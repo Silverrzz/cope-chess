@@ -1,6 +1,6 @@
-from engine_instance import EngineInstance
-from game_state import GameState
-from time_control import TimeManager
+from .engine_instance import EngineInstance
+from .game_state import GameState
+from .time_control import TimeManager
 
 class Match():
     def __init__(self, id: int, white: EngineInstance, black: EngineInstance, game_state: GameState, white_tm: TimeManager, black_tm: TimeManager):

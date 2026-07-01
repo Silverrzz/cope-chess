@@ -1,10 +1,10 @@
 import chess
 import time
 
-from engine_instance import EngineInstance
-from game_state import GameState
-from match import Match
-from time_control import TimeManager, TimeOutError
+from .engine_instance import EngineInstance
+from .game_state import GameState
+from .match import Match
+from .time_control import TimeManager, TimeOutError
 
 
 class MatchRunner():

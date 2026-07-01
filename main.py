@@ -1,12 +1,10 @@
-
-
 import chess
 
-from engine_instance import EngineInstance
-from time_control import TimeControl, TimeControlCategory
-from game_state import GameState
-from match import Match
-from match_runner import MatchRunner
+from match_runner.engine_instance import EngineInstance
+from match_runner.game_state import GameState
+from match_runner.match import Match
+from match_runner.match_runner import MatchRunner
+from match_runner.time_control import TimeControl, TimeControlCategory
 
 if __name__ == "__main__":
 
