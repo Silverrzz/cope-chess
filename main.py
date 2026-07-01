@@ -35,3 +35,13 @@ if __name__ == "__main__":
             f"Match {match.get_id()}: "
             f"{match.get_white().get_name()} vs {match.get_black().get_name()}"
         )
+
+    runner.run()
+
+    print("Results:")
+    for match in runner.get_completed_matches():
+        print(
+            f"Match {match.get_id()}: "
+            f"{match.get_white().get_name()} vs {match.get_black().get_name()} "
+            f"{match.get_game_state().get_summary()}"
+        )

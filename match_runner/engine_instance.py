@@ -50,3 +50,6 @@ class EngineInstance():
             return
 
         self._search_future.cancel()
+        self._search_executor.shutdown(wait=False, cancel_futures=True)
+        self._search_executor = ThreadPoolExecutor(max_workers=1)
+        self._search_future = None
