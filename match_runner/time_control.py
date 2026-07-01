@@ -19,7 +19,6 @@ class TimeControl:
         nodes: int | None = None,
     ):
         self._category = category
-        self._chess_clock = ChessClock()
         self._initial_time = initial_time
         self._increment = increment
         self._move_time = move_time
@@ -42,7 +41,7 @@ class TimeControl:
             if self._nodes is None:
                 raise ValueError("Movenodes mode needs nodes")
 
-    def get_manager_object(self):
+    def create_manager(self):
         return TimeManager(self)
 
     def get_category(self) -> TimeControlCategory:
@@ -50,12 +49,6 @@ class TimeControl:
 
     def set_category(self, category: TimeControlCategory):
         self._category = category
-
-    def get_chess_clock(self):
-        return self._chess_clock
-
-    def set_chess_clock(self, chess_clock):
-        self._chess_clock = chess_clock
 
     def get_initial_time(self) -> int | None:
         return self._initial_time
@@ -90,83 +83,98 @@ class TimeControl:
 class TimeOutError(Exception):
     pass
 
-class TimeManager(TimeControl):
-    def __init__(self, tc: TimeControl):
-        super().__init__(
-            category=tc.get_category(),
-            initial_time=tc.get_initial_time(),
-            increment=tc.get_increment(),
-            move_time=tc.get_move_time(),
-            moves_to_go=tc.get_moves_to_go(),
-            nodes=tc.get_nodes(),
-        )
+class TimeManager():
+    def __init__(self, time_control: TimeControl):
+        self._time_control = time_control
+        self._chess_clock = ChessClock()
+        self._remaining_time = time_control.get_initial_time()
+        self._remaining_move_time = time_control.get_move_time()
+        self._moves_to_go = time_control.get_moves_to_go()
+        self._nodes = time_control.get_nodes()
+
+    def get_time_control(self) -> TimeControl:
+        return self._time_control
+
+    def get_remaining_time(self) -> int | None:
+        return self._remaining_time
+
+    def get_remaining_move_time(self) -> int | None:
+        return self._remaining_move_time
+
+    def get_moves_to_go(self) -> int | None:
+        return self._moves_to_go
+
+    def get_nodes(self) -> int | None:
+        return self._nodes
 
     def start_clock(self):
         self._chess_clock.start_clock()
 
     def probe_clock(self):
         elapsed_time = self._chess_clock.get_elapsed_time()
-        if self._category is TimeControlCategory.INCREMENT:
-            remaining_time = self._initial_time - elapsed_time
+        category = self._time_control.get_category()
 
-            if remaining_time <= 0:
-                raise TimeOutError()
+        if category is TimeControlCategory.INCREMENT:
+            remaining_time = self._remaining_time - elapsed_time
 
-            return round(remaining_time)
-            
-        elif self._category is TimeControlCategory.MOVETIME:
-            remaining_time = self._move_time - elapsed_time
-
-            if remaining_time <= 0:
-                raise TimeOutError()
+            self._raise_if_timed_out(remaining_time)
 
             return round(remaining_time)
             
-        elif self._category is TimeControlCategory.MOVESTOGO:
-            
-            remaining_time = self._initial_time - elapsed_time
+        elif category is TimeControlCategory.MOVETIME:
+            remaining_time = self._remaining_move_time - elapsed_time
 
-            if remaining_time <= 0:
-                raise TimeOutError()
+            self._raise_if_timed_out(remaining_time)
+
+            return round(remaining_time)
+            
+        elif category is TimeControlCategory.MOVESTOGO:
+            
+            remaining_time = self._remaining_time - elapsed_time
+
+            self._raise_if_timed_out(remaining_time)
 
             return round(remaining_time)
 
-        elif self._category is TimeControlCategory.MOVENODES:
+        elif category is TimeControlCategory.MOVENODES:
             return self._nodes
 
     def stop_clock(self):
         elapsed_time = self._chess_clock.stop_clock()
-        if self._category is TimeControlCategory.INCREMENT:
-            self._initial_time -= elapsed_time
+        category = self._time_control.get_category()
 
-            if self._initial_time <= 0:
-                raise TimeOutError()
+        if category is TimeControlCategory.INCREMENT:
+            self._remaining_time -= elapsed_time
 
-            self._initial_time = round(self._initial_time + self._increment)
+            self._raise_if_timed_out(self._remaining_time)
+
+            self._remaining_time = round(self._remaining_time + self._time_control.get_increment())
             
-        elif self._category is TimeControlCategory.MOVETIME:
-            self._move_time -= elapsed_time
+        elif category is TimeControlCategory.MOVETIME:
+            self._remaining_move_time -= elapsed_time
 
-            if self._move_time <= 0:
-                raise TimeOutError()
+            self._raise_if_timed_out(self._remaining_move_time)
 
-            self._move_time = round(self._move_time)
+            self._remaining_move_time = round(self._remaining_move_time)
             
-        elif self._category is TimeControlCategory.MOVESTOGO:
+        elif category is TimeControlCategory.MOVESTOGO:
             
-            self._initial_time -= elapsed_time
+            self._remaining_time -= elapsed_time
             self._moves_to_go -= 1
 
-            if self._initial_time <= 0:
-                raise TimeOutError()
+            self._raise_if_timed_out(self._remaining_time)
 
-            self._initial_time = round(self._initial_time)
+            self._remaining_time = round(self._remaining_time)
 
-        elif self._category is TimeControlCategory.MOVENODES:
+        elif category is TimeControlCategory.MOVENODES:
             pass
 
     def stop_clock_after_timeout(self):
         self._chess_clock.stop_clock()
+
+    def _raise_if_timed_out(self, remaining_time: float):
+        if remaining_time <= 0:
+            raise TimeOutError()
 
 class ChessClock():
     def __init__(self, start_time: float = 0, running: bool = False):
