@@ -1,6 +1,6 @@
-from match_runner.engine_instance import EngineInstance
-from match_runner.match import Match
-from match_runner.time_control import TimeControl
+from bcec.match_runner.engine_instance import EngineInstance
+from bcec.match_runner.match import Match
+from bcec.match_runner.time_control import TimeControl
 
 
 class Tournament():

@@ -1,8 +1,8 @@
 import chess
 
-from match_runner.game_state import GameState
-from match_runner.match import Match
-from match_runner.match_runner import MatchRunner
+from bcec.match_runner.game_state import GameState
+from bcec.match_runner.match import Match
+from bcec.match_runner.match_runner import MatchRunner
 
 from .tournament import Tournament
 

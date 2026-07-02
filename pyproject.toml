@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bcec-club"
+version = "0.1.0"
+description = "BCEC Club chess engine tournament runner"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "python-chess>=1.999",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.111",
+    "jinja2>=3.1",
+    "uvicorn[standard]>=0.30",
+]
+runner = [
+    "websockets>=12",
+]
+worker = [
+    "websockets>=12",
+]
+dev = []
+
+[project.scripts]
+bcec = "bcec.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bcec*"]
