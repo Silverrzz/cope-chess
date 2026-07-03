@@ -35,3 +35,4 @@ include = ["cope*"]
 
 [tool.setuptools.package-data]
 "cope.db" = ["schema.sql"]
+"cope.web" = ["templates/*.html", "static/*.css"]

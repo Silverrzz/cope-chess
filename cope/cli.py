@@ -36,7 +36,14 @@ def main(argv: list[str] | None = None) -> int:
         help="path to the SQLite database file",
     )
 
-    subparsers.add_parser("web", help="start the web server")
+    web_parser = subparsers.add_parser("web", help="start the web server")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8701)
+    web_parser.add_argument(
+        "--db-path",
+        default=_default_db_path(),
+        help="path to the SQLite database file",
+    )
 
     runner_parser = subparsers.add_parser("runner", help="start the tournament runner")
     runner_parser.add_argument(
@@ -143,7 +150,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.role == "web":
-        print("cope web is not implemented yet")
+        import uvicorn
+
+        from .db import initialize_database
+        from .web.app import create_app
+
+        initialize_database(Path(args.db_path))
+        uvicorn.run(create_app(args.db_path), host=args.host, port=args.port)
         return 0
 
     if args.role == "worker":
