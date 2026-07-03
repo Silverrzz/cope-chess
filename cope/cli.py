@@ -19,6 +19,18 @@ def main(argv: list[str] | None = None) -> int:
         help="path to the SQLite database file",
     )
 
+    build_css_parser = subparsers.add_parser("build-css", help="compile web SCSS")
+    build_css_parser.add_argument(
+        "--source",
+        default="cope/web/static/style.scss",
+        help="SCSS source file",
+    )
+    build_css_parser.add_argument(
+        "--output",
+        default="cope/web/static/style.css",
+        help="CSS output file",
+    )
+
     mint_worker_parser = subparsers.add_parser(
         "mint-worker-token",
         help="mint a one-time worker registration token",
@@ -80,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
         db_path = Path(args.db_path)
         initialize_database(db_path)
         print(f"initialized database at {db_path}")
+        return 0
+
+    if args.role == "build-css":
+        _build_css(Path(args.source), Path(args.output))
         return 0
 
     if args.role == "mint-worker-token":
@@ -182,3 +198,18 @@ def _default_app_commit() -> str:
 
 def _default_db_path() -> str:
     return os.environ.get("COPE_DB_PATH", "cope.db")
+
+
+def _build_css(source: Path, output: Path) -> None:
+    try:
+        import sass
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing SCSS compiler. Install web dependencies with: "
+            'py -m pip install -e ".[web]"'
+        ) from exc
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    css = sass.compile(filename=str(source), output_style="expanded")
+    output.write_text(css, encoding="utf-8")
+    print(f"compiled {source} -> {output}")

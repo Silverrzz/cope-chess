@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Tournaments - COPE Chess{% endblock %}
+
+{% block content %}
+  <section class="page-title">
+    <h1>Tournaments</h1>
+    <p>{{ tournaments|length }} total</p>
+  </section>
+
+  {% if tournaments %}
+    <section class="list">
+      {% for item in tournaments %}
+        <article class="card">
+          <h2><a href="/tournaments/{{ item.record.id }}">{{ item.record.name }}</a></h2>
+          <p>{{ item.format }} | {{ item.time_control }} | {{ item.record.status }}</p>
+          <p>{{ item.participant_names|join(" vs ") }}</p>
+          <p>{{ item.summary.finished }} / {{ item.summary.total }} games finished</p>
+        </article>
+      {% endfor %}
+    </section>
+  {% else %}
+    <p class="empty">No tournaments yet.</p>
+  {% endif %}
+{% endblock %}

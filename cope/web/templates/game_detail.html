@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Game {{ game.id }} - COPE Chess{% endblock %}
+
+{% block content %}
+  <section class="page-title">
+    <h1>Game {{ game.id }}</h1>
+    <p>
+      {% if tournament %}<a href="/tournaments/{{ tournament.id }}">{{ tournament.name }}</a> | {% endif %}
+      {{ game.status }} | {{ game.result or "no result" }}
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>
+      {{ engines.get(game.white_engine_id, "Engine " ~ game.white_engine_id) }}
+      vs
+      {{ engines.get(game.black_engine_id, "Engine " ~ game.black_engine_id) }}
+    </h2>
+    <p>Round {{ game.round }} | pair {{ game.pair_index }}</p>
+    {% if game.termination %}<p>Termination: {{ game.termination }}</p>{% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Moves</h2>
+    {% if moves %}
+      <table>
+        <thead>
+          <tr>
+            <th>Ply</th>
+            <th>SAN</th>
+            <th>UCI</th>
+            <th>Depth</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for move in moves %}
+            <tr>
+              <td>{{ move.ply }}</td>
+              <td>{{ move.san }}</td>
+              <td>{{ move.uci }}</td>
+              <td>{{ move.depth or "-" }}</td>
+              <td>{{ move.time_ms }}ms</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No moves recorded yet.</p>
+    {% endif %}
+  </section>
+
+  {% if game.pgn %}
+    <section class="panel">
+      <h2>PGN</h2>
+      <pre>{{ game.pgn }}</pre>
+    </section>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}{{ tournament.name }} - COPE Chess{% endblock %}
+
+{% block content %}
+  <section class="page-title">
+    <h1>{{ tournament.name }}</h1>
+    <p>{{ tournament.status }} | round {{ tournament.current_round }}</p>
+  </section>
+
+  <section class="stats">
+    <div><strong>{{ summary.total }}</strong><span>games</span></div>
+    <div><strong>{{ summary.live }}</strong><span>live</span></div>
+    <div><strong>{{ summary.finished }}</strong><span>finished</span></div>
+    <div><strong>{{ summary.pending }}</strong><span>pending</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Games</h2>
+    {% if games %}
+      <table>
+        <thead>
+          <tr>
+            <th>Round</th>
+            <th>White</th>
+            <th>Black</th>
+            <th>Status</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for game in games %}
+            <tr data-href="/games/{{ game.id }}">
+              <td>{{ game.round }}</td>
+              <td>{{ engines.get(game.white_engine_id, "Engine " ~ game.white_engine_id) }}</td>
+              <td>{{ engines.get(game.black_engine_id, "Engine " ~ game.black_engine_id) }}</td>
+              <td>{{ game.status }}</td>
+              <td>{{ game.result or "-" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">No games scheduled yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Config</h2>
+    <pre>{{ config | tojson(indent=2) }}</pre>
+  </section>
+{% endblock %}
