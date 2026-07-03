@@ -1,7 +1,7 @@
-from .match_runner.engine_instance import EngineInstance
-from .match_runner.time_control import TimeControl, TimeControlCategory
-from .tournament_runner.tournament import Tournament
-from .tournament_runner.tournament_runner import TournamentRunner
+from .tournament.engine_instance import EngineInstance
+from .tournament.time_control import TimeControl, TimeControlCategory
+from .tournament.tournament import Tournament
+from .tournament.tournament_runner import TournamentRunner
 
 
 def run_prototype_tournament() -> None:
@@ -28,21 +28,20 @@ def run_prototype_tournament() -> None:
 
     print(f"Tournament: {active_tournament.get_name()}")
     print(f"Engines: {len(active_tournament.get_engines())}")
-    print(f"Matches: {len(active_tournament.get_matches())}")
+    print(f"Games: {len(active_tournament.get_games())}")
 
-    for match in active_tournament.get_matches():
+    for game in active_tournament.get_games():
         print(
-            f"Match {match.get_id()}: "
-            f"{match.get_white().get_name()} vs {match.get_black().get_name()}"
+            f"Game {game.id}: "
+            f"{game.white.get_name()} vs {game.black.get_name()}"
         )
 
     runner.run()
 
     print("Results:")
-    for match in runner.get_completed_matches():
+    for game in runner.get_completed_games():
         print(
-            f"Match {match.get_id()}: "
-            f"{match.get_white().get_name()} vs {match.get_black().get_name()} "
-            f"{match.get_game_state().get_summary()}"
+            f"Game {game.id}: "
+            f"{game.white.get_name()} vs {game.black.get_name()} "
+            f"{game.state.get_summary()}"
         )
-

@@ -3,23 +3,23 @@ import time
 
 from .engine_instance import EngineInstance
 from .game_state import GameState
-from .match import Match
 from .time_control import TimeControlCategory
+from .tournament import Game
 from .uci import go_command
 from .time_control import TimeManager, TimeOutError
 
 
-class MatchRunner():
-    def __init__(self, match: Match, clock_probe_interval: float = 0.001):
-        self._match = match
+class GameRunner():
+    def __init__(self, game: Game, clock_probe_interval: float = 0.001):
+        self._game = game
         self._clock_probe_interval = clock_probe_interval
         self._game_started = False
 
-    def get_match(self) -> Match:
-        return self._match
+    def get_game(self) -> Game:
+        return self._game
 
-    def set_match(self, match: Match):
-        self._match = match
+    def set_game(self, game: Game):
+        self._game = game
         self._game_started = False
 
     def run(self):
@@ -81,13 +81,13 @@ class MatchRunner():
         if self._game_started:
             return
 
-        self._match.get_white().start_new_game()
-        self._match.get_black().start_new_game()
+        self._game.white.start_new_game()
+        self._game.black.start_new_game()
         self._game_started = True
 
     def _build_go_command(self, clock: TimeManager) -> str:
-        white_clock = self._match.get_white_tm()
-        black_clock = self._match.get_black_tm()
+        white_clock = self._game.white_tm
+        black_clock = self._game.black_tm
         args: dict[str, int | None] = {
             "wtime": white_clock.get_remaining_time(),
             "btime": black_clock.get_remaining_time(),
@@ -108,22 +108,22 @@ class MatchRunner():
         return go_command(**args)
 
     def _get_game_state(self) -> GameState:
-        return self._match.get_game_state()
+        return self._game.state
 
     def _get_board(self) -> chess.Board:
         return self._get_game_state().get_board()
 
     def get_engine_to_move(self) -> EngineInstance:
         if self._get_board().turn == chess.WHITE:
-            return self._match.get_white()
+            return self._game.white
 
-        return self._match.get_black()
+        return self._game.black
 
     def get_clock_to_move(self) -> TimeManager:
         if self._get_board().turn == chess.WHITE:
-            return self._match.get_white_tm()
+            return self._game.white_tm
 
-        return self._match.get_black_tm()
+        return self._game.black_tm
 
     def push_legal_move(self, move: chess.Move, side_to_move: chess.Color) -> bool:
         board = self._get_board()
