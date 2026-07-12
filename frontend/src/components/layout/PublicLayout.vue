@@ -77,13 +77,6 @@ watch(
     <main id="main-content" class="public-main" :class="{ 'public-main--game': compactGameLayout }" tabindex="-1">
       <RouterView />
     </main>
-
-    <footer class="public-footer">
-      <div class="page-container public-footer__inner">
-        <span>COPE Chess</span>
-        <span class="public-footer__note">Open tournament management and live results.</span>
-      </div>
-    </footer>
   </div>
 </template>
 
@@ -190,25 +183,6 @@ watch(
   padding-block: 0;
 }
 
-.public-shell--game .public-footer {
-  display: none;
-}
-
-.public-footer {
-  border-top: 1px solid var(--color-border);
-  background: var(--color-bg-subtle);
-}
-
-.public-footer__inner {
-  min-height: 4.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-}
-
 @media (max-width: 42rem) {
   .public-header__inner {
     gap: var(--space-3);
@@ -253,12 +227,5 @@ watch(
     display: none;
   }
 
-  .public-footer__inner {
-    align-items: flex-start;
-    flex-direction: column;
-    justify-content: center;
-    gap: var(--space-1);
-    padding-block: var(--space-4);
-  }
 }
 </style>
