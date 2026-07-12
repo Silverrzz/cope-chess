@@ -1137,8 +1137,11 @@ def create_app(
         tournament = get_tournament(connection, tournament_id)
         if tournament is None:
             raise HTTPException(status_code=404, detail="tournament not found")
-        if tournament.status != "finished":
-            raise HTTPException(status_code=409, detail="tournament is not complete")
+        if tournament.status not in {"finished", "aborted"}:
+            raise HTTPException(
+                status_code=409,
+                detail="tournament is not finished or aborted",
+            )
 
         try:
             requested = request_tournament_rating_commit(connection, tournament)

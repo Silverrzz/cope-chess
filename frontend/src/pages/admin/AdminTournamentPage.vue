@@ -33,6 +33,9 @@ const loading = ref(true)
 const error = ref('')
 const pending = ref('')
 const id = computed(() => Number(route.params.id))
+const hasCommittableGames = computed(() => data.value?.games.some(
+  (game) => game.status === 'finished' && game.result !== null,
+) ?? false)
 const settingsRows = computed(() => {
   if (!data.value?.settings) return []
   return Array.isArray(data.value.settings)
@@ -124,7 +127,7 @@ onMounted(load)
         <div class="control-bar__status"><span>Current state</span><StatusBadge :status="data.tournament.status" /></div>
         <div class="control-bar__actions">
           <button v-for="(_, action) in data.actions" :key="action" class="button" :class="action === 'abort' ? 'button--danger' : 'button--primary'" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? 'Working…' : humanize(String(action)) }}</button>
-          <button v-if="data.tournament.status === 'finished' && data.tournament.config.rated && data.tournament.category_id !== null && (!data.commit || data.commit.status === 'failed')" class="button button--primary" type="button" :disabled="!!pending" @click="commitRatings">{{ pending === 'commit' ? 'Requesting…' : data.commit ? 'Retry rating commit' : 'Commit ratings' }}</button>
+          <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated && data.tournament.category_id !== null && (!data.commit || data.commit.status === 'failed')" class="button button--primary" type="button" :disabled="!!pending" @click="commitRatings">{{ pending === 'commit' ? 'Requesting…' : data.commit ? 'Retry rating commit' : 'Commit ratings' }}</button>
           <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && (!data.commit || data.commit.status === 'failed')" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
         </div>
       </section>

@@ -2256,8 +2256,19 @@ def request_tournament_rating_commit(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> bool:
-    if tournament.status != "finished":
-        raise ValueError("tournament is not complete")
+    if tournament.status not in {"finished", "aborted"}:
+        raise ValueError("tournament is not finished or aborted")
+    if tournament.status == "aborted":
+        finished_game = connection.execute(
+            """
+            SELECT 1 FROM games
+            WHERE tournament_id = ? AND status = 'finished' AND result IS NOT NULL
+            LIMIT 1
+            """,
+            (tournament.id,),
+        ).fetchone()
+        if finished_game is None:
+            raise ValueError("aborted tournament has no finished games")
     if not tournament.config.rated:
         raise ValueError("unrated tournament results cannot be committed")
     if tournament.category_id is None or not tournament.config.category_settings_linked:

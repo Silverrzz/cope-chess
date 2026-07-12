@@ -382,9 +382,21 @@ def list_uncommitted_finished_tournaments(
     return tuple(
         tournament
         for tournament in list_tournaments(connection)
-        if tournament.status == "finished"
+        if tournament.status in {"finished", "aborted"}
         and tournament.config.rated
         and tournament.category_id is not None
+        and (
+            tournament.status == "finished"
+            or connection.execute(
+                """
+                SELECT 1 FROM games
+                WHERE tournament_id = ? AND status = 'finished' AND result IS NOT NULL
+                LIMIT 1
+                """,
+                (tournament.id,),
+            ).fetchone()
+            is not None
+        )
         and tournament.id not in active_or_applied_ids
     )
 

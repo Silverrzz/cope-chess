@@ -68,8 +68,8 @@ def apply_tournament_rating_commit(
     tournament = get_tournament(connection, tournament_id)
     if tournament is None:
         raise RatingCommitError("tournament no longer exists")
-    if tournament.status != "finished":
-        raise RatingCommitError("tournament is not complete")
+    if tournament.status not in {"finished", "aborted"}:
+        raise RatingCommitError("tournament is not finished or aborted")
     if not tournament.config.rated:
         raise RatingCommitError("tournament is not rated")
     if tournament.category_id is None or not tournament.config.category_settings_linked:
@@ -77,9 +77,14 @@ def apply_tournament_rating_commit(
     if tournament.category_id != category_id:
         raise RatingCommitError("tournament category changed after the commit request")
 
-    games = list_games(connection, tournament_id)
+    all_games = list_games(connection, tournament_id)
+    games = (
+        tuple(game for game in all_games if game.status == "finished")
+        if tournament.status == "aborted"
+        else all_games
+    )
     if not games:
-        raise RatingCommitError("tournament has no games")
+        raise RatingCommitError("tournament has no finished games")
 
     participants = set(tournament.config.participants)
     for game in games:

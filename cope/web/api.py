@@ -681,8 +681,11 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        if tournament.status != "finished":
-            raise HTTPException(status_code=409, detail="Tournament is not complete.")
+        if tournament.status not in {"finished", "aborted"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Tournament is not finished or aborted.",
+            )
         try:
             requested = request_tournament_rating_commit(connection, tournament)
         except ValueError as exc:
