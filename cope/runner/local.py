@@ -244,6 +244,8 @@ def next_worker_assignment(
             assignment_key=secrets.token_urlsafe(24),
             worker_id=worker.id,
         )
+        if assignment_record is None:
+            continue
         opening = get_opening_position(connection, game.opening_id)
         LOG.info(
             "claimed game worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s",
@@ -384,7 +386,11 @@ def run_worker_assignment_game(
         result=result,
         termination=termination,
     )
-    finish_game_assignment(connection, assignment_record.id)
+    finish_game_assignment(
+        connection,
+        assignment_record.id,
+        assignment_record.assignment_key,
+    )
     _finish_tournament_if_complete(connection, tournament)
     connection.commit()
     LOG.info(

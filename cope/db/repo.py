@@ -1103,8 +1103,19 @@ def assign_game_to_worker(
     game_id: int,
     assignment_key: str,
     worker_id: int,
-) -> GameAssignmentRecord:
+) -> GameAssignmentRecord | None:
     now = utc_now()
+    claimed = connection.execute(
+        """
+        UPDATE games
+        SET status = 'assigned'
+        WHERE id = ? AND status = 'pending'
+        RETURNING id
+        """,
+        (game_id,),
+    ).fetchone()
+    if claimed is None:
+        return None
     connection.execute(
         """
         INSERT INTO game_assignments (
@@ -1127,14 +1138,6 @@ def assign_game_to_worker(
             worker_id,
             now,
         ),
-    )
-    connection.execute(
-        """
-        UPDATE games
-        SET status = 'assigned'
-        WHERE id = ? AND status IN ('pending', 'assigned')
-        """,
-        (game_id,),
     )
     assignment = get_game_assignment_for_game(connection, game_id)
     if assignment is None:
@@ -1159,14 +1162,15 @@ def mark_game_assignment_live(
 def acknowledge_game_assignment(
     connection: sqlite3.Connection,
     assignment_id: int,
+    assignment_key: str,
 ) -> None:
     cursor = connection.execute(
         """
         UPDATE game_assignments
         SET status = 'acked', acked_at = COALESCE(acked_at, ?)
-        WHERE id = ? AND status IN ('assigned', 'acked')
+        WHERE id = ? AND assignment_key = ? AND status IN ('assigned', 'acked')
         """,
-        (utc_now(), assignment_id),
+        (utc_now(), assignment_id, assignment_key),
     )
     if cursor.rowcount != 1:
         raise RuntimeError(f"assignment {assignment_id} is no longer awaiting readiness")
@@ -1175,33 +1179,35 @@ def acknowledge_game_assignment(
 def finish_game_assignment(
     connection: sqlite3.Connection,
     assignment_id: int,
+    assignment_key: str,
 ) -> None:
     connection.execute(
         """
         UPDATE game_assignments
         SET status = 'finished', finished_at = ?
-        WHERE id = ?
+        WHERE id = ? AND assignment_key = ?
         """,
-        (utc_now(), assignment_id),
+        (utc_now(), assignment_id, assignment_key),
     )
 
 
 def fail_game_assignment(
     connection: sqlite3.Connection,
     assignment_id: int,
+    assignment_key: str,
     error: str,
 ) -> None:
     assignment = get_game_assignment(connection, assignment_id)
+    if assignment is None or assignment.assignment_key != assignment_key:
+        return
     connection.execute(
         """
         UPDATE game_assignments
         SET status = 'abandoned', finished_at = ?, last_error = ?
-        WHERE id = ? AND status IN ('assigned', 'acked', 'live')
+        WHERE id = ? AND assignment_key = ? AND status IN ('assigned', 'acked', 'live')
         """,
-        (utc_now(), error[:500], assignment_id),
+        (utc_now(), error[:500], assignment_id, assignment_key),
     )
-    if assignment is None:
-        return
     connection.execute(
         """
         UPDATE games

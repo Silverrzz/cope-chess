@@ -942,7 +942,11 @@ class WorkerHandshakeServer:
     def _acknowledge_assignment(self, ready: AssignmentReady) -> None:
         connection = connect_database(self._config.db_path)
         try:
-            acknowledge_game_assignment(connection, ready.assignment_id)
+            acknowledge_game_assignment(
+                connection,
+                ready.assignment_id,
+                ready.assignment_key,
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -956,6 +960,7 @@ class WorkerHandshakeServer:
             fail_game_assignment(
                 connection,
                 assignment.assignment.assignment_id,
+                assignment.assignment.assignment_key,
                 str(error) or error.__class__.__name__,
             )
             game = get_game(connection, assignment.assignment.game_id)
