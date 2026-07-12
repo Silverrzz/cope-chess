@@ -15,6 +15,7 @@ x-cope-service: &cope-service
     COPE_WEB_EVENT_TOKEN_FILE: /run/secrets/cope_event_token
     COPE_WEB_STREAM_URL: ws://web:8701/internal/stream
     COPE_WORKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/worker
+    COPE_OPENING_IMPORT_MAX_BYTES: ${COPE_OPENING_IMPORT_MAX_BYTES:-67108864}
   secrets:
     - cope_admin_token
     - cope_event_token

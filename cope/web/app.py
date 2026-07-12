@@ -133,6 +133,10 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIST_DIR = PACKAGE_DIR / "frontend_dist"
 FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 ADMIN_SESSION_MAX_AGE_SECONDS = 43_200
+MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+MAX_OPENING_IMPORT_BODY_BYTES = int(
+    os.environ.get("COPE_OPENING_IMPORT_MAX_BYTES", str(64 * 1024 * 1024))
+)
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 # Valid admin actions on a tournament, per current status.
@@ -474,7 +478,16 @@ def create_app(
             except sqlite3.Error:
                 pass
         content_length = request.headers.get("content-length")
-        if content_length and content_length.isdigit() and int(content_length) > 2_097_152:
+        request_body_limit = (
+            MAX_OPENING_IMPORT_BODY_BYTES
+            if _is_opening_import_request(request)
+            else MAX_REQUEST_BODY_BYTES
+        )
+        if (
+            content_length
+            and content_length.isdigit()
+            and int(content_length) > request_body_limit
+        ):
             return JSONResponse({"detail": "Request body is too large."}, status_code=413)
         if request.method == "POST":
             if path in {"/admin/login", "/api/session"} and _rate_limited(
@@ -2017,6 +2030,15 @@ def _is_spa_request(request: Request) -> bool:
     if re.fullmatch(r"/admin/workers/\d+/token", path) is not None:
         return False
     return True
+
+
+def _is_opening_import_request(request: Request) -> bool:
+    if request.method not in {"POST", "PUT"}:
+        return False
+    path = request.url.path
+    return path == "/api/admin/openings" or bool(
+        re.fullmatch(r"/api/admin/openings/\d+", path)
+    )
 
 
 def _security_error(

@@ -46,7 +46,7 @@ watch(() => props.files, async (files) => {
     if (file.size > 2 * 1024 * 1024) {
       deferredFileCount.value += 1
       filePreview.value.push({ name: file.name, fen: 'Contents will be parsed by the server when saved' })
-      fileParseNote.value = 'Large files are uploaded without a size limit and parsed by the server.'
+      fileParseNote.value = 'Large files are uploaded and parsed by the server when saved.'
       continue
     }
     const text = await file.text()
