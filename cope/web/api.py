@@ -171,6 +171,10 @@ class TournamentPayload(BaseModel):
         return value.strip()
 
 
+class TournamentStatusPayload(BaseModel):
+    action: str = Field(min_length=1, max_length=20)
+
+
 class EnginePayload(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     author: str = Field(default="", max_length=120)
@@ -636,14 +640,14 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({"id": tournament_id, "message": "Tournament updated."})
 
     @app.post("/api/admin/tournaments/{tournament_id}/status")
-    async def admin_tournament_status(
+    def admin_tournament_status(
         tournament_id: int,
+        payload: TournamentStatusPayload,
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        body = await request.json()
-        action = str(body.get("action") or "") if isinstance(body, dict) else ""
+        action = payload.action
         allowed = web_app.TOURNAMENT_ACTIONS.get(tournament.status, {})
         if action not in allowed:
             raise HTTPException(

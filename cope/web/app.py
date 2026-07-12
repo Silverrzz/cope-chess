@@ -142,6 +142,7 @@ MAX_OPENING_IMPORT_BODY_BYTES = int(
 MAX_ENGINE_BINARY_BODY_BYTES = int(
     os.environ.get("COPE_ENGINE_BINARY_MAX_BYTES", str(1024 * 1024 * 1024))
 ) + 1024 * 1024
+MAX_BROADCAST_SNAPSHOT_GAMES = 1000
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 # Valid admin actions on a tournament, per current status.
@@ -1090,23 +1091,15 @@ def create_app(
     async def admin_tournament_status(
         tournament_id: int,
         request: Request,
-        connection: sqlite3.Connection = Depends(_database),
     ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-
         form = await read_form(request)
         action = form_value(form, "action")
-        allowed = TOURNAMENT_ACTIONS.get(tournament.status, {})
-        if action not in allowed:
-            raise HTTPException(
-                status_code=409,
-                detail=f"cannot {action} a {tournament.status} tournament",
-            )
-
-        set_tournament_status(connection, tournament_id, allowed[action])
-        connection.commit()
+        await asyncio.to_thread(
+            _change_tournament_status,
+            request.app.state.db_path,
+            tournament_id,
+            action,
+        )
         return RedirectResponse(
             url=f"/admin/tournaments/{tournament_id}",
             status_code=303,
@@ -2050,6 +2043,34 @@ def _database(request: Request) -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
+def _change_tournament_status(
+    db_path: str | Path,
+    tournament_id: int,
+    action: str,
+) -> str:
+    """Apply a lifecycle change outside the web event loop."""
+    connection = connect_database(db_path)
+    try:
+        tournament = get_tournament(connection, tournament_id)
+        if tournament is None:
+            raise HTTPException(status_code=404, detail="tournament not found")
+        allowed = TOURNAMENT_ACTIONS.get(tournament.status, {})
+        if action not in allowed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot {action} a {tournament.status} tournament",
+            )
+        target = allowed[action]
+        set_tournament_status(connection, tournament_id, target)
+        connection.commit()
+        return target
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 async def _receive_internal_stream(websocket: WebSocket, hub: StreamHub) -> None:
     while True:
         event = decode_stream_event(await websocket.receive_text())
@@ -2090,12 +2111,7 @@ async def _dispatch_internal_stream_event(app: FastAPI, event: StreamEnvelope) -
 
     if event.type == "tournament.live":
         hub.publish(topic, event.type, event.data, source=event.source)
-        hub.publish(
-            topic,
-            "tournament.snapshot",
-            _tournament_snapshot(app, tournament_id),
-            source="web",
-        )
+        _schedule_tournament_snapshot(app, tournament_id)
         return
 
     if event.type == "game.move":
@@ -2121,14 +2137,42 @@ def _schedule_tournament_snapshot(app: FastAPI, tournament_id: int) -> None:
 
 async def _publish_tournament_snapshot(app: FastAPI, tournament_id: int) -> None:
     await asyncio.sleep(0.5)
-    payload = await asyncio.to_thread(_tournament_snapshot, app, tournament_id)
-    hub: StreamHub = app.state.stream_hub
-    hub.publish(
-        f"tournament.{tournament_id}",
-        "tournament.snapshot",
-        payload,
-        source="web",
+    payload = await asyncio.to_thread(
+        _tournament_snapshot_for_broadcast,
+        app,
+        tournament_id,
     )
+    hub: StreamHub = app.state.stream_hub
+    topic = f"tournament.{tournament_id}"
+    if payload is None:
+        # A large snapshot is expensive to serialize once per subscriber and can
+        # starve unrelated requests. Send a tiny invalidation event; clients
+        # already coalesce these and refresh through the normal HTTP endpoint.
+        hub.publish(
+            topic,
+            "tournament.changed",
+            {"tournament_id": tournament_id},
+            source="web",
+        )
+        return
+    hub.publish(topic, "tournament.snapshot", payload, source="web")
+
+
+def _tournament_snapshot_for_broadcast(
+    app: FastAPI,
+    tournament_id: int,
+) -> dict[str, Any] | None:
+    connection = connect_database(app.state.db_path)
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
+            (tournament_id,),
+        ).fetchone()
+        if row is not None and int(row["count"]) > MAX_BROADCAST_SNAPSHOT_GAMES:
+            return None
+    finally:
+        connection.close()
+    return _tournament_snapshot(app, tournament_id)
 
 
 def _tournament_snapshot(app: FastAPI, tournament_id: int) -> dict[str, Any]:
@@ -2267,34 +2311,23 @@ def _publish_admin_post_streams(request: Request) -> None:
     path = request.url.path
     hub.publish_to_internal("runner.wake", {"reason": path})
 
-    connection = connect_database(request.app.state.db_path)
-    try:
-        if (
-            path.startswith("/admin/workers")
-            or path.startswith("/api/admin/workers")
-            or path.startswith("/api/admin/worker-pools")
-        ):
-            hub.publish("workers", "workers.changed", {}, source="web")
-        tournament_id = _admin_tournament_path_id(path)
-        if tournament_id is not None:
-            tournament = get_tournament(connection, tournament_id)
-            payload = (
-                _tournament_live_payload(
-                    connection,
-                    tournament,
-                    hub.tournament_live(tournament_id),
-                )
-                if tournament is not None
-                else {"error": "tournament not found"}
-            )
-            hub.publish(
-                f"tournament.{tournament_id}",
-                "tournament.snapshot",
-                payload,
-                source="web",
-            )
-    finally:
-        connection.close()
+    if (
+        path.startswith("/admin/workers")
+        or path.startswith("/api/admin/workers")
+        or path.startswith("/api/admin/worker-pools")
+    ):
+        hub.publish("workers", "workers.changed", {}, source="web")
+    tournament_id = _admin_tournament_path_id(path)
+    if tournament_id is not None:
+        # Never build a potentially multi-thousand-game snapshot in the request
+        # handler. Subscribers can refresh immediately, while the normal stream
+        # coalescer builds at most one snapshot in a worker thread.
+        hub.publish(
+            f"tournament.{tournament_id}",
+            "tournament.changed",
+            {"tournament_id": tournament_id},
+            source="web",
+        )
 
 
 def _admin_tournament_path_id(path: str) -> int | None:

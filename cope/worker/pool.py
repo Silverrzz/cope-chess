@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from websockets.client import connect
 
 from cope.core.models import (
@@ -33,9 +33,11 @@ LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 class WorkerPoolState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal[2] = STATE_VERSION
+    version: Literal[1, 2] = STATE_VERSION
     server_url: str
-    app_version: str
+    app_version: str = Field(
+        validation_alias=AliasChoices("app_version", "app_commit"),
+    )
     pool_id: int = Field(gt=0)
     label: str
     machine_id: str
@@ -60,6 +62,11 @@ async def run_worker_pool(config: WorkerPoolConfig) -> None:
             raise ValueError(
                 "pool state belongs to a different worker server; use its original --server-url"
             )
+        if state.version == 1:
+            state = state.model_copy(
+                update={"version": STATE_VERSION, "app_version": config.app_version}
+            )
+            _write_state(state_file, state)
         if state.app_version != config.app_version:
             raise ValueError(
                 "pool state belongs to a different app version; deploy matching worker code"

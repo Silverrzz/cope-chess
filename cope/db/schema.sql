@@ -310,6 +310,7 @@ CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_machine_active ON workers(machine_id, status);
 CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignments(worker_id, status);
+CREATE INDEX IF NOT EXISTS idx_game_assignments_game_status ON game_assignments(game_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_token_hash ON workers(token_hash) WHERE token_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_session_id ON workers(session_id) WHERE session_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_pools_enrollment_token_hash ON worker_pools(enrollment_token_hash) WHERE enrollment_token_hash IS NOT NULL;

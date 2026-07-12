@@ -679,11 +679,11 @@ def set_tournament_status(
         params.append(now)
     params.append(tournament_id)
 
-    connection.execute(
+    cursor = connection.execute(
         f"UPDATE tournaments SET status = ?{started_at_sql}{finished_at_sql} WHERE id = ?",
         params,
     )
-    if status == "aborted":
+    if status == "aborted" and cursor.rowcount > 0:
         _abandon_tournament_games(connection, tournament_id, now)
 
 
@@ -727,17 +727,15 @@ def _abandon_tournament_games(
     reason = "tournament aborted"
     connection.execute(
         """
-        UPDATE game_assignments
+        UPDATE game_assignments AS assignment
         SET status = 'abandoned',
-            finished_at = COALESCE(finished_at, ?),
-            last_error = COALESCE(last_error, ?)
-        WHERE status IN ('assigned', 'acked', 'live')
-          AND game_id IN (
-            SELECT id
-            FROM games
-            WHERE tournament_id = ?
-              AND status != 'finished'
-          )
+            finished_at = COALESCE(assignment.finished_at, ?),
+            last_error = COALESCE(assignment.last_error, ?)
+        FROM games AS game
+        WHERE assignment.game_id = game.id
+          AND assignment.status IN ('assigned', 'acked', 'live')
+          AND game.tournament_id = ?
+          AND game.status != 'finished'
         """,
         (now, reason, tournament_id),
     )
