@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
   value INTEGER NOT NULL
 );
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 2)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 3)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 CREATE TABLE IF NOT EXISTS engines (
@@ -146,6 +146,27 @@ CREATE TABLE IF NOT EXISTS game_assignments (
   finished_at TEXT,
   last_error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS worker_failures (
+  id BIGSERIAL PRIMARY KEY,
+  worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  worker_label TEXT NOT NULL,
+  pool_id BIGINT REFERENCES worker_pools(id) ON DELETE SET NULL,
+  machine_id TEXT,
+  assignment_id BIGINT REFERENCES game_assignments(id) ON DELETE SET NULL,
+  game_id BIGINT REFERENCES games(id) ON DELETE SET NULL,
+  engine_id BIGINT REFERENCES engines(id) ON DELETE SET NULL,
+  engine_name TEXT NOT NULL,
+  stage TEXT NOT NULL
+    CHECK (stage IN ('cache', 'clone', 'checkout', 'build', 'verify', 'start', 'runtime')),
+  error TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_failures_worker_time
+  ON worker_failures(worker_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_failures_machine_time
+  ON worker_failures(machine_id, occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS moves (
   game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,

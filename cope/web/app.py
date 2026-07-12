@@ -88,6 +88,7 @@ from cope.db import (
     list_uncommitted_finished_tournaments,
     list_upcoming_games,
     list_workers,
+    list_worker_failures,
     list_worker_pools,
     list_worker_activities,
     touch_service_heartbeat,
@@ -2518,13 +2519,15 @@ def _worker_admin_row(connection: sqlite3.Connection, worker_id: int) -> dict[st
                 for dependency in engine.required_dependencies
             }
         )
-        return _worker_admin_view(
+        row = _worker_admin_view(
             worker,
             _engine_names(connection),
             activity=get_worker_activity(connection, worker.id),
             active_engines=active_engines,
             required=required,
         )
+        row["failures"] = list_worker_failures(connection, worker.id, limit=20)
+        return row
     except (TypeError, ValueError, ValidationError, sqlite3.Error):
         return None
 
@@ -2702,6 +2705,23 @@ def _worker_admin_api_payload(
         if worker_server_url is not None
         else None,
         "dependencies": row["dependencies"],
+        "failures": [
+            {
+                "id": failure.id,
+                "worker_id": failure.worker_id,
+                "worker_label": failure.worker_label,
+                "pool_id": failure.pool_id,
+                "machine_id": failure.machine_id,
+                "assignment_id": failure.assignment_id,
+                "game_id": failure.game_id,
+                "engine_id": failure.engine_id,
+                "engine_name": failure.engine_name,
+                "stage": failure.stage,
+                "error": failure.error,
+                "occurred_at": failure.occurred_at,
+            }
+            for failure in row.get("failures", ())
+        ],
     }
 
 

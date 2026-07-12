@@ -18,6 +18,7 @@ from websockets.server import WebSocketServerProtocol, serve
 
 from cope.core.models import (
     AssignmentComplete,
+    AssignmentFailed,
     AssignmentRejected,
     AssignmentReady,
     DependencyProbe,
@@ -59,6 +60,7 @@ from cope.db import (
     enroll_worker_pool,
     list_workers,
     list_engine_records,
+    record_worker_failure,
     set_service_endpoint,
     touch_workers_seen,
     touch_service_heartbeat,
@@ -84,10 +86,19 @@ LOG = logging.getLogger("cope.worker_server")
 WORKER_CONNECTION_REPLACED_CLOSE_CODE = 4001
 ASSIGNABLE_WORKER_STATUSES = {"connected", "building", "ready", "busy"}
 DEPENDENCY_PROBE_CACHE_S = 5.0
+ENGINE_FAILURE_BACKOFF_S = 60.0
 
 
 class AssignmentDependencyRejected(RuntimeError):
     pass
+
+
+class AssignmentPreparationFailed(RuntimeError):
+    def __init__(self, failure: AssignmentFailed):
+        self.failure = failure
+        super().__init__(
+            f"{failure.engine_name} {failure.stage} failed: {failure.error}"
+        )
 
 
 @dataclass(frozen=True)
@@ -425,7 +436,15 @@ class WorkerHandshakeServer:
                     assignment.tournament_name,
                     assignment.round,
                 )
-                transport = WorkerEngineTransport(websocket, assignment)
+                transport = WorkerEngineTransport(
+                    websocket,
+                    assignment,
+                    failure_handler=lambda failure: self._record_runtime_failure(
+                        worker,
+                        assignment,
+                        failure,
+                    ),
+                )
                 try:
                     await _send_message(websocket, "assignment", assignment)
                     ready = await self._receive_assignment_ready(websocket, assignment)
@@ -442,6 +461,23 @@ class WorkerHandshakeServer:
                         assignment,
                         transport,
                     )
+                except AssignmentPreparationFailed as error:
+                    self._fail_preparation_assignment(worker, assignment, error.failure)
+                    LOG.error(
+                        "assignment preparation failed worker_id=%s machine_id=%s "
+                        "assignment_id=%s game_id=%s engine_id=%s engine=%s stage=%s error=%s",
+                        worker.id,
+                        worker.machine_id,
+                        payload.assignment_id,
+                        payload.game_id,
+                        error.failure.engine_id,
+                        error.failure.engine_name,
+                        error.failure.stage,
+                        error.failure.error,
+                    )
+                    await self._wake_workers()
+                    await asyncio.sleep(ENGINE_FAILURE_BACKOFF_S)
+                    continue
                 except AssignmentDependencyRejected as error:
                     self._fail_assignment(assignment, error)
                     LOG.warning(
@@ -925,6 +961,16 @@ class WorkerHandshakeServer:
             raise AssignmentDependencyRejected(
                 "worker missing dependencies: " + ", ".join(rejected.missing_dependencies)
             )
+        if envelope.type == "assignment_failed":
+            failure = AssignmentFailed.model_validate(envelope.data)
+            if not failure.matches_assignment(assignment.assignment):
+                raise ProtocolValidationError("assignment failure mismatch")
+            if failure.engine_id not in assignment.engines:
+                raise ProtocolValidationError("assignment failure references unknown engine")
+            expected_name = assignment.engines[failure.engine_id].name
+            if failure.engine_name != expected_name:
+                raise ProtocolValidationError("assignment failure engine name mismatch")
+            raise AssignmentPreparationFailed(failure)
         if envelope.type != "assignment_ready":
             raise ProtocolValidationError(
                 f"expected assignment_ready, got {envelope.type}"
@@ -978,6 +1024,88 @@ class WorkerHandshakeServer:
             {"assignment_id": assignment.assignment.assignment_id},
         )
 
+    def _fail_preparation_assignment(
+        self,
+        worker: WorkerRecord,
+        assignment,
+        failure: AssignmentFailed,
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            fail_game_assignment(
+                connection,
+                assignment.assignment.assignment_id,
+                assignment.assignment.assignment_key,
+                str(AssignmentPreparationFailed(failure)),
+            )
+            record_worker_failure(
+                connection,
+                worker=worker,
+                assignment_id=assignment.assignment.assignment_id,
+                game_id=assignment.assignment.game_id,
+                engine_id=failure.engine_id,
+                engine_name=failure.engine_name,
+                stage=failure.stage,
+                error=failure.error,
+            )
+            game = get_game(connection, assignment.assignment.game_id)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+        if game is not None:
+            publish_tournament_event(game.tournament_id)
+        publish_workers_changed(
+            "worker.engine_failure",
+            {
+                "worker_id": worker.id,
+                "machine_id": worker.machine_id,
+                "assignment_id": assignment.assignment.assignment_id,
+                "game_id": assignment.assignment.game_id,
+                "engine_id": failure.engine_id,
+                "stage": failure.stage,
+            },
+        )
+
+    def _record_runtime_failure(
+        self,
+        worker: WorkerRecord,
+        assignment,
+        failure: AssignmentFailed,
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            record_worker_failure(
+                connection,
+                worker=worker,
+                assignment_id=assignment.assignment.assignment_id,
+                game_id=assignment.assignment.game_id,
+                engine_id=failure.engine_id,
+                engine_name=failure.engine_name,
+                stage=failure.stage,
+                error=failure.error,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        publish_workers_changed(
+            "worker.engine_failure",
+            {
+                "worker_id": worker.id,
+                "machine_id": worker.machine_id,
+                "assignment_id": assignment.assignment.assignment_id,
+                "game_id": assignment.assignment.game_id,
+                "engine_id": failure.engine_id,
+                "stage": failure.stage,
+            },
+        )
+
 
 def _worker_capability_key(
     worker: WorkerRecord,
@@ -999,7 +1127,13 @@ def _worker_capability_key(
 
 
 class WorkerEngineTransport:
-    def __init__(self, websocket: WebSocketServerProtocol, assignment):
+    def __init__(
+        self,
+        websocket: WebSocketServerProtocol,
+        assignment,
+        *,
+        failure_handler: Callable[[AssignmentFailed], None],
+    ):
         self._websocket = websocket
         self._assignment = assignment
         self._loop = asyncio.get_running_loop()
@@ -1007,6 +1141,8 @@ class WorkerEngineTransport:
         self._closed = threading.Event()
         self._pending: set[Future] = set()
         self._pending_lock = threading.Lock()
+        self._failure_handler = failure_handler
+        self._failure_reported = False
 
     def close(self) -> None:
         self._closed.set()
@@ -1079,6 +1215,19 @@ class WorkerEngineTransport:
                                 engine_id,
                             )
                 continue
+
+            if envelope.type == "assignment_failed":
+                failure = _validate_worker_payload(AssignmentFailed, envelope.data)
+                if not failure.matches_assignment(assignment):
+                    raise ProtocolValidationError("engine failure assignment mismatch")
+                if failure.engine_id != engine_id:
+                    raise ProtocolValidationError("engine failure engine mismatch")
+                if not self._failure_reported:
+                    self._failure_reported = True
+                    self._failure_handler(failure)
+                raise RuntimeError(
+                    f"{failure.engine_name} {failure.stage} failed: {failure.error}"
+                )
 
             if envelope.type != "engine_command_result":
                 raise ProtocolValidationError(f"unexpected worker message: {envelope.type}")

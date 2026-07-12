@@ -11,7 +11,8 @@ import WorkerTokenPanel from '@/components/admin/WorkerTokenPanel.vue'
 import { errorText, formatDate, formatNumber } from '@/components/admin/format'
 import type { Worker, WorkerRow } from '@/components/admin/types'
 
-interface Response { row: WorkerRow; worker: Worker; worker_launch_command?: string | null; dependencies: { required: string[]; available: string[]; missing: string[]; runnable_engines: string[] } }
+interface WorkerFailure { id: number; worker_id: number | null; worker_label: string; pool_id: number | null; machine_id: string | null; assignment_id: number | null; game_id: number | null; engine_id: number | null; engine_name: string; stage: string; error: string; occurred_at: string }
+interface Response { row: WorkerRow; worker: Worker; worker_launch_command?: string | null; dependencies: { required: string[]; available: string[]; missing: string[]; runnable_engines: string[] }; failures: WorkerFailure[] }
 interface Minted { token: string; expires_at: string; start_command?: string; message: string }
 interface WorkerTokenBindings { token: string; expiresAt: string; startCommand?: string }
 const route = useRoute()
@@ -113,6 +114,30 @@ onBeforeUnmount(() => source?.close())
         <StatusBadge :status="data.row.status" />
       </section>
 
+      <section v-if="data.failures.length" class="panel failure-panel" aria-labelledby="worker-failures-title">
+        <div class="failure-panel__heading">
+          <div><h2 id="worker-failures-title">Engine failures</h2><p>The newest build or preparation failure is shown first.</p></div>
+          <span>{{ data.failures.length }} recent</span>
+        </div>
+        <details v-for="(failure, index) in data.failures" :key="failure.id" class="failure-entry" :open="index === 0">
+          <summary>
+            <span><strong>{{ failure.engine_name }}</strong><small>{{ failure.stage }} failed</small></span>
+            <time :datetime="failure.occurred_at">{{ formatDate(failure.occurred_at) }}</time>
+          </summary>
+          <div class="failure-entry__body">
+            <dl>
+              <div><dt>Worker</dt><dd>{{ failure.worker_label }} (#{{ failure.worker_id ?? data.worker.id }})</dd></div>
+              <div><dt>Machine</dt><dd>{{ failure.machine_id ?? 'Unknown' }}</dd></div>
+              <div><dt>Pool</dt><dd>{{ failure.pool_id ? `#${failure.pool_id}` : 'Standalone' }}</dd></div>
+              <div><dt>Game / assignment</dt><dd>#{{ failure.game_id ?? '—' }} / #{{ failure.assignment_id ?? '—' }}</dd></div>
+              <div><dt>Engine</dt><dd>{{ failure.engine_name }} (#{{ failure.engine_id ?? '—' }})</dd></div>
+              <div><dt>Stage</dt><dd>{{ failure.stage }}</dd></div>
+            </dl>
+            <pre>{{ failure.error }}</pre>
+          </div>
+        </details>
+      </section>
+
       <div class="worker-grid">
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Identity</h2></div><form class="rename-form" @submit.prevent="rename"><label><span>Worker label</span><input v-model="label" class="input" required maxlength="80"></label><button class="button button--primary button--small" type="submit" :disabled="pending === 'label'">{{ pending === 'label' ? 'Saving…' : 'Save label' }}</button></form></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Connection state</h2></div><dl class="fact-list"><div><dt>Overall</dt><dd><StatusBadge :status="data.row.status" /></dd></div><div><dt>Machine</dt><dd>{{ data.row.machine?.label ?? 'Unknown' }}<small>{{ data.row.machine?.detail }}</small></dd></div><div><dt>Session</dt><dd>{{ data.row.session?.label ?? 'None' }}<small>{{ data.row.session?.detail }}</small></dd></div><div><dt>Token</dt><dd>{{ data.row.token?.label ?? 'None' }}<small>{{ data.row.token?.detail }}</small></dd></div></dl></section>
@@ -133,9 +158,10 @@ onBeforeUnmount(() => source?.close())
 .live-state > span { background: var(--color-warning, #b7791f); border-radius: 50%; height: .48rem; width: .48rem; }
 .live-state > span.connected { background: var(--color-success, #24865a); box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--color-success, #24865a) 15%, transparent); }
 .current-work { align-items: center; display: flex; gap: 1rem; justify-content: space-between; padding: 1rem; }.current-work > div > span { color: var(--color-text-muted, #64748b); font-size: .64rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }.current-work h2 { font-size: .95rem; margin: .25rem 0 0; }.current-work p { color: var(--color-text-muted, #64748b); font-size: .75rem; margin: .2rem 0 0; }.current-work small { color: var(--color-text-muted, #64748b); display: block; font-size: .68rem; margin-top: .2rem; }
+.failure-panel { border-color: color-mix(in srgb, var(--color-danger, #b42318) 30%, var(--color-border, #d9e0ea)); overflow: hidden; padding: 0; }.failure-panel__heading { align-items: center; background: color-mix(in srgb, var(--color-danger, #b42318) 7%, var(--color-surface, #fff)); display: flex; justify-content: space-between; padding: .8rem 1rem; }.failure-panel__heading h2 { color: var(--color-danger, #b42318); font-size: .9rem; margin: 0; }.failure-panel__heading p, .failure-panel__heading span { color: var(--color-text-muted, #64748b); font-size: .68rem; margin: .18rem 0 0; }.failure-entry { border-top: 1px solid var(--color-border, #d9e0ea); }.failure-entry summary { align-items: center; cursor: pointer; display: flex; justify-content: space-between; padding: .7rem 1rem; }.failure-entry summary > span { display: grid; gap: .15rem; }.failure-entry summary strong { font-size: .78rem; }.failure-entry summary small, .failure-entry summary time { color: var(--color-text-muted, #64748b); font-size: .66rem; }.failure-entry__body { background: var(--color-surface-subtle, #f8fafc); border-top: 1px solid var(--color-border, #d9e0ea); padding: .8rem 1rem 1rem; }.failure-entry__body dl { display: grid; gap: .45rem 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 .75rem; }.failure-entry__body dl > div { min-width: 0; }.failure-entry__body dt { color: var(--color-text-muted, #64748b); font-size: .62rem; text-transform: uppercase; }.failure-entry__body dd { font-size: .72rem; font-weight: 600; margin: .15rem 0 0; overflow-wrap: anywhere; }.failure-entry__body pre { background: #171717; border-radius: .45rem; color: #f5f5f5; font-size: .68rem; line-height: 1.5; margin: 0; max-height: 18rem; overflow: auto; padding: .75rem; white-space: pre-wrap; word-break: break-word; }
 .dependency-list { display: flex; flex-wrap: wrap; gap: .4rem; padding: 1rem; }.dependency-list code { background: var(--color-surface-subtle, #f1f5f9); border: 1px solid var(--color-border, #d9e0ea); border-radius: .35rem; font-size: .7rem; padding: .28rem .42rem; }.dependency-checked { border-top: 1px solid var(--color-border, #d9e0ea); color: var(--color-text-muted, #64748b); font-size: .65rem; margin: 0; padding: .6rem 1rem; }
 .dependency-missing { background: color-mix(in srgb, var(--color-warning, #b7791f) 9%, transparent); color: var(--color-warning, #8a5a12); font-size: .7rem; margin: 0; padding: .65rem 1rem; }
 .worker-grid { display: grid; gap: .9rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }.detail-card { overflow: hidden; padding: 0; }.detail-card__heading { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .75rem 1rem; }.detail-card h2, .danger-zone h2 { font-size: .88rem; margin: 0; }.rename-form { align-items: end; display: grid; gap: .7rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1rem; }.rename-form label { display: grid; font-size: .75rem; font-weight: 650; gap: .35rem; }.fact-list { display: grid; margin: 0; }.fact-list > div { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: grid; gap: .75rem; grid-template-columns: minmax(5rem, .35fr) minmax(0, 1fr); padding: .65rem 1rem; }.fact-list > div:last-child { border-bottom: 0; }.fact-list dt { color: var(--color-text-muted, #64748b); font-size: .69rem; }.fact-list dd { font-size: .75rem; font-weight: 600; margin: 0; }.fact-list dd small { color: var(--color-text-muted, #64748b); display: block; font-size: .65rem; font-weight: 400; margin-top: .15rem; }.card-empty { color: var(--color-text-muted, #64748b); font-size: .75rem; margin: 0; padding: 1rem; }.credential-actions { align-items: flex-start; display: flex; flex-direction: column; gap: .65rem; padding: 1rem; }.credential-actions p { color: var(--color-text-muted, #64748b); font-size: .72rem; line-height: 1.45; margin: 0; }.danger-zone { align-items: center; border-color: color-mix(in srgb, var(--color-danger, #b42318) 25%, var(--color-border, #d9e0ea)); display: flex; gap: 1rem; justify-content: space-between; padding: 1rem; }.danger-zone p { color: var(--color-text-muted, #64748b); font-size: .72rem; margin: .2rem 0 0; }.danger-zone > div:last-child { display: flex; gap: .5rem; }
-@media (max-width: 48rem) { .worker-grid { grid-template-columns: 1fr; }.danger-zone { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 48rem) { .worker-grid { grid-template-columns: 1fr; }.danger-zone { align-items: flex-start; flex-direction: column; }.failure-entry__body dl { grid-template-columns: 1fr; } }
 @media (max-width: 32rem) { .rename-form { grid-template-columns: 1fr; }.rename-form .button { justify-self: start; } }
 </style>

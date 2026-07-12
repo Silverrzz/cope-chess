@@ -132,6 +132,22 @@ class WorkerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerFailureRecord:
+    id: int
+    worker_id: int | None
+    worker_label: str
+    pool_id: int | None
+    machine_id: str | None
+    assignment_id: int | None
+    game_id: int | None
+    engine_id: int | None
+    engine_name: str
+    stage: str
+    error: str
+    occurred_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class EngineRecord:
     id: int
     name: str
@@ -1608,6 +1624,75 @@ def list_workers(connection: sqlite3.Connection) -> tuple[WorkerRecord, ...]:
         for row in connection.execute(
             "SELECT * FROM workers WHERE status != 'revoked' ORDER BY id"
         )
+    )
+
+
+def record_worker_failure(
+    connection: sqlite3.Connection,
+    *,
+    worker: WorkerRecord,
+    assignment_id: int,
+    game_id: int,
+    engine_id: int,
+    engine_name: str,
+    stage: str,
+    error: str,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO worker_failures (
+          worker_id, worker_label, pool_id, machine_id, assignment_id, game_id,
+          engine_id, engine_name, stage, error, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            worker.id,
+            worker.label,
+            worker.pool_id,
+            worker.machine_id,
+            assignment_id,
+            game_id,
+            engine_id,
+            engine_name[:80],
+            stage,
+            error[:8000],
+            utc_now(),
+        ),
+    )
+    return cursor.lastrowid
+
+
+def list_worker_failures(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    *,
+    limit: int = 20,
+) -> tuple[WorkerFailureRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT * FROM worker_failures
+        WHERE worker_id = ?
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT ?
+        """,
+        (worker_id, max(1, min(limit, 100))),
+    )
+    return tuple(
+        WorkerFailureRecord(
+            id=row["id"],
+            worker_id=row["worker_id"],
+            worker_label=row["worker_label"],
+            pool_id=row["pool_id"],
+            machine_id=row["machine_id"],
+            assignment_id=row["assignment_id"],
+            game_id=row["game_id"],
+            engine_id=row["engine_id"],
+            engine_name=row["engine_name"],
+            stage=row["stage"],
+            error=row["error"],
+            occurred_at=row["occurred_at"],
+        )
+        for row in rows
     )
 
 

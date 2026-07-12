@@ -16,6 +16,7 @@ from websockets.exceptions import ConnectionClosed
 
 from cope.core.models import (
     AssignmentComplete,
+    AssignmentFailed,
     AssignmentRejected,
     DependencyProbe,
     DependencyReport,
@@ -40,7 +41,7 @@ from cope.core.protocol import (
 )
 from cope.core.stream import clamp_uci_info_line
 
-from .uci_engine import UciEngineProcess
+from .uci_engine import EnginePreparationError, UciEngineProcess
 
 
 LOG = logging.getLogger("cope.worker")
@@ -139,7 +140,7 @@ async def _run_worker_connection(
                     f"{connection_config.resources.threads} threads and "
                     f"{connection_config.resources.hash_mb}MB hash"
                 )
-            await _serve_assignment(websocket, assignment, worker_id=welcome.worker_id)
+            await _serve_assignment(websocket, assignment)
 
 
 def _build_hello(
@@ -188,8 +189,6 @@ def _build_hello(
 async def _serve_assignment(
     websocket,
     assignment: WorkerGameAssignment,
-    *,
-    worker_id: int,
 ) -> None:
     missing_dependencies = sorted(
         {
@@ -217,7 +216,7 @@ async def _serve_assignment(
         return
 
     engines = {
-        engine_id: UciEngineProcess(engine, worker_id=worker_id)
+        engine_id: UciEngineProcess(engine)
         for engine_id, engine in assignment.engines.items()
     }
     engine_names = ", ".join(engine.name for engine in assignment.engines.values())
@@ -290,11 +289,33 @@ async def _serve_assignment(
                 future.result()
 
             line_callback = publish_info if command.command.startswith("go") else None
-            result_lines = await asyncio.to_thread(
-                engine.handle_command,
-                command.command,
-                line_callback,
-            )
+            try:
+                result_lines = await asyncio.to_thread(
+                    engine.handle_command,
+                    command.command,
+                    line_callback,
+                )
+            except Exception as error:
+                failure = AssignmentFailed(
+                    **assignment.assignment.message_fields(),
+                    engine_id=command.engine_id,
+                    engine_name=assignment.engines[command.engine_id].name,
+                    stage="runtime" if engine.process_started else "start",
+                    error=(str(error).strip() or error.__class__.__name__)[-8000:],
+                )
+                await _send_message(websocket, "assignment_failed", failure)
+                LOG.error(
+                    "engine command failed assignment_id=%s game_id=%s engine_id=%s "
+                    "engine=%s stage=%s error=%s",
+                    command.assignment_id,
+                    command.game_id,
+                    failure.engine_id,
+                    failure.engine_name,
+                    failure.stage,
+                    failure.error,
+                )
+                await _wait_for_failed_assignment_complete(websocket, assignment, failure)
+                return
 
             result = EngineCommandResult(
                 **command.model_dump(exclude={"command"}),
@@ -311,6 +332,26 @@ async def _serve_assignment(
                 _line_sample(result_lines),
             )
             await _send_message(websocket, "engine_command_result", result)
+    except EnginePreparationError as error:
+        failure = AssignmentFailed(
+            **assignment.assignment.message_fields(),
+            engine_id=error.engine_id,
+            engine_name=error.engine_name,
+            stage=error.stage,
+            error=error.detail[-8000:],
+        )
+        await _send_message(websocket, "assignment_failed", failure)
+        LOG.error(
+            "assignment preparation failed assignment_id=%s game_id=%s engine_id=%s "
+            "engine=%s stage=%s error=%s",
+            assignment.assignment.assignment_id,
+            assignment.assignment.game_id,
+            error.engine_id,
+            error.engine_name,
+            error.stage,
+            error.detail,
+        )
+        return
     except Exception:
         LOG.exception(
             "assignment failed assignment_id=%s game_id=%s",
@@ -325,6 +366,27 @@ async def _serve_assignment(
             "assignment engines closed assignment_id=%s game_id=%s",
             assignment.assignment.assignment_id,
             assignment.assignment.game_id,
+        )
+
+
+async def _wait_for_failed_assignment_complete(
+    websocket,
+    assignment: WorkerGameAssignment,
+    failure: AssignmentFailed,
+) -> None:
+    while True:
+        envelope = await _recv_envelope(websocket)
+        if envelope.type == "assignment_complete":
+            complete = AssignmentComplete.model_validate(envelope.data)
+            _validate_assignment_message(complete, assignment, "assignment_complete")
+            return
+        if envelope.type == "engine_command":
+            command = EngineCommand.model_validate(envelope.data)
+            _validate_assignment_message(command, assignment, "engine_command")
+            await _send_message(websocket, "assignment_failed", failure)
+            continue
+        raise ProtocolValidationError(
+            f"unexpected runner message after engine failure: {envelope.type}"
         )
 
 

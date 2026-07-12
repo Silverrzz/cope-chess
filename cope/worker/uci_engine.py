@@ -4,23 +4,38 @@ import hashlib
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from collections.abc import Callable
 from pathlib import Path
+from typing import Iterator
 
 from cope.core.models import EngineSpec
 from cope.core.stream import clamp_uci_info_line
 
 
 LOG = logging.getLogger("cope.worker.engine")
+_BUILD_FAILURE_COOLDOWN_S = 60.0
+_BUILD_LOCKS: dict[Path, threading.Lock] = {}
+_BUILD_LOCKS_GUARD = threading.Lock()
+
+
+class EnginePreparationError(RuntimeError):
+    def __init__(self, spec: EngineSpec, stage: str, detail: str):
+        self.engine_id = spec.engine_id
+        self.engine_name = spec.name
+        self.stage = stage
+        self.detail = detail.strip() or "unknown engine preparation error"
+        super().__init__(f"{spec.name} {stage} failed: {self.detail}")
 
 
 class UciEngineProcess:
-    def __init__(self, spec: EngineSpec, *, worker_id: int):
+    def __init__(self, spec: EngineSpec):
         self._spec = spec
-        self._source_dir = _engine_source_dir(spec, worker_id)
+        self._source_dir = _engine_source_dir(spec)
         self._binary_path = self._source_dir / spec.binary_path
         self._process: subprocess.Popen[str] | None = None
         self._stdout: queue.Queue[str | None] = queue.Queue()
@@ -35,10 +50,19 @@ class UciEngineProcess:
             self._binary_path,
         )
 
+    @property
+    def process_started(self) -> bool:
+        return self._process is not None
+
     def prepare(self) -> None:
         """Install and build this engine without starting a UCI game process."""
         with self._io_lock:
-            self._ensure_built()
+            try:
+                self._ensure_built()
+            except EnginePreparationError:
+                raise
+            except Exception as exc:
+                raise EnginePreparationError(self._spec, "cache", str(exc)) from exc
 
     def handle_command(
         self,
@@ -248,59 +272,102 @@ class UciEngineProcess:
             )
             return
 
-        marker = self._source_dir / ".cope-build"
         build_key = _build_key(self._spec)
-        if (
-            self._source_dir.exists()
-            and marker.exists()
-            and marker.read_text(encoding="utf-8") == build_key
-            and self._binary_path.exists()
-        ):
-            self._built = True
+        cache_root = self._source_dir.parent
+        cache_name = self._source_dir.name
+        lock_path = cache_root / ".locks" / f"{cache_name}.lock"
+        failure_path = cache_root / ".failures" / f"{cache_name}.txt"
+
+        LOG.info(
+            "engine build waiting for machine cache engine_id=%s engine=%s cache=%s",
+            self._spec.engine_id,
+            self._spec.name,
+            self._source_dir,
+        )
+        with _exclusive_build_lock(lock_path):
+            if _build_is_ready(self._source_dir, self._binary_path, build_key):
+                self._built = True
+                LOG.info(
+                    "engine machine cache hit engine_id=%s engine=%s source_dir=%s commit=%s",
+                    self._spec.engine_id,
+                    self._spec.name,
+                    self._source_dir,
+                    self._spec.commit,
+                )
+                return
+
+            cached_failure = _recent_build_failure(failure_path)
+            if cached_failure is not None:
+                stage, detail = cached_failure
+                raise EnginePreparationError(
+                    self._spec,
+                    stage,
+                    "a recent machine-wide build attempt failed; retry is temporarily "
+                    f"suppressed:\n{detail}",
+                )
+
             LOG.info(
-                "engine build cache hit engine_id=%s engine=%s source_dir=%s commit=%s",
+                "engine machine build starting engine_id=%s engine=%s source_dir=%s commit=%s",
                 self._spec.engine_id,
                 self._spec.name,
                 self._source_dir,
                 self._spec.commit,
             )
-            return
+            # The name is deterministic because the build lock guarantees one
+            # writer. A process killed mid-build leaves a directory that the
+            # next attempt can identify and remove.
+            temporary = cache_root / ".tmp" / cache_name
+            stage = "cache"
+            try:
+                if self._source_dir.exists():
+                    shutil.rmtree(self._source_dir)
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+                temporary.parent.mkdir(parents=True, exist_ok=True)
 
-        LOG.info(
-            "engine build preparing engine_id=%s engine=%s source_dir=%s commit=%s",
-            self._spec.engine_id,
-            self._spec.name,
-            self._source_dir,
-            self._spec.commit,
-        )
-        self._source_dir.parent.mkdir(parents=True, exist_ok=True)
-        if not self._source_dir.exists():
-            command = ["git", "clone"]
-            if self._spec.branch:
-                command.extend(["--branch", self._spec.branch])
-            command.extend([self._spec.git_url, str(self._source_dir)])
-            _run_checked(command, cwd=None)
+                stage = "clone"
+                command = ["git", "clone"]
+                if self._spec.branch:
+                    command.extend(["--branch", self._spec.branch])
+                command.extend([self._spec.git_url, str(temporary)])
+                _run_checked(command, cwd=None)
+                stage = "checkout"
+                _run_checked(
+                    ["git", "checkout", "--force", "--detach", self._spec.commit],
+                    cwd=temporary,
+                )
+                stage = "build"
+                _run_checked(self._spec.build_cmd, cwd=temporary, shell=True)
 
-        if self._spec.branch:
-            fetch_command = ["git", "fetch", "--tags", "origin", self._spec.branch]
-        else:
-            fetch_command = ["git", "fetch", "--all", "--tags"]
-        _run_checked(fetch_command, cwd=self._source_dir)
-        _run_checked(["git", "checkout", "--force", "--detach", self._spec.commit], cwd=self._source_dir)
+                stage = "verify"
+                temporary_binary = temporary / self._spec.binary_path
+                if not temporary_binary.is_file():
+                    raise RuntimeError(
+                        f"{self._spec.name} build completed but binary was not found: "
+                        f"{temporary_binary}"
+                    )
+                (temporary / ".cope-build").write_text(build_key, encoding="utf-8")
+                os.replace(temporary, self._source_dir)
+                if failure_path.exists():
+                    failure_path.unlink()
+            except Exception as exc:
+                error = EnginePreparationError(self._spec, stage, str(exc))
+                _record_build_failure(failure_path, error.stage, error.detail)
+                raise error from exc
+            finally:
+                if temporary.exists():
+                    try:
+                        shutil.rmtree(temporary)
+                    except OSError:
+                        LOG.exception("could not remove temporary engine build %s", temporary)
 
-        _run_checked(self._spec.build_cmd, cwd=self._source_dir, shell=True)
-        if not self._binary_path.exists():
-            raise RuntimeError(
-                f"{self._spec.name} build completed but binary was not found: {self._binary_path}"
+            self._built = True
+            LOG.info(
+                "engine machine build ready engine_id=%s engine=%s binary=%s",
+                self._spec.engine_id,
+                self._spec.name,
+                self._binary_path,
             )
-        marker.write_text(build_key, encoding="utf-8")
-        self._built = True
-        LOG.info(
-            "engine build ready engine_id=%s engine=%s binary=%s",
-            self._spec.engine_id,
-            self._spec.name,
-            self._binary_path,
-        )
 
     def _read_stdout(self, process: subprocess.Popen[str]) -> None:
         LOG.info(
@@ -397,18 +464,77 @@ class UciEngineProcess:
             lines.append(line)
 
 
-def _engine_source_dir(spec: EngineSpec, worker_id: int) -> Path:
+def _engine_source_dir(spec: EngineSpec) -> Path:
     configured_cache_root = os.environ.get("COPE_WORKER_ENGINE_DIR")
     if configured_cache_root:
-        cache_root = Path(configured_cache_root)
+        cache_root = Path(configured_cache_root).expanduser().resolve()
     else:
-        cache_root = Path(".cope-worker/workers") / str(worker_id) / "engines"
-    source_key = hashlib.blake2s(
-        f"{spec.git_url}\0{spec.branch}".encode("utf-8"),
-        digest_size=8,
-    ).hexdigest()
-    safe_name = "".join(char if char.isalnum() else "-" for char in spec.name.lower()).strip("-")
-    return cache_root / f"{spec.engine_id}-{safe_name or 'engine'}-{source_key}"
+        cache_root = (_effective_home_dir() / ".cope-worker" / "engines").resolve()
+    return cache_root / f"engine-{_build_key(spec)}"
+
+
+def _effective_home_dir() -> Path:
+    if os.name == "posix":
+        import pwd
+
+        return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    return Path.home()
+
+
+def _build_is_ready(source_dir: Path, binary_path: Path, build_key: str) -> bool:
+    marker = source_dir / ".cope-build"
+    try:
+        return (
+            source_dir.is_dir()
+            and binary_path.is_file()
+            and marker.read_text(encoding="utf-8") == build_key
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def _recent_build_failure(path: Path) -> tuple[str, str] | None:
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age >= _BUILD_FAILURE_COOLDOWN_S:
+            path.unlink(missing_ok=True)
+            return None
+        stage, separator, detail = path.read_text(encoding="utf-8").partition("\n")
+        return (stage, detail.strip()) if separator else ("build", stage.strip())
+    except (FileNotFoundError, OSError, UnicodeError):
+        return None
+
+
+def _record_build_failure(path: Path, stage: str, detail: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{stage}\n{detail[-8000:]}\n", encoding="utf-8")
+    except OSError:
+        # Preserve the actual clone/build exception, especially when the
+        # reason the failure cannot be recorded is a full filesystem.
+        LOG.exception("could not record engine build failure in %s", path)
+
+
+@contextmanager
+def _exclusive_build_lock(path: Path) -> Iterator[None]:
+    """Serialize one engine build across pool threads and Linux processes."""
+    with _BUILD_LOCKS_GUARD:
+        thread_lock = _BUILD_LOCKS.setdefault(path, threading.Lock())
+
+    with thread_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as lock_file:
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _build_key(spec: EngineSpec) -> str:
@@ -461,8 +587,8 @@ def _run_checked(command, *, cwd: Path | None, shell: bool = False) -> None:
         _format_command(command),
     )
     if completed.returncode != 0:
-        if len(output) > 2000:
-            output = output[-2000:]
+        if len(output) > 8000:
+            output = output[-8000:]
         raise RuntimeError(
             f"command failed with exit code {completed.returncode}: {command}\n{output}"
         )

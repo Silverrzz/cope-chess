@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 UciOptionValue = str | int | bool
 DEPENDENCY_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,79}$")
 
@@ -368,6 +368,13 @@ class AssignmentRejected(AssignmentMessage):
         return normalize_required_dependencies(value)
 
 
+class AssignmentFailed(AssignmentMessage):
+    engine_id: int = Field(gt=0)
+    engine_name: str = Field(min_length=1, max_length=80)
+    stage: Literal["cache", "clone", "checkout", "build", "verify", "start", "runtime"]
+    error: str = Field(min_length=1, max_length=8000)
+
+
 class DependencyProbe(StrictModel):
     revision: str = Field(min_length=16, max_length=128)
     required_dependencies: list[str] = Field(default_factory=list)
@@ -477,7 +484,7 @@ class WorkerWelcome(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[4] = PROTOCOL_VERSION
+    v: Literal[5] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)
