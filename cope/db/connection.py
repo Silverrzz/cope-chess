@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import threading
+import atexit
 from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -79,6 +80,17 @@ def _pool(database_url: str) -> ConnectionPool:
             )
             _pools[key] = pool
         return pool
+
+
+def close_database_pools() -> None:
+    with _pools_lock:
+        pools = list(_pools.values())
+        _pools.clear()
+    for pool in pools:
+        pool.close()
+
+
+atexit.register(close_database_pools)
 
 
 class DatabaseCursor:

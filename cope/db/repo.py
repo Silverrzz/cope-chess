@@ -1569,7 +1569,7 @@ def upsert_worker_connection(
           machine_id = excluded.machine_id,
           hw = excluded.hw,
           last_seen = excluded.last_seen
-        WHERE status != 'revoked'
+        WHERE workers.status != 'revoked'
         """,
         (
             worker_id,
@@ -1628,7 +1628,7 @@ def update_worker_status(
         UPDATE workers
         SET status = ?, last_seen = ?
         WHERE id = ? AND status != 'revoked'
-          AND (? IS NULL OR session_id = ?)
+          AND (CAST(? AS TEXT) IS NULL OR session_id = ?)
         """,
         (status, utc_now(), worker_id, session_id, session_id),
     )
@@ -1647,7 +1647,7 @@ def touch_worker_seen(
         SET last_seen = ?
         WHERE id = ?
           AND status IN ('connected', 'building', 'ready', 'busy')
-          AND (? IS NULL OR session_id = ?)
+          AND (CAST(? AS TEXT) IS NULL OR session_id = ?)
         """,
         (utc_now(), worker_id, session_id, session_id),
     )
@@ -1695,7 +1695,7 @@ def update_worker_dependencies(
         SELECT available_dependencies, dependency_manifest_revision
         FROM workers
         WHERE id = ? AND status != 'revoked'
-          AND (? IS NULL OR session_id = ?)
+          AND (CAST(? AS TEXT) IS NULL OR session_id = ?)
         """,
         (worker_id, session_id, session_id),
     ).fetchone()
@@ -1716,7 +1716,7 @@ def update_worker_dependencies(
             dependencies_checked_at = ?,
             last_seen = ?
         WHERE id = ? AND status != 'revoked'
-          AND (? IS NULL OR session_id = ?)
+          AND (CAST(? AS TEXT) IS NULL OR session_id = ?)
         """,
         (
             serialized,
@@ -1760,7 +1760,7 @@ def disconnect_worker(
         UPDATE workers
         SET status = 'offline', last_seen = ?
         WHERE id = ? AND status != 'revoked'
-          AND (? IS NULL OR session_id = ?)
+          AND (CAST(? AS TEXT) IS NULL OR session_id = ?)
         """,
         (now, worker_id, session_id, session_id),
     )

@@ -763,26 +763,22 @@ class WorkerHandshakeServer:
                 f"{worker.assigned_hash_mb}MB hash"
             )
 
+        expected_hardware = hello.hw.model_dump_json()
         machine = connection.execute(
             """
             SELECT
               COALESCE(SUM(assigned_threads), 0) AS reserved_threads,
               COALESCE(SUM(assigned_hash_mb), 0) AS reserved_hash_mb,
-              MIN(hw) AS minimum_hw,
-              MAX(hw) AS maximum_hw
+              COALESCE(BOOL_AND(hw IS NULL OR hw = ?), TRUE) AS hardware_matches
             FROM workers
             WHERE id != ?
               AND machine_id = ?
               AND status != 'revoked'
               AND (pool_id IS NOT NULL OR status IN ('connected', 'building', 'ready', 'busy'))
             """,
-            (worker.id, hello.machine_id),
+            (expected_hardware, worker.id, hello.machine_id),
         ).fetchone()
-        expected_hardware = hello.hw.model_dump_json()
-        if machine is not None and (
-            (machine["minimum_hw"] is not None and machine["minimum_hw"] != expected_hardware)
-            or (machine["maximum_hw"] is not None and machine["maximum_hw"] != expected_hardware)
-        ):
+        if machine is not None and not machine["hardware_matches"]:
             raise ProtocolValidationError(
                 "connected workers with the same machine id reported different hardware"
             )
