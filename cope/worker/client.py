@@ -97,11 +97,7 @@ async def _run_worker_connection(
     config: WorkerClientConfig,
     state: _WorkerConnectionState,
 ) -> None:
-    connection_config = (
-        replace(config, token=None, session_id=state.session_id)
-        if state.session_id is not None and config.pool_slot_token is None
-        else config
-    )
+    connection_config = _connection_config(config, state)
     LOG.info(
         "connecting to runner url=%s app_version=%s",
         connection_config.server_url,
@@ -140,6 +136,21 @@ async def _run_worker_connection(
                 server_url=connection_config.server_url,
                 credential=welcome.session_id,
             )
+
+
+def _connection_config(
+    config: WorkerClientConfig,
+    state: _WorkerConnectionState,
+) -> WorkerClientConfig:
+    """Use the durable server session after the first accepted connection."""
+    if state.session_id is None:
+        return config
+    return replace(
+        config,
+        token=None,
+        pool_slot_token=None,
+        session_id=state.session_id,
+    )
 
 
 def _build_hello(
