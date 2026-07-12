@@ -783,14 +783,7 @@ def create_app(
                         continue
                     if event is None:
                         break
-                    yield sse_stream_event(
-                        hub.make_private_event(
-                            "workers",
-                            "workers.snapshot",
-                            snapshot(),
-                            source=event.source,
-                        )
-                    )
+                    yield sse_stream_event(event)
             finally:
                 hub.unsubscribe(subscription)
 
