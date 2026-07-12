@@ -89,6 +89,7 @@ from cope.db import (
     list_upcoming_games,
     list_workers,
     list_worker_pools,
+    list_worker_activities,
     touch_service_heartbeat,
     mint_worker_token_for_worker,
     next_engine_id,
@@ -396,13 +397,15 @@ def create_app(
     admin_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="COPE Chess")
-    app.state.db_path = Path(db_path)
+    app.state.db_path = str(db_path)
     app.state.worker_server_url = worker_server_url
     app.state.event_token = event_token or default_web_event_token()
     app.state.admin_token = admin_token or default_admin_token()
     app.state.stream_hub = StreamHub()
     app.state.request_limits = {}
     app.state.last_service_heartbeat = 0.0
+    app.state.worker_snapshot_task = None
+    app.state.tournament_snapshot_tasks = {}
     app.add_middleware(GZipMiddleware, minimum_size=1_000)
     app.mount(
         "/static",
@@ -780,7 +783,14 @@ def create_app(
                         continue
                     if event is None:
                         break
-                    yield sse_stream_event(event)
+                    yield sse_stream_event(
+                        hub.make_private_event(
+                            "workers",
+                            "workers.snapshot",
+                            snapshot(),
+                            source=event.source,
+                        )
+                    )
             finally:
                 hub.unsubscribe(subscription)
 
@@ -910,7 +920,7 @@ def create_app(
             _admin_context(
                 request,
                 "dashboard",
-                workers=_worker_admin_rows(connection),
+                workers=_worker_admin_rows(connection, limit=20),
                 live_games=list_games_by_status(connection, "live", limit=8),
                 engines=_engine_names(connection),
                 db_stats=database_stats(connection),
@@ -1629,15 +1639,28 @@ def create_app(
     @app.get("/admin/workers")
     def admin_workers(
         request: Request,
+        page: int = 1,
         connection: sqlite3.Connection = Depends(_database),
     ):
+        per_page = 100
+        page = max(page, 1)
+        workers = list(list_workers(connection))
+        total_pages = max((len(workers) + per_page - 1) // per_page, 1)
+        page = min(page, total_pages)
+        offset = (page - 1) * per_page
+        page_rows = _worker_admin_rows(
+            connection,
+            workers=workers[offset : offset + per_page],
+        )
         return templates.TemplateResponse(
             request,
             "admin/workers.html",
             _admin_context(
                 request,
                 "workers",
-                worker_rows=_worker_admin_rows(connection),
+                worker_rows=page_rows,
+                worker_page=page,
+                worker_total_pages=total_pages,
                 minted=None,
                 minted_start_command=None,
             ),
@@ -1657,9 +1680,11 @@ def create_app(
         )
 
     @app.get("/admin/workers/events")
-    async def admin_workers_events(request: Request):
+    async def admin_workers_events(request: Request, page: int = 1):
         hub: StreamHub = request.app.state.stream_hub
         hub.bind_loop()
+        page = max(page, 1)
+        per_page = 100
 
         def snapshot() -> dict[str, Any]:
             connection = connect_database(request.app.state.db_path)
@@ -1667,6 +1692,8 @@ def create_app(
                 return _workers_snapshot_payload(
                     connection,
                     worker_server_url=_request_worker_server_url(request, connection),
+                    worker_limit=per_page,
+                    worker_offset=(page - 1) * per_page,
                 )
             finally:
                 connection.close()
@@ -2042,12 +2069,11 @@ async def _send_internal_stream(
 async def _dispatch_internal_stream_event(app: FastAPI, event: StreamEnvelope) -> None:
     hub: StreamHub = app.state.stream_hub
     if event.topic == "workers" or event.type.startswith("worker"):
-        connection = connect_database(app.state.db_path)
-        try:
-            payload = _workers_snapshot_payload(connection)
-        finally:
-            connection.close()
-        hub.publish("workers", "workers.snapshot", payload, source=event.source)
+        task = app.state.worker_snapshot_task
+        if task is None or task.done():
+            app.state.worker_snapshot_task = asyncio.create_task(
+                _publish_worker_snapshot(app, source=event.source)
+            )
         return
 
     tournament_id = _event_tournament_id(event)
@@ -2072,11 +2098,33 @@ async def _dispatch_internal_stream_event(app: FastAPI, event: StreamEnvelope) -
 
     if event.type == "game.move":
         hub.publish(topic, "game.move", event.data, source=event.source)
+        return
+    _schedule_tournament_snapshot(app, tournament_id)
 
+
+async def _publish_worker_snapshot(app: FastAPI, *, source: str) -> None:
+    await asyncio.sleep(1.0)
+    hub: StreamHub = app.state.stream_hub
+    hub.publish("workers", "workers.changed", {}, source=source)
+
+
+def _schedule_tournament_snapshot(app: FastAPI, tournament_id: int) -> None:
+    tasks: dict[int, asyncio.Task] = app.state.tournament_snapshot_tasks
+    task = tasks.get(tournament_id)
+    if task is None or task.done():
+        tasks[tournament_id] = asyncio.create_task(
+            _publish_tournament_snapshot(app, tournament_id)
+        )
+
+
+async def _publish_tournament_snapshot(app: FastAPI, tournament_id: int) -> None:
+    await asyncio.sleep(0.5)
+    payload = await asyncio.to_thread(_tournament_snapshot, app, tournament_id)
+    hub: StreamHub = app.state.stream_hub
     hub.publish(
-        topic,
+        f"tournament.{tournament_id}",
         "tournament.snapshot",
-        _tournament_snapshot(app, tournament_id),
+        payload,
         source="web",
     )
 
@@ -2138,8 +2186,18 @@ def _workers_snapshot_payload(
     connection: sqlite3.Connection,
     *,
     worker_server_url: str | None = None,
+    worker_limit: int | None = None,
+    worker_offset: int = 0,
 ) -> dict[str, Any]:
-    rows = _worker_admin_rows(connection)
+    workers = list(list_workers(connection))
+    visible_workers = workers[worker_offset:]
+    if worker_limit is not None:
+        visible_workers = visible_workers[:worker_limit]
+    visible_rows = _worker_admin_rows(connection, workers=visible_workers)
+    summary_rows = [
+        {"worker": worker, "status": _worker_effective_status(worker)}
+        for worker in workers
+    ]
     required_dependencies = sorted(
         {
             dependency
@@ -2151,12 +2209,16 @@ def _workers_snapshot_payload(
     return {
         "workers": [
             _worker_admin_payload(row)
-            for row in rows
+            for row in visible_rows
         ],
-        "machines": _worker_machine_payloads(rows),
+        "total_workers": len(workers),
+        "connected_workers": sum(
+            row["status"] in CONNECTED_WORKER_STATUSES for row in summary_rows
+        ),
+        "machines": _worker_machine_payloads(summary_rows),
         "pools": _worker_pool_payloads(
             connection,
-            rows,
+            summary_rows,
             worker_server_url=worker_server_url,
         ),
         "required_dependencies": required_dependencies,
@@ -2219,7 +2281,7 @@ def _publish_admin_post_streams(request: Request) -> None:
             or path.startswith("/api/admin/workers")
             or path.startswith("/api/admin/worker-pools")
         ):
-            hub.publish("workers", "workers.snapshot", _workers_snapshot_payload(connection), source="web")
+            hub.publish("workers", "workers.changed", {}, source="web")
         tournament_id = _admin_tournament_path_id(path)
         if tournament_id is not None:
             tournament = get_tournament(connection, tournament_id)
@@ -2396,12 +2458,33 @@ def _stream_hello_authorized(websocket: WebSocket, hello: StreamEnvelope) -> boo
     return bool(supplied and hmac.compare_digest(supplied, expected))
 
 
-def _worker_admin_rows(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+def _worker_admin_rows(
+    connection: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    workers: list[Any] | None = None,
+) -> list[dict[str, Any]]:
     engines = _engine_names(connection)
+    active_engines = [engine for engine in list_engine_records(connection) if engine.active]
+    required = sorted(
+        {dependency for engine in active_engines for dependency in engine.required_dependencies}
+    )
+    activities = list_worker_activities(connection)
     rows: list[dict[str, Any]] = []
-    for worker in list_workers(connection):
+    source = workers if workers is not None else list_workers(connection)
+    if limit is not None:
+        source = source[:limit]
+    for worker in source:
         try:
-            rows.append(_worker_admin_view(connection, worker, engines))
+            rows.append(
+                _worker_admin_view(
+                    worker,
+                    engines,
+                    activity=activities.get(worker.id),
+                    active_engines=active_engines,
+                    required=required,
+                )
+            )
         except (TypeError, ValueError, ValidationError, sqlite3.Error):
             continue
     return rows
@@ -2412,22 +2495,35 @@ def _worker_admin_row(connection: sqlite3.Connection, worker_id: int) -> dict[st
     if worker is None:
         return None
     try:
-        return _worker_admin_view(connection, worker, _engine_names(connection))
+        active_engines = [engine for engine in list_engine_records(connection) if engine.active]
+        required = sorted(
+            {
+                dependency
+                for engine in active_engines
+                for dependency in engine.required_dependencies
+            }
+        )
+        return _worker_admin_view(
+            worker,
+            _engine_names(connection),
+            activity=get_worker_activity(connection, worker.id),
+            active_engines=active_engines,
+            required=required,
+        )
     except (TypeError, ValueError, ValidationError, sqlite3.Error):
         return None
 
 
 def _worker_admin_view(
-    connection: sqlite3.Connection,
     worker,
     engines: dict[int, str],
+    *,
+    activity,
+    active_engines,
+    required: list[str],
 ) -> dict[str, Any]:
     effective_status = _worker_effective_status(worker)
-    activity = _worker_activity(connection, worker.id, engines)
-    active_engines = [engine for engine in list_engine_records(connection) if engine.active]
-    required = sorted(
-        {dependency for engine in active_engines for dependency in engine.required_dependencies}
-    )
+    activity_view = _worker_activity_view(activity, engines)
     available = set(worker.available_dependencies)
     return {
         "worker": worker,
@@ -2435,7 +2531,7 @@ def _worker_admin_view(
         "token": _worker_token_view(worker),
         "session": _worker_session_view(worker),
         "machine": _worker_machine_view(worker, effective_status),
-        "work": activity or _worker_idle_activity(worker, effective_status),
+        "work": activity_view or _worker_idle_activity(worker, effective_status),
         "dependencies": {
             "required": required,
             "available": sorted(available),
@@ -2723,6 +2819,13 @@ def _worker_activity(
     engines: dict[int, str],
 ) -> dict[str, Any] | None:
     activity = get_worker_activity(connection, worker_id)
+    return _worker_activity_view(activity, engines)
+
+
+def _worker_activity_view(
+    activity,
+    engines: dict[int, str],
+) -> dict[str, Any] | None:
     if activity is None:
         return None
 

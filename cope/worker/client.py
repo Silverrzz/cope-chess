@@ -17,6 +17,8 @@ from websockets.exceptions import ConnectionClosed
 from cope.core.models import (
     AssignmentComplete,
     AssignmentRejected,
+    DependencyProbe,
+    DependencyReport,
     AssignmentReady,
     BenchInfo,
     EngineCommand,
@@ -554,5 +556,3 @@ def _log_connection_closed(error: ConnectionClosed) -> None:
         return
 
     LOG.warning("runner connection lost code=%s reason=%s", error.code, reason)
-    DependencyProbe,
-    DependencyReport,

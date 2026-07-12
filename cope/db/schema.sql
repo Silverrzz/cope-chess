@@ -1,9 +1,13 @@
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS schema_metadata (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
+
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 2)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 CREATE TABLE IF NOT EXISTS engines (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   author TEXT NOT NULL DEFAULT '',
   version TEXT NOT NULL DEFAULT '',
@@ -18,7 +22,7 @@ CREATE TABLE IF NOT EXISTS engines (
 );
 
 CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL DEFAULT '',
   default_config TEXT NOT NULL DEFAULT '{}',
@@ -26,19 +30,18 @@ CREATE TABLE IF NOT EXISTS categories (
   created_at TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO categories (id, name, description, default_config, created_at)
+INSERT INTO categories (name, description, default_config, created_at)
 VALUES (
-  1,
   'Default',
   'General rating list and tournament defaults.',
   '{}',
   '1970-01-01T00:00:00+00:00'
-);
+) ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS tournaments (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
-  category_id INTEGER REFERENCES categories(id),
+  category_id BIGINT REFERENCES categories(id),
   settings_unlinked INTEGER NOT NULL DEFAULT 0 CHECK (settings_unlinked IN (0, 1)),
   config TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft'
@@ -51,37 +54,37 @@ CREATE TABLE IF NOT EXISTS tournaments (
 );
 
 CREATE TABLE IF NOT EXISTS participants (
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
-  engine_id INTEGER NOT NULL REFERENCES engines(id),
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  engine_id BIGINT NOT NULL REFERENCES engines(id),
   seed INTEGER NOT NULL,
   PRIMARY KEY (tournament_id, engine_id),
   UNIQUE (tournament_id, seed)
 );
 
 CREATE TABLE IF NOT EXISTS tournament_matches (
-  id INTEGER PRIMARY KEY,
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  id BIGSERIAL PRIMARY KEY,
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
   round INTEGER NOT NULL,
   match_index INTEGER NOT NULL,
-  engine1_id INTEGER NOT NULL REFERENCES engines(id),
-  engine2_id INTEGER REFERENCES engines(id),
+  engine1_id BIGINT NOT NULL REFERENCES engines(id),
+  engine2_id BIGINT REFERENCES engines(id),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'finished', 'bye')),
-  winner_engine_id INTEGER REFERENCES engines(id),
+  winner_engine_id BIGINT REFERENCES engines(id),
   UNIQUE (tournament_id, round, match_index)
 );
 
 CREATE TABLE IF NOT EXISTS games (
-  id INTEGER PRIMARY KEY,
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  id BIGSERIAL PRIMARY KEY,
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
   round INTEGER NOT NULL,
   pair_index INTEGER NOT NULL,
-  white_engine_id INTEGER NOT NULL REFERENCES engines(id),
-  black_engine_id INTEGER NOT NULL REFERENCES engines(id),
-  match_id INTEGER REFERENCES tournament_matches(id) ON DELETE SET NULL,
+  white_engine_id BIGINT NOT NULL REFERENCES engines(id),
+  black_engine_id BIGINT NOT NULL REFERENCES engines(id),
+  match_id BIGINT REFERENCES tournament_matches(id) ON DELETE SET NULL,
   game_number INTEGER NOT NULL DEFAULT 1,
   tiebreak_kind TEXT CHECK (tiebreak_kind IS NULL OR tiebreak_kind IN ('extra_pair', 'armageddon')),
-  opening_id INTEGER,
+  opening_id BIGINT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'assigned', 'live', 'finished', 'abandoned')),
   result TEXT CHECK (result IS NULL OR result IN ('1-0', '0-1', '1/2-1/2')),
@@ -94,11 +97,48 @@ CREATE TABLE IF NOT EXISTS games (
   UNIQUE (tournament_id, round, pair_index, white_engine_id, black_engine_id)
 );
 
+CREATE TABLE IF NOT EXISTS worker_pools (
+  id BIGSERIAL PRIMARY KEY,
+  label TEXT NOT NULL,
+  enrollment_token_hash TEXT,
+  enrollment_expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'enrolled', 'revoked')),
+  machine_id TEXT,
+  slot_count INTEGER NOT NULL CHECK (slot_count > 0),
+  assigned_threads INTEGER NOT NULL CHECK (assigned_threads > 0),
+  assigned_hash_mb INTEGER NOT NULL CHECK (assigned_hash_mb > 0),
+  created_at TEXT NOT NULL,
+  enrolled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workers (
+  id BIGSERIAL PRIMARY KEY,
+  label TEXT NOT NULL,
+  token_hash TEXT,
+  token_expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'minted'
+    CHECK (status IN ('minted', 'connected', 'building', 'ready', 'busy', 'offline', 'revoked')),
+  session_id TEXT,
+  app_commit TEXT,
+  protocol_version INTEGER,
+  machine_id TEXT,
+  pool_id BIGINT REFERENCES worker_pools(id) ON DELETE SET NULL,
+  pool_slot_token_hash TEXT,
+  assigned_threads INTEGER NOT NULL DEFAULT 1 CHECK (assigned_threads > 0),
+  assigned_hash_mb INTEGER NOT NULL DEFAULT 32 CHECK (assigned_hash_mb > 0),
+  hw TEXT,
+  available_dependencies TEXT NOT NULL DEFAULT '[]',
+  dependency_manifest_revision TEXT,
+  dependencies_checked_at TEXT,
+  last_seen TEXT
+);
+
 CREATE TABLE IF NOT EXISTS game_assignments (
-  id INTEGER PRIMARY KEY,
-  game_id INTEGER NOT NULL UNIQUE REFERENCES games(id) ON DELETE CASCADE,
+  id BIGSERIAL PRIMARY KEY,
+  game_id BIGINT NOT NULL UNIQUE REFERENCES games(id) ON DELETE CASCADE,
   assignment_key TEXT NOT NULL UNIQUE,
-  worker_id INTEGER REFERENCES workers(id) ON DELETE SET NULL,
+  worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'assigned'
     CHECK (status IN ('assigned', 'acked', 'live', 'finished', 'abandoned', 'expired')),
   sent_at TEXT,
@@ -108,7 +148,7 @@ CREATE TABLE IF NOT EXISTS game_assignments (
 );
 
 CREATE TABLE IF NOT EXISTS moves (
-  game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   ply INTEGER NOT NULL,
   uci TEXT NOT NULL,
   san TEXT NOT NULL,
@@ -126,8 +166,8 @@ CREATE TABLE IF NOT EXISTS moves (
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
-  engine_id INTEGER NOT NULL REFERENCES engines(id),
-  category_id INTEGER NOT NULL REFERENCES categories(id),
+  engine_id BIGINT NOT NULL REFERENCES engines(id),
+  category_id BIGINT NOT NULL REFERENCES categories(id),
   elo REAL NOT NULL DEFAULT 1500,
   games_played INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
@@ -135,43 +175,28 @@ CREATE TABLE IF NOT EXISTS ratings (
 );
 
 CREATE TABLE IF NOT EXISTS rating_history (
-  id INTEGER PRIMARY KEY,
-  engine_id INTEGER NOT NULL REFERENCES engines(id),
-  category_id INTEGER NOT NULL REFERENCES categories(id),
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
-  opponent_engine_id INTEGER NOT NULL REFERENCES engines(id),
+  id BIGSERIAL PRIMARY KEY,
+  engine_id BIGINT NOT NULL REFERENCES engines(id),
+  category_id BIGINT NOT NULL REFERENCES categories(id),
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id),
+  opponent_engine_id BIGINT NOT NULL REFERENCES engines(id),
   elo_before REAL NOT NULL,
   elo REAL NOT NULL,
   elo_change REAL NOT NULL,
   score REAL NOT NULL CHECK (score IN (0, 0.5, 1)),
-  game_id INTEGER NOT NULL REFERENCES games(id),
+  game_id BIGINT NOT NULL REFERENCES games(id),
   at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tournament_rating_commits (
-  tournament_id INTEGER PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
-  category_id INTEGER NOT NULL REFERENCES categories(id),
-  command_id INTEGER,
+  tournament_id BIGINT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
+  category_id BIGINT NOT NULL REFERENCES categories(id),
+  command_id BIGINT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'claimed', 'applied', 'failed')),
   requested_at TEXT NOT NULL,
   applied_at TEXT,
   error TEXT
-);
-
-CREATE TABLE IF NOT EXISTS worker_pools (
-  id INTEGER PRIMARY KEY,
-  label TEXT NOT NULL,
-  enrollment_token_hash TEXT,
-  enrollment_expires_at TEXT,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'enrolled', 'revoked')),
-  machine_id TEXT,
-  slot_count INTEGER NOT NULL CHECK (slot_count > 0),
-  assigned_threads INTEGER NOT NULL CHECK (assigned_threads > 0),
-  assigned_hash_mb INTEGER NOT NULL CHECK (assigned_hash_mb > 0),
-  created_at TEXT NOT NULL,
-  enrolled_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS service_endpoints (
@@ -188,38 +213,16 @@ CREATE TABLE IF NOT EXISTS service_heartbeats (
   last_seen TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS workers (
-  id INTEGER PRIMARY KEY,
-  label TEXT NOT NULL,
-  token_hash TEXT,
-  token_expires_at TEXT,
-  status TEXT NOT NULL DEFAULT 'minted'
-    CHECK (status IN ('minted', 'connected', 'building', 'ready', 'busy', 'offline', 'revoked')),
-  session_id TEXT,
-  app_commit TEXT,
-  protocol_version INTEGER,
-  machine_id TEXT,
-  pool_id INTEGER REFERENCES worker_pools(id) ON DELETE SET NULL,
-  pool_slot_token_hash TEXT,
-  assigned_threads INTEGER NOT NULL DEFAULT 1 CHECK (assigned_threads > 0),
-  assigned_hash_mb INTEGER NOT NULL DEFAULT 32 CHECK (assigned_hash_mb > 0),
-  hw TEXT,
-  available_dependencies TEXT NOT NULL DEFAULT '[]',
-  dependency_manifest_revision TEXT,
-  dependencies_checked_at TEXT,
-  last_seen TEXT
-);
-
 CREATE TABLE IF NOT EXISTS opening_suites (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   description TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS openings (
-  id INTEGER PRIMARY KEY,
-  suite_id INTEGER NOT NULL REFERENCES opening_suites(id) ON DELETE CASCADE,
+  id BIGSERIAL PRIMARY KEY,
+  suite_id BIGINT NOT NULL REFERENCES opening_suites(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
   name TEXT NOT NULL DEFAULT '',
   fen TEXT NOT NULL,
@@ -227,18 +230,18 @@ CREATE TABLE IF NOT EXISTS openings (
 );
 
 CREATE TABLE IF NOT EXISTS chat_messages (
-  id INTEGER PRIMARY KEY,
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  id BIGSERIAL PRIMARY KEY,
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
   display_name TEXT NOT NULL,
   text TEXT NOT NULL,
   at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS system_chat_events (
-  tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
   event_key TEXT NOT NULL,
   event_type TEXT NOT NULL,
-  message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  message_id BIGINT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
   metadata TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (tournament_id, event_key)
 );
@@ -248,15 +251,16 @@ CREATE TABLE IF NOT EXISTS chat_settings (
   value TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO chat_settings (key, value) VALUES
+INSERT INTO chat_settings (key, value) VALUES
   ('enabled', 'true'),
   ('slowmode_seconds', '0'),
   ('max_message_length', '300'),
   ('allow_anonymous_names', 'true'),
-  ('retention_days', '30');
+  ('retention_days', '30')
+ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS runner_commands (
-  id INTEGER PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   command TEXT NOT NULL,
   payload TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'pending'
@@ -273,6 +277,8 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_history_engine_category_at ON rating_history(engine_id, category_id, at);
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
+CREATE INDEX IF NOT EXISTS idx_workers_machine_active ON workers(machine_id, status);
+CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignments(worker_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_token_hash ON workers(token_hash) WHERE token_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_session_id ON workers(session_id) WHERE session_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_pools_enrollment_token_hash ON worker_pools(enrollment_token_hash) WHERE enrollment_token_hash IS NOT NULL;

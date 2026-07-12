@@ -335,7 +335,6 @@ function handleSnapshot(event: Event): void {
   const envelope = parseEnvelope<LiveSnapshot>(event)
   if (!envelope) return
   applySnapshot(envelope.data)
-  scheduleSnapshotRefresh()
 }
 
 function handleGameMove(event: Event): void {
@@ -343,8 +342,8 @@ function handleGameMove(event: Event): void {
   if (envelope?.data.game_id !== undefined && sameId(envelope.data.game_id, selectedGameId.value)) {
     if (clockRuntime.value) clockRuntime.value = { ...clockRuntime.value, running: false }
     stopClock()
+    scheduleSnapshotRefresh()
   }
-  scheduleSnapshotRefresh()
 }
 
 function handleEngineInfo(event: Event): void {

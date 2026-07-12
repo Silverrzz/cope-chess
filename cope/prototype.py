@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 from .core.models import (
     AdjudicationConfig,
     EngineSpec,
@@ -72,11 +69,9 @@ def run_prototype_tournament() -> None:
 
 
 def run_prototype_data_setup() -> None:
-    db_path = Path(os.environ.get("COPE_DB_PATH", "tmp/cope-prototype.db"))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    initialize_database(db_path)
+    initialize_database()
 
-    connection = connect_database(db_path)
+    connection = connect_database()
     try:
         _seed_engine(
             connection,
@@ -118,7 +113,7 @@ def run_prototype_data_setup() -> None:
         )
         connection.commit()
 
-        print(f"Database: {db_path}")
+        print("Database: PostgreSQL")
         print(f"Persistent engines: {len(list_engines(connection))}")
         print(f"Persistent tournaments: {len(list_tournaments(connection))}")
         print(f"Created persistent tournament: {tournament_id}")

@@ -6,7 +6,10 @@ x-cope-service: &cope-service
   image: cope-chess:${COPE_DEPLOY_COMMIT}
   restart: unless-stopped
   environment: &cope-environment
-    COPE_DB_PATH: /data/cope.db
+    COPE_DATABASE_URL: postgresql://cope@db:5432/cope
+    COPE_DATABASE_PASSWORD_FILE: /run/secrets/cope_db_password
+    COPE_DATABASE_POOL_MIN: "2"
+    COPE_DATABASE_POOL_MAX: "50"
     COPE_DEPLOY_COMMIT: ${COPE_DEPLOY_COMMIT}
     COPE_ADMIN_TOKEN_FILE: /run/secrets/cope_admin_token
     COPE_WEB_EVENT_TOKEN_FILE: /run/secrets/cope_event_token
@@ -15,8 +18,7 @@ x-cope-service: &cope-service
   secrets:
     - cope_admin_token
     - cope_event_token
-  volumes:
-    - cope-data:/data
+    - cope_db_password
   logging:
     driver: json-file
     options:
@@ -24,14 +26,55 @@ x-cope-service: &cope-service
       max-file: "5"
 
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cope
+      POSTGRES_USER: cope
+      POSTGRES_PASSWORD_FILE: /run/secrets/cope_db_password
+      POSTGRES_INITDB_ARGS: --data-checksums
+    secrets:
+      - cope_db_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - max_connections=${COPE_POSTGRES_MAX_CONNECTIONS:-300}
+      - -c
+      - shared_buffers=${COPE_POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${COPE_POSTGRES_EFFECTIVE_CACHE_SIZE:-2GB}
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=${COPE_POSTGRES_MAX_WAL_SIZE:-4GB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cope -d cope"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
   migrate:
     <<: *cope-service
     restart: "no"
-    command: ["db", "migrate", "--db-path", "/data/cope.db"]
+    command: ["db", "migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
 
   web:
     <<: *cope-service
-    command: ["web", "--host", "0.0.0.0", "--port", "8701", "--db-path", "/data/cope.db"]
+    command: ["web", "--host", "0.0.0.0", "--port", "8701"]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -43,7 +86,7 @@ services:
 
   scheduler:
     <<: *cope-service
-    command: ["scheduler", "--db-path", "/data/cope.db"]
+    command: ["scheduler"]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -52,7 +95,23 @@ services:
 
   worker-server:
     <<: *cope-service
-    command: ["worker-server", "--worker-host", "0.0.0.0", "--worker-port", "8702", "--db-path", "/data/cope.db"]
+    environment:
+      <<: *cope-environment
+      COPE_DATABASE_POOL_MAX: "150"
+    command:
+      - worker-server
+      - --worker-host
+      - 0.0.0.0
+      - --worker-port
+      - "8702"
+      - --poll-interval-s
+      - "10"
+      - --presence-flush-interval-s
+      - "15"
+      - --dependency-probe-interval-s
+      - "300"
+      - --game-threads
+      - ${COPE_WORKER_GAME_THREADS:-2048}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -88,18 +147,22 @@ services:
     profiles: ["operations"]
     restart: "no"
     working_dir: /backups
-    command: ["db", "backup", "--db-path", "/data/cope.db", "--keep", "7"]
+    command: ["db", "backup", "--keep", "7"]
     volumes:
-      - cope-data:/data
       - ./backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
 
 secrets:
   cope_admin_token:
     file: ./secrets/admin_token
   cope_event_token:
     file: ./secrets/event_token
+  cope_db_password:
+    file: ./secrets/db_password
 
 volumes:
-  cope-data:
+  postgres-data:
   caddy-data:
   caddy-config:

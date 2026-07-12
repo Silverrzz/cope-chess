@@ -416,7 +416,7 @@ def register_api_routes(app: FastAPI) -> None:
         tournaments = list_tournaments(connection)
         return _json(
             {
-                "workers": web_app._worker_admin_rows(connection),
+                "workers": web_app._worker_admin_rows(connection, limit=20),
                 "live_games": list_games_by_status(connection, "live", limit=8),
                 "engines": web_app._engine_names(connection),
                 "db_stats": database_stats(connection),
@@ -1022,12 +1022,18 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/admin/workers")
     def admin_workers(
         request: Request,
+        page: int = 1,
+        per_page: int = 100,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        page = max(page, 1)
+        per_page = min(max(per_page, 1), 200)
         return _json(
             web_app._workers_snapshot_payload(
                 connection,
                 worker_server_url=web_app._request_worker_server_url(request, connection),
+                worker_limit=per_page,
+                worker_offset=(page - 1) * per_page,
             )
         )
 

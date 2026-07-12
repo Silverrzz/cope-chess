@@ -243,15 +243,13 @@ def get_worker_activity(
           games.black_engine_id,
           tournaments.id AS tournament_id,
           tournaments.name AS tournament_name,
-          COUNT(moves.ply) AS plies
+          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies
         FROM game_assignments
         JOIN games ON games.id = game_assignments.game_id
         JOIN tournaments ON tournaments.id = games.tournament_id
-        LEFT JOIN moves ON moves.game_id = games.id
         WHERE game_assignments.worker_id = ?
           AND game_assignments.status IN ('assigned', 'acked', 'live')
           AND games.status IN ('assigned', 'live')
-        GROUP BY game_assignments.id
         ORDER BY game_assignments.sent_at DESC, game_assignments.id DESC
         LIMIT 1
         """,
@@ -270,6 +268,49 @@ def get_worker_activity(
         tournament_name=row["tournament_name"],
         plies=row["plies"],
     )
+
+
+def list_worker_activities(
+    connection: sqlite3.Connection,
+) -> dict[int, WorkerActivityRecord]:
+    rows = connection.execute(
+        """
+        SELECT
+          game_assignments.worker_id,
+          game_assignments.status AS assignment_status,
+          games.id AS game_id,
+          games.round,
+          games.white_engine_id,
+          games.black_engine_id,
+          tournaments.id AS tournament_id,
+          tournaments.name AS tournament_name,
+          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies
+        FROM game_assignments
+        JOIN games ON games.id = game_assignments.game_id
+        JOIN tournaments ON tournaments.id = games.tournament_id
+        WHERE game_assignments.worker_id IS NOT NULL
+          AND game_assignments.status IN ('assigned', 'acked', 'live')
+          AND games.status IN ('assigned', 'live')
+        ORDER BY game_assignments.worker_id, game_assignments.sent_at DESC,
+                 game_assignments.id DESC
+        """
+    )
+    activities: dict[int, WorkerActivityRecord] = {}
+    for row in rows:
+        worker_id = int(row["worker_id"])
+        if worker_id in activities:
+            continue
+        activities[worker_id] = WorkerActivityRecord(
+            assignment_status=row["assignment_status"],
+            game_id=row["game_id"],
+            round=row["round"],
+            white_engine_id=row["white_engine_id"],
+            black_engine_id=row["black_engine_id"],
+            tournament_id=row["tournament_id"],
+            tournament_name=row["tournament_name"],
+            plies=row["plies"],
+        )
+    return activities
 
 
 def active_engine_hardware_profiles(
@@ -347,8 +388,9 @@ def list_uncommitted_finished_tournaments(
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
     row = connection.execute(
         """
-        SELECT 1 FROM sqlite_master
-        WHERE type = 'table' AND name = ?
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = ?
         """,
         (table_name,),
     ).fetchone()

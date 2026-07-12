@@ -85,5 +85,16 @@
         <p class="empty">No workers yet. Use New worker to create a registration token.</p>
       {% endif %}
     </section>
+    {% if worker_total_pages > 1 %}
+      <nav class="pagination" aria-label="Worker pages">
+        {% if worker_page > 1 %}
+          <a class="button button--small" href="/admin/workers?page={{ worker_page - 1 }}">Previous</a>
+        {% endif %}
+        <span class="muted">Page {{ worker_page }} of {{ worker_total_pages }}</span>
+        {% if worker_page < worker_total_pages %}
+          <a class="button button--small" href="/admin/workers?page={{ worker_page + 1 }}">Next</a>
+        {% endif %}
+      </nav>
+    {% endif %}
   </div>
 {% endblock %}

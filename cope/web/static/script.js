@@ -1029,7 +1029,7 @@ document.querySelectorAll("[data-tournament-live]").forEach((arena) => {
     }
   }
 
-  const events = new EventSource("/admin/workers/events");
+  const events = new EventSource(`/admin/workers/events${window.location.search}`);
   events.addEventListener("workers.snapshot", (event) => {
     const envelope = parseEnvelope(event);
     if (envelope) applyWorkersPayload(envelope.data);

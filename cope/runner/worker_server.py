@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +44,7 @@ from cope.core.protocol import (
     make_message,
 )
 from cope.db import (
+    DEFAULT_DB_PATH,
     WorkerRecord,
     connect_database,
     disconnect_worker,
@@ -56,11 +57,10 @@ from cope.db import (
     get_worker_by_token,
     get_worker_pool_by_token,
     enroll_worker_pool,
-    initialize_database,
     list_workers,
     list_engine_records,
     set_service_endpoint,
-    touch_worker_seen,
+    touch_workers_seen,
     touch_service_heartbeat,
     update_worker_status,
     update_worker_dependencies,
@@ -83,7 +83,7 @@ from cope.runner.events import (
 LOG = logging.getLogger("cope.worker_server")
 WORKER_CONNECTION_REPLACED_CLOSE_CODE = 4001
 ASSIGNABLE_WORKER_STATUSES = {"connected", "building", "ready", "busy"}
-DEPENDENCY_PROBE_INTERVAL_S = 30.0
+DEPENDENCY_PROBE_CACHE_S = 5.0
 
 
 class AssignmentDependencyRejected(RuntimeError):
@@ -94,13 +94,27 @@ class AssignmentDependencyRejected(RuntimeError):
 class WorkerServerConfig:
     host: str = field(default_factory=default_worker_host)
     port: int = field(default_factory=default_worker_port)
-    db_path: str | Path = "cope.db"
+    db_path: str | Path = DEFAULT_DB_PATH
     expected_app_commit: str | None = None
     heartbeat_interval_ms: int = 5000
-    assignment_poll_interval_s: float = 1.0
+    assignment_poll_interval_s: float = 10.0
+    presence_flush_interval_s: float = 15.0
+    dependency_probe_interval_s: float = 300.0
+    game_thread_count: int = 2048
 
 
 async def run_worker_server(config: WorkerServerConfig) -> None:
+    try:
+        threading.stack_size(1024 * 1024)
+    except (RuntimeError, ValueError):
+        LOG.warning("could not reduce game thread stack size")
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(
+        ThreadPoolExecutor(
+            max_workers=max(config.game_thread_count, 1),
+            thread_name_prefix="cope-game",
+        )
+    )
     server = WorkerHandshakeServer(config)
     server.install_stream_wake_handler()
     start_event_publisher()
@@ -111,27 +125,30 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
         publish_tournament_event(tournament_id)
     heartbeat_interval_s = max(config.heartbeat_interval_ms / 1000, 0.5)
     ping_timeout_s = max(heartbeat_interval_s * 3, 15.0)
-    async with serve(
-        server.handle_connection,
-        config.host,
-        config.port,
-        ping_interval=heartbeat_interval_s,
-        ping_timeout=ping_timeout_s,
-        close_timeout=1,
-    ):
-        _register_worker_endpoint(config)
-        LOG.info(
-            "listening for workers bind=%s:%s path=%s db=%s",
+    await server.start_background_tasks()
+    try:
+        async with serve(
+            server.handle_connection,
             config.host,
             config.port,
-            DEFAULT_WORKER_PATH,
-            config.db_path,
-        )
-        await asyncio.Future()
+            ping_interval=heartbeat_interval_s,
+            ping_timeout=ping_timeout_s,
+            close_timeout=1,
+            max_queue=32,
+        ):
+            _register_worker_endpoint(config)
+            LOG.info(
+                "listening for workers bind=%s:%s path=%s db=postgresql",
+                config.host,
+                config.port,
+                DEFAULT_WORKER_PATH,
+            )
+            await asyncio.Future()
+    finally:
+        await server.stop_background_tasks()
 
 
 def _register_worker_endpoint(config: WorkerServerConfig) -> None:
-    initialize_database(config.db_path)
     connection = connect_database(config.db_path)
     try:
         set_service_endpoint(
@@ -155,7 +172,75 @@ class WorkerHandshakeServer:
         self._config = config
         self._work_available = asyncio.Condition()
         self._work_generation = 0
+        self._wake_pending = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._assignment_lock = asyncio.Lock()
+        self._empty_claim_generation: dict[tuple, int] = {}
+        self._connections: dict[
+            int, tuple[str, WebSocketServerProtocol]
+        ] = {}
+        self._worker_capabilities: dict[int, tuple] = {}
+        self._background_tasks: list[asyncio.Task] = []
+        self._dependency_probe_cache: DependencyProbe | None = None
+        self._dependency_probe_cached_at = 0.0
+
+    async def start_background_tasks(self) -> None:
+        self._background_tasks = [
+            asyncio.create_task(self._fallback_wake_loop(), name="worker-fallback-wake"),
+            asyncio.create_task(self._presence_flush_loop(), name="worker-presence-flush"),
+        ]
+
+    async def stop_background_tasks(self) -> None:
+        for task in self._background_tasks:
+            task.cancel()
+        for task in self._background_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._background_tasks.clear()
+        await self._flush_worker_presence()
+
+    async def _fallback_wake_loop(self) -> None:
+        interval = max(self._config.assignment_poll_interval_s, 1.0)
+        while True:
+            await asyncio.sleep(interval)
+            await self._wake_workers()
+
+    async def _presence_flush_loop(self) -> None:
+        interval = max(self._config.presence_flush_interval_s, 1.0)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._flush_worker_presence()
+            except Exception:
+                LOG.exception("worker presence batch failed")
+
+    async def _flush_worker_presence(self) -> None:
+        sessions = [
+            (worker_id, session_id)
+            for worker_id, (session_id, _websocket) in self._connections.items()
+        ]
+        connection = connect_database(self._config.db_path)
+        try:
+            current = touch_workers_seen(connection, sessions) if sessions else set()
+            touch_service_heartbeat(
+                connection,
+                "worker-server",
+                self._config.expected_app_commit or "dev",
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        stale = [item for item in sessions if item[0] not in current]
+        for worker_id, session_id in stale:
+            live = self._connections.get(worker_id)
+            if live is None or live[0] != session_id:
+                continue
+            with contextlib.suppress(ConnectionClosed):
+                await live[1].close(
+                    code=WORKER_CONNECTION_REPLACED_CLOSE_CODE,
+                    reason="worker session is no longer current",
+                )
 
     def install_stream_wake_handler(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -169,7 +254,6 @@ class WorkerHandshakeServer:
         set_runner_wake_handler(wake_from_stream)
 
     def reset_orphaned_worker_connections(self) -> tuple[int, ...]:
-        initialize_database(self._config.db_path)
         connection = connect_database(self._config.db_path)
         try:
             tournament_ids: set[int] = set()
@@ -236,6 +320,7 @@ class WorkerHandshakeServer:
             )
             await _send_message(websocket, "welcome", welcome)
             await self._receive_dependency_report(websocket, worker, dependency_probe)
+            self._connections[worker.id] = (worker.session_id or "", websocket)
             LOG.info("worker accepted worker_id=%s label=%s", worker.id, label)
             publish_workers_changed("worker.connected", {"worker_id": worker.id})
             await self._wake_workers()
@@ -248,6 +333,10 @@ class WorkerHandshakeServer:
             return
         finally:
             if worker is not None:
+                live = self._connections.get(worker.id)
+                if live is not None and live[0] == worker.session_id:
+                    self._connections.pop(worker.id, None)
+                    self._worker_capabilities.pop(worker.id, None)
                 try:
                     tournament_ids = self._record_worker_disconnected(worker)
                     for tournament_id in tournament_ids:
@@ -263,8 +352,12 @@ class WorkerHandshakeServer:
     ) -> None:
         wake_generation = self._work_generation
         closed = asyncio.create_task(websocket.wait_closed())
-        heartbeat = asyncio.create_task(self._maintain_worker_heartbeat(worker, closed))
-        next_dependency_probe_at = time.monotonic() + DEPENDENCY_PROBE_INTERVAL_S
+        worker_status = "connected"
+        probe_interval = max(self._config.dependency_probe_interval_s, 30.0)
+        probe_jitter = ((worker.id * 2654435761) % 1000) / 1000
+        next_dependency_probe_at = time.monotonic() + probe_interval * (
+            0.5 + probe_jitter
+        )
         try:
             while True:
                 if websocket.closed:
@@ -272,10 +365,13 @@ class WorkerHandshakeServer:
 
                 if time.monotonic() >= next_dependency_probe_at:
                     await self._refresh_worker_dependencies(websocket, worker)
-                    next_dependency_probe_at = time.monotonic() + DEPENDENCY_PROBE_INTERVAL_S
+                    next_dependency_probe_at = time.monotonic() + probe_interval
 
                 try:
-                    assignment = self._claim_next_assignment(worker)
+                    assignment = await self._claim_next_assignment(
+                        worker,
+                        wake_generation,
+                    )
                 except WorkerConnectionInactive as error:
                     LOG.info(
                         "worker session inactive worker_id=%s reason=%s",
@@ -289,12 +385,16 @@ class WorkerHandshakeServer:
                     return
 
                 if assignment is None:
-                    if not self._record_worker_status(
-                        worker.id,
-                        "ready",
-                        session_id=worker.session_id,
-                    ):
-                        raise WorkerConnectionInactive("worker session is no longer current")
+                    if worker_status != "ready":
+                        if not self._record_worker_status(
+                            worker.id,
+                            "ready",
+                            session_id=worker.session_id,
+                        ):
+                            raise WorkerConnectionInactive(
+                                "worker session is no longer current"
+                            )
+                        worker_status = "ready"
                     next_generation = await self._wait_for_work_or_disconnect(
                         wake_generation,
                         closed,
@@ -314,6 +414,7 @@ class WorkerHandshakeServer:
                         RuntimeError("worker session is no longer current"),
                     )
                     raise WorkerConnectionInactive("worker session is no longer current")
+                worker_status = "building"
 
                 payload = assignment.assignment
                 LOG.info(
@@ -335,6 +436,7 @@ class WorkerHandshakeServer:
                         session_id=worker.session_id,
                     ):
                         raise WorkerConnectionInactive("worker session is no longer current")
+                    worker_status = "busy"
                     await asyncio.to_thread(
                         self._run_assignment_game,
                         assignment,
@@ -410,32 +512,29 @@ class WorkerHandshakeServer:
                     reason=_close_reason(error),
                 )
         finally:
-            if not heartbeat.done():
-                heartbeat.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat
             if not closed.done():
                 closed.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await closed
 
     async def _wake_workers(self) -> None:
-        async with self._work_available:
-            self._work_generation += 1
-            self._work_available.notify_all()
+        if self._wake_pending:
+            return
+        self._wake_pending = True
+        try:
+            await asyncio.sleep(0.05)
+            async with self._work_available:
+                self._work_generation += 1
+                self._empty_claim_generation.clear()
+                self._work_available.notify_all()
+        finally:
+            self._wake_pending = False
 
     async def _wait_for_work(self, wake_generation: int) -> int:
-        timeout_s = max(self._config.assignment_poll_interval_s, 0.1)
-        try:
-            async with self._work_available:
-                await asyncio.wait_for(
-                    self._work_available.wait_for(
-                        lambda: self._work_generation != wake_generation
-                    ),
-                    timeout=timeout_s,
-                )
-                return self._work_generation
-        except TimeoutError:
+        async with self._work_available:
+            await self._work_available.wait_for(
+                lambda: self._work_generation != wake_generation
+            )
             return self._work_generation
 
     async def _wait_for_work_or_disconnect(
@@ -456,42 +555,13 @@ class WorkerHandshakeServer:
             return None
         return work.result()
 
-    async def _maintain_worker_heartbeat(
-        self,
-        worker: WorkerRecord,
-        closed: asyncio.Task,
-    ) -> None:
-        interval_s = max(self._config.heartbeat_interval_ms / 1000, 0.5)
-        while not closed.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(closed), timeout=interval_s)
-            except TimeoutError:
-                try:
-                    if not self._touch_worker_seen(worker):
-                        return
-                except Exception:
-                    LOG.exception("worker heartbeat update failed worker_id=%s", worker.id)
-                    return
-
-    def _touch_worker_seen(self, worker: WorkerRecord) -> bool:
-        connection = connect_database(self._config.db_path)
-        try:
-            updated = touch_worker_seen(
-                connection,
-                worker.id,
-                session_id=worker.session_id,
-            )
-            touch_service_heartbeat(
-                connection,
-                "worker-server",
-                self._config.expected_app_commit or "dev",
-            )
-            connection.commit()
-            return updated
-        finally:
-            connection.close()
-
     def _dependency_probe(self) -> DependencyProbe:
+        now = time.monotonic()
+        if (
+            self._dependency_probe_cache is not None
+            and now - self._dependency_probe_cached_at < DEPENDENCY_PROBE_CACHE_S
+        ):
+            return self._dependency_probe_cache
         connection = connect_database(self._config.db_path)
         try:
             dependencies = sorted(
@@ -505,10 +575,13 @@ class WorkerHandshakeServer:
         finally:
             connection.close()
         revision = hashlib.sha256("\0".join(dependencies).encode("utf-8")).hexdigest()
-        return DependencyProbe(
+        probe = DependencyProbe(
             revision=revision,
             required_dependencies=dependencies,
         )
+        self._dependency_probe_cache = probe
+        self._dependency_probe_cached_at = now
+        return probe
 
     async def _refresh_worker_dependencies(
         self,
@@ -536,7 +609,7 @@ class WorkerHandshakeServer:
             raise ProtocolValidationError("dependency report contains unrequested names")
         connection = connect_database(self._config.db_path)
         try:
-            updated = update_worker_dependencies(
+            valid, changed = update_worker_dependencies(
                 connection,
                 worker.id,
                 available_dependencies=report.available_dependencies,
@@ -546,9 +619,14 @@ class WorkerHandshakeServer:
             connection.commit()
         finally:
             connection.close()
-        if not updated:
+        if not valid:
             raise WorkerConnectionInactive("worker session is no longer current")
-        publish_workers_changed("worker.dependencies", {"worker_id": worker.id})
+        self._worker_capabilities[worker.id] = _worker_capability_key(
+            worker,
+            report.available_dependencies,
+        )
+        if changed:
+            publish_workers_changed("worker.dependencies", {"worker_id": worker.id})
 
     def _validate_app_commit(
         self,
@@ -567,7 +645,6 @@ class WorkerHandshakeServer:
         self,
         hello: WorkerPoolEnrollmentHello,
     ) -> WorkerPoolWelcome:
-        initialize_database(self._config.db_path)
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -613,7 +690,6 @@ class WorkerHandshakeServer:
         self,
         hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
     ) -> WorkerRecord:
-        initialize_database(self._config.db_path)
         connection = connect_database(self._config.db_path)
         try:
             if isinstance(hello, WorkerTokenHello):
@@ -687,41 +763,38 @@ class WorkerHandshakeServer:
                 f"{worker.assigned_hash_mb}MB hash"
             )
 
-        machine_workers = [
-            candidate
-            for candidate in list_workers(connection)
-            if candidate.id != worker.id
-            and candidate.machine_id == hello.machine_id
-            and candidate.status != "revoked"
-            and (
-                candidate.pool_id is not None
-                or candidate.status in ASSIGNABLE_WORKER_STATUSES
+        machine = connection.execute(
+            """
+            SELECT
+              COALESCE(SUM(assigned_threads), 0) AS reserved_threads,
+              COALESCE(SUM(assigned_hash_mb), 0) AS reserved_hash_mb,
+              MIN(hw) AS minimum_hw,
+              MAX(hw) AS maximum_hw
+            FROM workers
+            WHERE id != ?
+              AND machine_id = ?
+              AND status != 'revoked'
+              AND (pool_id IS NOT NULL OR status IN ('connected', 'building', 'ready', 'busy'))
+            """,
+            (worker.id, hello.machine_id),
+        ).fetchone()
+        expected_hardware = hello.hw.model_dump_json()
+        if machine is not None and (
+            (machine["minimum_hw"] is not None and machine["minimum_hw"] != expected_hardware)
+            or (machine["maximum_hw"] is not None and machine["maximum_hw"] != expected_hardware)
+        ):
+            raise ProtocolValidationError(
+                "connected workers with the same machine id reported different hardware"
             )
-        ]
-        for candidate in machine_workers:
-            if candidate.hw is None:
-                continue
-            if candidate.hw.physical_cores != hello.hw.physical_cores:
-                raise ProtocolValidationError(
-                    "connected workers with the same machine id reported different physical core counts"
-                )
-            if candidate.hw.total_ram_mb != hello.hw.total_ram_mb:
-                raise ProtocolValidationError(
-                    "connected workers with the same machine id reported different RAM capacities"
-                )
 
-        reserved_threads = hello.resources.threads + sum(
-            candidate.assigned_threads for candidate in machine_workers
-        )
+        reserved_threads = hello.resources.threads + int(machine["reserved_threads"] or 0)
         if reserved_threads > hello.hw.physical_cores:
             raise ProtocolValidationError(
                 f"machine resource oversubscription: workers reserve {reserved_threads} threads "
                 f"but only {hello.hw.physical_cores} physical cores are available"
             )
 
-        reserved_hash_mb = hello.resources.hash_mb + sum(
-            candidate.assigned_hash_mb for candidate in machine_workers
-        )
+        reserved_hash_mb = hello.resources.hash_mb + int(machine["reserved_hash_mb"] or 0)
         if reserved_hash_mb > hello.hw.total_ram_mb:
             raise ProtocolValidationError(
                 f"machine resource oversubscription: workers reserve {reserved_hash_mb}MB hash "
@@ -778,8 +851,26 @@ class WorkerHandshakeServer:
         finally:
             connection.close()
 
-    def _claim_next_assignment(self, worker: WorkerRecord):
-        initialize_database(self._config.db_path)
+    async def _claim_next_assignment(
+        self,
+        worker: WorkerRecord,
+        wake_generation: int,
+    ):
+        capability = self._worker_capabilities.get(
+            worker.id,
+            _worker_capability_key(worker),
+        )
+        if self._empty_claim_generation.get(capability) == wake_generation:
+            return None
+        async with self._assignment_lock:
+            if self._empty_claim_generation.get(capability) == wake_generation:
+                return None
+            assignment = self._claim_next_assignment_from_database(worker)
+            if assignment is None:
+                self._empty_claim_generation[capability] = wake_generation
+            return assignment
+
+    def _claim_next_assignment_from_database(self, worker: WorkerRecord):
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -885,6 +976,25 @@ class WorkerHandshakeServer:
             "assignment.failed",
             {"assignment_id": assignment.assignment.assignment_id},
         )
+
+
+def _worker_capability_key(
+    worker: WorkerRecord,
+    available_dependencies: list[str] | None = None,
+) -> tuple:
+    hardware = worker.hw.model_dump_json() if worker.hw is not None else ""
+    return (
+        worker.assigned_threads,
+        worker.assigned_hash_mb,
+        hardware,
+        tuple(
+            sorted(
+                worker.available_dependencies
+                if available_dependencies is None
+                else available_dependencies
+            )
+        ),
+    )
 
 
 class WorkerEngineTransport:

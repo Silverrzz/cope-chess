@@ -13,6 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+database = [
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+]
 web = [
     "fastapi>=0.111",
     "jinja2>=3.1",

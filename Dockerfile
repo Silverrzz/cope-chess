@@ -10,16 +10,19 @@ ARG COPE_DEPLOY_COMMIT=dev
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     COPE_DEPLOY_COMMIT=${COPE_DEPLOY_COMMIT} \
-    COPE_DB_PATH=/data/cope.db
+    COPE_DATABASE_URL=postgresql://cope@db:5432/cope
 WORKDIR /app
-RUN groupadd --system --gid 10001 cope \
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y postgresql-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 cope \
     && useradd --system --uid 10001 --gid cope --home-dir /app cope
 COPY pyproject.toml MANIFEST.in ./
 COPY cope/ ./cope/
 COPY --from=frontend-build /src/cope/web/frontend_dist/ ./cope/web/frontend_dist/
-RUN python -m pip install --no-cache-dir ".[web,runner,worker]" \
-    && mkdir -p /data /backups \
-    && chown -R cope:cope /data /backups /app
+RUN python -m pip install --no-cache-dir ".[database,web,runner,worker]" \
+    && mkdir -p /backups \
+    && chown -R cope:cope /backups /app
 USER cope
 EXPOSE 8701 8702
 ENTRYPOINT ["cope"]

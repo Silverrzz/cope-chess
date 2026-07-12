@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import signal
-import sqlite3
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,7 +20,6 @@ from .network import (
     default_worker_port,
     default_worker_server_url,
 )
-from .prototype import run_prototype_tournament
 
 
 LOG = logging.getLogger("cope.cli")
@@ -36,25 +35,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m cope")
     subparsers = parser.add_subparsers(dest="role", required=True)
 
-    init_db_parser = subparsers.add_parser("init-db", help="initialize the SQLite database")
+    init_db_parser = subparsers.add_parser("init-db", help="initialize the PostgreSQL database")
     init_db_parser.add_argument(
-        "--db-path",
+        "--database-url",
+        dest="db_path",
         default=_default_db_path(),
-        help="path to the SQLite database file",
+        help="PostgreSQL connection URL",
     )
 
     db_parser = subparsers.add_parser("db", help="database lifecycle operations")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
     for command in ("migrate", "check"):
         command_parser = db_subparsers.add_parser(command)
-        command_parser.add_argument("--db-path", default=_default_db_path())
+        command_parser.add_argument(
+            "--database-url", dest="db_path", default=_default_db_path()
+        )
     backup_parser = db_subparsers.add_parser("backup")
-    backup_parser.add_argument("--db-path", default=_default_db_path())
+    backup_parser.add_argument(
+        "--database-url", dest="db_path", default=_default_db_path()
+    )
     backup_parser.add_argument("--output", type=Path)
     backup_parser.add_argument("--keep", type=_positive_int, default=7)
     restore_parser = db_subparsers.add_parser("restore")
     restore_parser.add_argument("source", type=Path)
-    restore_parser.add_argument("--db-path", default=_default_db_path())
+    restore_parser.add_argument(
+        "--database-url", dest="db_path", default=_default_db_path()
+    )
 
     subparsers.add_parser("doctor", help="check database and production configuration")
     subparsers.add_parser("version", help="print the COPE release and protocol version")
@@ -83,9 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         help="token lifetime in seconds",
     )
     mint_worker_parser.add_argument(
-        "--db-path",
+        "--database-url",
+        dest="db_path",
         default=_default_db_path(),
-        help="path to the SQLite database file",
+        help="PostgreSQL connection URL",
     )
     mint_worker_parser.add_argument("--threads", type=_positive_int, default=1)
     mint_worker_parser.add_argument("--hash-mb", type=_positive_int, default=32)
@@ -112,9 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         help="admin login token, or COPE_ADMIN_TOKEN",
     )
     web_parser.add_argument(
-        "--db-path",
+        "--database-url",
+        dest="db_path",
         default=_default_db_path(),
-        help="path to the SQLite database file",
+        help="PostgreSQL connection URL",
     )
 
     scheduler_parser = subparsers.add_parser(
@@ -139,9 +147,10 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait when opening the internal web stream",
     )
     scheduler_parser.add_argument(
-        "--db-path",
+        "--database-url",
+        dest="db_path",
         default=_default_db_path(),
-        help="path to the SQLite database file",
+        help="PostgreSQL connection URL",
     )
     scheduler_parser.add_argument(
         "--prototype",
@@ -194,15 +203,34 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait when opening the internal web stream",
     )
     worker_server_parser.add_argument(
-        "--db-path",
+        "--database-url",
+        dest="db_path",
         default=_default_db_path(),
-        help="path to the SQLite database file",
+        help="PostgreSQL connection URL",
     )
     worker_server_parser.add_argument(
         "--poll-interval-s",
         type=float,
-        default=2.0,
-        help="seconds between worker assignment fallback scans",
+        default=float(os.environ.get("COPE_WORKER_ASSIGNMENT_POLL_INTERVAL_S", "10")),
+        help="seconds between global worker assignment fallback scans",
+    )
+    worker_server_parser.add_argument(
+        "--presence-flush-interval-s",
+        type=float,
+        default=float(os.environ.get("COPE_WORKER_PRESENCE_FLUSH_INTERVAL_S", "15")),
+        help="seconds between batched worker presence writes",
+    )
+    worker_server_parser.add_argument(
+        "--dependency-probe-interval-s",
+        type=float,
+        default=float(os.environ.get("COPE_WORKER_DEPENDENCY_PROBE_INTERVAL_S", "300")),
+        help="seconds between staggered worker dependency refreshes",
+    )
+    worker_server_parser.add_argument(
+        "--game-threads",
+        type=_positive_int,
+        default=int(os.environ.get("COPE_WORKER_GAME_THREADS", "2048")),
+        help="maximum simultaneous game orchestration threads",
     )
 
     worker_parser = subparsers.add_parser("worker", help="start a worker client")
@@ -267,9 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "init-db":
         from .db import initialize_database
 
-        db_path = Path(args.db_path)
+        db_path = args.db_path
         initialize_database(db_path)
-        print(f"initialized database at {db_path}")
+        print("initialized PostgreSQL database")
         return 0
 
     if args.role == "build-css":
@@ -279,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "mint-worker-token":
         from .db import connect_database, initialize_database, mint_worker_token
 
-        db_path = Path(args.db_path)
+        db_path = args.db_path
         initialize_database(db_path)
         connection = connect_database(db_path)
         try:
@@ -317,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
             db_path=args.db_path,
             expected_app_commit=args.app_commit,
             assignment_poll_interval_s=args.poll_interval_s,
+            presence_flush_interval_s=args.presence_flush_interval_s,
+            dependency_probe_interval_s=args.dependency_probe_interval_s,
+            game_thread_count=args.game_threads,
         )
         try:
             asyncio.run(run_worker_server(config))
@@ -327,10 +358,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.role == "scheduler":
         if args.prototype:
+            from .prototype import run_prototype_tournament
+
             run_prototype_tournament()
             return 0
 
-        from .db import connect_database, initialize_database
+        from .db import connect_database
         from .runner import (
             RunnerServiceConfig,
             print_runner_report,
@@ -338,8 +371,7 @@ def main(argv: list[str] | None = None) -> int:
             run_tournament_service,
         )
 
-        db_path = Path(args.db_path)
-        initialize_database(db_path)
+        db_path = args.db_path
         if not args.once:
             config = RunnerServiceConfig(
                 db_path=db_path,
@@ -374,10 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "web":
         import uvicorn
 
-        from .db import initialize_database
         from .web.app import create_app
 
-        initialize_database(Path(args.db_path))
         uvicorn.run(
             create_app(
                 args.db_path,
@@ -453,7 +483,7 @@ def _positive_int(value: str) -> int:
 
 
 def _default_db_path() -> str:
-    return os.environ.get("COPE_DB_PATH", "cope.db")
+    return os.environ.get("COPE_DATABASE_URL", "postgresql://cope@127.0.0.1:5432/cope")
 
 
 def _build_css(source: Path, output: Path) -> None:
@@ -479,37 +509,38 @@ def _database_command(args) -> int:
         initialize_database,
     )
 
-    db_path = Path(args.db_path).expanduser().resolve()
+    database_url = args.db_path
     if args.db_command == "migrate":
-        initialize_database(db_path)
-        print(f"database migrated path={db_path} schema={SCHEMA_VERSION}")
+        initialize_database(database_url)
+        print(f"database migrated schema={SCHEMA_VERSION}")
         return 0
 
     if args.db_command == "check":
-        connection = connect_database(db_path)
+        connection = connect_database(database_url)
         try:
-            result = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+            result = connection.execute("SELECT 1 AS ready").fetchone()
             version = database_schema_version(connection)
         finally:
             connection.close()
-        print(f"database path={db_path} integrity={result} schema={version}/{SCHEMA_VERSION}")
-        return 0 if result == "ok" and version == SCHEMA_VERSION else 1
+        ready = bool(result and result["ready"] == 1)
+        print(f"database ready={ready} schema={version}/{SCHEMA_VERSION}")
+        return 0 if ready and version == SCHEMA_VERSION else 1
 
     if args.db_command == "backup":
-        initialize_database(db_path)
+        initialize_database(database_url)
         output = args.output or Path("backups") / (
-            "cope-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + ".db"
+            "cope-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + ".dump"
         )
         output = output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        source = connect_database(db_path)
-        destination = sqlite3.connect(output)
-        try:
-            source.backup(destination)
-        finally:
-            destination.close()
-            source.close()
-        backups = sorted(output.parent.glob("cope-*.db"), key=lambda path: path.stat().st_mtime)
+        subprocess.run(
+            ["pg_dump", "--format=custom", "--file", str(output), database_url],
+            check=True,
+            env=_postgres_command_env(),
+        )
+        backups = sorted(
+            output.parent.glob("cope-*.dump"), key=lambda path: path.stat().st_mtime
+        )
         for stale in backups[:-args.keep]:
             stale.unlink()
         print(f"database backup created at {output}")
@@ -517,22 +548,22 @@ def _database_command(args) -> int:
 
     if args.db_command == "restore":
         source_path = args.source.expanduser().resolve()
-        if not source_path.is_file() or source_path == db_path:
-            raise SystemExit("restore source must be a separate SQLite backup file")
-        source = sqlite3.connect(source_path)
-        try:
-            result = str(source.execute("PRAGMA integrity_check").fetchone()[0])
-            if result != "ok":
-                raise SystemExit(f"backup integrity check failed: {result}")
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            destination = sqlite3.connect(db_path)
-            try:
-                source.backup(destination)
-            finally:
-                destination.close()
-        finally:
-            source.close()
-        print(f"database restored from {source_path} to {db_path}")
+        if not source_path.is_file():
+            raise SystemExit(f"backup does not exist: {source_path}")
+        subprocess.run(
+            [
+                "pg_restore",
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--dbname",
+                database_url,
+                str(source_path),
+            ],
+            check=True,
+            env=_postgres_command_env(),
+        )
+        print(f"database restored from {source_path}")
         return 0
 
     raise SystemExit(f"unknown database command: {args.db_command}")
@@ -542,20 +573,20 @@ def _doctor() -> int:
     from .db import SCHEMA_VERSION, connect_database, database_schema_version
 
     failures: list[str] = []
-    db_path = Path(_default_db_path()).expanduser().resolve()
-    if not db_path.is_file():
-        failures.append(f"database does not exist: {db_path}")
-    else:
-        connection = connect_database(db_path)
+    database_url = _default_db_path()
+    try:
+        connection = connect_database(database_url)
         try:
-            integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+            ready = connection.execute("SELECT 1 AS ready").fetchone()
             version = database_schema_version(connection)
         finally:
             connection.close()
-        if integrity != "ok":
-            failures.append(f"database quick_check: {integrity}")
+        if not ready or ready["ready"] != 1:
+            failures.append("database readiness query failed")
         if version != SCHEMA_VERSION:
             failures.append(f"database schema is {version}, expected {SCHEMA_VERSION}")
+    except Exception as exc:
+        failures.append(f"database unavailable: {exc}")
     if not default_admin_token():
         failures.append("COPE_ADMIN_TOKEN or COPE_ADMIN_TOKEN_FILE is not configured")
     if not default_web_event_token():
@@ -564,8 +595,19 @@ def _doctor() -> int:
         for failure in failures:
             print(f"FAIL {failure}")
         return 1
-    print(f"OK database={db_path} schema={SCHEMA_VERSION}")
+    print(f"OK database=postgresql schema={SCHEMA_VERSION}")
     return 0
+
+
+def _postgres_command_env() -> dict[str, str]:
+    environment = os.environ.copy()
+    password = os.environ.get("COPE_DATABASE_PASSWORD")
+    password_file = os.environ.get("COPE_DATABASE_PASSWORD_FILE")
+    if password_file:
+        password = Path(password_file).read_text(encoding="utf-8").strip()
+    if password:
+        environment["PGPASSWORD"] = password
+    return environment
 
 
 if __name__ == "__main__":

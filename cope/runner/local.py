@@ -6,6 +6,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,7 +46,6 @@ from cope.db import (
     get_game_assignment,
     get_opening_position,
     get_tournament,
-    initialize_database,
     list_games,
     list_moves,
     list_tournaments,
@@ -81,6 +81,7 @@ from cope.tournament.tournament import Game
 
 TERMINAL_GAME_STATUSES = {"finished", "abandoned"}
 DEFAULT_WORKER_MAX_PLIES = 160
+ENGINE_INFO_PUBLISH_INTERVAL_S = 0.5
 DEFAULT_MAX_MOVES_DECISIVE_CP = 800
 LOG = logging.getLogger("cope.runner")
 
@@ -102,11 +103,7 @@ class RunnerServiceConfig:
 
 
 def run_tournament_service(config: RunnerServiceConfig) -> None:
-    initialize_database(config.db_path)
-    LOG.info(
-        "service started db=%s wake_mode=stream",
-        config.db_path,
-    )
+    LOG.info("service started db=postgresql wake_mode=stream")
     wake = threading.Event()
     set_runner_wake_handler(lambda _event: wake.set())
     start_event_publisher()
@@ -415,6 +412,7 @@ class _LiveGameReporter:
         self._game = game
         self._white = white
         self._black = black
+        self._last_engine_info_at = {"white": 0.0, "black": 0.0}
 
     def publish_white_engine_info(self, line: str, info: EngineSearchInfo) -> None:
         self._publish_engine_info("white", self._white, line, info)
@@ -447,6 +445,10 @@ class _LiveGameReporter:
         line: str,
         info: EngineSearchInfo,
     ) -> None:
+        now = time.monotonic()
+        if now - self._last_engine_info_at[side] < ENGINE_INFO_PUBLISH_INTERVAL_S:
+            return
+        self._last_engine_info_at[side] = now
         engine_data = _live_engine_data(info)
         root_fen = self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen

@@ -1654,6 +1654,33 @@ def touch_worker_seen(
     return cursor.rowcount > 0
 
 
+def touch_workers_seen(
+    connection: sqlite3.Connection,
+    sessions: list[tuple[int, str]],
+) -> set[int]:
+    """Persist many live worker sessions in one database transaction."""
+    if not sessions:
+        return set()
+    now = utc_now()
+    values = ", ".join("(?, ?)" for _ in sessions)
+    parameters: list[Any] = [now]
+    for worker_id, session_id in sessions:
+        parameters.extend((worker_id, session_id))
+    rows = connection.execute(
+        f"""
+        UPDATE workers AS worker
+        SET last_seen = ?
+        FROM (VALUES {values}) AS live(worker_id, session_id)
+        WHERE worker.id = live.worker_id
+          AND worker.session_id = live.session_id
+          AND worker.status IN ('connected', 'building', 'ready', 'busy')
+        RETURNING worker.id
+        """,
+        parameters,
+    ).fetchall()
+    return {int(row["id"]) for row in rows}
+
+
 def update_worker_dependencies(
     connection: sqlite3.Connection,
     worker_id: int,
@@ -1661,8 +1688,26 @@ def update_worker_dependencies(
     available_dependencies: list[str],
     manifest_revision: str,
     session_id: str | None = None,
-) -> bool:
+) -> tuple[bool, bool]:
     now = utc_now()
+    current = connection.execute(
+        """
+        SELECT available_dependencies, dependency_manifest_revision
+        FROM workers
+        WHERE id = ? AND status != 'revoked'
+          AND (? IS NULL OR session_id = ?)
+        """,
+        (worker_id, session_id, session_id),
+    ).fetchone()
+    if current is None:
+        return False, False
+    serialized = _json_dump(available_dependencies)
+    changed = (
+        current["available_dependencies"] != serialized
+        or current["dependency_manifest_revision"] != manifest_revision
+    )
+    if not changed:
+        return True, False
     cursor = connection.execute(
         """
         UPDATE workers
@@ -1674,7 +1719,7 @@ def update_worker_dependencies(
           AND (? IS NULL OR session_id = ?)
         """,
         (
-            _json_dump(available_dependencies),
+            serialized,
             manifest_revision,
             now,
             now,
@@ -1683,7 +1728,7 @@ def update_worker_dependencies(
             session_id,
         ),
     )
-    return cursor.rowcount > 0
+    return cursor.rowcount > 0, True
 
 
 def disconnect_worker(
