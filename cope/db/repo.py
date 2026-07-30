@@ -1006,7 +1006,27 @@ def _resolve_tournament_category_config(
         "engine_threads": 1,
         "engine_hash_mb": 16,
     }
-    settings.update(category.default_config)
+    category_keys = {
+        "time_control",
+        "adjudication",
+        "rated",
+        "lag_compensation_ms",
+        "engine_threads",
+        "engine_hash_mb",
+    }
+    settings.update(
+        {
+            key: value
+            for key, value in category.default_config.items()
+            if key in category_keys
+        }
+    )
+    if isinstance(settings["adjudication"], dict):
+        settings["adjudication"] = {
+            key: value
+            for key, value in settings["adjudication"].items()
+            if key in {"draw", "resign", "max_moves"}
+        }
     settings.update(
         format=config.format,
         format_options=config.format_options,

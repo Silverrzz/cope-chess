@@ -437,10 +437,9 @@ def _ensure_secrets() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for name in ("admin_token", "event_token", "db_password"):
         path = directory / name
-        if path.is_file() and path.stat().st_size:
-            continue
-        path.write_text(secrets.token_urlsafe(48) + "\n", encoding="utf-8")
-        _restrict_file(path)
+        if not path.is_file() or not path.stat().st_size:
+            path.write_text(secrets.token_urlsafe(48) + "\n", encoding="utf-8")
+        _make_container_readable(path)
 
 
 def _load_settings() -> dict[str, str]:
@@ -546,6 +545,11 @@ def _container_status(name: str) -> str:
 def _restrict_file(path: Path) -> None:
     if os.name != "nt":
         path.chmod(0o600)
+
+
+def _make_container_readable(path: Path) -> None:
+    if os.name != "nt":
+        path.chmod(0o644)
 
 
 if __name__ == "__main__":
