@@ -19,16 +19,15 @@ def install_worker_release(
     *,
     target_commit: str,
     repository_url: str,
-) -> str:
+) -> Path:
     if COMMIT_PATTERN.fullmatch(target_commit) is None:
         raise ValueError("worker update target is not a full Git commit")
-    root_value = os.environ.get("COPE_UPDATE_ROOT", "").strip()
-    if not root_value:
-        raise RuntimeError("COPE_UPDATE_ROOT is not configured")
-    root = Path(root_value).expanduser().resolve()
+    root = _update_root()
     repository = root / "repository"
+    root.mkdir(parents=True, exist_ok=True, mode=0o755)
     if not (repository / ".git").exists():
-        raise RuntimeError(f"worker update repository is missing at {repository}")
+        clone_url = _repository_clone_url(repository_url)
+        _run(["git", "clone", "--origin", "origin", clone_url, str(repository)])
     configured_url = _git_output(repository, "remote", "get-url", "origin")
     if _normalise_repository_url(configured_url) != _normalise_repository_url(repository_url):
         raise RuntimeError("worker update repository does not match the server deployment source")
@@ -100,7 +99,27 @@ def install_worker_release(
     temporary_link.symlink_to(release, target_is_directory=True)
     os.replace(temporary_link, link)
     _prune_releases(repository, releases, keep={target_commit}, limit=3)
-    return target_commit
+    return _venv_executable(release / "venv", "cope")
+
+
+def _update_root() -> Path:
+    configured = os.environ.get("COPE_UPDATE_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
+    return (base / "cope-worker").resolve()
+
+
+def _repository_clone_url(repository_url: str) -> str:
+    configured = os.environ.get("COPE_UPDATE_REPOSITORY_URL", "").strip()
+    if configured:
+        if _normalise_repository_url(configured) != _normalise_repository_url(repository_url):
+            raise RuntimeError("configured worker repository does not match the deployment source")
+        return configured
+    if "://" in repository_url or repository_url.startswith(("/", ".")):
+        return repository_url
+    return f"https://{repository_url}.git"
 
 
 def _release_ready(release: Path, target_commit: str) -> bool:

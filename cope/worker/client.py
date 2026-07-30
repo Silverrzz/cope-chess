@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import sys
 import threading
 import time
 import uuid
@@ -79,8 +80,14 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
         state.connected = False
         try:
             restart = await _run_worker_connection(config, state)
-            if restart:
-                return
+            if restart is not None:
+                restart_executable, target_commit = restart
+                os.environ["COPE_BUILD_VERSION"] = target_commit
+                os.environ["COPE_UPDATE_ROOT"] = str(restart_executable.parents[4])
+                os.execv(
+                    str(restart_executable),
+                    [str(restart_executable), *_restart_arguments(sys.argv[1:])],
+                )
         except ConnectionClosed as error:
             _log_connection_closed(error)
         except (OSError, asyncio.TimeoutError) as error:
@@ -105,7 +112,7 @@ class _WorkerConnectionState:
 async def _run_worker_connection(
     config: WorkerClientConfig,
     state: _WorkerConnectionState,
-) -> bool:
+) -> tuple[Path, str] | None:
     connection_config = _connection_config(config, state)
     LOG.info(
         "connecting to runner url=%s app_version=%s",
@@ -124,8 +131,7 @@ async def _run_worker_connection(
             _redact_secret(welcome.session_id),
         )
         if welcome.update is not None:
-            await _apply_worker_update(websocket, welcome.update)
-            return True
+            return await _apply_worker_update(websocket, welcome.update)
         return await _serve_assignments(
             websocket,
             capacity=welcome.capacity,
@@ -146,6 +152,22 @@ def _connection_config(
         token=None,
         session_id=state.session_id,
     )
+
+
+def _restart_arguments(arguments: list[str]) -> list[str]:
+    result: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument == "--app-version":
+            skip_value = True
+            continue
+        if argument.startswith("--app-version="):
+            continue
+        result.append(argument)
+    return result
 
 
 def _build_hello(
@@ -215,7 +237,7 @@ def _write_worker_session(path: Path | None, session_id: str) -> None:
 async def _apply_worker_update(
     websocket,
     update: WorkerUpdateCommand,
-) -> None:
+) -> tuple[Path, str]:
     status_fields = {
         "job_id": update.job_id,
         "target_commit": update.target_commit,
@@ -239,7 +261,7 @@ async def _apply_worker_update(
                 detail="Fetching and building the worker release.",
             ),
         )
-        await asyncio.to_thread(
+        executable = await asyncio.to_thread(
             install_worker_release,
             target_commit=update.target_commit,
             repository_url=update.repository_url,
@@ -266,6 +288,7 @@ async def _apply_worker_update(
         ),
     )
     await websocket.close(code=1000, reason="worker update installed")
+    return executable, update.target_commit
 
 
 async def _serve_assignments(
@@ -274,7 +297,7 @@ async def _serve_assignments(
     capacity: WorkerResources,
     server_url: str,
     credential: str,
-) -> bool:
+) -> tuple[Path, str] | None:
     queues: dict[int, asyncio.Queue] = {}
     assignments: dict[int, WorkerGameAssignment] = {}
     tasks: dict[int, asyncio.Task] = {}
@@ -326,7 +349,7 @@ async def _route_assignment_messages(
     send_lock: asyncio.Lock,
     fatal: asyncio.Future,
     assignment_done,
-) -> bool:
+) -> tuple[Path, str] | None:
     while True:
         receive = asyncio.create_task(_recv_envelope(websocket))
         done, _pending = await asyncio.wait(
@@ -344,8 +367,7 @@ async def _route_assignment_messages(
             if tasks:
                 raise ProtocolValidationError("runner requested an update during active work")
             update = WorkerUpdateCommand.model_validate(envelope.data)
-            await _apply_worker_update(websocket, update)
-            return True
+            return await _apply_worker_update(websocket, update)
         if envelope.type == "assignment":
             assignment = WorkerGameAssignment.model_validate(envelope.data)
             assignment_id = assignment.assignment.assignment_id
