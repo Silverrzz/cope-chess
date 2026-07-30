@@ -445,11 +445,14 @@ def create_app(
             try:
                 connection.execute("SELECT 1").fetchone()
                 schema_version = database_schema_version(connection)
+                from cope.web.api import _tournament_form_payload
+
+                _tournament_form_payload(app, None, connection)
             finally:
                 connection.close()
-        except sqlite3.Error:
+        except Exception:
             return JSONResponse(
-                {"status": "not_ready", "database": "unavailable"},
+                {"status": "not_ready"},
                 status_code=503,
             )
         ready = schema_version == SCHEMA_VERSION

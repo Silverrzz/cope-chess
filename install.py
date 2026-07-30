@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
+INSTALLER_VERSION = "3"
 
 
 @dataclass(frozen=True)
@@ -224,15 +225,45 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
     if "://" in domain or "/" in domain:
         raise SystemExit("Enter a DNS name without a scheme or path.")
     settings["domain"] = domain
-    repository_url = _git_value("remote", "get-url", "origin")
-    _ensure_env(domain, repository_url)
+    repository_url = _prompt(
+        "Git repository URL used for deployments",
+        settings.get("repository_url")
+        or _env_value("COPE_UPDATE_REPOSITORY_URL")
+        or _git_value("remote", "get-url", "origin"),
+    )
+    if not repository_url:
+        raise SystemExit("A Git repository URL is required for safe deployments.")
+    configured_origin = _git_value("remote", "get-url", "origin")
+    if configured_origin and _normalise_repository_url(repository_url) != _normalise_repository_url(
+        configured_origin
+    ):
+        raise SystemExit("The deployment repository URL must match this checkout's origin.")
+    update_ref = _prompt(
+        "Git branch or ref used for deployments",
+        settings.get("update_ref") or _env_value("COPE_UPDATE_REF") or "main",
+    )
+    if not update_ref or any(character.isspace() for character in update_ref):
+        raise SystemExit("The deployment Git ref cannot be empty or contain whitespace.")
+    compose_project = _prompt(
+        "Docker Compose project name",
+        settings.get("compose_project")
+        or _env_value("COPE_COMPOSE_PROJECT")
+        or "cope-chess",
+    )
+    if not _valid_compose_project(compose_project):
+        raise SystemExit(
+            "The Docker Compose project must start with a letter or digit and contain only letters, digits, hyphens, and underscores."
+        )
+    settings["repository_url"] = repository_url
+    settings["update_ref"] = update_ref
+    settings["compose_project"] = compose_project
+    _ensure_env(domain, repository_url, update_ref, compose_project)
     _ensure_secrets()
     version = _build_version()
     print("\nBuilding the server platform...")
     _run(
         [
-            "docker",
-            "compose",
+            *_compose_prefix(compose_project),
             "build",
             "--build-arg",
             f"COPE_BUILD_VERSION={version}",
@@ -242,8 +273,7 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
         print("Starting the server platform...")
         _run(
             [
-                "docker",
-                "compose",
+                *_compose_prefix(compose_project),
                 "up",
                 "-d",
                 "--no-build",
@@ -253,6 +283,7 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
                 "180",
             ]
         )
+        _verify_server_deployment(compose_project, version)
     return settings
 
 
@@ -290,7 +321,9 @@ def _configure_clients(
         path = "worker" if key == "worker" else "benchmarker"
         default = settings.get(setting, "")
         if local_server:
-            default = f"wss://{domain}/{path}"
+            port = "8702" if key == "worker" else "8703"
+            service = "worker-server" if key == "worker" else "benchmark-server"
+            default = f"ws://{service}:{port}/{path}"
         if not default:
             port = "8702" if key == "worker" else "8703"
             default = f"ws://127.0.0.1:{port}"
@@ -302,11 +335,12 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
     RUNTIME.mkdir(parents=True, exist_ok=True)
     container = _container_name(key)
     status = _container_status(container)
-    if status == "running":
+    current_version = _container_label(container, "cope-chess.installer-version")
+    if status == "running" and current_version == INSTALLER_VERSION:
         print(f"{_target(key).label} is already running in {container}.")
         return
     if status:
-        _run(["docker", "rm", container])
+        _run(["docker", "rm", "--force", container])
     state_path = (
         RUNTIME / "worker.json"
         if key == "worker"
@@ -324,6 +358,8 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         "--detach",
         "--name",
         container,
+        "--label",
+        f"cope-chess.installer-version={INSTALLER_VERSION}",
         "--init",
         "--restart",
         "unless-stopped",
@@ -337,16 +373,39 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         f"type=volume,source={_cache_volume()},target=/root/.cope-worker/engines",
         "--env",
         f"COPE_BUILD_VERSION={_build_version()}",
-        "--entrypoint",
-        "/bin/sh",
-        IMAGE,
-        "-c",
-        'state="$1"; token="$2"; shift 2; if [ -s "$state" ]; then exec cope "$@"; '
-        'else exec cope "$@" --token-file "$token"; fi',
-        "cope-bootstrap",
-        "/state/worker.json" if key == "worker" else "/state/benchmarker.session",
-        f"/state/{key}.token",
     ]
+    if settings[f"{key}_server_url"].startswith(
+        ("ws://worker-server:", "ws://benchmark-server:")
+    ):
+        command.extend(["--network", _compose_network()])
+    if key == "worker":
+        update_root = RUNTIME / "update"
+        update_root.mkdir(parents=True, exist_ok=True)
+        command.extend(
+            [
+                "--mount",
+                f"type=bind,source={update_root},target=/update",
+                "--mount",
+                f"type=bind,source={ROOT},target=/update/repository",
+                "--env",
+                "COPE_UPDATE_ROOT=/update",
+            ]
+        )
+    command.extend(
+        [
+            "--entrypoint",
+            "/bin/sh",
+            IMAGE,
+            "-c",
+            'binary=cope; if [ -x /update/current/venv/bin/cope ]; then '
+            'binary=/update/current/venv/bin/cope; fi; state="$1"; token="$2"; '
+            'shift 2; if [ -s "$state" ]; then exec "$binary" "$@"; '
+            'else exec "$binary" "$@" --token-file "$token"; fi',
+            "cope-bootstrap",
+            "/state/worker.json" if key == "worker" else "/state/benchmarker.session",
+            f"/state/{key}.token",
+        ]
+    )
     command.extend(
         [
             key,
@@ -367,12 +426,26 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
 
 def _registration_token(key: str, settings: dict[str, str]) -> str:
     domain = settings.get("domain", "")
-    expected = f"wss://{domain}/{'worker' if key == 'worker' else 'benchmarker'}"
-    if domain and settings.get(f"{key}_server_url") == expected:
+    path = "worker" if key == "worker" else "benchmarker"
+    service = "worker-server" if key == "worker" else "benchmark-server"
+    port = "8702" if key == "worker" else "8703"
+    expected = {
+        f"wss://{domain}/{path}",
+        f"ws://{service}:{port}/{path}",
+    }
+    if domain and settings.get(f"{key}_server_url") in expected:
         command = "mint-worker-token" if key == "worker" else "mint-benchmarker-token"
         label = f"{socket.gethostname()}-{key}"
         output = _run(
-            ["docker", "compose", "exec", "-T", "web", "cope", command, label],
+            [
+                *_compose_prefix(settings.get("compose_project", "cope-chess")),
+                "exec",
+                "-T",
+                "web",
+                "cope",
+                command,
+                label,
+            ],
             capture=True,
         )
         for line in output.splitlines():
@@ -385,7 +458,12 @@ def _registration_token(key: str, settings: dict[str, str]) -> str:
     return token
 
 
-def _ensure_env(domain: str, repository_url: str) -> None:
+def _ensure_env(
+    domain: str,
+    repository_url: str,
+    update_ref: str,
+    compose_project: str,
+) -> None:
     path = ROOT / ".env"
     if path.exists():
         content = path.read_text(encoding="utf-8")
@@ -393,8 +471,9 @@ def _ensure_env(domain: str, repository_url: str) -> None:
         example = ROOT / ".env.example"
         content = example.read_text(encoding="utf-8") if example.exists() else ""
     content = _set_env_value(content, "COPE_DOMAIN", domain)
-    if repository_url:
-        content = _set_env_value(content, "COPE_UPDATE_REPOSITORY_URL", repository_url)
+    content = _set_env_value(content, "COPE_UPDATE_REPOSITORY_URL", repository_url)
+    content = _set_env_value(content, "COPE_UPDATE_REF", update_ref)
+    content = _set_env_value(content, "COPE_COMPOSE_PROJECT", compose_project)
     path.write_text(content, encoding="utf-8")
 
 
@@ -486,6 +565,66 @@ def _build_version() -> str:
     return (ROOT / "cope" / "VERSION").read_text(encoding="utf-8").strip()
 
 
+def _compose_prefix(project: str) -> list[str]:
+    return [
+        "docker",
+        "compose",
+        "--project-name",
+        project,
+        "--project-directory",
+        str(ROOT),
+        "--file",
+        str(ROOT / "compose.yaml"),
+    ]
+
+
+def _valid_compose_project(value: str) -> bool:
+    return bool(value) and value[0].isalnum() and all(
+        character.isalnum() or character in "-_" for character in value
+    )
+
+
+def _normalise_repository_url(value: str) -> str:
+    cleaned = value.strip().rstrip("/").removesuffix(".git").lower()
+    if "@" in cleaned and ":" in cleaned and "://" not in cleaned:
+        authority, path = cleaned.split(":", 1)
+        return f"{authority.rsplit('@', 1)[-1]}/{path.lstrip('/')}"
+    if "://" in cleaned:
+        scheme, remainder = cleaned.split("://", 1)
+        del scheme
+        return remainder.rsplit("@", 1)[-1]
+    return cleaned
+
+
+def _verify_server_deployment(project: str, expected_version: str) -> None:
+    container_id = _run(
+        [*_compose_prefix(project), "ps", "--quiet", "web"],
+        capture=True,
+    )
+    if not container_id:
+        raise SystemExit("The web service did not start.")
+    actual_project = _container_label(container_id, "com.docker.compose.project")
+    if actual_project != project:
+        raise SystemExit(
+            f"The web service belongs to Compose project {actual_project!r}, expected {project!r}."
+        )
+    output = _run(
+        [*_compose_prefix(project), "exec", "-T", "web", "cope", "version"],
+        capture=True,
+    )
+    marker = f"version={expected_version}"
+    if marker not in output:
+        raise SystemExit(
+            f"The running web service does not contain the requested build {expected_version}."
+        )
+    status = _run(
+        ["docker", "inspect", "--format", "{{.State.Health.Status}}", container_id],
+        capture=True,
+    )
+    if status != "healthy":
+        raise SystemExit(f"The running web service failed deployment checks: {status or 'unknown'}.")
+
+
 def _git_value(*arguments: str) -> str:
     if shutil.which("git") is None:
         return ""
@@ -540,6 +679,52 @@ def _container_status(name: str) -> str:
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _container_label(name: str, label: str) -> str:
+    quoted_label = json.dumps(label)
+    result = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            f"{{{{index .Config.Labels {quoted_label}}}}}",
+            name,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _compose_network() -> str:
+    project = _env_value("COPE_COMPOSE_PROJECT") or "cope-chess"
+    service = subprocess.run(
+        [*_compose_prefix(project), "ps", "--quiet", "worker-server"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    container_id = service.stdout.strip()
+    if not container_id:
+        raise SystemExit("The local worker server is not running.")
+    inspection = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", container_id],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    try:
+        networks = json.loads(inspection.stdout)
+    except json.JSONDecodeError:
+        networks = {}
+    if inspection.returncode != 0 or not isinstance(networks, dict) or not networks:
+        raise SystemExit("Could not determine the local COPE Docker network.")
+    return next(iter(networks))
 
 
 def _restrict_file(path: Path) -> None:

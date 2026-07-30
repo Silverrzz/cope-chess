@@ -571,10 +571,8 @@ def _compose_project_name(configured: str = "") -> str:
                     f"deployment coordinator is running as Compose service {service!r}, expected 'updater'"
                 )
             if configured and configured != project:
-                LOG.warning(
-                    "ignoring mismatched COPE_COMPOSE_PROJECT configured=%s actual=%s",
-                    configured,
-                    project,
+                raise RuntimeError(
+                    f"COPE_COMPOSE_PROJECT is {configured!r}, but the updater belongs to {project!r}"
                 )
             return project
     if configured:
