@@ -191,11 +191,11 @@ services:
 
 secrets:
   cope_admin_token:
-    file: ${COPE_HOST_SOURCE_DIR:-.}/secrets/admin_token
+    file: ./secrets/admin_token
   cope_event_token:
-    file: ${COPE_HOST_SOURCE_DIR:-.}/secrets/event_token
+    file: ./secrets/event_token
   cope_db_password:
-    file: ${COPE_HOST_SOURCE_DIR:-.}/secrets/db_password
+    file: ./secrets/db_password
 
 volumes:
   postgres-data:

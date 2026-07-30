@@ -103,7 +103,7 @@ def _run_deployment(
     original_commit = ""
     rollback_tag = f"cope-chess:rollback-{job_id}"
     built = False
-    restarted = False
+    restart_attempted = False
     source_changed = False
     try:
         repository_url = config.repository_url or _git_output(
@@ -143,6 +143,7 @@ def _run_deployment(
         _run(["git", "-C", str(source_dir), "checkout", "--detach", target_commit])
         source_changed = target_commit != original_commit
         _validate_compose_inputs(source_dir)
+        _compose(config, source_dir, "config", "--quiet")
         _compose(
             config,
             source_dir,
@@ -159,6 +160,7 @@ def _run_deployment(
         _set_job_status(config, job_id, "restarting")
         _set_server_target(config, job_id, "restarting")
         restart_started_at = datetime.now(UTC)
+        restart_attempted = True
         _compose(
             config,
             source_dir,
@@ -170,9 +172,8 @@ def _run_deployment(
             "scheduler",
             "worker-server",
             "benchmark-server",
-            "caddy",
         )
-        restarted = True
+        _reload_caddy(config, source_dir)
         _set_job_status(config, job_id, "verifying")
         _wait_for_services(config, target_commit, restart_started_at)
         _wait_for_worker_reconnections(config, job_id)
@@ -204,10 +205,10 @@ def _run_deployment(
                 _run(["git", "-C", str(source_dir), "checkout", "--detach", original_commit])
             except Exception as source_error:
                 rollback_detail = f" Source rollback failed: {source_error}"
-        if built or restarted:
+        if built or restart_attempted:
             try:
                 _run(["docker", "tag", rollback_tag, "cope-chess:local"])
-                if restarted:
+                if restart_attempted:
                     _compose(
                         config,
                         source_dir,
@@ -219,8 +220,8 @@ def _run_deployment(
                         "scheduler",
                         "worker-server",
                         "benchmark-server",
-                        "caddy",
                     )
+                    _reload_caddy(config, source_dir)
                 rollback_detail += " Previous server image restored."
             except Exception as rollback_error:
                 rollback_detail += f" Automatic rollback failed: {rollback_error}"
@@ -447,7 +448,7 @@ def _heartbeat_ready(
         return False
     try:
         last_seen = datetime.fromisoformat(heartbeat["last_seen"])
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return False
     return last_seen > restart_started_at
 
@@ -537,6 +538,35 @@ def _compose(
         check=check,
         capture=True,
         environment=environment,
+    )
+
+
+def _reload_caddy(config: UpdaterConfig, source_dir: Path) -> None:
+    _compose(
+        config,
+        source_dir,
+        "exec",
+        "-T",
+        "caddy",
+        "caddy",
+        "validate",
+        "--config",
+        "/etc/caddy/Caddyfile",
+        "--adapter",
+        "caddyfile",
+    )
+    _compose(
+        config,
+        source_dir,
+        "exec",
+        "-T",
+        "caddy",
+        "caddy",
+        "reload",
+        "--config",
+        "/etc/caddy/Caddyfile",
+        "--adapter",
+        "caddyfile",
     )
 
 
@@ -655,8 +685,30 @@ def _run(
         env=environment,
     )
     if check and result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+        detail = _command_failure_detail(result.stderr or result.stdout or "")
         raise RuntimeError(
-            f"{command[0]} exited with status {result.returncode}: {detail[-3000:]}"
+            f"{command[0]} exited with status {result.returncode}: {detail}"
         )
     return (result.stdout or "").strip()
+
+
+def _command_failure_detail(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        unique.append(line)
+    important = [
+        line
+        for line in unique
+        if re.search(
+            r"\b(error|failed|fatal|denied|invalid|missing|does not exist|not found)\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+    ]
+    selected = important[-10:] if important else unique[-12:]
+    return "\n".join(selected)[-2000:] or "command failed without diagnostic output"

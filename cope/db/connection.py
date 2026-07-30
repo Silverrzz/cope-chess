@@ -164,7 +164,12 @@ class DatabaseConnection:
             return
         raw, self._raw = self._raw, None
         try:
-            raw.commit()
+            try:
+                raw.commit()
+            except psycopg.IntegrityError as exc:
+                raise sqlite3.IntegrityError(str(exc)) from exc
+            except psycopg.Error as exc:
+                raise sqlite3.DatabaseError(str(exc)) from exc
         finally:
             self._pool.putconn(raw)
 
@@ -173,7 +178,10 @@ class DatabaseConnection:
             return
         raw, self._raw = self._raw, None
         try:
-            raw.rollback()
+            try:
+                raw.rollback()
+            except psycopg.Error as exc:
+                raise sqlite3.DatabaseError(str(exc)) from exc
         finally:
             self._pool.putconn(raw)
 

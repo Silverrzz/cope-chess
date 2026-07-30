@@ -124,7 +124,10 @@ class TournamentPayload(BaseModel):
     @field_validator("name")
     @classmethod
     def strip_name(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        if not value:
+            raise ValueError("tournament name cannot be blank")
+        return value
 
 
 class TournamentStatusPayload(BaseModel):
@@ -185,7 +188,10 @@ class EngineVersionCreatePayload(BaseModel):
     @field_validator("version", "repository_full_name", "source_ref")
     @classmethod
     def strip_value(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        if not value:
+            raise ValueError("value cannot be blank")
+        return value
 
 
 class AppSettingsPayload(BaseModel):
@@ -196,7 +202,10 @@ class AppSettingsPayload(BaseModel):
     @field_validator("openai_model")
     @classmethod
     def strip_model(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        if not value:
+            raise ValueError("model cannot be blank")
+        return value
 
 
 class GitHostPayload(BaseModel):
@@ -211,7 +220,10 @@ class GitHostPayload(BaseModel):
     @field_validator("name", "base_url", "api_url")
     @classmethod
     def strip_host_value(cls, value: str) -> str:
-        return value.strip().rstrip("/")
+        value = value.strip().rstrip("/")
+        if not value:
+            raise ValueError("value cannot be blank")
+        return value
 
     @field_validator("base_url", "api_url")
     @classmethod
@@ -230,11 +242,22 @@ class CategoryPayload(BaseModel):
     @field_validator("name")
     @classmethod
     def strip_name(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        if not value:
+            raise ValueError("category name cannot be blank")
+        return value
 
 
 class WorkerPayload(BaseModel):
     label: str = Field(default="worker", min_length=1, max_length=80)
+
+    @field_validator("label")
+    @classmethod
+    def strip_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("worker label cannot be blank")
+        return value
 
 
 class WorkerTokenPayload(BaseModel):
@@ -671,9 +694,35 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        config = _validated_tournament_config(connection, payload.config)
-        tournament_id = create_tournament(connection, payload.name, config)
-        connection.commit()
+        try:
+            config = _validated_tournament_config(connection, payload.config)
+            tournament_id = create_tournament(connection, payload.name, config)
+            connection.commit()
+        except HTTPException:
+            connection.rollback()
+            raise
+        except ValidationError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail=[error["msg"] for error in exc.errors()],
+            ) from exc
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Tournament data changed while the draft was being created. Reload the form and try again.",
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament creation failed")
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not save the tournament. Try again.",
+            ) from exc
         _publish_admin_change(web_app, request)
         return _json(
             {
@@ -734,9 +783,35 @@ def register_api_routes(app: FastAPI) -> None:
                 status_code=409,
                 detail="Only draft tournaments can be edited.",
             )
-        config = _validated_tournament_config(connection, payload.config)
-        update_tournament(connection, tournament_id, name=payload.name, config=config)
-        connection.commit()
+        try:
+            config = _validated_tournament_config(connection, payload.config)
+            update_tournament(connection, tournament_id, name=payload.name, config=config)
+            connection.commit()
+        except HTTPException:
+            connection.rollback()
+            raise
+        except ValidationError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail=[error["msg"] for error in exc.errors()],
+            ) from exc
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Tournament data changed while the draft was being saved. Reload the form and try again.",
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament update failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not save the tournament. Try again.",
+            ) from exc
         _publish_admin_change(web_app, request)
         return _json({"id": tournament_id, "message": "Tournament updated."})
 
