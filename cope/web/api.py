@@ -1776,10 +1776,10 @@ def _validated_tournament_config(
         raise HTTPException(status_code=422, detail="One or more selected engines no longer exist.")
     unavailable = [
         engine_id for engine_id in submitted.participants
-        if not records[engine_id].active or _engine_artifact_status(records[engine_id]) != "ready"
+        if not records[engine_id].active
     ]
     if unavailable:
-        raise HTTPException(status_code=422, detail="Every participant must be active with a healthy binary artifact on the main server.")
+        raise HTTPException(status_code=422, detail="Every participant must be active.")
 
     if submitted.category_id is None:
         _validate_opening_suite_reference(connection, submitted.opening_suite_id)
@@ -1887,7 +1887,7 @@ def _tournament_form_payload(
     engines = [
         engine
         for engine in list_engine_records(connection)
-        if (engine.active and _engine_artifact_status(engine) == "ready") or engine.id in participant_ids
+        if engine.active or engine.id in participant_ids
     ]
     category_defaults = {
         str(category.id): _category_settings(category.default_config)
