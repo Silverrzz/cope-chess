@@ -5,7 +5,9 @@ import asyncio
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -696,7 +698,12 @@ def _database_command(args) -> int:
 
     database_url = args.db_path
     if args.db_command == "migrate":
-        initialize_database(database_url)
+        try:
+            initialize_database(database_url)
+        except sqlite3.DatabaseError as exc:
+            detail = str(exc).split("CONTEXT:", 1)[0].strip()
+            print(f"database migration failed: {detail}", file=sys.stderr)
+            return 1
         print(f"database migrated schema={SCHEMA_VERSION}")
         return 0
 

@@ -271,18 +271,22 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
     )
     if start:
         print("Starting the server platform...")
-        _run(
-            [
-                *_compose_prefix(compose_project),
-                "up",
-                "-d",
-                "--no-build",
-                "--remove-orphans",
-                "--wait",
-                "--wait-timeout",
-                "180",
-            ]
-        )
+        try:
+            _run(
+                [
+                    *_compose_prefix(compose_project),
+                    "up",
+                    "-d",
+                    "--no-build",
+                    "--remove-orphans",
+                    "--wait",
+                    "--wait-timeout",
+                    "180",
+                ]
+            )
+        except SystemExit:
+            _print_compose_logs(compose_project, "migrate")
+            raise
         _verify_server_deployment(compose_project, version)
     return settings
 
@@ -582,6 +586,19 @@ def _valid_compose_project(value: str) -> bool:
     return bool(value) and value[0].isalnum() and all(
         character.isalnum() or character in "-_" for character in value
     )
+
+
+def _print_compose_logs(project: str, service: str) -> None:
+    result = subprocess.run(
+        [*_compose_prefix(project), "logs", "--no-color", "--tail", "80", service],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    detail = (result.stdout or result.stderr or "").strip()
+    if detail:
+        print(f"\n{service} diagnostics:\n{detail[-6000:]}", file=sys.stderr)
 
 
 def _normalise_repository_url(value: str) -> str:

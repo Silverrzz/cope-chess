@@ -5,8 +5,13 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 
 DO $$
 BEGIN
+  IF to_regclass('schema_migrations') IS NOT NULL THEN
+    RAISE EXCEPTION 'incompatible database from an obsolete Cope architecture detected'
+      USING HINT = 'Back up the existing database, then choose a new Docker Compose project name or reset its postgres-data volume.';
+  END IF;
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'engines' AND column_name = 'git_url') THEN
-    RAISE EXCEPTION 'legacy source-built engine schema is unsupported; create a fresh database for schema 8';
+    RAISE EXCEPTION 'legacy source-built engine schema is unsupported'
+      USING HINT = 'Back up the existing database, then choose a new Docker Compose project name or reset its postgres-data volume.';
   END IF;
 END $$;
 
