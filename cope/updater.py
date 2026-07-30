@@ -113,6 +113,7 @@ def _run_deployment(
             "origin",
         )
         _validate_source_repository(source_dir, repository_url)
+        _compose_project_name(config.compose_project)
         repository_identity = _normalise_repository_url(repository_url)
         original_commit = _git_output(source_dir, "rev-parse", "HEAD")
         target_commit = _resolve_target_commit(
@@ -141,6 +142,7 @@ def _run_deployment(
         _run(["docker", "tag", "cope-chess:local", rollback_tag])
         _run(["git", "-C", str(source_dir), "checkout", "--detach", target_commit])
         source_changed = target_commit != original_commit
+        _validate_compose_inputs(source_dir)
         _compose(
             config,
             source_dir,
@@ -515,7 +517,7 @@ def _compose(
 ) -> str:
     environment = os.environ.copy()
     environment["COPE_HOST_SOURCE_DIR"] = _host_source_dir(source_dir)
-    project_name = config.compose_project or _compose_project_name()
+    project_name = _compose_project_name(config.compose_project)
     compose_command = (
         ["docker-compose"]
         if shutil.which("docker-compose")
@@ -538,7 +540,7 @@ def _compose(
     )
 
 
-def _compose_project_name() -> str:
+def _compose_project_name(configured: str = "") -> str:
     container_id = os.environ.get("HOSTNAME", "").strip()
     if container_id:
         project = _run(
@@ -553,8 +555,50 @@ def _compose_project_name() -> str:
             capture=True,
         )
         if project:
+            service = _run(
+                [
+                    "docker",
+                    "inspect",
+                    container_id,
+                    "--format",
+                    '{{index .Config.Labels "com.docker.compose.service"}}',
+                ],
+                check=False,
+                capture=True,
+            )
+            if service != "updater":
+                raise RuntimeError(
+                    f"deployment coordinator is running as Compose service {service!r}, expected 'updater'"
+                )
+            if configured and configured != project:
+                LOG.warning(
+                    "ignoring mismatched COPE_COMPOSE_PROJECT configured=%s actual=%s",
+                    configured,
+                    project,
+                )
             return project
-    return "cope"
+    if configured:
+        return configured
+    raise RuntimeError("could not determine the active Compose project")
+
+
+def _validate_compose_inputs(source_dir: Path) -> None:
+    compose_file = source_dir / "compose.yaml"
+    if not compose_file.is_file():
+        raise RuntimeError(f"deployment Compose file is missing: {compose_file}")
+    missing = [
+        str(path.relative_to(source_dir))
+        for path in (
+            source_dir / "secrets" / "admin_token",
+            source_dir / "secrets" / "event_token",
+            source_dir / "secrets" / "db_password",
+        )
+        if not path.is_file() or path.stat().st_size == 0
+    ]
+    if missing:
+        raise RuntimeError(
+            "deployment secret files are missing or empty: " + ", ".join(missing)
+        )
 
 
 def _host_source_dir(source_dir: Path) -> str:
