@@ -40,7 +40,7 @@ cope = "cope.cli:main"
 include = ["cope*"]
 
 [tool.setuptools.package-data]
-"cope" = ["VERSION"]
+"cope" = ["VERSION", "BUILD_VERSION"]
 "cope.db" = ["schema.sql"]
 "cope.web" = [
     "frontend_dist/*",

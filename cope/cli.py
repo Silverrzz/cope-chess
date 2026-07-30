@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .network import (
+    default_benchmark_server_host,
+    default_benchmark_server_port,
+    default_benchmarker_server_url,
     default_admin_token,
     default_web_event_token,
     default_web_event_timeout_s,
@@ -94,8 +97,24 @@ def main(argv: list[str] | None = None) -> int:
         default=_default_db_path(),
         help="PostgreSQL connection URL",
     )
-    mint_worker_parser.add_argument("--threads", type=_positive_int, default=1)
-    mint_worker_parser.add_argument("--hash-mb", type=_positive_int, default=32)
+
+    mint_benchmarker_parser = subparsers.add_parser(
+        "mint-benchmarker-token",
+        help="mint a one-time benchmarker registration token",
+    )
+    mint_benchmarker_parser.add_argument("label", help="admin label for the benchmarker")
+    mint_benchmarker_parser.add_argument(
+        "--ttl-seconds",
+        type=int,
+        default=7200,
+        help="token lifetime in seconds",
+    )
+    mint_benchmarker_parser.add_argument(
+        "--database-url",
+        dest="db_path",
+        default=_default_db_path(),
+        help="PostgreSQL connection URL",
+    )
 
     web_parser = subparsers.add_parser("web", help="start the web server")
     web_parser.add_argument("--host", default=default_web_host())
@@ -227,49 +246,149 @@ def main(argv: list[str] | None = None) -> int:
         help="maximum simultaneous game orchestration threads",
     )
 
+    updater_parser = subparsers.add_parser(
+        "updater",
+        help="run the deployment update coordinator",
+    )
+    updater_parser.add_argument(
+        "--database-url",
+        dest="db_path",
+        default=_default_db_path(),
+    )
+    updater_parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=Path(os.environ.get("COPE_UPDATE_SOURCE_DIR", "/workspace")),
+    )
+    updater_parser.add_argument(
+        "--repository-url",
+        default=os.environ.get("COPE_UPDATE_REPOSITORY_URL", ""),
+    )
+    updater_parser.add_argument(
+        "--default-ref",
+        default=os.environ.get("COPE_UPDATE_REF", "main"),
+    )
+    updater_parser.add_argument(
+        "--compose-project",
+        default=os.environ.get("COPE_COMPOSE_PROJECT", ""),
+    )
+    updater_parser.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=float(os.environ.get("COPE_UPDATE_POLL_INTERVAL_S", "2")),
+    )
+    updater_parser.add_argument(
+        "--worker-wait-s",
+        type=float,
+        default=float(os.environ.get("COPE_UPDATE_WORKER_WAIT_S", "1800")),
+    )
+    updater_parser.add_argument(
+        "--service-wait-s",
+        type=float,
+        default=float(os.environ.get("COPE_UPDATE_SERVICE_WAIT_S", "180")),
+    )
+    updater_parser.add_argument(
+        "--allow-rollback",
+        action="store_true",
+        default=os.environ.get("COPE_UPDATE_ALLOW_ROLLBACK", "").lower()
+        in {"1", "true", "yes"},
+    )
+
     worker_parser = subparsers.add_parser("worker", help="start a worker client")
     worker_parser.add_argument("--server-url", default=default_worker_server_url())
-    worker_parser.add_argument("--token")
+    worker_parser.add_argument("--token", default=os.environ.get("COPE_WORKER_TOKEN"))
+    worker_parser.add_argument("--token-file", type=Path)
     worker_parser.add_argument("--session-id")
+    worker_parser.add_argument(
+        "--state-file",
+        type=Path,
+        default=Path(".cope-worker/worker.json"),
+        help="current-user-only file used to persist the reconnect session",
+    )
     worker_parser.add_argument("--label-hint", default="")
     worker_parser.add_argument("--app-version", default=_default_app_version())
-    worker_parser.add_argument(
-        "--threads",
-        type=_positive_int,
-        default=1,
-        help="CPU threads reserved for this worker process",
-    )
-    worker_parser.add_argument(
-        "--hash-mb",
-        type=_positive_int,
-        default=32,
-        help="total engine hash memory reserved for this worker process",
-    )
     worker_parser.add_argument(
         "--machine-id",
         help="stable machine identity override for containers or isolated environments",
     )
 
-    worker_pool_parser = subparsers.add_parser(
-        "worker-pool",
-        help="enroll or resume a machine worker pool",
+    benchmark_server_parser = subparsers.add_parser(
+        "benchmark-server",
+        help="start the benchmark scheduling websocket server",
     )
-    worker_pool_parser.add_argument("--server-url", default=default_worker_server_url())
-    worker_pool_parser.add_argument("--app-version", default=_default_app_version())
-    worker_pool_parser.add_argument(
-        "--state-file",
+    benchmark_server_parser.add_argument(
+        "--host",
+        default=default_benchmark_server_host(),
+    )
+    benchmark_server_parser.add_argument(
+        "--port",
+        type=_positive_int,
+        default=default_benchmark_server_port(),
+    )
+    benchmark_server_parser.add_argument("--app-version", default=_default_app_version())
+    benchmark_server_parser.add_argument(
+        "--database-url",
+        dest="db_path",
+        default=_default_db_path(),
+    )
+    benchmark_server_parser.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=float(os.environ.get("COPE_BENCHMARK_POLL_INTERVAL_S", "30")),
+    )
+    benchmark_server_parser.add_argument(
+        "--retry-interval-s",
+        type=_positive_int,
+        default=int(os.environ.get("COPE_BENCHMARK_RETRY_INTERVAL_S", "3600")),
+    )
+    benchmark_server_parser.add_argument(
+        "--benchmark-timeout-s",
+        type=_positive_int,
+        default=int(os.environ.get("COPE_BENCHMARK_TIMEOUT_S", "600")),
+    )
+    benchmark_server_parser.add_argument(
+        "--response-timeout-s",
+        type=_positive_int,
+        default=int(os.environ.get("COPE_BENCHMARK_RESPONSE_TIMEOUT_S", "7200")),
+    )
+
+    benchmarker_parser = subparsers.add_parser(
+        "benchmarker",
+        help="start a local engine benchmark client",
+    )
+    benchmarker_parser.add_argument(
+        "--server-url",
+        default=default_benchmarker_server_url(),
+    )
+    benchmarker_parser.add_argument(
+        "--token",
+        default=os.environ.get("COPE_BENCHMARKER_TOKEN"),
+    )
+    benchmarker_parser.add_argument(
+        "--token-file",
         type=Path,
-        default=Path(".cope-worker/pool.json"),
-        help="current-user-only file used to persist pool slot credentials",
+        default=(
+            Path(os.environ["COPE_BENCHMARKER_TOKEN_FILE"])
+            if os.environ.get("COPE_BENCHMARKER_TOKEN_FILE")
+            else None
+        ),
     )
-    worker_pool_parser.add_argument(
-        "--enrollment-token-file",
-        type=Path,
-        help="read the one-time enrollment token from a file instead of prompting",
-    )
-    worker_pool_parser.add_argument(
+    benchmarker_parser.add_argument("--session-id")
+    benchmarker_parser.add_argument("--label-hint", default="")
+    benchmarker_parser.add_argument("--app-version", default=_default_app_version())
+    benchmarker_parser.add_argument(
         "--machine-id",
         help="stable machine identity override for containers or isolated environments",
+    )
+    benchmarker_parser.add_argument(
+        "--session-file",
+        type=Path,
+        default=Path(
+            os.environ.get(
+                "COPE_BENCHMARKER_SESSION_FILE",
+                "~/.cope-benchmarker/session",
+            )
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -309,14 +428,33 @@ def main(argv: list[str] | None = None) -> int:
                 connection,
                 label=args.label,
                 ttl_seconds=args.ttl_seconds,
-                assigned_threads=args.threads,
-                assigned_hash_mb=args.hash_mb,
             )
             connection.commit()
         finally:
             connection.close()
 
         print(f"worker_id={token.worker_id}")
+        print(f"expires_at={token.expires_at}")
+        print(f"token={token.token}")
+        return 0
+
+    if args.role == "mint-benchmarker-token":
+        from .db import connect_database, initialize_database, mint_benchmarker_token
+
+        db_path = args.db_path
+        initialize_database(db_path)
+        connection = connect_database(db_path)
+        try:
+            token = mint_benchmarker_token(
+                connection,
+                label=args.label,
+                ttl_seconds=args.ttl_seconds,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        print(f"benchmarker_id={token.benchmarker_id}")
         print(f"expires_at={token.expires_at}")
         print(f"token={token.token}")
         return 0
@@ -347,6 +485,24 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             LOG.info("worker server stopped")
             return 130
+        return 0
+
+    if args.role == "updater":
+        from .updater import UpdaterConfig, run_updater
+
+        run_updater(
+            UpdaterConfig(
+                db_path=args.db_path,
+                source_dir=args.source_dir,
+                repository_url=args.repository_url,
+                default_ref=args.default_ref,
+                compose_project=args.compose_project,
+                poll_interval_s=args.poll_interval_s,
+                worker_wait_s=args.worker_wait_s,
+                service_wait_s=args.service_wait_s,
+                allow_rollback=args.allow_rollback,
+            )
+        )
         return 0
 
     if args.role == "scheduler":
@@ -416,15 +572,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "worker":
         from .worker.client import WorkerClientConfig, run_worker_client
 
+        token = args.token
+        if args.token_file is not None and args.token_file.expanduser().is_file():
+            token = args.token_file.expanduser().read_text(encoding="utf-8").strip() or token
+        if args.session_id:
+            token = None
         config = WorkerClientConfig(
             server_url=args.server_url,
             app_version=args.app_version,
-            token=args.token,
+            token=token,
             session_id=args.session_id,
             label_hint=args.label_hint,
-            threads=args.threads,
-            hash_mb=args.hash_mb,
             machine_id=args.machine_id,
+            state_file=args.state_file,
         )
         try:
             asyncio.run(run_worker_client(config))
@@ -433,20 +593,50 @@ def main(argv: list[str] | None = None) -> int:
             return 130
         return 0
 
-    if args.role == "worker-pool":
-        from .worker.pool import WorkerPoolConfig, run_worker_pool
+    if args.role == "benchmark-server":
+        from .runner.benchmark_server import (
+            BenchmarkServerConfig,
+            run_benchmark_server,
+        )
 
-        config = WorkerPoolConfig(
-            server_url=args.server_url,
-            app_version=args.app_version,
-            state_file=args.state_file,
-            enrollment_token_file=args.enrollment_token_file,
-            machine_id=args.machine_id,
+        config = BenchmarkServerConfig(
+            host=args.host,
+            port=args.port,
+            db_path=args.db_path,
+            expected_app_version=args.app_version,
+            poll_interval_s=args.poll_interval_s,
+            retry_interval_s=args.retry_interval_s,
+            benchmark_timeout_s=args.benchmark_timeout_s,
+            response_timeout_s=args.response_timeout_s,
         )
         try:
-            asyncio.run(run_worker_pool(config))
+            asyncio.run(run_benchmark_server(config))
         except KeyboardInterrupt:
-            LOG.info("worker pool stopped")
+            LOG.info("benchmark server stopped")
+            return 130
+        return 0
+
+    if args.role == "benchmarker":
+        from .benchmarker import BenchmarkerClientConfig, run_benchmarker_client
+
+        token = args.token
+        if args.token_file is not None and args.token_file.expanduser().is_file():
+            token = args.token_file.expanduser().read_text(encoding="utf-8").strip() or token
+        if args.session_id:
+            token = None
+        config = BenchmarkerClientConfig(
+            server_url=args.server_url,
+            app_version=args.app_version,
+            token=token,
+            session_id=args.session_id,
+            label_hint=args.label_hint,
+            machine_id=args.machine_id,
+            session_file=args.session_file,
+        )
+        try:
+            asyncio.run(run_benchmarker_client(config))
+        except KeyboardInterrupt:
+            LOG.info("benchmarker stopped")
             return 130
         return 0
 

@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 11
 UciOptionValue = str | int | bool
 
 
@@ -62,20 +62,27 @@ class DrawAdjudicationRule(StrictModel):
     max_abs_cp: int = Field(ge=0)
     consecutive_plies: int = Field(gt=0)
 
+    @field_validator("consecutive_plies")
+    @classmethod
+    def require_engine_agreement(cls, value: int) -> int:
+        return max(value, 2)
+
 
 class ResignAdjudicationRule(StrictModel):
     min_abs_cp: int = Field(gt=0)
     consecutive_plies: int = Field(gt=0)
 
-
-class SyzygyAdjudicationRule(StrictModel):
-    max_pieces: int = Field(ge=2, le=7)
+    @field_validator("consecutive_plies")
+    @classmethod
+    def require_engine_agreement(cls, value: int) -> int:
+        return max(value, 2)
 
 
 class AdjudicationConfig(StrictModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
     draw: DrawAdjudicationRule | None = None
     resign: ResignAdjudicationRule | None = None
-    syzygy: SyzygyAdjudicationRule | None = None
     max_moves: int | None = Field(default=None, gt=0)
 
 
@@ -84,9 +91,10 @@ class EngineSpec(StrictModel):
     name: str = Field(min_length=1, max_length=80)
     author: str = Field(default="", max_length=120)
     version: str = Field(min_length=1, max_length=80)
-    binary_url: str = Field(min_length=1, max_length=500)
-    binary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    binary_size: int = Field(gt=0)
+    repository_url: str = Field(min_length=1, max_length=1000)
+    source_ref: str = Field(min_length=1, max_length=200)
+    dockerfile: str = Field(min_length=1, max_length=100_000)
+    build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
 
     @field_validator("uci_options")
@@ -261,15 +269,58 @@ class GameAssignment(StrictModel):
         }
 
 
+class WorkflowStep(StrictModel):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=120)
+    order: int = Field(ge=0)
+    owner: Literal["server", "worker", "shared"]
+
+
+class OpeningLine(StrictModel):
+    name: str = ""
+    start_fen: str = Field(min_length=1)
+    moves: tuple[str, ...] = ()
+    fen: str = Field(min_length=1)
+
+
+def game_setup_workflow() -> tuple[WorkflowStep, ...]:
+    return (
+        WorkflowStep(key="assignment", label="Assignment accepted", order=0, owner="shared"),
+        WorkflowStep(key="engines", label="Engine artifacts", order=1, owner="shared"),
+        WorkflowStep(key="benchmark", label="Hardware benchmark", order=2, owner="shared"),
+        WorkflowStep(key="startup", label="Engine startup", order=3, owner="shared"),
+        WorkflowStep(key="opening", label="Opening setup", order=4, owner="shared"),
+        WorkflowStep(key="play", label="Engine play", order=5, owner="shared"),
+        WorkflowStep(key="conclude", label="Game conclusion", order=6, owner="server"),
+        WorkflowStep(key="cleanup", label="Worker cleanup", order=7, owner="worker"),
+    )
+
+
+class GameBenchmarkReference(StrictModel):
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    engine_nps: dict[int, int]
+    timeout_s: int = Field(default=600, gt=0)
+
+    @field_validator("engine_nps")
+    @classmethod
+    def validate_engine_nps(cls, value: dict[int, int]) -> dict[int, int]:
+        if not value or any(engine_id <= 0 or nps <= 0 for engine_id, nps in value.items()):
+            raise ValueError("benchmark reference requires positive engine ids and NPS values")
+        return value
+
+
 class WorkerGameAssignment(StrictModel):
     assignment: GameAssignment
     tournament_name: str = Field(min_length=1)
     round: int = Field(gt=0)
     initial_fen: str = Field(min_length=1)
     opening_name: str | None = None
+    opening_moves: tuple[str, ...] = ()
     max_plies: int = Field(gt=0)
     engines: dict[int, EngineSpec]
     required_resources: WorkerResources
+    benchmark_reference: GameBenchmarkReference
+    workflow: tuple[WorkflowStep, ...] = Field(default_factory=game_setup_workflow)
 
     @field_validator("engines")
     @classmethod
@@ -282,6 +333,23 @@ class WorkerGameAssignment(StrictModel):
             if spec.engine_id != engine_id:
                 raise ValueError("engine spec id must match its assignment key")
         return value
+
+    @field_validator("workflow")
+    @classmethod
+    def validate_workflow(cls, value: tuple[WorkflowStep, ...]) -> tuple[WorkflowStep, ...]:
+        if not value:
+            raise ValueError("assignment workflow must contain at least one step")
+        if len({step.key for step in value}) != len(value):
+            raise ValueError("assignment workflow step keys must be unique")
+        if len({step.order for step in value}) != len(value):
+            raise ValueError("assignment workflow step orders must be unique")
+        return tuple(sorted(value, key=lambda step: step.order))
+
+    @model_validator(mode="after")
+    def validate_benchmark_reference(self) -> WorkerGameAssignment:
+        if set(self.benchmark_reference.engine_nps) != set(self.engines):
+            raise ValueError("benchmark reference must include every assigned engine")
+        return self
 
 
 class AssignmentMessage(StrictModel):
@@ -297,26 +365,73 @@ class AssignmentMessage(StrictModel):
         )
 
 
+class AssignmentProgress(AssignmentMessage):
+    stage: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    stage_label: str = Field(min_length=1, max_length=120)
+    stage_order: int = Field(ge=0)
+    substage: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    status: Literal["pending", "running", "completed", "failed"]
+    detail: str = Field(min_length=1, max_length=4000)
+    engine_id: int | None = Field(default=None, gt=0)
+    engine_name: str | None = Field(default=None, min_length=1, max_length=80)
+    current: int | None = Field(default=None, ge=0)
+    total: int | None = Field(default=None, gt=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_progress(self) -> AssignmentProgress:
+        if self.current is not None and self.total is not None and self.current > self.total:
+            raise ValueError("progress current cannot exceed total")
+        if (self.engine_id is None) != (self.engine_name is None):
+            raise ValueError("engine progress requires both engine id and name")
+        return self
+
+
 class EngineCommand(AssignmentMessage):
     engine_id: int = Field(gt=0)
     command: str = Field(min_length=1)
 
 
+class EngineCommandStarted(AssignmentMessage):
+    engine_id: int = Field(gt=0)
+
+
+class EngineClock(EngineCommandStarted):
+    elapsed_ms: int = Field(ge=0)
+
+
+class EngineStop(EngineCommandStarted):
+    pass
+
+
 class EngineCommandResult(AssignmentMessage):
     engine_id: int = Field(gt=0)
     lines: list[str]
+    elapsed_ms: int = Field(ge=0)
 
 
-class EngineInfo(EngineCommandResult):
-    pass
+class EngineInfo(EngineClock):
+    lines: list[str]
 
 
 class AssignmentComplete(AssignmentMessage):
     pass
 
 
+class AssignmentCleanupComplete(AssignmentMessage):
+    pass
+
+
+class EngineHardwareScore(StrictModel):
+    benchmark_nps: int = Field(gt=0)
+    worker_nps: int = Field(gt=0)
+    hardware_score: float = Field(gt=0, allow_inf_nan=False)
+    elapsed_ms: int = Field(ge=0)
+
+
 class AssignmentReady(AssignmentMessage):
     prepared_engine_ids: list[int] = Field(min_length=1)
+    hardware_scores: dict[int, EngineHardwareScore]
 
     @field_validator("prepared_engine_ids")
     @classmethod
@@ -327,11 +442,27 @@ class AssignmentReady(AssignmentMessage):
             raise ValueError("prepared engine ids must be unique")
         return value
 
+    @field_validator("hardware_scores")
+    @classmethod
+    def validate_hardware_scores(
+        cls,
+        value: dict[int, EngineHardwareScore],
+    ) -> dict[int, EngineHardwareScore]:
+        if not value or any(engine_id <= 0 for engine_id in value):
+            raise ValueError("hardware scores require positive engine ids")
+        return value
+
+    @model_validator(mode="after")
+    def validate_ready_engines(self) -> AssignmentReady:
+        if set(self.prepared_engine_ids) != set(self.hardware_scores):
+            raise ValueError("prepared engines and hardware scores must match")
+        return self
+
 
 class AssignmentFailed(AssignmentMessage):
     engine_id: int = Field(gt=0)
     engine_name: str = Field(min_length=1, max_length=80)
-    stage: Literal["cache", "download", "verify", "start", "runtime"]
+    stage: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     error: str = Field(min_length=1, max_length=8000)
 
 
@@ -364,7 +495,6 @@ class HardwareInfo(StrictModel):
 class WorkerActiveAssignmentsMixin(StrictModel):
     active_assignment_ids: list[int] = Field(default_factory=list)
     machine_id: str = Field(min_length=8, max_length=128)
-    resources: WorkerResources
 
     @field_validator("active_assignment_ids")
     @classmethod
@@ -389,42 +519,80 @@ class WorkerSessionHello(WorkerActiveAssignmentsMixin):
     app_version: str = Field(min_length=1)
 
 
-class WorkerPoolSlotHello(WorkerActiveAssignmentsMixin):
-    slot_token: str = Field(min_length=1)
-    hw: HardwareInfo
-    app_version: str = Field(min_length=1)
+class WorkerUpdateCommand(StrictModel):
+    job_id: int = Field(gt=0)
+    target_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    repository_url: str = Field(min_length=1, max_length=1000)
 
 
-class WorkerPoolEnrollmentHello(StrictModel):
-    enrollment_token: str = Field(min_length=1)
-    machine_id: str = Field(min_length=8, max_length=128)
-    hw: HardwareInfo
-    app_version: str = Field(min_length=1)
-
-
-class WorkerPoolSlotCredential(StrictModel):
-    worker_id: int = Field(gt=0)
-    label: str = Field(min_length=1, max_length=80)
-    slot_token: str = Field(min_length=1)
-    resources: WorkerResources
-
-
-class WorkerPoolWelcome(StrictModel):
-    pool_id: int = Field(gt=0)
-    label: str = Field(min_length=1, max_length=80)
-    machine_id: str = Field(min_length=8, max_length=128)
-    slots: list[WorkerPoolSlotCredential] = Field(min_length=1)
+class WorkerUpdateStatus(StrictModel):
+    job_id: int = Field(gt=0)
+    target_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    status: Literal["accepted", "installing", "restarting", "failed"]
+    detail: str = Field(default="", max_length=4000)
 
 
 class WorkerWelcome(StrictModel):
     worker_id: int = Field(gt=0)
     session_id: str = Field(min_length=1)
     heartbeat_interval_ms: int = Field(gt=0)
-    resources: WorkerResources
+    capacity: WorkerResources
+    update: WorkerUpdateCommand | None = None
+
+
+class BenchmarkerTokenHello(StrictModel):
+    token: str = Field(min_length=1)
+    label_hint: str = Field(default="", max_length=80)
+    machine_id: str = Field(min_length=8, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    hw: HardwareInfo
+    app_version: str = Field(min_length=1)
+
+
+class BenchmarkerSessionHello(StrictModel):
+    session_id: str = Field(min_length=1)
+    machine_id: str = Field(min_length=8, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    hw: HardwareInfo
+    app_version: str = Field(min_length=1)
+
+
+class BenchmarkerWelcome(StrictModel):
+    benchmarker_id: int = Field(gt=0)
+    session_id: str = Field(min_length=1)
+    poll_interval_ms: int = Field(gt=0)
+
+
+class BenchmarkAssignment(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    engine: EngineSpec
+    timeout_s: int = Field(gt=0)
+
+
+class BenchmarkResult(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    nps: int = Field(gt=0)
+    elapsed_ms: int = Field(ge=0)
+    output: str = Field(default="", max_length=64_000)
+
+
+class BenchmarkFailed(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stage: Literal["build", "bench", "parse"]
+    error: str = Field(min_length=1, max_length=8000)
+    output: str = Field(default="", max_length=64_000)
 
 
 class Envelope(StrictModel):
-    v: Literal[7] = PROTOCOL_VERSION
+    v: Literal[11] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

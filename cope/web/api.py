@@ -1,62 +1,68 @@
 from __future__ import annotations
 
 import hmac
-import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
-import uuid
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 import chess
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.datastructures import UploadFile
 
-from cope.core.models import TournamentConfig
+from cope.core.models import OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
     category_tournament_count,
     create_category,
+    create_deployment_job,
     create_engine,
     create_engine_version,
+    create_git_host,
     create_opening_suite,
     create_tournament,
     create_worker,
-    create_worker_pool,
     database_stats,
     database_schema_version,
     delete_category,
     delete_chat_message,
     delete_engine,
     delete_engine_version,
+    delete_git_host,
     delete_opening_suite,
     delete_tournament,
     delete_worker,
     engine_game_count,
     get_category,
+    get_deployment_job,
     get_chat_settings,
     get_engine_record,
     get_engine_family,
     get_engine_version_record,
+    get_app_settings,
+    get_git_host,
+    get_openai_api_key,
     get_game,
     get_opening_suite,
     get_tournament,
     get_tournament_rating_commit,
     get_worker,
-    get_worker_by_session_id,
-    get_worker_pool,
     list_categories,
+    list_deployment_jobs,
+    list_deployment_targets,
     list_chat_messages,
     list_engine_games,
     list_engine_records,
     list_engine_families,
     list_engine_versions,
+    list_git_hosts,
     list_games,
     list_games_by_status,
     list_opening_suites,
@@ -66,99 +72,49 @@ from cope.db import (
     list_tournaments,
     list_uncommitted_finished_tournaments,
     list_workers,
-    mint_worker_pool_token,
     mint_worker_token_for_worker,
     replace_suite_openings,
     request_tournament_rating_commit,
     revoke_worker,
-    revoke_worker_pool,
     set_tournament_status,
     suite_opening_count,
     update_category,
     update_chat_settings,
     update_engine,
     update_engine_version,
+    update_app_settings,
+    update_git_host,
     update_opening_suite,
     update_tournament,
     update_worker_label,
 )
 from cope.web import forms
-from cope.web.openings import parse_opening_uploads, parse_openings
+from cope.web.engine_sources import (
+    SourceServiceError,
+    canonical_repository_url,
+    generate_dockerfile,
+    list_releases,
+    repository_context,
+    search_repositories,
+)
+from cope.web.openings import format_opening, parse_opening_uploads, parse_openings
 from cope.web.requests import read_form
 from cope.version import app_version
 
 
 LOG = logging.getLogger("cope.web.api")
-ENGINE_UPLOAD_CHUNK_BYTES = 1024 * 1024
-
-
-def _engine_binary_root() -> Path:
-    return Path(os.environ.get("COPE_ENGINE_BINARY_DIR", "/var/lib/cope/engine-binaries")).expanduser().resolve()
-
-
-async def _store_engine_upload(upload: UploadFile) -> tuple[str, int]:
-    root = _engine_binary_root()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    maximum = int(os.environ.get("COPE_ENGINE_BINARY_MAX_BYTES", str(1024 * 1024 * 1024)))
-    temporary = root / f".upload-{uuid.uuid4().hex}"
-    digest = hashlib.sha256()
-    size = 0
-    try:
-        with temporary.open("xb") as output:
-            while True:
-                chunk = await upload.read(ENGINE_UPLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > maximum:
-                    raise HTTPException(status_code=413, detail=f"Engine binary exceeds the {maximum}-byte upload limit.")
-                digest.update(chunk)
-                output.write(chunk)
-            if size == 0:
-                raise HTTPException(status_code=422, detail="The uploaded engine binary is empty.")
-            output.flush()
-            os.fsync(output.fileno())
-        sha256 = digest.hexdigest()
-        destination = root / sha256
-        if destination.exists():
-            temporary.unlink()
-            if destination.stat().st_size != size:
-                raise HTTPException(status_code=500, detail="Stored engine artifact failed an integrity check.")
-        else:
-            os.replace(temporary, destination)
-            destination.chmod(0o600)
-        return sha256, size
-    finally:
-        await upload.close()
-        if temporary.exists():
-            temporary.unlink()
-
-
-def _remove_unreferenced_artifact(connection: sqlite3.Connection, storage_key: str) -> None:
-    row = connection.execute(
-        "SELECT COUNT(*) AS count FROM engine_versions WHERE storage_key = ?", (storage_key,)
-    ).fetchone()
-    if row is not None and int(row["count"]) == 0:
-        try:
-            (_engine_binary_root() / storage_key).unlink(missing_ok=True)
-        except OSError:
-            LOG.exception("could not remove unreferenced engine artifact storage_key=%s", storage_key)
+DEFAULT_ENGINE_DOCKERFILE = """FROM ubuntu:24.04
+WORKDIR /opt/cope
+COPY . .
+RUN test -x ./engine
+ENTRYPOINT ["./engine"]
+"""
 
 
 def _engine_version_admin_payload(version) -> dict[str, Any]:
     payload = jsonable_encoder(version)
     payload["active"] = version.version_active
-    payload["storage_status"] = _engine_artifact_status(version)
     return payload
-
-
-def _engine_artifact_status(version) -> str:
-    path = _engine_binary_root() / version.storage_key
-    if not path.is_file():
-        return "missing"
-    if path.stat().st_size != version.binary_size:
-        return "corrupt"
-    return "ready"
 
 
 class TournamentPayload(BaseModel):
@@ -196,6 +152,7 @@ class EnginePayload(BaseModel):
 
 class EngineVersionUpdatePayload(BaseModel):
     version: str = Field(min_length=1, max_length=80)
+    dockerfile: str = Field(min_length=1, max_length=100_000)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
     active: bool = True
 
@@ -205,6 +162,62 @@ class EngineVersionUpdatePayload(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("version cannot be blank")
+        return value
+
+    @field_validator("dockerfile")
+    @classmethod
+    def validate_dockerfile(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith("FROM "):
+            raise ValueError("Dockerfile must start with FROM")
+        return value + "\n"
+
+
+class EngineVersionCreatePayload(BaseModel):
+    version: str = Field(min_length=1, max_length=80)
+    git_host_id: int = Field(gt=0)
+    repository_full_name: str = Field(min_length=3, max_length=300)
+    source_ref: str = Field(min_length=1, max_length=200)
+    source_kind: str = Field(pattern=r"^(release|commit)$")
+    uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
+    active: bool = True
+
+    @field_validator("version", "repository_full_name", "source_ref")
+    @classmethod
+    def strip_value(cls, value: str) -> str:
+        return value.strip()
+
+
+class AppSettingsPayload(BaseModel):
+    openai_model: str = Field(min_length=1, max_length=120)
+    openai_api_key: str | None = Field(default=None, max_length=500)
+    clear_openai_api_key: bool = False
+
+    @field_validator("openai_model")
+    @classmethod
+    def strip_model(cls, value: str) -> str:
+        return value.strip()
+
+
+class GitHostPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    provider: str = Field(pattern=r"^(github|gitlab)$")
+    base_url: str = Field(min_length=8, max_length=500)
+    api_url: str = Field(min_length=8, max_length=500)
+    access_token: str | None = Field(default=None, max_length=1000)
+    clear_access_token: bool = False
+    enabled: bool = True
+
+    @field_validator("name", "base_url", "api_url")
+    @classmethod
+    def strip_host_value(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
+    @field_validator("base_url", "api_url")
+    @classmethod
+    def validate_host_url(cls, value: str) -> str:
+        if not value.startswith(("https://", "http://")):
+            raise ValueError("Git host URLs must use HTTP or HTTPS")
         return value
 
 
@@ -222,32 +235,22 @@ class CategoryPayload(BaseModel):
 
 class WorkerPayload(BaseModel):
     label: str = Field(default="worker", min_length=1, max_length=80)
-    assigned_threads: int = Field(default=1, gt=0)
-    assigned_hash_mb: int = Field(default=32, gt=0)
 
 
 class WorkerTokenPayload(BaseModel):
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
 
 
-class WorkerPoolPayload(BaseModel):
-    label: str = Field(default="machine pool", min_length=1, max_length=80)
-    slot_count: int = Field(ge=1, le=512)
-    assigned_threads: int = Field(default=1, gt=0)
-    assigned_hash_mb: int = Field(default=32, gt=0)
-    ttl_seconds: int = Field(default=900, ge=60, le=7200)
+class DeploymentPayload(BaseModel):
+    ref: str = Field(default="", max_length=200)
 
-    @field_validator("label")
+    @field_validator("ref")
     @classmethod
-    def strip_label(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("Pool label is required.")
-        return stripped
-
-
-class WorkerPoolTokenPayload(BaseModel):
-    ttl_seconds: int = Field(default=900, ge=60, le=7200)
+    def validate_ref(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}", cleaned) is None:
+            raise ValueError("Git ref contains unsupported characters")
+        return cleaned
 
 
 class ChatSettingsPayload(BaseModel):
@@ -404,6 +407,11 @@ def register_api_routes(app: FastAPI) -> None:
                 "engine_data": engine_data,
                 "clocks": clocks,
                 "clock_state": clock_state,
+                "game_progress": (
+                    web_app._game_progress_view(connection, viewer_game.id)
+                    if viewer_game
+                    else None
+                ),
                 "standings": web_app._standings(connection, tournament, games, engines),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),
                 "engine_hardware": web_app._engine_hardware_view(connection, tournament),
@@ -537,6 +545,90 @@ def register_api_routes(app: FastAPI) -> None:
                     "schema_version": database_schema_version(connection),
                     "services": list_service_heartbeats(connection),
                 },
+            }
+        )
+
+    @app.get("/api/admin/deployments")
+    def admin_deployments(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        heartbeats = {
+            item["service"]: item
+            for item in list_service_heartbeats(connection)
+        }
+        jobs = list_deployment_jobs(connection, limit=25)
+        return _json(
+            {
+                "current_version": app_version(),
+                "default_ref": os.environ.get("COPE_UPDATE_REF", "main"),
+                "updater": heartbeats.get("updater"),
+                "jobs": [
+                    {
+                        **jsonable_encoder(job),
+                        "targets": jsonable_encoder(
+                            list_deployment_targets(connection, job.id)
+                        ),
+                    }
+                    for job in jobs
+                ],
+            }
+        )
+
+    @app.post("/api/admin/deployments")
+    def admin_create_deployment(
+        payload: DeploymentPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        updater = next(
+            (
+                item
+                for item in list_service_heartbeats(connection)
+                if item["service"] == "updater"
+            ),
+            None,
+        )
+        if updater is None:
+            raise HTTPException(status_code=503, detail="The deployment updater is offline.")
+        try:
+            updater_age = datetime.now(UTC) - datetime.fromisoformat(updater["last_seen"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=503, detail="The deployment updater heartbeat is invalid.")
+        if updater_age.total_seconds() > 30:
+            raise HTTPException(status_code=503, detail="The deployment updater is offline.")
+        try:
+            job_id = create_deployment_job(
+                connection,
+                requested_ref=requested_ref,
+            )
+            connection.commit()
+        except ValueError as error:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "id": job_id,
+                "message": f"Deployment {job_id} queued for {requested_ref}.",
+            },
+            status_code=202,
+        )
+
+    @app.get("/api/admin/deployments/{job_id}")
+    def admin_deployment(
+        job_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        job = get_deployment_job(connection, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Deployment not found.")
+        return _json(
+            {
+                **jsonable_encoder(job),
+                "targets": jsonable_encoder(
+                    list_deployment_targets(connection, job.id)
+                ),
             }
         )
 
@@ -722,6 +814,147 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"message": "Tournament deleted."})
 
+    @app.get("/api/admin/settings")
+    def admin_settings(connection: sqlite3.Connection = Depends(web_app._database)):
+        settings = get_app_settings(connection)
+        hosts = list_git_hosts(connection)
+        return _json(
+            {
+                "settings": settings,
+                "git_hosts": [
+                    {
+                        "id": host.id,
+                        "name": host.name,
+                        "provider": host.provider,
+                        "base_url": host.base_url,
+                        "api_url": host.api_url,
+                        "access_token_configured": bool(host.access_token),
+                        "enabled": host.enabled,
+                        "created_at": host.created_at,
+                    }
+                    for host in hosts
+                ],
+            }
+        )
+
+    @app.put("/api/admin/settings")
+    def admin_update_settings(
+        payload: AppSettingsPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        update_app_settings(
+            connection,
+            openai_model=payload.openai_model,
+            openai_api_key=(
+                payload.openai_api_key.strip()
+                if payload.openai_api_key is not None and payload.openai_api_key.strip()
+                else None
+            ),
+            clear_openai_api_key=payload.clear_openai_api_key,
+        )
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "AI settings saved."})
+
+    @app.post("/api/admin/git-hosts")
+    def admin_create_git_host(
+        payload: GitHostPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            host_id = create_git_host(
+                connection,
+                name=payload.name,
+                provider=payload.provider,
+                base_url=payload.base_url,
+                api_url=payload.api_url,
+                access_token=(payload.access_token or "").strip(),
+                enabled=payload.enabled,
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"id": host_id, "message": "Git host added."}, status_code=201)
+
+    @app.put("/api/admin/git-hosts/{host_id}")
+    def admin_update_git_host(
+        host_id: int,
+        payload: GitHostPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_git_host(connection, host_id) is None:
+            raise HTTPException(status_code=404, detail="Git host not found.")
+        try:
+            update_git_host(
+                connection,
+                host_id,
+                name=payload.name,
+                provider=payload.provider,
+                base_url=payload.base_url,
+                api_url=payload.api_url,
+                access_token=(
+                    payload.access_token.strip()
+                    if payload.access_token is not None and payload.access_token.strip()
+                    else None
+                ),
+                clear_access_token=payload.clear_access_token,
+                enabled=payload.enabled,
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"id": host_id, "message": "Git host updated."})
+
+    @app.delete("/api/admin/git-hosts/{host_id}")
+    def admin_delete_git_host(
+        host_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_git_host(connection, host_id) is None:
+            raise HTTPException(status_code=404, detail="Git host not found.")
+        try:
+            delete_git_host(connection, host_id)
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Git host deleted."})
+
+    @app.get("/api/admin/repositories/search")
+    def admin_search_repositories(
+        q: str,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        query = q.strip()
+        if len(query) < 2 or len(query) > 200:
+            raise HTTPException(status_code=422, detail="Enter at least two characters.")
+        try:
+            results = search_repositories(list_git_hosts(connection, enabled_only=True), query)
+        except SourceServiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _json({"repositories": results})
+
+    @app.get("/api/admin/repositories/releases")
+    def admin_repository_releases(
+        host_id: int,
+        full_name: str,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        host = get_git_host(connection, host_id)
+        if host is None or not host.enabled:
+            raise HTTPException(status_code=404, detail="Git host is unavailable.")
+        try:
+            releases = list_releases(host, full_name)
+        except SourceServiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _json({"releases": releases})
+
     # Engines
 
     @app.get("/api/admin/engines")
@@ -766,6 +999,10 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "engine": engine,
                 "versions": [_engine_version_admin_payload(version) for version in list_engine_versions(connection, engine_id)],
+                "game_counts": {
+                    version.id: engine_game_count(connection, version.id)
+                    for version in list_engine_versions(connection, engine_id)
+                },
             }
         )
 
@@ -828,56 +1065,66 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({"message": "Engine deleted."})
 
     @app.post("/api/admin/engines/{engine_id}/versions")
-    async def admin_create_engine_version(
+    def admin_create_engine_version(
         engine_id: int,
+        payload: EngineVersionCreatePayload,
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         if get_engine_family(connection, engine_id) is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
-        form = await request.form()
-        upload = form.get("binary")
-        if not isinstance(upload, UploadFile) or not upload.filename:
-            raise HTTPException(status_code=422, detail="Choose an engine binary to upload.")
-        version = str(form.get("version") or "").strip()
-        if not version or len(version) > 80:
-            raise HTTPException(status_code=422, detail="Version is required and must be at most 80 characters.")
+        host = get_git_host(connection, payload.git_host_id)
+        if host is None or not host.enabled:
+            raise HTTPException(status_code=404, detail="Git host is unavailable.")
+        if payload.source_kind == "commit":
+            if not re.fullmatch(r"[0-9a-fA-F]{7,64}", payload.source_ref):
+                raise HTTPException(status_code=422, detail="Enter a valid commit hash.")
+        else:
+            try:
+                release_tags = {
+                    release["tag"]
+                    for release in list_releases(host, payload.repository_full_name)
+                }
+            except SourceServiceError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            if payload.source_ref not in release_tags:
+                raise HTTPException(status_code=422, detail="Choose a public release.")
         try:
-            options = json.loads(str(form.get("uci_options") or "{}"))
-            if not isinstance(options, dict) or any(not str(name).strip() for name in options):
-                raise ValueError
-            if any(not isinstance(value, (str, int, bool)) for value in options.values()):
-                raise ValueError
-        except (json.JSONDecodeError, ValueError):
-            raise HTTPException(status_code=422, detail="Default UCI options must be a JSON object.")
-        active = str(form.get("active") or "true").lower() in {"1", "true", "yes", "on"}
-        binary_filename = upload.filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
-        if not binary_filename or len(binary_filename) > 255 or any(ord(char) < 32 for char in binary_filename):
-            raise HTTPException(status_code=422, detail="The uploaded binary filename is invalid.")
-        artifact = await _store_engine_upload(upload)
+            repository_url = canonical_repository_url(host, payload.repository_full_name)
+        except SourceServiceError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         try:
             version_id = create_engine_version(
                 connection,
                 engine_id=engine_id,
-                version=version,
-                binary_filename=binary_filename,
-                binary_sha256=artifact[0],
-                binary_size=artifact[1],
-                storage_key=artifact[0],
-                uci_options=options,
-                active=active,
+                version=payload.version,
+                git_host_id=host.id,
+                repository_url=repository_url,
+                repository_full_name=payload.repository_full_name,
+                source_ref=payload.source_ref,
+                source_kind=payload.source_kind,
+                dockerfile=DEFAULT_ENGINE_DOCKERFILE,
+                uci_options=payload.uci_options,
+                active=payload.active,
             )
             connection.commit()
         except sqlite3.IntegrityError as exc:
-            connection.rollback()
-            _remove_unreferenced_artifact(connection, artifact[0])
             raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
-        except Exception:
-            connection.rollback()
-            _remove_unreferenced_artifact(connection, artifact[0])
-            raise
         _publish_admin_change(web_app, request)
-        return _json({"id": version_id, "message": f"Version {version} uploaded and verified."}, status_code=201)
+        return _json(
+            {"id": version_id, "message": f"Version {payload.version} created."},
+            status_code=201,
+        )
+
+    @app.get("/api/admin/engine-versions/{version_id}")
+    def admin_engine_version(
+        version_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        return _json({"version": _engine_version_admin_payload(version)})
 
     @app.put("/api/admin/engine-versions/{version_id}")
     def admin_update_engine_version(
@@ -896,6 +1143,7 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 version_id,
                 version=payload.version,
+                dockerfile=payload.dockerfile,
                 uci_options=options,
                 active=payload.active,
             )
@@ -905,6 +1153,44 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"id": version_id, "message": "Engine version updated."})
 
+    @app.post("/api/admin/engine-versions/{version_id}/generate-dockerfile")
+    def admin_generate_engine_dockerfile(
+        version_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        if version.git_host_id is None:
+            raise HTTPException(status_code=409, detail="Engine version has no Git host.")
+        host = get_git_host(connection, version.git_host_id)
+        if host is None:
+            raise HTTPException(status_code=409, detail="The version's Git host no longer exists.")
+        api_key = get_openai_api_key(connection)
+        settings = get_app_settings(connection)
+        if not api_key:
+            raise HTTPException(
+                status_code=409,
+                detail="Add an OpenAI API key in Settings before generating a Dockerfile.",
+            )
+        try:
+            context = repository_context(
+                host,
+                version.repository_full_name,
+                version.source_ref,
+            )
+            dockerfile = generate_dockerfile(
+                api_key=api_key,
+                model=settings.openai_model,
+                repository_url=version.repository_url,
+                full_name=version.repository_full_name,
+                source_ref=version.source_ref,
+                context=context,
+            )
+        except SourceServiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _json({"dockerfile": dockerfile, "model": settings.openai_model})
+
     @app.delete("/api/admin/engine-versions/{version_id}")
     def admin_delete_engine_version(
         version_id: int,
@@ -912,40 +1198,12 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         try:
-            storage_key = delete_engine_version(connection, version_id)
+            delete_engine_version(connection, version_id)
             connection.commit()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        _remove_unreferenced_artifact(connection, storage_key)
         _publish_admin_change(web_app, request)
         return _json({"message": "Engine version deleted."})
-
-    @app.get("/api/worker/engine-binaries/{version_id}")
-    def worker_engine_binary(
-        version_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        authorization = request.headers.get("authorization", "")
-        scheme, _, credential = authorization.partition(" ")
-        worker = get_worker_by_session_id(connection, credential) if scheme.lower() == "bearer" and credential else None
-        if worker is None or worker.status not in {"connected", "downloading", "ready", "busy"}:
-            raise HTTPException(status_code=401, detail="A current worker session is required.")
-        version = get_engine_version_record(connection, version_id)
-        if version is None or not version.active:
-            raise HTTPException(status_code=404, detail="Engine version is unavailable.")
-        path = _engine_binary_root() / version.storage_key
-        if not path.is_file():
-            LOG.error("registered engine binary is missing version_id=%s path=%s", version_id, path)
-            raise HTTPException(status_code=503, detail="Engine binary is missing from server storage.")
-        response = FileResponse(
-            path,
-            media_type="application/octet-stream",
-            filename=version.binary_filename,
-        )
-        response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
-        response.headers["X-Engine-SHA256"] = version.binary_sha256
-        return response
 
     # Categories
 
@@ -1120,7 +1378,14 @@ def register_api_routes(app: FastAPI) -> None:
                 "suite": suite,
                 "openings": openings,
                 "positions_text": "\n".join(
-                    f"{opening.name}; {opening.fen}" if opening.name else opening.fen
+                    format_opening(
+                        OpeningLine(
+                            name=opening.name,
+                            start_fen=opening.start_fen,
+                            moves=opening.moves,
+                            fen=opening.fen,
+                        )
+                    )
                     for opening in openings
                 ),
                 "usage_count": sum(
@@ -1176,7 +1441,12 @@ def register_api_routes(app: FastAPI) -> None:
         if mode not in {"replace", "append", "keep"}:
             raise HTTPException(status_code=422, detail="Choose a valid import mode.")
         existing = [
-            (opening.name, opening.fen)
+            OpeningLine(
+                name=opening.name,
+                start_fen=opening.start_fen,
+                moves=opening.moves,
+                fen=opening.fen,
+            )
             for opening in list_suite_openings(connection, suite_id)
         ]
         incoming = _opening_values(
@@ -1251,67 +1521,6 @@ def register_api_routes(app: FastAPI) -> None:
             )
         )
 
-    @app.post("/api/admin/worker-pools")
-    def admin_create_worker_pool(
-        payload: WorkerPoolPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        enrollment = create_worker_pool(
-            connection,
-            label=payload.label.strip(),
-            slot_count=payload.slot_count,
-            assigned_threads=payload.assigned_threads,
-            assigned_hash_mb=payload.assigned_hash_mb,
-            ttl_seconds=payload.ttl_seconds,
-        )
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        response = _json(
-            _worker_pool_enrollment_payload(web_app, request, connection, enrollment),
-            status_code=201,
-        )
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.post("/api/admin/worker-pools/{pool_id}/token")
-    def admin_worker_pool_token(
-        pool_id: int,
-        payload: WorkerPoolTokenPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if get_worker_pool(connection, pool_id) is None:
-            raise HTTPException(status_code=404, detail="Worker pool not found.")
-        try:
-            enrollment = mint_worker_pool_token(
-                connection,
-                pool_id=pool_id,
-                ttl_seconds=payload.ttl_seconds,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        response = _json(
-            _worker_pool_enrollment_payload(web_app, request, connection, enrollment)
-        )
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.post("/api/admin/worker-pools/{pool_id}/revoke")
-    def admin_worker_pool_revoke(
-        pool_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if get_worker_pool(connection, pool_id) is None:
-            raise HTTPException(status_code=404, detail="Worker pool not found.")
-        revoke_worker_pool(connection, pool_id)
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        return _json({"message": "Worker pool revoked and its workers removed."})
-
     @app.post("/api/admin/workers")
     def admin_create_worker(
         payload: WorkerPayload,
@@ -1321,8 +1530,6 @@ def register_api_routes(app: FastAPI) -> None:
         worker_id = create_worker(
             connection,
             label=payload.label.strip(),
-            assigned_threads=payload.assigned_threads,
-            assigned_hash_mb=payload.assigned_hash_mb,
         )
         connection.commit()
         _publish_admin_change(web_app, request)
@@ -1372,9 +1579,7 @@ def register_api_routes(app: FastAPI) -> None:
         command = (
             f"cope worker --server-url "
             f"{web_app._command_arg(web_app._request_worker_server_url(request, connection))} "
-            f"--token {web_app._command_arg(minted.token)} "
-            f"--threads {worker.assigned_threads} "
-            f"--hash-mb {worker.assigned_hash_mb}"
+            f"--token {web_app._command_arg(minted.token)}"
         )
         response = _json(
             {
@@ -1481,29 +1686,6 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({"message": "Message deleted."})
 
 
-def _worker_pool_enrollment_payload(
-    web_app,
-    request: Request,
-    connection: sqlite3.Connection,
-    enrollment,
-) -> dict[str, Any]:
-    pool = get_worker_pool(connection, enrollment.pool_id)
-    if pool is None:
-        raise HTTPException(status_code=404, detail="Worker pool not found.")
-    server_url = web_app._request_worker_server_url(request, connection)
-    state_file = f".cope-worker/pool-{pool.id}.json"
-    return {
-        "pool_id": pool.id,
-        "token": enrollment.token,
-        "expires_at": enrollment.expires_at,
-        "start_command": (
-            f"cope worker-pool --server-url {web_app._command_arg(server_url)} "
-            f"--state-file {web_app._command_arg(state_file)}"
-        ),
-        "message": "One-time machine pool enrollment token generated.",
-    }
-
-
 def _json(
     payload: Any,
     *,
@@ -1545,7 +1727,6 @@ def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
         "adjudication": {
             "draw": None,
             "resign": None,
-            "syzygy": None,
             "max_moves": None,
         },
         "rated": True,
@@ -1760,7 +1941,7 @@ def _opening_values(
     files: list[tuple[str, str]],
     *,
     allow_empty: bool = False,
-) -> list[tuple[str, str]]:
+) -> list[OpeningLine]:
     try:
         openings = parse_openings(positions)
         openings.extend(parse_opening_uploads(files))
@@ -1773,30 +1954,55 @@ def _opening_values(
             detail="Add at least one valid opening position.",
         )
     errors: list[str] = []
-    validated: list[tuple[str, str]] = []
-    for index, (name, fen) in enumerate(openings, start=1):
+    validated: list[OpeningLine] = []
+    for index, opening in enumerate(openings, start=1):
         try:
-            board = chess.Board(fen)
+            board = (
+                chess.Board()
+                if opening.start_fen == "startpos"
+                else chess.Board(opening.start_fen)
+            )
+            start_fen = board.fen()
+            for uci in opening.moves:
+                move = chess.Move.from_uci(uci)
+                if move not in board.legal_moves:
+                    raise ValueError(f"illegal opening move {uci} at ply {board.ply() + 1}")
+                board.push(move)
         except ValueError as exc:
             errors.append(f"Position {index}: {exc}")
             continue
-        validated.append((name.strip(), board.fen()))
+        validated.append(
+            OpeningLine(
+                name=opening.name.strip(),
+                start_fen=start_fen,
+                moves=opening.moves,
+                fen=board.fen(),
+            )
+        )
     if errors:
         raise HTTPException(status_code=422, detail=errors[:20])
     return validated
 
 
 def _deduplicate_openings(
-    openings: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    result: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for name, fen in openings:
-        normalized = fen.strip()
-        if not normalized or normalized in seen:
+    openings: list[OpeningLine],
+) -> list[OpeningLine]:
+    result: list[OpeningLine] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for opening in openings:
+        normalized = opening.start_fen.strip()
+        key = (normalized, opening.moves)
+        if not normalized or key in seen:
             continue
-        seen.add(normalized)
-        result.append((name.strip(), normalized))
+        seen.add(key)
+        result.append(
+            OpeningLine(
+                name=opening.name.strip(),
+                start_fen=normalized,
+                moves=opening.moves,
+                fen=opening.fen.strip(),
+            )
+        )
     return result
 
 

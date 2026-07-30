@@ -31,6 +31,7 @@ let copyTimer: number | undefined
 const uciMoves = computed(() => props.moves.map((move) => move.uci).filter(Boolean))
 const sanMoves = computed(() => props.moves.map((move) => move.san || move.uci))
 const opening = computed<OpeningRecord>(() => props.opening || { name: 'Start position', fen: 'startpos' })
+const bookPlyTotal = computed(() => opening.value.book_moves?.length || 0)
 const hasOpeningName = computed(() => {
   const name = opening.value.name.trim().toLowerCase()
   return Boolean(name) && name !== '?' && name !== 'opening'
@@ -100,6 +101,7 @@ function fallbackCopy(value: string): void {
       >
         <span>Opening</span>
         <strong>{{ opening.name }}</strong>
+        <small v-if="bookPlyTotal">{{ bookPlyTotal }} book plies from its start position</small>
       </button>
       <button class="viewer-meta__copy viewer-meta__copy--fen" type="button" title="Copy current FEN" @click="copy(currentFen, 'FEN')">
         <span>Current FEN</span>
@@ -175,6 +177,11 @@ function fallbackCopy(value: string): void {
   font-size: 0.75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.viewer-meta__copy small {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.65rem;
 }
 
 .viewer-meta__copy code {

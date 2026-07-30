@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import subprocess
+import time
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from websockets.client import connect
+from websockets.exceptions import ConnectionClosed
+
+from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
+from cope.core.models import (
+    BenchmarkAssignment,
+    BenchmarkFailed,
+    BenchmarkerSessionHello,
+    BenchmarkerTokenHello,
+    BenchmarkerWelcome,
+    BenchmarkResult,
+)
+from cope.core.protocol import (
+    ProtocolValidationError,
+    decode_envelope,
+    encode_message,
+    make_message,
+)
+from cope.worker.client import _detect_hardware, _detect_machine_id
+from cope.worker.uci_engine import EnginePreparationError, UciEngineProcess
+
+
+LOG = logging.getLogger("cope.benchmarker")
+RECONNECT_INITIAL_DELAY_S = 1.0
+RECONNECT_MAX_DELAY_S = 30.0
+OUTPUT_LIMIT = 64_000
+
+
+@dataclass(frozen=True)
+class BenchmarkerClientConfig:
+    server_url: str
+    app_version: str
+    token: str | None = None
+    session_id: str | None = None
+    label_hint: str = ""
+    machine_id: str | None = None
+    session_file: Path | None = None
+
+
+@dataclass
+class _ConnectionState:
+    session_id: str | None
+    connected: bool = False
+
+
+async def run_benchmarker_client(config: BenchmarkerClientConfig) -> None:
+    state = _ConnectionState(
+        session_id=config.session_id or (
+            _load_session(config.session_file) if config.token is None else None
+        )
+    )
+    reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
+    while True:
+        state.connected = False
+        try:
+            await _run_connection(config, state)
+        except ConnectionClosed as error:
+            reason = error.reason or str(error) or error.__class__.__name__
+            LOG.warning("benchmark server connection closed code=%s reason=%s", error.code, reason)
+        except (OSError, asyncio.TimeoutError) as error:
+            LOG.warning("benchmark server connection failed: %s", error)
+        except Exception:
+            LOG.exception("benchmarker client failed")
+            raise
+
+        if state.connected:
+            reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
+        LOG.info("reconnecting to benchmark server in %.1fs", reconnect_delay_s)
+        await asyncio.sleep(reconnect_delay_s)
+        reconnect_delay_s = min(reconnect_delay_s * 2, RECONNECT_MAX_DELAY_S)
+
+
+async def _run_connection(
+    config: BenchmarkerClientConfig,
+    state: _ConnectionState,
+) -> None:
+    connection_config = (
+        config
+        if state.session_id is None
+        else replace(config, token=None, session_id=state.session_id)
+    )
+    machine_id = connection_config.machine_id or _detect_machine_id()
+    hw = _detect_hardware()
+    hardware_key = benchmark_hardware_key(machine_id, hw)
+    credential_count = sum(
+        value is not None
+        for value in (connection_config.token, connection_config.session_id)
+    )
+    if credential_count != 1:
+        raise ValueError("benchmarker needs exactly one of token or session_id")
+    if connection_config.token is not None:
+        hello = BenchmarkerTokenHello(
+            token=connection_config.token,
+            label_hint=connection_config.label_hint,
+            machine_id=machine_id,
+            hardware_key=hardware_key,
+            hw=hw,
+            app_version=connection_config.app_version,
+        )
+    else:
+        hello = BenchmarkerSessionHello(
+            session_id=connection_config.session_id or "",
+            machine_id=machine_id,
+            hardware_key=hardware_key,
+            hw=hw,
+            app_version=connection_config.app_version,
+        )
+
+    LOG.info(
+        "connecting to benchmark server url=%s hardware_key=%s",
+        connection_config.server_url,
+        hardware_key,
+    )
+    async with connect(connection_config.server_url, max_size=128_000) as websocket:
+        await websocket.send(encode_message(make_message("benchmark_hello", hello)))
+        envelope = decode_envelope(await websocket.recv())
+        if envelope.type != "benchmark_welcome":
+            raise ProtocolValidationError(
+                f"expected benchmark_welcome, got {envelope.type}"
+            )
+        welcome = BenchmarkerWelcome.model_validate(envelope.data)
+        state.session_id = welcome.session_id
+        _save_session(connection_config.session_file, welcome.session_id)
+        state.connected = True
+        LOG.info(
+            "accepted benchmarker_id=%s hardware_key=%s",
+            welcome.benchmarker_id,
+            hardware_key,
+        )
+        while True:
+            envelope = decode_envelope(await websocket.recv())
+            if envelope.type != "benchmark_assignment":
+                raise ProtocolValidationError(
+                    f"expected benchmark_assignment, got {envelope.type}"
+                )
+            assignment = BenchmarkAssignment.model_validate(envelope.data)
+            if assignment.hardware_key != hardware_key:
+                raise ProtocolValidationError("benchmark assignment hardware key mismatch")
+            message_type, result = await asyncio.to_thread(
+                _run_benchmark,
+                assignment,
+                connection_config.server_url,
+                welcome.session_id,
+            )
+            await websocket.send(encode_message(make_message(message_type, result)))
+
+
+def _run_benchmark(
+    assignment: BenchmarkAssignment,
+    server_url: str,
+    credential: str,
+) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
+    engine = UciEngineProcess(
+        assignment.engine,
+        server_url=server_url,
+        credential=credential,
+    )
+    output = ""
+    try:
+        try:
+            engine.prepare()
+        except EnginePreparationError as error:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="build",
+                    error=error.detail[-8000:],
+                ),
+            )
+
+        started_ns = time.monotonic_ns()
+        try:
+            completed = subprocess.run(
+                [str(engine.artifact_path.resolve()), "bench"],
+                cwd=engine.artifact_directory,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=assignment.timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            output = _trim_output(_timeout_output(error))
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="bench",
+                    error=f"engine bench exceeded {assignment.timeout_s} seconds",
+                    output=output,
+                ),
+            )
+        except OSError as error:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="bench",
+                    error=str(error)[-8000:],
+                ),
+            )
+
+        elapsed_ms = max(
+            0,
+            round((time.monotonic_ns() - started_ns) / 1_000_000),
+        )
+        output = _trim_output(completed.stdout or "")
+        if completed.returncode != 0:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="bench",
+                    error=f"engine bench exited with code {completed.returncode}",
+                    output=output,
+                ),
+            )
+        nps = parse_benchmark_nps(output)
+        if nps is None:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="parse",
+                    error="engine bench output did not contain a positive NPS value",
+                    output=output,
+                ),
+            )
+        return (
+            "benchmark_result",
+            BenchmarkResult(
+                job_id=assignment.job_id,
+                job_key=assignment.job_key,
+                hardware_key=assignment.hardware_key,
+                build_hash=assignment.engine.build_hash,
+                nps=nps,
+                elapsed_ms=elapsed_ms,
+                output=output,
+            ),
+        )
+    finally:
+        engine.close()
+
+
+def _trim_output(output: str) -> str:
+    return output[-OUTPUT_LIMIT:]
+
+
+def _timeout_output(error: subprocess.TimeoutExpired) -> str:
+    value = error.stdout or ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _load_session(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        value = path.expanduser().read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError(f"could not read benchmarker session file: {error}") from error
+    return value or None
+
+
+def _save_session(path: Path | None, session_id: str) -> None:
+    if path is None:
+        return
+    target = path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(session_id + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(target)

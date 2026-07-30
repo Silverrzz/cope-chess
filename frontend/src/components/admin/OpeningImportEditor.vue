@@ -27,9 +27,15 @@ const manualLines = computed<PreviewLine[]>(() => props.modelValue
   .map((line) => line.trim())
   .filter(Boolean)
   .map((line, index) => {
-    const separator = line.indexOf(';')
-    return separator > 0
-      ? { name: line.slice(0, separator).trim(), fen: line.slice(separator + 1).trim() }
+    const parts = line.split(';')
+    const name = parts[0] ?? ''
+    const fen = parts[1] ?? ''
+    const moves = parts[2] ?? ''
+    return parts.length > 1
+      ? {
+          name: name.trim() || `Position ${index + 1}`,
+          fen: `${fen.trim()}${moves.trim() ? ` / ${moves.trim().split(/\s+/).length} book plies` : ''}`,
+        }
       : { name: `Position ${index + 1}`, fen: line }
   }))
 
@@ -114,7 +120,7 @@ function removeFile(index: number): void {
         </ul>
 
         <label v-if="source === 'manual'" class="field">
-          <span class="field__label">FEN or EPD positions</span>
+          <span class="field__label">FEN, or name; FEN; UCI book moves</span>
           <textarea class="input input--mono" :value="modelValue" rows="11" spellcheck="false" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"></textarea>
         </label>
       </div>

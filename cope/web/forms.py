@@ -18,7 +18,6 @@ from cope.core.models import (
     ResignAdjudicationRule,
     RoundRobinFormatOptions,
     SwissFormatOptions,
-    SyzygyAdjudicationRule,
     TournamentConfig,
 )
 
@@ -179,28 +178,24 @@ def _time_control(form: FormValues, errors: list[str]) -> Any:
 
 
 def _adjudication(form: FormValues, errors: list[str]) -> AdjudicationConfig:
-    draw = resign = syzygy = None
+    draw = resign = None
     max_moves = None
     try:
         if form_flag(form, "adjudication_draw"):
             draw = DrawAdjudicationRule(
                 min_fullmove=_int_field(form, "draw_min_fullmove", errors, "Draw: minimum move", minimum=1, default=40),
                 max_abs_cp=_int_field(form, "draw_max_abs_cp", errors, "Draw: max eval (cp)", minimum=0, default=10),
-                consecutive_plies=_int_field(form, "draw_plies", errors, "Draw: consecutive plies", minimum=1, default=8),
+                consecutive_plies=_int_field(form, "draw_plies", errors, "Draw: consecutive plies", minimum=2, default=8),
             )
         if form_flag(form, "adjudication_resign"):
             resign = ResignAdjudicationRule(
                 min_abs_cp=_int_field(form, "resign_min_abs_cp", errors, "Resign: min eval (cp)", minimum=1, default=800),
-                consecutive_plies=_int_field(form, "resign_plies", errors, "Resign: consecutive plies", minimum=1, default=6),
-            )
-        if form_flag(form, "adjudication_syzygy"):
-            syzygy = SyzygyAdjudicationRule(
-                max_pieces=_int_field(form, "syzygy_max_pieces", errors, "Syzygy: max pieces", minimum=2, default=6),
+                consecutive_plies=_int_field(form, "resign_plies", errors, "Resign: consecutive plies", minimum=2, default=6),
             )
         raw_max_moves = form_value(form, "adjudication_max_moves")
         if raw_max_moves:
             max_moves = _int_field(form, "adjudication_max_moves", errors, "Maximum moves", minimum=1, default=0)
-        return AdjudicationConfig(draw=draw, resign=resign, syzygy=syzygy, max_moves=max_moves)
+        return AdjudicationConfig(draw=draw, resign=resign, max_moves=max_moves)
     except ValidationError as exc:
         errors.extend(_validation_messages(exc))
         return AdjudicationConfig()
@@ -265,7 +260,6 @@ _CHECKBOX_FIELDS = (
     "rated",
     "adjudication_draw",
     "adjudication_resign",
-    "adjudication_syzygy",
 )
 
 
@@ -309,8 +303,6 @@ def settings_form_values(settings: dict[str, Any]) -> dict[str, Any]:
         "adjudication_resign": False,
         "resign_min_abs_cp": 800,
         "resign_plies": 6,
-        "adjudication_syzygy": False,
-        "syzygy_max_pieces": 6,
         "adjudication_max_moves": "",
     }
 
@@ -349,10 +341,6 @@ def settings_form_values(settings: dict[str, Any]) -> dict[str, Any]:
         values["adjudication_resign"] = True
         values["resign_min_abs_cp"] = resign.get("min_abs_cp", values["resign_min_abs_cp"])
         values["resign_plies"] = resign.get("consecutive_plies", values["resign_plies"])
-    syzygy = adjudication.get("syzygy")
-    if syzygy:
-        values["adjudication_syzygy"] = True
-        values["syzygy_max_pieces"] = syzygy.get("max_pieces", values["syzygy_max_pieces"])
     if adjudication.get("max_moves"):
         values["adjudication_max_moves"] = adjudication["max_moves"]
 

@@ -55,7 +55,7 @@ export function defaultSettings(): TournamentSettings {
     time_control: { category: 'increment', initial_ms: 60_000, increment_ms: 1_000 },
     concurrency: 1,
     opening_suite_id: null,
-    adjudication: { max_moves: null },
+    adjudication: { draw: null, resign: null, max_moves: null },
     rated: true,
     lag_compensation_ms: 50,
   }
@@ -155,9 +155,6 @@ export function settingsFromFlat(values: Record<string, unknown> = {}): Tourname
           consecutive_plies: positiveInt(values.resign_plies, 6),
         }
       : null,
-    syzygy: bool(values.adjudication_syzygy, false)
-      ? { max_pieces: positiveInt(values.syzygy_max_pieces, 6) }
-      : null,
     max_moves: positiveInt(values.adjudication_max_moves, 0) || null,
   }
   return settings
@@ -170,7 +167,19 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
     ...defaults,
     ...cloneData(value),
     adjudication: {
-      ...cloneData(value.adjudication ?? {}),
+      draw: value.adjudication?.draw
+        ? {
+            min_fullmove: positiveInt(value.adjudication.draw.min_fullmove, 40),
+            max_abs_cp: nonNegativeInt(value.adjudication.draw.max_abs_cp, 10),
+            consecutive_plies: Math.max(2, positiveInt(value.adjudication.draw.consecutive_plies, 8)),
+          }
+        : null,
+      resign: value.adjudication?.resign
+        ? {
+            min_abs_cp: positiveInt(value.adjudication.resign.min_abs_cp, 800),
+            consecutive_plies: Math.max(2, positiveInt(value.adjudication.resign.consecutive_plies, 6)),
+          }
+        : null,
       max_moves: value.adjudication?.max_moves ?? null,
     },
     lag_compensation_ms: value.lag_compensation_ms ?? 50,

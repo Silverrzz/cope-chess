@@ -47,7 +47,9 @@ const navGroups: { label: string; items: { label: string; to: string; icon: Icon
     label: "Operations",
     items: [
       { label: "Workers", to: "/admin/workers", icon: "server" },
+      { label: "Updates", to: "/admin/updates", icon: "refresh" },
       { label: "Chat", to: "/admin/chat", icon: "message-square" },
+      { label: "Settings", to: "/admin/settings", icon: "settings" },
     ],
   },
 ];

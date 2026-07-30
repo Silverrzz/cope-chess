@@ -79,6 +79,8 @@ from cope.db import (
     list_engines,
     list_games_by_status,
     list_games,
+    list_game_assignment_progress,
+    list_game_assignment_stage_progress,
     list_moves,
     list_opening_suites,
     list_rating_rows,
@@ -90,7 +92,6 @@ from cope.db import (
     list_upcoming_games,
     list_workers,
     list_worker_failures,
-    list_worker_pools,
     list_worker_activities,
     touch_service_heartbeat,
     mint_worker_token_for_worker,
@@ -106,7 +107,7 @@ from cope.db import (
     update_tournament,
     update_worker_label,
 )
-from cope.core.models import HardwareInfo, TournamentFormat
+from cope.core.models import HardwareInfo, OpeningLine, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
     StreamProtocolError,
@@ -126,7 +127,7 @@ from cope.network import (
 )
 from cope.web import forms
 from cope.web.forms import FormError, form_flag, form_value
-from cope.web.openings import parse_opening_uploads, parse_openings
+from cope.web.openings import format_opening, parse_opening_uploads, parse_openings
 from cope.web.requests import read_form, read_form_with_files
 from cope.version import app_version
 
@@ -139,9 +140,6 @@ MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 MAX_OPENING_IMPORT_BODY_BYTES = int(
     os.environ.get("COPE_OPENING_IMPORT_MAX_BYTES", str(64 * 1024 * 1024))
 )
-MAX_ENGINE_BINARY_BODY_BYTES = int(
-    os.environ.get("COPE_ENGINE_BINARY_MAX_BYTES", str(1024 * 1024 * 1024))
-) + 1024 * 1024
 MAX_BROADCAST_SNAPSHOT_GAMES = 1000
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
@@ -454,13 +452,11 @@ def create_app(
                 {"status": "not_ready", "database": "unavailable"},
                 status_code=503,
             )
-        storage_ready = _engine_storage_ready()
-        ready = schema_version == SCHEMA_VERSION and storage_ready
+        ready = schema_version == SCHEMA_VERSION
         return JSONResponse(
             {
                 "status": "ready" if ready else "not_ready",
                 "database": "ok",
-                "engine_binary_storage": "ok" if storage_ready else "unavailable",
                 "schema_version": schema_version,
                 "expected_schema_version": SCHEMA_VERSION,
             },
@@ -489,8 +485,6 @@ def create_app(
         request_body_limit = MAX_REQUEST_BODY_BYTES
         if _is_opening_import_request(request):
             request_body_limit = MAX_OPENING_IMPORT_BODY_BYTES
-        elif _is_engine_binary_upload_request(request):
-            request_body_limit = MAX_ENGINE_BINARY_BODY_BYTES
         if (
             content_length
             and content_length.isdigit()
@@ -722,6 +716,11 @@ def create_app(
                 "viewer_locked": viewer_locked,
                 "engine_data": _engine_data(viewer_game, viewer_moves),
                 "clocks": _clock_data(viewer_moves),
+                "game_progress": (
+                    _game_progress_view(connection, viewer_game.id)
+                    if viewer_game
+                    else None
+                ),
                 "standings": _standings(connection, tournament, games, engines),
                 "settings": _settings_view(connection, tournament),
                 "engine_hardware": _engine_hardware_view(connection, tournament),
@@ -1550,7 +1549,14 @@ def create_app(
                 suite=suite,
                 openings=openings,
                 positions_text="\n".join(
-                    f"{opening.name}; {opening.fen}" if opening.name else opening.fen
+                    format_opening(
+                        OpeningLine(
+                            name=opening.name,
+                            start_fen=opening.start_fen,
+                            moves=opening.moves,
+                            fen=opening.fen,
+                        )
+                    )
                     for opening in openings
                 ),
             ),
@@ -1773,23 +1779,9 @@ def create_app(
     ):
         form = await read_form(request)
         label = form_value(form, "label") or "worker"
-        raw_assigned_threads = form_value(form, "assigned_threads")
-        raw_assigned_hash_mb = form_value(form, "assigned_hash_mb")
-        assigned_threads = (
-            int(raw_assigned_threads)
-            if raw_assigned_threads and raw_assigned_threads.isdigit() and int(raw_assigned_threads) > 0
-            else 1
-        )
-        assigned_hash_mb = (
-            int(raw_assigned_hash_mb)
-            if raw_assigned_hash_mb and raw_assigned_hash_mb.isdigit() and int(raw_assigned_hash_mb) > 0
-            else 32
-        )
         worker_id = create_worker(
             connection,
             label=label,
-            assigned_threads=assigned_threads,
-            assigned_hash_mb=assigned_hash_mb,
         )
         connection.commit()
         return RedirectResponse(
@@ -1840,9 +1832,7 @@ def create_app(
                 minted_start_command=(
                     f"cope worker --server-url "
                     f"{_command_arg(_request_worker_server_url(request, connection))} "
-                    f"--token {_command_arg(minted.token)} "
-                    f"--threads {worker.assigned_threads} "
-                    f"--hash-mb {worker.assigned_hash_mb}"
+                    f"--token {_command_arg(minted.token)}"
                 ),
                 worker_launch_command=None,
             ),
@@ -2001,27 +1991,6 @@ def _is_opening_import_request(request: Request) -> bool:
     return path == "/api/admin/openings" or bool(
         re.fullmatch(r"/api/admin/openings/\d+", path)
     )
-
-
-def _is_engine_binary_upload_request(request: Request) -> bool:
-    return request.method == "POST" and bool(
-        re.fullmatch(r"/api/admin/engines/\d+/versions", request.url.path)
-    )
-
-
-def _engine_storage_ready() -> bool:
-    root = Path(os.environ.get("COPE_ENGINE_BINARY_DIR", "/var/lib/cope/engine-binaries")).expanduser()
-    probe = root / f".health-{os.getpid()}-{threading.get_ident()}"
-    try:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with probe.open("xb") as stream:
-            stream.write(b"ok")
-        return True
-    except OSError:
-        return False
-    finally:
-        with contextlib.suppress(OSError):
-            probe.unlink()
 
 
 def _security_error(
@@ -2257,56 +2226,7 @@ def _workers_snapshot_payload(
             row["status"] in CONNECTED_WORKER_STATUSES for row in summary_rows
         ),
         "machines": _worker_machine_payloads(summary_rows),
-        "pools": _worker_pool_payloads(
-            connection,
-            summary_rows,
-            worker_server_url=worker_server_url,
-        ),
     }
-
-
-def _worker_pool_payloads(
-    connection: sqlite3.Connection,
-    rows: list[dict[str, Any]],
-    *,
-    worker_server_url: str | None = None,
-) -> list[dict[str, Any]]:
-    workers_by_pool: dict[int, list[Any]] = {}
-    for row in rows:
-        worker = row["worker"]
-        if worker.pool_id is not None:
-            workers_by_pool.setdefault(worker.pool_id, []).append(worker)
-    payloads: list[dict[str, Any]] = []
-    for pool in list_worker_pools(connection):
-        if pool.status == "revoked":
-            continue
-        workers = workers_by_pool.get(pool.id, [])
-        active = sum(worker.status in CONNECTED_WORKER_STATUSES for worker in workers)
-        state_file = f".cope-worker/pool-{pool.id}.json"
-        command = None
-        if worker_server_url is not None:
-            command = (
-                f"cope worker-pool --server-url {_command_arg(worker_server_url)} "
-                f"--state-file {_command_arg(state_file)}"
-            )
-        payloads.append(
-            {
-                "id": pool.id,
-                "label": pool.label,
-                "status": pool.status,
-                "enrollment_expires_at": pool.enrollment_expires_at,
-                "machine_id": pool.machine_id,
-                "slot_count": pool.slot_count,
-                "created_worker_count": len(workers),
-                "active_worker_count": active,
-                "assigned_threads": pool.assigned_threads,
-                "assigned_hash_mb": pool.assigned_hash_mb,
-                "reserved_threads": pool.slot_count * pool.assigned_threads,
-                "reserved_hash_mb": pool.slot_count * pool.assigned_hash_mb,
-                "start_command": command,
-            }
-        )
-    return payloads
 
 
 def _publish_admin_post_streams(request: Request) -> None:
@@ -2317,7 +2237,6 @@ def _publish_admin_post_streams(request: Request) -> None:
     if (
         path.startswith("/admin/workers")
         or path.startswith("/api/admin/workers")
-        or path.startswith("/api/admin/worker-pools")
     ):
         hub.publish("workers", "workers.changed", {}, source="web")
     tournament_id = _admin_tournament_path_id(path)
@@ -2550,30 +2469,28 @@ def _worker_admin_view(
 def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
     worker = row["worker"]
     hardware = {
-        "reported": True,
-        "summary": _worker_resource_summary(worker.assigned_threads),
-        "detail": f"{worker.assigned_hash_mb}MB engine hash",
-        "cores": str(worker.assigned_threads),
-        "memory": f"{worker.assigned_hash_mb}MB",
+        "reported": False,
+        "summary": "Not reported",
+        "detail": "",
+        "cores": "-",
+        "memory": "-",
     }
     if worker.hw is not None:
         hardware = {
             "reported": True,
-            "summary": _worker_resource_summary(worker.assigned_threads),
+            "summary": _worker_resource_summary(worker.hw.physical_cores),
             "detail": (
-                f"{worker.hw.ram_gb}GB RAM · reserves {worker.assigned_threads} cores / "
-                f"{worker.assigned_hash_mb}MB hash"
+                f"{worker.hw.physical_cores} physical / "
+                f"{worker.hw.logical_cores} logical cores · {worker.hw.ram_gb}GB RAM"
             ),
-            "cores": str(worker.assigned_threads),
-            "memory": f"{worker.assigned_hash_mb}MB",
+            "cores": str(worker.hw.physical_cores),
+            "memory": f"{worker.hw.ram_gb}GB",
         }
-        hardware["detail"] = f"{worker.assigned_hash_mb}MB engine hash"
     return {
         "id": worker.id,
         "label": worker.label,
         "status": row["status"],
         "last_seen": worker.last_seen,
-        "pool_id": worker.pool_id,
         "work": row["work"],
         "machine": row["machine"],
         "hardware": hardware,
@@ -2601,16 +2518,12 @@ def _worker_machine_payloads(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         active_workers = sum(
             row["status"] in CONNECTED_WORKER_STATUSES for row in machine_rows
         )
-        reserved_threads = sum(row["worker"].assigned_threads for row in machine_rows)
-        reserved_hash_mb = sum(row["worker"].assigned_hash_mb for row in machine_rows)
         payloads.append(
             {
                 "id": machine_id,
                 "label": machine_id[:12],
                 "worker_count": len(machine_rows),
                 "active_worker_count": active_workers,
-                "reserved_threads": reserved_threads,
-                "reserved_hash_mb": reserved_hash_mb,
                 "hardware": _machine_hardware_payload(hardware),
             }
         )
@@ -2657,9 +2570,6 @@ def _worker_record_payload(worker) -> dict[str, Any]:
         "app_version": worker.app_commit,
         "protocol_version": worker.protocol_version,
         "machine_id": worker.machine_id,
-        "pool_id": worker.pool_id,
-        "assigned_threads": worker.assigned_threads,
-        "assigned_hash_mb": worker.assigned_hash_mb,
         "hw": hardware,
         "last_seen": worker.last_seen,
     }
@@ -2689,7 +2599,6 @@ def _worker_admin_api_payload(
                 "id": failure.id,
                 "worker_id": failure.worker_id,
                 "worker_label": failure.worker_label,
-                "pool_id": failure.pool_id,
                 "machine_id": failure.machine_id,
                 "assignment_id": failure.assignment_id,
                 "game_id": failure.game_id,
@@ -2709,14 +2618,6 @@ def _state_view(status: str, label: str, detail: str) -> dict[str, str]:
 
 
 def _worker_token_view(worker) -> dict[str, str]:
-    if worker.pool_id is not None:
-        if worker.status == "revoked":
-            return _state_view("revoked", "Revoked", "Pool slot credential removed")
-        return _state_view(
-            "active",
-            "Pool managed",
-            "Credential stored by the machine pool",
-        )
     if worker.token_expires_at is None:
         if worker.status == "revoked":
             return _state_view("revoked", "Revoked", "Token removed")
@@ -2740,14 +2641,10 @@ def _worker_session_view(worker) -> dict[str, str]:
 
 
 def _worker_launch_command(worker, worker_server_url: str) -> str | None:
-    if worker.pool_id is not None:
-        return None
     if worker.session_id:
         command = (
             f"cope worker --server-url {_command_arg(worker_server_url)} "
-            f"--session-id {_command_arg(worker.session_id)} "
-            f"--threads {worker.assigned_threads} "
-            f"--hash-mb {worker.assigned_hash_mb}"
+            f"--session-id {_command_arg(worker.session_id)}"
         )
         if worker.machine_id:
             command = f"{command} --machine-id {_command_arg(worker.machine_id)}"
@@ -2844,16 +2741,25 @@ def _worker_activity_view(
         return None
 
     status = activity.assignment_status
-    verb = "Playing" if status == "live" else "Assigned"
+    verb = activity.progress_stage or ("Playing" if status == "live" else "Assigned")
     white = engines.get(activity.white_engine_id, f"Engine {activity.white_engine_id}")
     black = engines.get(activity.black_engine_id, f"Engine {activity.black_engine_id}")
+    active_count = activity.active_assignment_count
     return _activity_view(
         status,
         verb,
-        f"Game #{activity.game_id} in round {activity.round}",
+        activity.progress_detail or (
+            f"{active_count} games active"
+            if active_count > 1
+            else f"Game #{activity.game_id} in round {activity.round}"
+        ),
         f"{activity.tournament_name}: {white} vs {black}",
         href=f"/admin/tournaments/{activity.tournament_id}",
-        meta=f"{activity.plies} plies recorded",
+        meta=(
+            f"Latest game #{activity.game_id} · {activity.plies} plies recorded"
+            if active_count > 1
+            else f"{activity.plies} plies recorded"
+        ),
     )
 
 
@@ -3336,11 +3242,64 @@ def _game_payload(
     return payload
 
 
+def _game_progress_view(
+    connection: sqlite3.Connection,
+    game_id: int,
+) -> dict[str, Any] | None:
+    records = list_game_assignment_progress(connection, game_id, limit=100)
+    if not records:
+        return None
+    events = [
+        {
+            "id": record.id,
+            "source": record.source,
+            "stage": record.stage,
+            "stage_label": record.stage_label,
+            "stage_order": record.stage_order,
+            "substage": record.substage,
+            "status": record.status,
+            "detail": record.detail,
+            "engine_id": record.engine_id,
+            "engine_name": record.engine_name,
+            "current": record.current,
+            "total": record.total,
+            "metadata": record.metadata,
+            "occurred_at": record.occurred_at,
+        }
+        for record in records
+    ]
+    stages = [
+        {
+            "id": record.id,
+            "source": record.source,
+            "stage": record.stage,
+            "stage_label": record.stage_label,
+            "stage_order": record.stage_order,
+            "substage": record.substage,
+            "status": record.status,
+            "detail": record.detail,
+            "engine_id": record.engine_id,
+            "engine_name": record.engine_name,
+            "current": record.current,
+            "total": record.total,
+            "metadata": record.metadata,
+            "occurred_at": record.occurred_at,
+        }
+        for record in list_game_assignment_stage_progress(connection, game_id)
+    ]
+    return {
+        "current": events[-1],
+        "stages": stages,
+        "events": events,
+    }
+
+
 def _move_payload(move: MoveRecord) -> dict[str, Any]:
     return {
         "ply": move.ply,
         "uci": move.uci,
         "san": move.san,
+        "is_book": move.is_book,
         "eval_cp": move.eval_cp,
         "eval_mate": move.eval_mate,
         "depth": move.depth,
@@ -3391,6 +3350,11 @@ def _tournament_live_payload(
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
+        "game_progress": (
+            _game_progress_view(connection, viewer_game.id)
+            if viewer_game
+            else None
+        ),
         "standings": _standings(connection, tournament, games, engines),
         "games": [_game_payload(game, engines) for game in games],
     }
@@ -3543,13 +3507,15 @@ def _eval_label(move: MoveRecord) -> str:
     return "-"
 
 
-def _opening_view(connection: sqlite3.Connection, opening_id: int | None) -> dict[str, str] | None:
+def _opening_view(connection: sqlite3.Connection, opening_id: int | None) -> dict[str, Any] | None:
     opening = get_opening_position(connection, opening_id)
     if opening is None:
         return None
     return {
         "name": opening.name,
-        "fen": opening.fen,
+        "fen": opening.start_fen,
+        "book_moves": list(opening.moves),
+        "final_fen": opening.fen,
     }
 
 
@@ -3791,7 +3757,7 @@ def _settings_view(
     if adjudication.draw:
         rows.append(
             (
-                "Draw adjudication",
+                "Draw agreement",
                 f"after move {adjudication.draw.min_fullmove}, "
                 f"within +/-{adjudication.draw.max_abs_cp}cp "
                 f"for {adjudication.draw.consecutive_plies} plies",
@@ -3800,13 +3766,11 @@ def _settings_view(
     if adjudication.resign:
         rows.append(
             (
-                "Resign adjudication",
+                "Win adjudication",
                 f"beyond +/-{adjudication.resign.min_abs_cp}cp "
                 f"for {adjudication.resign.consecutive_plies} plies",
             )
         )
-    if adjudication.syzygy:
-        rows.append(("Syzygy adjudication", f"up to {adjudication.syzygy.max_pieces} pieces"))
     if adjudication.max_moves:
         rows.append(("Maximum moves", str(adjudication.max_moves)))
 

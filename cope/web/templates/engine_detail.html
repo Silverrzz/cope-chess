@@ -19,8 +19,9 @@
     <h2>Build</h2>
     <dl class="definition-grid">
       <dt>Version</dt><dd>{{ engine.version or "-" }}</dd>
-      <dt>Binary</dt><dd><code>{{ engine.binary_filename }}</code></dd>
-      <dt>SHA-256</dt><dd><code>{{ engine.binary_sha256 }}</code></dd>
+      <dt>Repository</dt><dd><code>{{ engine.repository_full_name }}</code></dd>
+      <dt>Source</dt><dd><code>{{ engine.source_ref }}</code></dd>
+      <dt>Build</dt><dd><code>{{ engine.build_hash }}</code></dd>
       {% if engine.uci_options %}
         <dt>UCI options</dt>
         <dd>

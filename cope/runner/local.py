@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,18 +19,23 @@ from cope.chat import (
     announce_tournament_finished,
 )
 from cope.core.models import (
+    AdjudicationConfig,
     ColorSlot,
+    EngineSpec,
     GameAssignment,
+    GameBenchmarkReference,
     TimeControl,
     WorkerGameAssignment,
     IncrementTimeControl,
     MoveNodesTimeControl,
     MoveTimeControl,
     MovesToGoTimeControl,
+    TournamentConfig,
     WorkerResources,
 )
 from cope.db import (
     GameAssignmentRecord,
+    GameBenchmarkReferenceRecord,
     GameRecord,
     MoveRecord,
     OpeningPositionRecord,
@@ -38,12 +44,12 @@ from cope.db import (
     assign_game_to_worker,
     claim_tournament_worker_profile,
     connect_database,
-    finish_game_assignment,
     finish_game,
     get_engine,
     get_engine_name,
     get_game,
     get_game_assignment,
+    get_common_benchmark_reference,
     get_opening_position,
     get_tournament,
     list_games,
@@ -81,7 +87,7 @@ from cope.tournament.tournament import Game
 
 
 TERMINAL_GAME_STATUSES = {"finished", "abandoned"}
-DEFAULT_WORKER_MAX_PLIES = 160
+MAX_LEGAL_GAME_PLIES = 17_697
 ENGINE_INFO_PUBLISH_INTERVAL_S = 0.5
 DEFAULT_MAX_MOVES_DECISIVE_CP = 800
 LOG = logging.getLogger("cope.runner")
@@ -204,7 +210,16 @@ def print_runner_report(report: RunnerReport) -> None:
 def next_worker_assignment(
     connection: sqlite3.Connection,
     worker: WorkerRecord,
+    *,
+    used_resources: tuple[int, int] | None = None,
 ) -> WorkerGameAssignment | None:
+    available_resources = _worker_available_resources(
+        connection,
+        worker,
+        used_resources=used_resources,
+    )
+    if available_resources is None:
+        return None
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
             continue
@@ -218,7 +233,11 @@ def next_worker_assignment(
             continue
 
         required_resources = _tournament_required_resources(tournament)
-        if not worker.resources.can_run(required_resources):
+        available_threads, available_hash_mb = available_resources
+        if (
+            available_threads < required_resources.threads
+            or available_hash_mb < required_resources.hash_mb
+        ):
             continue
 
         if worker.hw is None:
@@ -229,6 +248,13 @@ def next_worker_assignment(
 
         game = _next_playable_game_for_worker(connection, games, worker)
         if game is None:
+            continue
+        engines = _assignment_engines(connection, game)
+        benchmark_reference = get_common_benchmark_reference(
+            connection,
+            tuple(engines.values()),
+        )
+        if benchmark_reference is None:
             continue
 
         if not claim_tournament_worker_profile(
@@ -256,7 +282,15 @@ def next_worker_assignment(
             tournament.name,
             game.round,
         )
-        return _worker_assignment_payload(connection, tournament, game, assignment_record, opening)
+        return _worker_assignment_payload(
+            connection,
+            tournament,
+            game,
+            assignment_record,
+            opening,
+            engines,
+            benchmark_reference,
+        )
 
     return None
 
@@ -280,13 +314,45 @@ def run_worker_assignment_game(
     connection: sqlite3.Connection,
     assignment: WorkerGameAssignment,
     transport: EngineCommandTransport,
+    *,
+    progress_handler: Callable[
+        [str, str, str, str, int | None, int | None, dict | None],
+        None,
+    ] | None = None,
 ) -> None:
-    assignment_record = _validated_assignment_record(connection, assignment)
+    def progress(
+        stage: str,
+        substage: str,
+        status: str,
+        detail: str,
+        current: int | None = None,
+        total: int | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        if progress_handler is not None:
+            progress_handler(
+                stage,
+                substage,
+                status,
+                detail,
+                current,
+                total,
+                metadata,
+            )
+
+    _validated_assignment_record(connection, assignment)
     game_record = _validated_game(connection, assignment.assignment.game_id)
     tournament = _validated_tournament(connection, game_record.tournament_id)
     opening = get_opening_position(connection, game_record.opening_id)
     board = _starting_board(opening)
-    _apply_recorded_moves(board, list_moves(connection, game_record.id))
+    recorded_moves = list_moves(connection, game_record.id)
+    opening_moves = () if opening is None else opening.moves
+    if assignment.initial_fen != board.fen():
+        raise RuntimeError("assignment opening start position does not match the game")
+    if assignment.opening_moves != opening_moves:
+        raise RuntimeError("assignment opening moves do not match the game")
+    played_opening_moves = _played_opening_move_count(recorded_moves, opening_moves)
+    _apply_recorded_moves(board, recorded_moves)
     LOG.info(
         "starting game assignment_id=%s game_id=%s tournament=%s round=%s opening=%s",
         assignment.assignment.assignment_id,
@@ -294,6 +360,12 @@ def run_worker_assignment_game(
         tournament.name,
         game_record.round,
         None if opening is None else opening.name,
+    )
+    progress(
+        "startup",
+        "runtime_create",
+        "running",
+        "Creating the synchronized engine runtime",
     )
 
     runtime_time_control = _runtime_time_control(tournament.config.time_control)
@@ -319,15 +391,158 @@ def run_worker_assignment_game(
     white.set_info_listener(live_reporter.publish_white_engine_info)
     black.set_info_listener(live_reporter.publish_black_engine_info)
     runner = GameRunner(game, on_clock_sync=live_reporter.publish_clock_sync)
+    progress(
+        "startup",
+        "runtime_create",
+        "completed",
+        "Created both engine runtime controllers",
+    )
+    progress(
+        "startup",
+        "engine_initialize",
+        "running",
+        "Starting both engines and synchronizing their UCI configuration",
+        current=0,
+        total=2,
+    )
+    runner.prepare_game()
+    progress(
+        "startup",
+        "engine_initialize",
+        "completed",
+        "Both engines passed UCI initialization and readiness checks",
+        current=2,
+        total=2,
+    )
+    opening_label = "Start position" if opening is None else opening.name or "Configured opening"
+    progress(
+        "opening",
+        "opening_select",
+        "running",
+        f"Selecting {opening_label}",
+        current=played_opening_moves,
+        total=max(len(opening_moves), 1),
+        metadata={
+            "start_fen": assignment.initial_fen,
+            "opening": opening_label,
+            "book_plies": len(opening_moves),
+        },
+    )
+    white.prepare_position(board)
+    black.prepare_position(board)
+    progress(
+        "opening",
+        "opening_start_position",
+        "completed",
+        f"Both engines initialized at the start position for {opening_label}",
+        current=played_opening_moves,
+        total=max(len(opening_moves), 1),
+        metadata={"fen": board.fen()},
+    )
+    for book_index, uci in enumerate(
+        opening_moves[played_opening_moves:],
+        start=played_opening_moves + 1,
+    ):
+        _validated_assignment_record(connection, assignment)
+        progress(
+            "opening",
+            "opening_move",
+            "running",
+            f"Playing opening book move {book_index}/{len(opening_moves)}: {uci}",
+            current=book_index - 1,
+            total=len(opening_moves),
+            metadata={"move": uci, "book_ply": book_index},
+        )
+        move = chess.Move.from_uci(uci)
+        if move not in board.legal_moves:
+            raise RuntimeError(
+                f"opening move {uci} is illegal at book ply {book_index}"
+            )
+        board_before_move = board.copy()
+        side_to_move = board.turn
+        board.push(move)
+        game.state.update_from_board()
+        white.prepare_position(board)
+        black.prepare_position(board)
+        clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
+        clock_after_ms = _clock_time_ms(clock)
+        record_move(
+            connection,
+            game_id=game_record.id,
+            ply=board.ply(),
+            uci=uci,
+            san=board_before_move.san(move),
+            is_book=True,
+            time_ms=0,
+            clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
+        )
+        connection.commit()
+        publish_game_move(tournament.id, game_record.id, board.ply())
+        progress(
+            "opening",
+            "opening_move",
+            "completed",
+            f"Applied opening book move {book_index}/{len(opening_moves)}: {uci}",
+            current=book_index,
+            total=len(opening_moves),
+            metadata={
+                "move": uci,
+                "book_ply": book_index,
+                "game_ply": board.ply(),
+                "fen": board.fen(),
+                "clocks_started": False,
+            },
+        )
+    progress(
+        "opening",
+        "opening_moves",
+        "completed",
+        f"Completed {len(opening_moves)} book plies for {opening_label}; clocks remain stopped",
+        current=len(opening_moves),
+        total=max(len(opening_moves), 1),
+        metadata={
+            "fen": board.fen(),
+            "book_plies": len(opening_moves),
+            "clocks_started": False,
+        },
+    )
 
     mark_worker_assignment_live(connection, assignment.assignment.assignment_id)
     _validated_assignment_record(connection, assignment)
     connection.commit()
     publish_tournament_event(tournament.id)
+    progress(
+        "play",
+        "game_live",
+        "running",
+        "Engines are synchronized and move play is starting",
+        current=board.ply(),
+        total=max(assignment.max_plies, board.ply(), 1),
+    )
 
-    while not game.state.is_finished() and board.ply() < assignment.max_plies:
+    moves = list_moves(connection, game_record.id)
+    adjudicated = (
+        None
+        if game.state.is_finished()
+        else _adjudication_result(tournament.config.adjudication, moves)
+    )
+    while (
+        not game.state.is_finished()
+        and adjudicated is None
+        and board.ply() < assignment.max_plies
+    ):
         _validated_assignment_record(connection, assignment)
         side_to_move = board.turn
+        side_label = "White" if side_to_move == chess.WHITE else "Black"
+        progress(
+            "play",
+            "move_turn",
+            "running",
+            f"{side_label} is preparing move at ply {board.ply() + 1}",
+            current=board.ply(),
+            total=max(assignment.max_plies, board.ply(), 1),
+            metadata={"side": side_label.lower(), "next_ply": board.ply() + 1},
+        )
         board_before_move = board.copy()
         move = runner.run_next_move()
         if move is None:
@@ -355,6 +570,18 @@ def run_worker_assignment_game(
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
         )
         connection.commit()
+        moves = list_moves(connection, game_record.id)
+        if not game.state.is_finished():
+            adjudicated = _adjudication_result(tournament.config.adjudication, moves)
+        progress(
+            "play",
+            "move_recorded",
+            "running",
+            f"Recorded ply {board.ply()}: {move.uci()}",
+            current=board.ply(),
+            total=max(assignment.max_plies, board.ply(), 1),
+            metadata={"move": move.uci(), "ply": board.ply()},
+        )
         publish_game_move(tournament.id, game_record.id, board.ply())
         if board.ply() <= 10 or board.ply() % 10 == 0:
             LOG.info(
@@ -365,14 +592,46 @@ def run_worker_assignment_game(
             )
 
     _validated_assignment_record(connection, assignment)
+    progress(
+        "play",
+        "game_complete",
+        "completed",
+        f"Move play stopped after {board.ply()} plies",
+        current=board.ply(),
+        total=max(assignment.max_plies, board.ply(), 1),
+    )
+    progress(
+        "conclude",
+        "result",
+        "running",
+        "Determining the final game result and termination",
+        current=board.ply(),
+        total=max(assignment.max_plies, board.ply(), 1),
+    )
     moves = list_moves(connection, game_record.id)
-    if not game.state.is_finished():
+    if adjudicated is not None:
+        result, termination = adjudicated
+    elif not game.state.is_finished():
         result, termination = _max_moves_result(tournament, moves)
     else:
         result = game.state.get_result()
         termination = game.state.get_details() or "unknown"
 
+    progress(
+        "conclude",
+        "pgn",
+        "running",
+        f"Building PGN for {len(moves)} recorded plies",
+        current=len(moves),
+        total=max(len(moves), 1),
+    )
     pgn = _build_pgn(connection, tournament, game_record, opening, moves, result, termination)
+    progress(
+        "conclude",
+        "persist",
+        "running",
+        f"Persisting result {result} ({termination})",
+    )
     finish_game(
         connection,
         game_record.id,
@@ -387,13 +646,17 @@ def run_worker_assignment_game(
         result=result,
         termination=termination,
     )
-    finish_game_assignment(
-        connection,
-        assignment_record.id,
-        assignment_record.assignment_key,
-    )
     _finish_tournament_if_complete(connection, tournament)
     connection.commit()
+    progress(
+        "conclude",
+        "persist",
+        "completed",
+        f"Game concluded with result {result} after {len(moves)} plies",
+        current=len(moves),
+        total=max(len(moves), 1),
+        metadata={"result": result, "termination": termination, "plies": len(moves)},
+    )
     LOG.info(
         "finished game assignment_id=%s game_id=%s result=%s termination=%s plies=%s",
         assignment.assignment.assignment_id,
@@ -535,6 +798,8 @@ def _worker_assignment_payload(
     game: GameRecord,
     assignment: GameAssignmentRecord,
     opening: OpeningPositionRecord | None,
+    engines: dict[int, EngineSpec],
+    benchmark_reference: GameBenchmarkReferenceRecord,
 ) -> WorkerGameAssignment:
     return WorkerGameAssignment(
         assignment=GameAssignment(
@@ -555,17 +820,22 @@ def _worker_assignment_payload(
         round=game.round,
         initial_fen=_starting_board(opening).fen(),
         opening_name=None if opening is None else opening.name,
+        opening_moves=() if opening is None else opening.moves,
         max_plies=_max_plies(tournament),
-        engines=_assignment_engines(connection, game),
+        engines=engines,
         required_resources=_tournament_required_resources(tournament),
+        benchmark_reference=GameBenchmarkReference(
+            hardware_key=benchmark_reference.hardware_key,
+            engine_nps=benchmark_reference.engine_nps,
+        ),
     )
 
 
 def _assignment_engines(
     connection: sqlite3.Connection,
     game: GameRecord,
-):
-    engines = {}
+) -> dict[int, EngineSpec]:
+    engines: dict[int, EngineSpec] = {}
     for engine_id in {game.white_engine_id, game.black_engine_id}:
         engine = get_engine(connection, engine_id)
         if engine is None:
@@ -592,6 +862,42 @@ def _tournament_required_resources(tournament: TournamentRecord) -> WorkerResour
     return WorkerResources(
         threads=tournament.config.engine_threads,
         hash_mb=tournament.config.engine_hash_mb * 2,
+    )
+
+
+def _worker_available_resources(
+    connection: sqlite3.Connection,
+    worker: WorkerRecord,
+    *,
+    used_resources: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
+    capacity = worker.capacity
+    if capacity is None:
+        return None
+    if used_resources is None:
+        used_threads = 0
+        used_hash_mb = 0
+        rows = connection.execute(
+            """
+            SELECT tournaments.config
+            FROM game_assignments
+            JOIN games ON games.id = game_assignments.game_id
+            JOIN tournaments ON tournaments.id = games.tournament_id
+            WHERE game_assignments.worker_id = ?
+              AND game_assignments.status IN ('assigned', 'acked', 'live')
+              AND games.status IN ('assigned', 'live')
+            """,
+            (worker.id,),
+        )
+        for row in rows:
+            config = TournamentConfig.model_validate_json(row["config"])
+            used_threads += config.engine_threads
+            used_hash_mb += config.engine_hash_mb * 2
+    else:
+        used_threads, used_hash_mb = used_resources
+    return (
+        max(0, capacity.threads - used_threads),
+        max(0, capacity.hash_mb - used_hash_mb),
     )
 
 
@@ -725,9 +1031,35 @@ def _finish_tournament_if_complete(
 
 
 def _starting_board(opening: OpeningPositionRecord | None) -> chess.Board:
-    if opening is None or opening.fen == "startpos":
+    if opening is None or opening.start_fen == "startpos":
         return chess.Board()
-    return chess.Board(opening.fen)
+    return chess.Board(opening.start_fen)
+
+
+def _played_opening_move_count(
+    recorded_moves: tuple[MoveRecord, ...],
+    opening_moves: tuple[str, ...],
+) -> int:
+    book_moves: list[MoveRecord] = []
+    engine_move_seen = False
+    for move in recorded_moves:
+        if move.is_book:
+            if engine_move_seen:
+                raise RuntimeError("recorded book move appears after engine play")
+            book_moves.append(move)
+        else:
+            engine_move_seen = True
+    if len(book_moves) > len(opening_moves):
+        raise RuntimeError("recorded game has more book moves than its opening")
+    for index, move in enumerate(book_moves):
+        if move.uci != opening_moves[index]:
+            raise RuntimeError(
+                f"recorded book move {move.uci} does not match opening move "
+                f"{opening_moves[index]} at book ply {index + 1}"
+            )
+    if engine_move_seen and len(book_moves) != len(opening_moves):
+        raise RuntimeError("engine play started before the opening book was completed")
+    return len(book_moves)
 
 
 def _apply_recorded_moves(
@@ -745,7 +1077,84 @@ def _max_plies(tournament: TournamentRecord) -> int:
     max_moves = tournament.config.adjudication.max_moves
     if max_moves is not None:
         return max_moves * 2
-    return DEFAULT_WORKER_MAX_PLIES
+    return MAX_LEGAL_GAME_PLIES
+
+
+def _adjudication_result(
+    config: AdjudicationConfig,
+    moves: tuple[MoveRecord, ...],
+) -> tuple[str, str] | None:
+    draw = config.draw
+    if draw is not None:
+        window = _adjudication_window(moves, draw.consecutive_plies)
+        if window and all(
+            (move.ply + 1) // 2 >= draw.min_fullmove
+            and move.eval_mate is None
+            and move.eval_cp is not None
+            and abs(move.eval_cp) <= draw.max_abs_cp
+            for move in window
+        ):
+            return (
+                "1/2-1/2",
+                "draw adjudication: both engines agreed within "
+                f"+/-{draw.max_abs_cp}cp for {draw.consecutive_plies} consecutive plies",
+            )
+
+    resign = config.resign
+    if resign is None:
+        return None
+    window = _adjudication_window(moves, resign.consecutive_plies)
+    if not window:
+        return None
+
+    winners: list[str] = []
+    for move in window:
+        score = _white_relative_move_score(move)
+        if score is None:
+            return None
+        mate, cp = score
+        if mate is not None:
+            if mate == 0:
+                return None
+            winners.append("white" if mate > 0 else "black")
+        elif cp is not None and abs(cp) >= resign.min_abs_cp:
+            winners.append("white" if cp > 0 else "black")
+        else:
+            return None
+
+    winner = winners[0]
+    if any(candidate != winner for candidate in winners[1:]):
+        return None
+    return (
+        "1-0" if winner == "white" else "0-1",
+        f"win adjudication: both engines agreed {winner} was winning for "
+        f"{resign.consecutive_plies} consecutive plies",
+    )
+
+
+def _adjudication_window(
+    moves: tuple[MoveRecord, ...],
+    consecutive_plies: int,
+) -> tuple[MoveRecord, ...]:
+    if len(moves) < consecutive_plies:
+        return ()
+    window = moves[-consecutive_plies:]
+    if any(current.ply != previous.ply + 1 for previous, current in zip(window, window[1:])):
+        return ()
+    if len({move.ply % 2 for move in window}) != 2:
+        return ()
+    return window
+
+
+def _white_relative_move_score(
+    move: MoveRecord,
+) -> tuple[int | None, int | None] | None:
+    mover_sign = 1 if move.ply % 2 == 1 else -1
+    if move.eval_mate is not None:
+        return mover_sign * move.eval_mate, None
+    if move.eval_cp is not None:
+        return None, mover_sign * move.eval_cp
+    return None
 
 
 def _max_moves_result(

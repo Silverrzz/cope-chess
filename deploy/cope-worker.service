@@ -1,5 +1,5 @@
 [Unit]
-Description=COPE Chess worker pool
+Description=COPE Chess worker
 After=network-online.target
 Wants=network-online.target
 
@@ -7,16 +7,18 @@ Wants=network-online.target
 Type=simple
 User=cope-worker
 Group=cope-worker
+SupplementaryGroups=docker
 EnvironmentFile=/etc/cope/worker.env
+Environment=COPE_UPDATE_ROOT=/opt/cope-worker
 WorkingDirectory=/var/lib/cope-worker
-ExecStart=/opt/cope-worker/venv/bin/cope worker-pool --server-url ${COPE_WORKER_SERVER_URL} --state-file /var/lib/cope-worker/pool.json
+ExecStart=/opt/cope-worker/current/venv/bin/cope worker --server-url ${COPE_WORKER_SERVER_URL} --token-file /etc/cope/worker.token --state-file /var/lib/cope-worker/worker.json
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/cope-worker
+ReadWritePaths=/var/lib/cope-worker /opt/cope-worker
 
 [Install]
 WantedBy=multi-user.target

@@ -41,6 +41,12 @@ class EngineSearchInfo:
     pv: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EngineCommandOutput:
+    lines: list[str]
+    elapsed_ms: int | None = None
+
+
 @runtime_checkable
 class EngineCommandTransport(Protocol):
     def execute_engine_command(
@@ -48,7 +54,7 @@ class EngineCommandTransport(Protocol):
         engine_id: int,
         command: str,
         info_handler: Callable[[str], None] | None = None,
-    ) -> list[str]:
+    ) -> EngineCommandOutput | list[str]:
         ...
 
 
@@ -111,15 +117,29 @@ class EngineInstance:
     def get_move(self, board: chess.Board, go_command_arg: str) -> chess.Move:
         return self.get_search_result(board, go_command_arg).bestmove
 
+    def prepare_position(self, board: chess.Board) -> None:
+        self._ensure_engine_started()
+        command = position_command(board)
+        if self._is_remote():
+            self._send_remote_command(command)
+            return
+        self._send_uci_command(command)
+
     def get_search_result(self, board: chess.Board, go_command_arg: str) -> EngineSearchResult:
         self._ensure_engine_started()
         self._current_search_info = None
 
         if self._is_remote():
             lines: list[str] = []
-            lines.extend(self._send_remote_command(position_command(board)))
-            lines.extend(self._send_remote_command(go_command_arg, self._record_info_line))
-            result = _parse_search_result(lines, board, self._name)
+            lines.extend(self._send_remote_command(position_command(board)).lines)
+            search_output = self._send_remote_command(go_command_arg, self._record_info_line)
+            lines.extend(search_output.lines)
+            result = _parse_search_result(
+                lines,
+                board,
+                self._name,
+                command_elapsed_ms=search_output.elapsed_ms,
+            )
             self._last_search_result = result
             return result
 
@@ -140,6 +160,12 @@ class EngineInstance:
         if self.is_searching():
             raise RuntimeError(f"{self._name} is already searching")
 
+        self._last_search_result = None
+        self._current_search_info = None
+        if self._is_remote():
+            begin_search = getattr(self._host, "begin_engine_search", None)
+            if callable(begin_search):
+                begin_search(int(self._name))
         self._search_future = self._search_executor.submit(
             self.get_search_result,
             board.copy(),
@@ -158,12 +184,23 @@ class EngineInstance:
     def uses_worker_search_clock(self) -> bool:
         return self._is_remote()
 
+    def get_worker_search_elapsed_ms(self) -> int | None:
+        if not self._is_remote():
+            return None
+        read_clock = getattr(self._host, "current_command_elapsed_ms", None)
+        if not callable(read_clock):
+            return None
+        return read_clock(int(self._name))
+
     def _send_remote_command(
         self,
         command: str,
         info_handler: Callable[[str], None] | None = None,
-    ) -> list[str]:
-        return self._host.execute_engine_command(int(self._name), command, info_handler)
+    ) -> EngineCommandOutput:
+        output = self._host.execute_engine_command(int(self._name), command, info_handler)
+        if isinstance(output, EngineCommandOutput):
+            return output
+        return EngineCommandOutput(lines=output)
 
     def _record_info_line(self, line: str) -> None:
         line = clamp_uci_info_line(line)
@@ -174,8 +211,8 @@ class EngineInstance:
                 self._info_listener(line, info)
 
     def _read_remote_until_token(self, command: str, token: str):
-        lines = self._send_remote_command(command)
-        if token not in lines:
+        output = self._send_remote_command(command)
+        if token not in output.lines:
             raise RuntimeError(f"{self._name} timed out waiting for {token}")
 
     def _send_uci_command(self, command: str):
@@ -285,7 +322,11 @@ class EngineInstance:
 
         if self._is_remote():
             try:
-                self._send_remote_command("stop")
+                stop_search = getattr(self._host, "stop_engine_search", None)
+                if callable(stop_search):
+                    stop_search(int(self._name))
+                else:
+                    self._send_remote_command("stop")
             except Exception:
                 pass
             self._search_future.cancel()
@@ -378,16 +419,17 @@ def _parse_search_result(
     lines: list[str],
     board: chess.Board,
     engine_name: str,
+    *,
+    command_elapsed_ms: int | None = None,
 ) -> EngineSearchResult:
     bestmove: chess.Move | None = None
     search_info = EngineSearchInfo()
     info_line: str | None = None
-    command_elapsed_ms: int | None = None
-
     for line in lines:
         worker_elapsed_ms = parse_worker_command_elapsed(line)
         if worker_elapsed_ms is not None:
-            command_elapsed_ms = worker_elapsed_ms
+            if command_elapsed_ms is None:
+                command_elapsed_ms = worker_elapsed_ms
             continue
         info = _parse_info_line(line, search_info)
         if info is not None:
@@ -429,6 +471,10 @@ def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSear
         return None
     if len(parts) >= 2 and parts[1] == "string":
         return None
+    if "multipv" in parts:
+        multipv = _int_after(parts, "multipv", 1)
+        if multipv != 1:
+            return None
 
     previous = previous or EngineSearchInfo()
     eval_cp = previous.eval_cp
@@ -441,7 +487,11 @@ def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSear
 
     if "score" in parts:
         score_index = parts.index("score")
-        if score_index + 2 < len(parts) and parts[score_index + 1] == "cp":
+        bounded = "lowerbound" in parts[score_index + 3 :] or "upperbound" in parts[score_index + 3 :]
+        if bounded:
+            eval_cp = None
+            eval_mate = None
+        elif score_index + 2 < len(parts) and parts[score_index + 1] == "cp":
             score_cp = _int_at(parts, score_index + 2)
             if score_cp is not None:
                 eval_cp = score_cp

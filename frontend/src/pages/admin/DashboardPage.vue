@@ -80,7 +80,7 @@ onMounted(load)
 <template>
   <div class="admin-page dashboard-page">
     <AdminPageHeader title="Dashboard">
-      <template #actions><RouterLink class="button button--primary" to="/admin/tournaments/new">New tournament</RouterLink></template>
+      <template #actions><RouterLink class="button button--secondary" to="/admin/updates">Update platform</RouterLink><RouterLink class="button button--primary" to="/admin/tournaments/new">New tournament</RouterLink></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
     <InlineFeedback :message="actionMessage" tone="info" />

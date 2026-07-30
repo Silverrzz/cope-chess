@@ -125,6 +125,13 @@ function validate(): string {
     if (Object.keys(options).some((name) => ['threads', 'hash'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
   }
   if (config.value.adjudication.max_moves !== null && (!Number.isInteger(config.value.adjudication.max_moves) || config.value.adjudication.max_moves < 1)) return 'Maximum moves must be a whole number of at least 1.'
+  const draw = config.value.adjudication.draw
+  if (draw && (!Number.isInteger(draw.min_fullmove) || draw.min_fullmove < 1)) return 'Draw adjudication must start from a whole full move of at least 1.'
+  if (draw && (!Number.isInteger(draw.max_abs_cp) || draw.max_abs_cp < 0)) return 'Draw evaluation must be a non-negative whole number of centipawns.'
+  if (draw && (!Number.isInteger(draw.consecutive_plies) || draw.consecutive_plies < 2)) return 'Draw agreement requires at least 2 consecutive plies.'
+  const resign = config.value.adjudication.resign
+  if (resign && (!Number.isInteger(resign.min_abs_cp) || resign.min_abs_cp < 1)) return 'Win evaluation must be a whole number of at least 1 centipawn.'
+  if (resign && (!Number.isInteger(resign.consecutive_plies) || resign.consecutive_plies < 2)) return 'Win adjudication requires at least 2 consecutive plies.'
 
   const options = config.value.format_options
   if (config.value.format === 'round_robin' && (!('games_per_pairing' in options) || !Number.isInteger(options.games_per_pairing) || options.games_per_pairing < 1)) return 'Games per pairing must be a whole number of at least 1.'

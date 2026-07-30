@@ -11,6 +11,9 @@ DEFAULT_WEB_STREAM_PATH = "/internal/stream"
 DEFAULT_WORKER_HOST = "127.0.0.1"
 DEFAULT_WORKER_PORT = 8702
 DEFAULT_WORKER_PATH = "/worker"
+DEFAULT_BENCHMARK_SERVER_HOST = "127.0.0.1"
+DEFAULT_BENCHMARK_SERVER_PORT = 8703
+DEFAULT_BENCHMARKER_PATH = "/benchmarker"
 ADMIN_TOKEN_ENV = "COPE_ADMIN_TOKEN"
 LOCAL_EVENT_PUBLISHERS = {"127.0.0.1", "::1"}
 WILDCARD_HOSTS = {"", "0.0.0.0", "::"}
@@ -44,6 +47,28 @@ def default_worker_server_url() -> str:
         DEFAULT_WORKER_HOST,
     )
     return f"ws://{_url_host(public_host)}:{default_worker_port()}{DEFAULT_WORKER_PATH}"
+
+
+def default_benchmark_server_host() -> str:
+    return os.environ.get("COPE_BENCHMARK_SERVER_HOST", DEFAULT_BENCHMARK_SERVER_HOST)
+
+
+def default_benchmark_server_port() -> int:
+    return _env_int("COPE_BENCHMARK_SERVER_PORT", DEFAULT_BENCHMARK_SERVER_PORT)
+
+
+def default_benchmarker_server_url() -> str:
+    explicit = os.environ.get("COPE_BENCHMARKER_SERVER_URL")
+    if explicit:
+        return explicit
+    public_host = os.environ.get("COPE_BENCHMARK_SERVER_PUBLIC_HOST") or _public_host(
+        default_benchmark_server_host(),
+        DEFAULT_BENCHMARK_SERVER_HOST,
+    )
+    return (
+        f"ws://{_url_host(public_host)}:{default_benchmark_server_port()}"
+        f"{DEFAULT_BENCHMARKER_PATH}"
+    )
 
 
 def default_web_stream_url() -> str:

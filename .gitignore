@@ -21,6 +21,7 @@ dist/
 /frontend/dist/
 /frontend/*.tsbuildinfo
 /cope/web/frontend_dist/
+/.pnpm-store/
 
 # Runtime data
 /tmp/

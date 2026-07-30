@@ -19,7 +19,7 @@
             <th>Name</th>
             <th>Author</th>
             <th>Version</th>
-            <th>Binary</th>
+            <th>Repository</th>
             <th>Games</th>
             <th>Status</th>
             <th class="col-actions"></th>
@@ -31,7 +31,7 @@
               <td><a href="/admin/engines/{{ engine.engine_id }}/edit">{{ engine.name }}</a></td>
               <td>{{ engine.author or "-" }}</td>
               <td>{{ engine.version or "-" }}</td>
-              <td><code>{{ engine.binary_sha256[:12] }}</code></td>
+              <td><code>{{ engine.repository_full_name }}</code></td>
               <td>{{ game_counts.get(engine.id, 0) }}</td>
               <td><span class="badge badge--{{ 'finished' if engine.active else 'aborted' }}">{{ "active" if engine.active else "inactive" }}</span></td>
               <td class="col-actions">

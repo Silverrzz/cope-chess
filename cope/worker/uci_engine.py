@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import queue
@@ -8,14 +7,12 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
-from urllib.parse import urljoin, urlsplit, urlunsplit
 from contextlib import contextmanager
 from collections.abc import Callable
 from pathlib import Path
 from typing import Iterator
 
+from cope.core.benchmark import parse_benchmark_nps
 from cope.core.models import EngineSpec
 from cope.core.stream import clamp_uci_info_line
 
@@ -36,16 +33,24 @@ class EnginePreparationError(RuntimeError):
 
 
 class UciEngineProcess:
-    def __init__(self, spec: EngineSpec, *, server_url: str, credential: str):
+    def __init__(
+        self,
+        spec: EngineSpec,
+        *,
+        server_url: str,
+        credential: str,
+        progress_callback: Callable[[str, str, str, str], None] | None = None,
+    ):
+        del server_url, credential
         self._spec = spec
+        self._progress_callback = progress_callback
         self._source_dir = _engine_source_dir(spec)
         self._binary_path = self._source_dir / "engine"
-        self._download_url = _absolute_download_url(server_url, spec.binary_url)
-        self._credential = credential
         self._process: subprocess.Popen[str] | None = None
         self._stdout: queue.Queue[str | None] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
         self._io_lock = threading.Lock()
+        self._stdin_lock = threading.Lock()
         self._prepared = False
         LOG.info(
             "engine wrapper created engine_id=%s engine=%s source_dir=%s binary=%s",
@@ -59,15 +64,97 @@ class UciEngineProcess:
     def process_started(self) -> bool:
         return self._process is not None
 
+    def report_progress(
+        self,
+        stage: str,
+        substage: str,
+        status: str,
+        detail: str,
+    ) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(stage, substage, status, detail)
+
+    @property
+    def artifact_path(self) -> Path:
+        return self._binary_path
+
+    @property
+    def artifact_directory(self) -> Path:
+        return self._source_dir
+
     def prepare(self) -> None:
         """Download and verify this version without starting a UCI process."""
+        with self._io_lock:
+            try:
+                self.report_progress(
+                    "engines",
+                    "artifact_prepare",
+                    "running",
+                    f"Preparing {self._spec.name} engine artifact",
+                )
+                self._ensure_artifact()
+                self.report_progress(
+                    "engines",
+                    "artifact_prepare",
+                    "completed",
+                    f"{self._spec.name} engine artifact is ready",
+                )
+            except EnginePreparationError:
+                raise
+            except Exception as exc:
+                raise EnginePreparationError(self._spec, "cache", str(exc)) from exc
+
+    def benchmark(self, timeout_s: int) -> tuple[int, int]:
         with self._io_lock:
             try:
                 self._ensure_artifact()
             except EnginePreparationError:
                 raise
             except Exception as exc:
-                raise EnginePreparationError(self._spec, "cache", str(exc)) from exc
+                raise EnginePreparationError(
+                    self._spec,
+                    "benchmark",
+                    str(exc),
+                ) from exc
+            started_ns = time.monotonic_ns()
+            try:
+                completed = subprocess.run(
+                    [str(self._binary_path.resolve()), "bench"],
+                    cwd=self._source_dir,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout_s,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise EnginePreparationError(
+                    self._spec,
+                    "benchmark",
+                    f"engine bench exceeded {timeout_s} seconds",
+                ) from exc
+            except OSError as exc:
+                raise EnginePreparationError(
+                    self._spec,
+                    "benchmark",
+                    str(exc),
+                ) from exc
+            elapsed_ms = max(0, round((time.monotonic_ns() - started_ns) / 1_000_000))
+            output = (completed.stdout or "")[-64_000:]
+            if completed.returncode != 0:
+                raise EnginePreparationError(
+                    self._spec,
+                    "benchmark",
+                    f"engine bench exited with code {completed.returncode}: {output}",
+                )
+            nps = parse_benchmark_nps(output)
+            if nps is None:
+                raise EnginePreparationError(
+                    self._spec,
+                    "benchmark",
+                    f"engine bench output did not contain a positive NPS value: {output}",
+                )
+            return nps, elapsed_ms
 
     def handle_command(
         self,
@@ -191,6 +278,12 @@ class UciEngineProcess:
                 process.poll(),
             )
 
+    def stop_search(self) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        self._send("stop")
+
     def _send(self, command: str) -> None:
         process = self._ensure_process()
         if process.stdin is None:
@@ -203,8 +296,9 @@ class UciEngineProcess:
                 process.pid,
                 command,
             )
-            process.stdin.write(command + "\n")
-            process.stdin.flush()
+            with self._stdin_lock:
+                process.stdin.write(command + "\n")
+                process.stdin.flush()
         except BrokenPipeError as exc:
             raise RuntimeError(f"{self._spec.name} pipe broke while sending {command!r}") from exc
 
@@ -233,6 +327,12 @@ class UciEngineProcess:
             raise RuntimeError(f"{self._spec.name} binary does not exist: {self._binary_path}")
 
         try:
+            self.report_progress(
+                "startup",
+                "process_launch",
+                "running",
+                f"Launching {self._spec.name}",
+            )
             LOG.info(
                 "engine starting engine_id=%s engine=%s binary=%s cwd=%s",
                 self._spec.engine_id,
@@ -258,6 +358,12 @@ class UciEngineProcess:
             self._spec.name,
             self._process.pid,
         )
+        self.report_progress(
+            "startup",
+            "process_launch",
+            "completed",
+            f"{self._spec.name} process started with pid {self._process.pid}",
+        )
         self._stdout = queue.Queue()
         self._stdout_thread = threading.Thread(
             target=self._read_stdout,
@@ -277,7 +383,7 @@ class UciEngineProcess:
             )
             return
 
-        artifact_key = self._spec.binary_sha256
+        artifact_key = self._spec.build_hash
         cache_root = self._source_dir.parent
         cache_name = self._source_dir.name
         lock_path = cache_root / ".locks" / f"{cache_name}.lock"
@@ -289,17 +395,33 @@ class UciEngineProcess:
             self._spec.name,
             self._source_dir,
         )
+        self.report_progress(
+            "engines",
+            "cache_lock",
+            "running",
+            f"Waiting for the machine cache lock for {self._spec.name}",
+        )
         with _exclusive_artifact_lock(lock_path):
-            if _artifact_is_ready(
-                self._source_dir, self._binary_path, artifact_key, self._spec.binary_size
-            ):
+            self.report_progress(
+                "engines",
+                "cache_lookup",
+                "running",
+                f"Checking the machine cache for {self._spec.name}",
+            )
+            if _artifact_is_ready(self._source_dir, self._binary_path, artifact_key):
                 self._prepared = True
+                self.report_progress(
+                    "engines",
+                    "cache_lookup",
+                    "completed",
+                    f"Using the cached {self._spec.name} artifact",
+                )
                 LOG.info(
                     "engine machine cache hit engine_id=%s engine=%s source_dir=%s sha256=%s",
                     self._spec.engine_id,
                     self._spec.name,
                     self._source_dir,
-                    self._spec.binary_sha256,
+                    self._spec.build_hash,
                 )
                 return
 
@@ -318,11 +440,14 @@ class UciEngineProcess:
                 self._spec.engine_id,
                 self._spec.name,
                 self._source_dir,
-                self._spec.binary_sha256,
+                self._spec.build_hash,
             )
-            # The name is deterministic because the artifact lock guarantees one
-            # writer. A process killed mid-download leaves a directory that the
-            # next attempt can identify and remove.
+            self.report_progress(
+                "engines",
+                "source_download",
+                "running",
+                f"Downloading {self._spec.name} source at {self._spec.source_ref}",
+            )
             temporary = cache_root / ".tmp" / cache_name
             stage = "cache"
             try:
@@ -334,24 +459,113 @@ class UciEngineProcess:
 
                 temporary.mkdir(parents=True)
                 stage = "download"
-                temporary_binary = temporary / "engine"
-                _download_binary(
-                    self._download_url,
-                    temporary_binary,
-                    credential=self._credential,
-                    expected_size=self._spec.binary_size,
+                repository = temporary / "repository"
+                _run_checked(["git", "init", str(repository)], cwd=None)
+                _run_checked(
+                    ["git", "-C", str(repository), "remote", "add", "origin", self._spec.repository_url],
+                    cwd=None,
                 )
+                _run_checked(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "fetch",
+                        "--depth",
+                        "1",
+                        "origin",
+                        self._spec.source_ref,
+                    ],
+                    cwd=None,
+                )
+                _run_checked(
+                    ["git", "-C", str(repository), "checkout", "--detach", "FETCH_HEAD"],
+                    cwd=None,
+                )
+                self.report_progress(
+                    "engines",
+                    "source_download",
+                    "completed",
+                    f"Downloaded {self._spec.name} source",
+                )
+                stage = "build"
+                self.report_progress(
+                    "engines",
+                    "container_build",
+                    "running",
+                    f"Building the {self._spec.name} engine image",
+                )
+                (repository / "Dockerfile.cope").write_text(self._spec.dockerfile, encoding="utf-8")
+                image_name = f"cope-engine-{artifact_key[:24]}"
+                container_name = f"{image_name}-{os.getpid()}-{threading.get_ident()}"
+                _run_checked(
+                    [
+                        "docker",
+                        "build",
+                        "--file",
+                        "Dockerfile.cope",
+                        "--tag",
+                        image_name,
+                        ".",
+                    ],
+                    cwd=repository,
+                )
+                self.report_progress(
+                    "engines",
+                    "container_build",
+                    "completed",
+                    f"Built the {self._spec.name} engine image",
+                )
+                self.report_progress(
+                    "engines",
+                    "artifact_extract",
+                    "running",
+                    f"Extracting the {self._spec.name} executable",
+                )
+                _run_checked(
+                    ["docker", "create", "--name", container_name, image_name],
+                    cwd=None,
+                )
+                try:
+                    _run_checked(
+                        [
+                            "docker",
+                            "cp",
+                            f"{container_name}:/opt/cope/engine",
+                            str(temporary / "engine"),
+                        ],
+                        cwd=None,
+                    )
+                finally:
+                    _run_checked(["docker", "rm", "-f", container_name], cwd=None)
                 stage = "verify"
-                digest = _sha256_file(temporary_binary)
-                if digest != self._spec.binary_sha256:
-                    raise RuntimeError(f"SHA-256 mismatch: expected {self._spec.binary_sha256}, got {digest}")
-                if temporary_binary.stat().st_size != self._spec.binary_size:
-                    raise RuntimeError("downloaded binary size does not match the registered artifact")
+                temporary_binary = temporary / "engine"
+                if not temporary_binary.is_file() or temporary_binary.stat().st_size <= 0:
+                    raise RuntimeError("Docker image does not contain /opt/cope/engine")
+                self.report_progress(
+                    "engines",
+                    "artifact_extract",
+                    "completed",
+                    f"Extracted the {self._spec.name} executable",
+                )
+                self.report_progress(
+                    "engines",
+                    "artifact_verify",
+                    "running",
+                    f"Verifying the {self._spec.name} executable",
+                )
                 temporary_binary.chmod(0o700)
                 (temporary / ".cope-artifact").write_text(artifact_key, encoding="utf-8")
+                shutil.rmtree(repository)
                 os.replace(temporary, self._source_dir)
                 if failure_path.exists():
                     failure_path.unlink()
+                self.report_progress(
+                    "engines",
+                    "artifact_verify",
+                    "completed",
+                    f"Verified and cached the {self._spec.name} executable",
+                )
             except Exception as exc:
                 error = EnginePreparationError(self._spec, stage, str(exc))
                 _record_artifact_failure(failure_path, error.stage, error.detail)
@@ -472,7 +686,7 @@ def _engine_source_dir(spec: EngineSpec) -> Path:
         cache_root = Path(configured_cache_root).expanduser().resolve()
     else:
         cache_root = (_effective_home_dir() / ".cope-worker" / "engines").resolve()
-    return cache_root / f"sha256-{spec.binary_sha256}"
+    return cache_root / f"build-{spec.build_hash}"
 
 
 def _effective_home_dir() -> Path:
@@ -487,16 +701,14 @@ def _artifact_is_ready(
     source_dir: Path,
     binary_path: Path,
     artifact_key: str,
-    expected_size: int,
 ) -> bool:
     marker = source_dir / ".cope-artifact"
     try:
         return (
             source_dir.is_dir()
             and binary_path.is_file()
-            and binary_path.stat().st_size == expected_size
+            and binary_path.stat().st_size > 0
             and marker.read_text(encoding="utf-8") == artifact_key
-            and _sha256_file(binary_path) == artifact_key
         )
     except (OSError, UnicodeError):
         return False
@@ -544,56 +756,6 @@ def _exclusive_artifact_lock(path: Path) -> Iterator[None]:
                     import fcntl
 
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def _absolute_download_url(server_url: str, path: str) -> str:
-    if path.startswith(("https://", "http://")):
-        return path
-    parsed = urlsplit(server_url)
-    scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
-    origin = urlunsplit((scheme, parsed.netloc, "/", "", ""))
-    return urljoin(origin, path.lstrip("/"))
-
-
-def _download_binary(
-    url: str,
-    destination: Path,
-    *,
-    credential: str,
-    expected_size: int,
-) -> None:
-    request = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {credential}", "Accept": "application/octet-stream"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response, destination.open("xb") as output:
-            declared = response.headers.get("Content-Length")
-            if declared and int(declared) != expected_size:
-                raise RuntimeError("server reported an unexpected binary size")
-            received = 0
-            while True:
-                chunk = response.read(min(1024 * 1024, expected_size - received + 1))
-                if not chunk:
-                    break
-                received += len(chunk)
-                if received > expected_size:
-                    raise RuntimeError("server sent more binary data than registered")
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"binary server returned HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"could not reach binary server: {exc.reason}") from exc
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _run_checked(command, *, cwd: Path | None, shell: bool = False) -> None:

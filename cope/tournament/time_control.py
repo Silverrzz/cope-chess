@@ -110,8 +110,12 @@ class TimeManager:
     def start_clock(self):
         self._chess_clock.start_clock()
 
-    def probe_clock(self):
-        elapsed_time = self._chess_clock.get_elapsed_time()
+    def probe_clock(self, elapsed_time_ms: float | None = None):
+        elapsed_time = (
+            self._chess_clock.get_elapsed_time()
+            if elapsed_time_ms is None
+            else elapsed_time_ms
+        )
         category = self._time_control.get_category()
 
         if category is TimeControlCategory.INCREMENT:

@@ -9,8 +9,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cope.core.models import (
+    AssignmentProgress,
     EngineSpec,
     HardwareInfo,
+    OpeningLine,
     TournamentConfig,
     WorkerResources,
 )
@@ -105,6 +107,27 @@ class GameAssignmentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class GameProgressRecord:
+    id: int
+    assignment_id: int
+    assignment_key: str
+    game_id: int
+    source: str
+    stage: str
+    stage_label: str
+    stage_order: int
+    substage: str
+    status: str
+    detail: str
+    engine_id: int | None
+    engine_name: str | None
+    current: int | None
+    total: int | None
+    metadata: dict[str, Any]
+    occurred_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerRecord:
     id: int
     label: str
@@ -114,17 +137,16 @@ class WorkerRecord:
     app_commit: str | None
     protocol_version: int | None
     machine_id: str | None
-    pool_id: int | None
-    assigned_threads: int
-    assigned_hash_mb: int
     hw: HardwareInfo | None
     last_seen: str | None
 
     @property
-    def resources(self) -> WorkerResources:
+    def capacity(self) -> WorkerResources | None:
+        if self.hw is None:
+            return None
         return WorkerResources(
-            threads=self.assigned_threads,
-            hash_mb=self.assigned_hash_mb,
+            threads=self.hw.physical_cores,
+            hash_mb=self.hw.total_ram_mb,
         )
 
 
@@ -133,7 +155,6 @@ class WorkerFailureRecord:
     id: int
     worker_id: int | None
     worker_label: str
-    pool_id: int | None
     machine_id: str | None
     assignment_id: int | None
     game_id: int | None
@@ -159,14 +180,35 @@ class EngineVersionRecord:
     name: str
     author: str
     version: str
-    binary_filename: str
-    binary_sha256: str
-    binary_size: int
-    storage_key: str
+    git_host_id: int | None
+    repository_url: str
+    repository_full_name: str
+    source_ref: str
+    source_kind: str
+    dockerfile: str
+    build_hash: str
     uci_options: dict[str, Any]
     active: bool
     version_active: bool
     engine_active: bool
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AppSettingsRecord:
+    openai_api_key_configured: bool
+    openai_model: str
+
+
+@dataclass(frozen=True, slots=True)
+class GitHostRecord:
+    id: int
+    name: str
+    provider: str
+    base_url: str
+    api_url: str
+    access_token: str
+    enabled: bool
     created_at: str
 
 
@@ -184,6 +226,8 @@ class OpeningRecord:
     suite_id: int
     position: int
     name: str
+    start_fen: str
+    moves: tuple[str, ...]
     fen: str
 
 
@@ -210,34 +254,6 @@ class WorkerToken:
     worker_id: int
     token: str
     expires_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerPoolRecord:
-    id: int
-    label: str
-    enrollment_expires_at: str | None
-    status: str
-    machine_id: str | None
-    slot_count: int
-    assigned_threads: int
-    assigned_hash_mb: int
-    created_at: str
-    enrolled_at: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerPoolEnrollment:
-    pool_id: int
-    token: str
-    expires_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerPoolSlotCredential:
-    worker_id: int
-    label: str
-    token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +286,33 @@ class RunnerCommandRecord:
     claimed_at: str | None
     finished_at: str | None
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentJobRecord:
+    id: int
+    requested_ref: str
+    target_commit: str | None
+    status: str
+    requested_at: str
+    started_at: str | None
+    finished_at: str | None
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeploymentTargetRecord:
+    id: int
+    job_id: int
+    target_kind: str
+    target_id: int | None
+    label: str
+    repository_url: str | None
+    target_commit: str | None
+    current_commit: str | None
+    status: str
+    detail: str
+    updated_at: str
 
 
 def utc_now() -> str:
@@ -382,20 +425,35 @@ def create_engine_version(
     *,
     engine_id: int,
     version: str,
-    binary_filename: str,
-    binary_sha256: str,
-    binary_size: int,
-    storage_key: str,
+    git_host_id: int | None,
+    repository_url: str,
+    repository_full_name: str,
+    source_ref: str,
+    source_kind: str,
+    dockerfile: str,
     uci_options: dict[str, Any] | None = None,
     active: bool = True,
 ) -> int:
+    build_hash = _engine_build_hash(repository_url, source_ref, dockerfile)
     cursor = connection.execute(
         """INSERT INTO engine_versions
-           (engine_id, version, binary_filename, binary_sha256, binary_size, storage_key,
-            uci_options, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (engine_id, version, binary_filename, binary_sha256, binary_size, storage_key,
-         _json_dump(uci_options or {}), int(active), utc_now()),
+           (engine_id, version, git_host_id, repository_url, repository_full_name,
+            source_ref, source_kind, dockerfile, build_hash, uci_options, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            engine_id,
+            version,
+            git_host_id,
+            repository_url,
+            repository_full_name,
+            source_ref,
+            source_kind,
+            dockerfile,
+            build_hash,
+            _json_dump(uci_options or {}),
+            int(active),
+            utc_now(),
+        ),
     )
     return int(cursor.lastrowid)
 
@@ -405,12 +463,19 @@ def update_engine_version(
     version_id: int,
     *,
     version: str,
+    dockerfile: str,
     uci_options: dict[str, Any],
     active: bool,
 ) -> None:
+    current = get_engine_version_record(connection, version_id)
+    if current is None:
+        raise ValueError("engine version not found")
+    build_hash = _engine_build_hash(current.repository_url, current.source_ref, dockerfile)
     connection.execute(
-        "UPDATE engine_versions SET version = ?, uci_options = ?, active = ? WHERE id = ?",
-        (version, _json_dump(uci_options), int(active), version_id),
+        """UPDATE engine_versions
+           SET version = ?, dockerfile = ?, build_hash = ?, uci_options = ?, active = ?
+           WHERE id = ?""",
+        (version, dockerfile, build_hash, _json_dump(uci_options), int(active), version_id),
     )
 
 
@@ -429,7 +494,7 @@ def delete_engine(connection: sqlite3.Connection, engine_id: int) -> None:
     connection.execute("DELETE FROM engines WHERE id = ?", (engine_id,))
 
 
-def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> str:
+def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> None:
     if engine_game_count(connection, version_id) > 0:
         raise ValueError("engine version has recorded games; deactivate it instead of deleting")
     row = connection.execute("SELECT COUNT(*) AS count FROM participants WHERE engine_id = ?", (version_id,)).fetchone()
@@ -440,7 +505,128 @@ def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> st
         raise ValueError("engine version not found")
     connection.execute("DELETE FROM ratings WHERE engine_id = ?", (version_id,))
     connection.execute("DELETE FROM engine_versions WHERE id = ?", (version_id,))
-    return record.storage_key
+
+
+def get_app_settings(connection: sqlite3.Connection) -> AppSettingsRecord:
+    values = {
+        str(row["key"]): str(row["value"])
+        for row in connection.execute(
+            "SELECT key, value FROM app_settings WHERE key IN ('openai_api_key', 'openai_model')"
+        )
+    }
+    return AppSettingsRecord(
+        openai_api_key_configured=bool(values.get("openai_api_key", "")),
+        openai_model=values.get("openai_model", "gpt-5.6-sol"),
+    )
+
+
+def get_openai_api_key(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        "SELECT value FROM app_settings WHERE key = 'openai_api_key'"
+    ).fetchone()
+    return "" if row is None else str(row["value"])
+
+
+def update_app_settings(
+    connection: sqlite3.Connection,
+    *,
+    openai_model: str,
+    openai_api_key: str | None = None,
+    clear_openai_api_key: bool = False,
+) -> None:
+    connection.execute(
+        """INSERT INTO app_settings (key, value) VALUES ('openai_model', ?)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+        (openai_model,),
+    )
+    if clear_openai_api_key or openai_api_key is not None:
+        connection.execute(
+            """INSERT INTO app_settings (key, value) VALUES ('openai_api_key', ?)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+            ("" if clear_openai_api_key else openai_api_key,),
+        )
+
+
+def list_git_hosts(
+    connection: sqlite3.Connection,
+    *,
+    enabled_only: bool = False,
+) -> tuple[GitHostRecord, ...]:
+    sql = "SELECT * FROM git_hosts"
+    parameters: tuple[Any, ...] = ()
+    if enabled_only:
+        sql += " WHERE enabled = ?"
+        parameters = (1,)
+    sql += " ORDER BY name"
+    return tuple(_git_host_from_row(row) for row in connection.execute(sql, parameters))
+
+
+def get_git_host(connection: sqlite3.Connection, host_id: int) -> GitHostRecord | None:
+    row = connection.execute("SELECT * FROM git_hosts WHERE id = ?", (host_id,)).fetchone()
+    return None if row is None else _git_host_from_row(row)
+
+
+def create_git_host(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    provider: str,
+    base_url: str,
+    api_url: str,
+    access_token: str,
+    enabled: bool,
+) -> int:
+    cursor = connection.execute(
+        """INSERT INTO git_hosts
+           (name, provider, base_url, api_url, access_token, enabled, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (name, provider, base_url, api_url, access_token, int(enabled), utc_now()),
+    )
+    return int(cursor.lastrowid)
+
+
+def update_git_host(
+    connection: sqlite3.Connection,
+    host_id: int,
+    *,
+    name: str,
+    provider: str,
+    base_url: str,
+    api_url: str,
+    access_token: str | None,
+    clear_access_token: bool,
+    enabled: bool,
+) -> None:
+    if clear_access_token or access_token is not None:
+        connection.execute(
+            """UPDATE git_hosts SET name = ?, provider = ?, base_url = ?, api_url = ?,
+               access_token = ?, enabled = ? WHERE id = ?""",
+            (
+                name,
+                provider,
+                base_url,
+                api_url,
+                "" if clear_access_token else access_token,
+                int(enabled),
+                host_id,
+            ),
+        )
+    else:
+        connection.execute(
+            """UPDATE git_hosts SET name = ?, provider = ?, base_url = ?, api_url = ?,
+               enabled = ? WHERE id = ?""",
+            (name, provider, base_url, api_url, int(enabled), host_id),
+        )
+
+
+def delete_git_host(connection: sqlite3.Connection, host_id: int) -> None:
+    row = connection.execute(
+        "SELECT COUNT(*) AS count FROM engine_versions WHERE git_host_id = ?",
+        (host_id,),
+    ).fetchone()
+    if row is not None and int(row["count"]):
+        raise ValueError("git host is used by engine versions; disable it instead")
+    connection.execute("DELETE FROM git_hosts WHERE id = ?", (host_id,))
 
 
 def get_engine_record(
@@ -813,7 +999,6 @@ def _resolve_tournament_category_config(
         "adjudication": {
             "draw": None,
             "resign": None,
-            "syzygy": None,
             "max_moves": None,
         },
         "rated": True,
@@ -1127,6 +1312,96 @@ def get_game_assignment_for_game(
     return _get_game_assignment(connection, "game_id", game_id)
 
 
+def record_game_assignment_progress(
+    connection: sqlite3.Connection,
+    progress: AssignmentProgress,
+    *,
+    source: str,
+) -> int:
+    assignment = get_game_assignment(connection, progress.assignment_id)
+    if assignment is None:
+        raise RuntimeError(f"unknown assignment {progress.assignment_id}")
+    if (
+        assignment.assignment_key != progress.assignment_key
+        or assignment.game_id != progress.game_id
+    ):
+        raise RuntimeError(f"progress does not match assignment {progress.assignment_id}")
+    cursor = connection.execute(
+        """
+        INSERT INTO game_assignment_progress (
+          assignment_id, assignment_key, game_id, source,
+          stage, stage_label, stage_order, substage, status, detail,
+          engine_id, engine_name, current_value, total_value, metadata, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            progress.assignment_id,
+            progress.assignment_key,
+            progress.game_id,
+            source,
+            progress.stage,
+            progress.stage_label,
+            progress.stage_order,
+            progress.substage,
+            progress.status,
+            progress.detail,
+            progress.engine_id,
+            progress.engine_name,
+            progress.current,
+            progress.total,
+            _json_dump(progress.metadata),
+            utc_now(),
+        ),
+    )
+    return cursor.lastrowid
+
+
+def list_game_assignment_progress(
+    connection: sqlite3.Connection,
+    game_id: int,
+    *,
+    limit: int = 100,
+) -> tuple[GameProgressRecord, ...]:
+    assignment = get_game_assignment_for_game(connection, game_id)
+    if assignment is None:
+        return ()
+    rows = connection.execute(
+        """
+        SELECT * FROM (
+          SELECT * FROM game_assignment_progress
+          WHERE game_id = ? AND assignment_key = ?
+          ORDER BY id DESC
+          LIMIT ?
+        ) AS recent
+        ORDER BY id
+        """,
+        (game_id, assignment.assignment_key, max(1, min(limit, 500))),
+    )
+    return tuple(_game_progress_from_row(row) for row in rows)
+
+
+def list_game_assignment_stage_progress(
+    connection: sqlite3.Connection,
+    game_id: int,
+) -> tuple[GameProgressRecord, ...]:
+    assignment = get_game_assignment_for_game(connection, game_id)
+    if assignment is None:
+        return ()
+    rows = connection.execute(
+        """
+        SELECT * FROM (
+          SELECT DISTINCT ON (stage) *
+          FROM game_assignment_progress
+          WHERE game_id = ? AND assignment_key = ?
+          ORDER BY stage, id DESC
+        ) AS latest
+        ORDER BY stage_order, id
+        """,
+        (game_id, assignment.assignment_key),
+    )
+    return tuple(_game_progress_from_row(row) for row in rows)
+
+
 def _get_game_assignment(
     connection: sqlite3.Connection,
     column: str,
@@ -1266,217 +1541,15 @@ def create_worker(
     connection: sqlite3.Connection,
     *,
     label: str,
-    assigned_threads: int = 1,
-    assigned_hash_mb: int = 32,
 ) -> int:
     cursor = connection.execute(
         """
-        INSERT INTO workers (label, assigned_threads, assigned_hash_mb, status)
-        VALUES (?, ?, ?, 'minted')
+        INSERT INTO workers (label, status)
+        VALUES (?, 'minted')
         """,
-        (label, assigned_threads, assigned_hash_mb),
+        (label,),
     )
     return int(cursor.lastrowid)
-
-
-def create_worker_pool(
-    connection: sqlite3.Connection,
-    *,
-    label: str,
-    slot_count: int,
-    assigned_threads: int,
-    assigned_hash_mb: int,
-    ttl_seconds: int = 900,
-) -> WorkerPoolEnrollment:
-    cursor = connection.execute(
-        """
-        INSERT INTO worker_pools (
-          label, status, slot_count, assigned_threads, assigned_hash_mb, created_at
-        )
-        VALUES (?, 'pending', ?, ?, ?, ?)
-        """,
-        (
-            label,
-            slot_count,
-            assigned_threads,
-            assigned_hash_mb,
-            utc_now(),
-        ),
-    )
-    return mint_worker_pool_token(
-        connection,
-        pool_id=int(cursor.lastrowid),
-        ttl_seconds=ttl_seconds,
-    )
-
-
-def mint_worker_pool_token(
-    connection: sqlite3.Connection,
-    *,
-    pool_id: int,
-    ttl_seconds: int = 900,
-) -> WorkerPoolEnrollment:
-    token = secrets.token_urlsafe(32)
-    expires_at = (utc_now_datetime() + timedelta(seconds=ttl_seconds)).isoformat(
-        timespec="seconds"
-    )
-    cursor = connection.execute(
-        """
-        UPDATE worker_pools
-        SET enrollment_token_hash = ?, enrollment_expires_at = ?
-        WHERE id = ? AND status = 'pending' AND machine_id IS NULL
-        """,
-        (hash_worker_token(token), expires_at, pool_id),
-    )
-    if cursor.rowcount == 0:
-        raise ValueError("worker pool cannot receive an enrollment token")
-    return WorkerPoolEnrollment(pool_id=pool_id, token=token, expires_at=expires_at)
-
-
-def get_worker_pool(
-    connection: sqlite3.Connection,
-    pool_id: int,
-) -> WorkerPoolRecord | None:
-    row = connection.execute(
-        "SELECT * FROM worker_pools WHERE id = ?",
-        (pool_id,),
-    ).fetchone()
-    return _worker_pool_from_row(row) if row is not None else None
-
-
-def get_worker_pool_by_token(
-    connection: sqlite3.Connection,
-    token: str,
-) -> WorkerPoolRecord | None:
-    row = connection.execute(
-        "SELECT * FROM worker_pools WHERE enrollment_token_hash = ?",
-        (hash_worker_token(token),),
-    ).fetchone()
-    return _worker_pool_from_row(row) if row is not None else None
-
-
-def list_worker_pools(connection: sqlite3.Connection) -> tuple[WorkerPoolRecord, ...]:
-    return tuple(
-        _worker_pool_from_row(row)
-        for row in connection.execute("SELECT * FROM worker_pools ORDER BY id")
-    )
-
-
-def worker_pool_token_is_valid(
-    record: WorkerPoolRecord,
-    *,
-    now: datetime | None = None,
-) -> bool:
-    if record.status != "pending" or record.enrollment_expires_at is None:
-        return False
-    expires_at = datetime.fromisoformat(record.enrollment_expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
-    return expires_at > (now or utc_now_datetime())
-
-
-def enroll_worker_pool(
-    connection: sqlite3.Connection,
-    *,
-    pool: WorkerPoolRecord,
-    machine_id: str,
-    hw: HardwareInfo,
-    app_commit: str,
-    protocol_version: int,
-) -> tuple[WorkerPoolSlotCredential, ...]:
-    if not worker_pool_token_is_valid(pool):
-        raise ValueError("invalid or expired worker pool enrollment token")
-    existing = tuple(
-        _worker_from_row(row)
-        for row in connection.execute(
-            """
-            SELECT * FROM workers
-            WHERE machine_id = ?
-              AND status != 'revoked'
-              AND (
-                pool_id IS NOT NULL
-                OR status IN ('connected', 'downloading', 'ready', 'busy')
-              )
-            """,
-            (machine_id,),
-        )
-    )
-    for worker in existing:
-        if worker.hw is None:
-            continue
-        if worker.hw.physical_cores != hw.physical_cores:
-            raise ValueError("existing workers on this machine report a different core count")
-        if worker.hw.total_ram_mb != hw.total_ram_mb:
-            raise ValueError("existing workers on this machine report a different RAM capacity")
-
-    required_threads = (
-        pool.slot_count * pool.assigned_threads
-        + sum(worker.assigned_threads for worker in existing)
-    )
-    if required_threads > hw.physical_cores:
-        raise ValueError(
-            f"pool reserves {required_threads} threads but the machine reports "
-            f"only {hw.physical_cores} physical cores"
-        )
-    required_hash_mb = (
-        pool.slot_count * pool.assigned_hash_mb
-        + sum(worker.assigned_hash_mb for worker in existing)
-    )
-    if required_hash_mb > hw.total_ram_mb:
-        raise ValueError(
-            f"pool reserves {required_hash_mb}MB hash but the machine reports "
-            f"only {hw.total_ram_mb}MB RAM"
-        )
-
-    width = max(2, len(str(pool.slot_count)))
-    credentials: list[WorkerPoolSlotCredential] = []
-    for slot_number in range(1, pool.slot_count + 1):
-        token = secrets.token_urlsafe(32)
-        label = f"{pool.label} {slot_number:0{width}d}"
-        cursor = connection.execute(
-            """
-            INSERT INTO workers (
-              label, status, app_commit, protocol_version, machine_id, pool_id,
-              pool_slot_token_hash, assigned_threads, assigned_hash_mb, hw, last_seen
-            )
-            VALUES (?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                label,
-                app_commit,
-                protocol_version,
-                machine_id,
-                pool.id,
-                hash_worker_token(token),
-                pool.assigned_threads,
-                pool.assigned_hash_mb,
-                hw.model_dump_json(),
-                utc_now(),
-            ),
-        )
-        credentials.append(
-            WorkerPoolSlotCredential(
-                worker_id=int(cursor.lastrowid),
-                label=label,
-                token=token,
-            )
-        )
-
-    cursor = connection.execute(
-        """
-        UPDATE worker_pools
-        SET enrollment_token_hash = NULL,
-            enrollment_expires_at = NULL,
-            status = 'enrolled',
-            machine_id = ?,
-            enrolled_at = ?
-        WHERE id = ? AND status = 'pending' AND enrollment_token_hash IS NOT NULL
-        """,
-        (machine_id, utc_now(), pool.id),
-    )
-    if cursor.rowcount == 0:
-        raise ValueError("worker pool enrollment was already consumed")
-    return tuple(credentials)
 
 
 def mint_worker_token(
@@ -1484,14 +1557,10 @@ def mint_worker_token(
     *,
     label: str,
     ttl_seconds: int = 7200,
-    assigned_threads: int = 1,
-    assigned_hash_mb: int = 32,
 ) -> WorkerToken:
     worker_id = create_worker(
         connection,
         label=label,
-        assigned_threads=assigned_threads,
-        assigned_hash_mb=assigned_hash_mb,
     )
     return mint_worker_token_for_worker(
         connection,
@@ -1519,7 +1588,6 @@ def mint_worker_token_for_worker(
         WHERE id = ?
           AND status != 'revoked'
           AND session_id IS NULL
-          AND pool_id IS NULL
         """,
         (hash_worker_token(token), expires_at, worker_id),
     )
@@ -1556,19 +1624,6 @@ def get_worker_by_session_id(
     row = connection.execute(
         "SELECT * FROM workers WHERE session_id = ?",
         (session_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return _worker_from_row(row)
-
-
-def get_worker_by_pool_slot_token(
-    connection: sqlite3.Connection,
-    token: str,
-) -> WorkerRecord | None:
-    row = connection.execute(
-        "SELECT * FROM workers WHERE pool_slot_token_hash = ?",
-        (hash_worker_token(token),),
     ).fetchone()
     if row is None:
         return None
@@ -1669,14 +1724,13 @@ def record_worker_failure(
     cursor = connection.execute(
         """
         INSERT INTO worker_failures (
-          worker_id, worker_label, pool_id, machine_id, assignment_id, game_id,
+          worker_id, worker_label, machine_id, assignment_id, game_id,
           engine_id, engine_name, stage, error, occurred_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             worker.id,
             worker.label,
-            worker.pool_id,
             worker.machine_id,
             assignment_id,
             game_id,
@@ -1710,7 +1764,6 @@ def list_worker_failures(
             id=row["id"],
             worker_id=row["worker_id"],
             worker_label=row["worker_label"],
-            pool_id=row["pool_id"],
             machine_id=row["machine_id"],
             assignment_id=row["assignment_id"],
             game_id=row["game_id"],
@@ -1848,28 +1901,6 @@ def revoke_worker(connection: sqlite3.Connection, worker_id: int) -> None:
     connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 
-def revoke_worker_pool(connection: sqlite3.Connection, pool_id: int) -> None:
-    worker_ids = tuple(
-        int(row["id"])
-        for row in connection.execute(
-            "SELECT id FROM workers WHERE pool_id = ?",
-            (pool_id,),
-        )
-    )
-    for worker_id in worker_ids:
-        revoke_worker(connection, worker_id)
-    connection.execute(
-        """
-        UPDATE worker_pools
-        SET status = 'revoked',
-            enrollment_token_hash = NULL,
-            enrollment_expires_at = NULL
-        WHERE id = ?
-        """,
-        (pool_id,),
-    )
-
-
 def _active_worker_tournament_ids(
     connection: sqlite3.Connection,
     worker_id: int,
@@ -1927,12 +1958,6 @@ def _release_worker_active_assignments(
 
 def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
     """Delete a worker and return its active assignments to the pending pool."""
-    row = connection.execute(
-        "SELECT pool_id FROM workers WHERE id = ?",
-        (worker_id,),
-    ).fetchone()
-    if row is not None and row["pool_id"] is not None:
-        raise ValueError("pool worker slots cannot be deleted individually; revoke the slot instead")
     connection.execute(
         """
         UPDATE games
@@ -2022,18 +2047,24 @@ def list_opening_suites(connection: sqlite3.Connection) -> tuple[OpeningSuiteRec
 def replace_suite_openings(
     connection: sqlite3.Connection,
     suite_id: int,
-    openings: list[tuple[str, str]],
+    openings: list[OpeningLine],
 ) -> int:
-    """Replace all openings in a suite with (name, fen) pairs. Returns the new count."""
     connection.execute("DELETE FROM openings WHERE suite_id = ?", (suite_id,))
     connection.executemany(
         """
-        INSERT INTO openings (suite_id, position, name, fen)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO openings (suite_id, position, name, start_fen, moves, fen)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            (suite_id, position, name, fen)
-            for position, (name, fen) in enumerate(openings, start=1)
+            (
+                suite_id,
+                position,
+                opening.name,
+                opening.start_fen,
+                json.dumps(opening.moves),
+                opening.fen,
+            )
+            for position, opening in enumerate(openings, start=1)
         ),
     )
     return len(openings)
@@ -2163,6 +2194,330 @@ def delete_chat_message(
         return None
     connection.execute("DELETE FROM chat_messages WHERE id = ?", (message_id,))
     return _chat_message_from_row(row)
+
+
+def create_deployment_job(
+    connection: sqlite3.Connection,
+    *,
+    requested_ref: str,
+) -> int:
+    active = connection.execute(
+        """
+        SELECT id FROM deployment_jobs
+        WHERE status NOT IN ('succeeded', 'failed')
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if active is not None:
+        raise ValueError(f"deployment {active['id']} is already in progress")
+    now = utc_now()
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO deployment_jobs (requested_ref, status, requested_at)
+            VALUES (?, 'pending', ?)
+            """,
+            (requested_ref, now),
+        )
+    except sqlite3.IntegrityError as error:
+        raise ValueError("a deployment is already in progress") from error
+    job_id = int(cursor.lastrowid)
+    connection.execute(
+        """
+        INSERT INTO deployment_targets (
+          job_id, target_kind, target_id, label, current_commit, status, updated_at
+        )
+        VALUES (?, 'server', NULL, 'Server platform', NULL, 'pending', ?)
+        """,
+        (job_id, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO deployment_targets (
+          job_id, target_kind, target_id, label, current_commit, status, updated_at
+        )
+        SELECT ?, 'worker', id, label, app_commit, 'pending', ?
+        FROM workers
+        WHERE status != 'revoked'
+        ORDER BY id
+        """,
+        (job_id, now),
+    )
+    return job_id
+
+
+def get_deployment_job(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> DeploymentJobRecord | None:
+    row = connection.execute(
+        "SELECT * FROM deployment_jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    return None if row is None else _deployment_job_from_row(row)
+
+
+def list_deployment_jobs(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 20,
+) -> tuple[DeploymentJobRecord, ...]:
+    rows = connection.execute(
+        "SELECT * FROM deployment_jobs ORDER BY id DESC LIMIT ?",
+        (max(1, min(limit, 100)),),
+    )
+    return tuple(_deployment_job_from_row(row) for row in rows)
+
+
+def list_deployment_targets(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> tuple[DeploymentTargetRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT * FROM deployment_targets
+        WHERE job_id = ?
+        ORDER BY CASE target_kind WHEN 'server' THEN 0 ELSE 1 END, id
+        """,
+        (job_id,),
+    )
+    return tuple(_deployment_target_from_row(row) for row in rows)
+
+
+def claim_deployment_job(
+    connection: sqlite3.Connection,
+) -> DeploymentJobRecord | None:
+    row = connection.execute(
+        """
+        WITH candidate AS (
+          SELECT id
+          FROM deployment_jobs
+          WHERE status = 'pending'
+          ORDER BY id
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE deployment_jobs
+        SET status = 'resolving', started_at = COALESCE(started_at, ?),
+            finished_at = NULL, error = NULL
+        WHERE id = (SELECT id FROM candidate)
+        RETURNING *
+        """,
+        (utc_now(),),
+    ).fetchone()
+    return None if row is None else _deployment_job_from_row(row)
+
+
+def fail_interrupted_deployment_jobs(
+    connection: sqlite3.Connection,
+) -> tuple[int, ...]:
+    rows = connection.execute(
+        """
+        SELECT id
+        FROM deployment_jobs
+        WHERE status NOT IN ('pending', 'succeeded', 'failed')
+        ORDER BY id
+        """
+    ).fetchall()
+    job_ids = tuple(int(row["id"]) for row in rows)
+    if not job_ids:
+        return ()
+    now = utc_now()
+    for job_id in job_ids:
+        connection.execute(
+            """
+            UPDATE deployment_jobs
+            SET status = 'failed', finished_at = ?,
+                error = 'Updater restarted before the deployment completed.'
+            WHERE id = ?
+            """,
+            (now, job_id),
+        )
+        connection.execute(
+            """
+            UPDATE deployment_targets
+            SET status = CASE WHEN status = 'succeeded' THEN status ELSE 'failed' END,
+                detail = CASE
+                  WHEN status = 'succeeded' THEN detail
+                  ELSE 'Updater restarted before the deployment completed.'
+                END,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (now, job_id),
+        )
+    return job_ids
+
+
+def set_deployment_target_commit(
+    connection: sqlite3.Connection,
+    job_id: int,
+    target_commit: str,
+    repository_url: str,
+) -> None:
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE deployment_jobs
+        SET target_commit = ?
+        WHERE id = ? AND status NOT IN ('succeeded', 'failed')
+        """,
+        (target_commit, job_id),
+    )
+    connection.execute(
+        """
+        UPDATE deployment_targets
+        SET target_commit = ?, repository_url = ?, status = 'waiting',
+            detail = '', updated_at = ?
+        WHERE job_id = ? AND status = 'pending'
+        """,
+        (target_commit, repository_url, now, job_id),
+    )
+
+
+def update_deployment_job_status(
+    connection: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    *,
+    error: str | None = None,
+) -> None:
+    terminal = status in {"succeeded", "failed"}
+    connection.execute(
+        """
+        UPDATE deployment_jobs
+        SET status = ?, error = ?,
+            finished_at = CASE WHEN ? THEN ? ELSE NULL END
+        WHERE id = ?
+        """,
+        (status, error, terminal, utc_now(), job_id),
+    )
+
+
+def update_deployment_target_status(
+    connection: sqlite3.Connection,
+    target_id: int,
+    status: str,
+    *,
+    current_commit: str | None = None,
+    detail: str = "",
+) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets
+        SET status = ?, current_commit = COALESCE(?, current_commit),
+            detail = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (status, current_commit, detail[:4000], utc_now(), target_id),
+    )
+
+
+def update_server_deployment_target(
+    connection: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    *,
+    current_commit: str | None = None,
+    detail: str = "",
+) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets
+        SET status = ?, current_commit = COALESCE(?, current_commit),
+            detail = ?, updated_at = ?
+        WHERE job_id = ? AND target_kind = 'server'
+        """,
+        (status, current_commit, detail[:4000], utc_now(), job_id),
+    )
+
+
+def worker_deployment_target(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> DeploymentTargetRecord | None:
+    row = connection.execute(
+        """
+        SELECT target.*
+        FROM deployment_targets AS target
+        JOIN deployment_jobs AS job ON job.id = target.job_id
+        WHERE target.target_kind = 'worker'
+          AND target.target_id = ?
+          AND target.target_commit IS NOT NULL
+          AND target.status IN ('waiting', 'updating', 'restarting', 'deferred', 'failed')
+          AND job.status != 'failed'
+        ORDER BY target.job_id DESC
+        LIMIT 1
+        """,
+        (worker_id,),
+    ).fetchone()
+    return None if row is None else _deployment_target_from_row(row)
+
+
+def reconcile_worker_deployment(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    app_commit: str,
+) -> DeploymentTargetRecord | None:
+    target = worker_deployment_target(connection, worker_id)
+    if target is None:
+        return None
+    if target.target_commit == app_commit:
+        update_deployment_target_status(
+            connection,
+            target.id,
+            "succeeded",
+            current_commit=app_commit,
+        )
+        return None
+    if target.status in {"failed", "deferred"}:
+        update_deployment_target_status(
+            connection,
+            target.id,
+            "waiting",
+            current_commit=app_commit,
+        )
+        return worker_deployment_target(connection, worker_id)
+    if target.current_commit != app_commit:
+        update_deployment_target_status(
+            connection,
+            target.id,
+            target.status,
+            current_commit=app_commit,
+            detail=target.detail,
+        )
+        return worker_deployment_target(connection, worker_id)
+    return target
+
+
+def _deployment_job_from_row(row: sqlite3.Row) -> DeploymentJobRecord:
+    return DeploymentJobRecord(
+        id=row["id"],
+        requested_ref=row["requested_ref"],
+        target_commit=row["target_commit"],
+        status=row["status"],
+        requested_at=row["requested_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        error=row["error"],
+    )
+
+
+def _deployment_target_from_row(row: sqlite3.Row) -> DeploymentTargetRecord:
+    return DeploymentTargetRecord(
+        id=row["id"],
+        job_id=row["job_id"],
+        target_kind=row["target_kind"],
+        target_id=row["target_id"],
+        label=row["label"],
+        repository_url=row["repository_url"],
+        target_commit=row["target_commit"],
+        current_commit=row["current_commit"],
+        status=row["status"],
+        detail=row["detail"],
+        updated_at=row["updated_at"],
+    )
 
 
 def enqueue_runner_command(
@@ -2328,11 +2683,19 @@ def get_tournament_rating_commit(
 
 
 def _category_from_row(row: sqlite3.Row) -> CategoryRecord:
+    default_config = json.loads(row["default_config"])
+    adjudication = default_config.get("adjudication")
+    if isinstance(adjudication, dict):
+        default_config["adjudication"] = {
+            key: adjudication[key]
+            for key in ("draw", "resign", "max_moves")
+            if key in adjudication
+        }
     return CategoryRecord(
         id=row["id"],
         name=row["name"],
         description=row["description"],
-        default_config=json.loads(row["default_config"]),
+        default_config=default_config,
         active=bool(row["active"]),
         created_at=row["created_at"],
     )
@@ -2344,9 +2707,10 @@ def _engine_from_row(row: sqlite3.Row) -> EngineSpec:
         name=row["name"],
         author=row["author"],
         version=row["version"],
-        binary_url=f"/api/worker/engine-binaries/{row['id']}",
-        binary_sha256=row["binary_sha256"],
-        binary_size=row["binary_size"],
+        repository_url=row["repository_url"],
+        source_ref=row["source_ref"],
+        dockerfile=row["dockerfile"],
+        build_hash=row["build_hash"],
         uci_options=json.loads(row["uci_options"]),
     )
 
@@ -2363,13 +2727,36 @@ def _engine_record_from_row(row: sqlite3.Row) -> EngineRecord:
 def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
     return EngineVersionRecord(
         id=row["id"], engine_id=row["engine_id"], name=row["name"], author=row["author"],
-        version=row["version"], binary_filename=row["binary_filename"],
-        binary_sha256=row["binary_sha256"], binary_size=row["binary_size"],
-        storage_key=row["storage_key"], uci_options=json.loads(row["uci_options"]),
+        version=row["version"], git_host_id=row["git_host_id"],
+        repository_url=row["repository_url"] or "",
+        repository_full_name=row["repository_full_name"] or "",
+        source_ref=row["source_ref"] or "",
+        source_kind=row["source_kind"] or "commit",
+        dockerfile=row["dockerfile"] or "",
+        build_hash=row["build_hash"] or "",
+        uci_options=json.loads(row["uci_options"]),
         active=bool(row["active"]) and bool(row.get("engine_active", True)),
         version_active=bool(row["active"]), engine_active=bool(row.get("engine_active", True)),
         created_at=row["created_at"],
     )
+
+
+def _git_host_from_row(row: sqlite3.Row) -> GitHostRecord:
+    return GitHostRecord(
+        id=row["id"],
+        name=row["name"],
+        provider=row["provider"],
+        base_url=row["base_url"],
+        api_url=row["api_url"],
+        access_token=row["access_token"],
+        enabled=bool(row["enabled"]),
+        created_at=row["created_at"],
+    )
+
+
+def _engine_build_hash(repository_url: str, source_ref: str, dockerfile: str) -> str:
+    value = "\0".join((repository_url, source_ref, dockerfile)).encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
 
 
 def _opening_suite_from_row(row: sqlite3.Row) -> OpeningSuiteRecord:
@@ -2387,6 +2774,8 @@ def _opening_from_row(row: sqlite3.Row) -> OpeningRecord:
         suite_id=row["suite_id"],
         position=row["position"],
         name=row["name"],
+        start_fen=row["start_fen"],
+        moves=tuple(json.loads(row["moves"])),
         fen=row["fen"],
     )
 
@@ -2503,6 +2892,28 @@ def _game_assignment_from_row(row: sqlite3.Row) -> GameAssignmentRecord:
     )
 
 
+def _game_progress_from_row(row: sqlite3.Row) -> GameProgressRecord:
+    return GameProgressRecord(
+        id=row["id"],
+        assignment_id=row["assignment_id"],
+        assignment_key=row["assignment_key"],
+        game_id=row["game_id"],
+        source=row["source"],
+        stage=row["stage"],
+        stage_label=row["stage_label"],
+        stage_order=row["stage_order"],
+        substage=row["substage"],
+        status=row["status"],
+        detail=row["detail"],
+        engine_id=row["engine_id"],
+        engine_name=row["engine_name"],
+        current=row["current_value"],
+        total=row["total_value"],
+        metadata=json.loads(row["metadata"] or "{}"),
+        occurred_at=row["occurred_at"],
+    )
+
+
 def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
     hw = None
     if row["hw"] is not None:
@@ -2517,26 +2928,8 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         app_commit=row["app_commit"],
         protocol_version=row["protocol_version"],
         machine_id=row["machine_id"],
-        pool_id=row["pool_id"],
-        assigned_threads=row["assigned_threads"],
-        assigned_hash_mb=row["assigned_hash_mb"],
         hw=hw,
         last_seen=row["last_seen"],
-    )
-
-
-def _worker_pool_from_row(row: sqlite3.Row) -> WorkerPoolRecord:
-    return WorkerPoolRecord(
-        id=row["id"],
-        label=row["label"],
-        enrollment_expires_at=row["enrollment_expires_at"],
-        status=row["status"],
-        machine_id=row["machine_id"],
-        slot_count=row["slot_count"],
-        assigned_threads=row["assigned_threads"],
-        assigned_hash_mb=row["assigned_hash_mb"],
-        created_at=row["created_at"],
-        enrolled_at=row["enrolled_at"],
     )
 
 

@@ -6,16 +6,18 @@ export interface Engine {
   name: string
   author?: string
   version: string
-  binary_filename: string
-  binary_sha256: string
-  binary_size: number
-  storage_key?: string
+  git_host_id: Id | null
+  repository_url: string
+  repository_full_name: string
+  source_ref: string
+  source_kind: 'release' | 'commit'
+  dockerfile: string
+  build_hash: string
   uci_options: Record<string, string | number | boolean>
   active: boolean
   version_active?: boolean
   engine_active?: boolean
   created_at?: string
-  storage_status?: 'ready' | 'missing' | 'corrupt'
 }
 
 export interface EngineFamily {
@@ -64,9 +66,15 @@ export interface TournamentSettings {
   concurrency: number
   opening_suite_id: number | null
   adjudication: {
-    draw?: unknown | null
-    resign?: unknown | null
-    syzygy?: unknown | null
+    draw: {
+      min_fullmove: number
+      max_abs_cp: number
+      consecutive_plies: number
+    } | null
+    resign: {
+      min_abs_cp: number
+      consecutive_plies: number
+    } | null
     max_moves: number | null
   }
   rated: boolean
@@ -122,9 +130,6 @@ export interface Worker {
   app_version?: string | null
   protocol_version?: number | null
   machine_id?: string | null
-  pool_id?: number | null
-  assigned_threads: number
-  assigned_hash_mb: number
   last_seen?: string | null
   hw?: {
     cpu_model: string

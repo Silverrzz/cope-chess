@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'engines' AND column_name = 'git_url') THEN
-    RAISE EXCEPTION 'legacy source-built engine schema is unsupported; create a fresh database for schema 4';
+    RAISE EXCEPTION 'legacy source-built engine schema is unsupported; create a fresh database for schema 8';
   END IF;
 END $$;
 
@@ -17,19 +17,67 @@ CREATE TABLE IF NOT EXISTS engines (
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT INTO app_settings (key, value) VALUES
+  ('openai_api_key', ''),
+  ('openai_model', 'gpt-5.6-sol')
+ON CONFLICT (key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS git_hosts (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL CHECK (provider IN ('github', 'gitlab')),
+  base_url TEXT NOT NULL,
+  api_url TEXT NOT NULL,
+  access_token TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at TEXT NOT NULL
+);
+
+INSERT INTO git_hosts (name, provider, base_url, api_url, access_token, enabled, created_at)
+VALUES ('GitHub', 'github', 'https://github.com', 'https://api.github.com', '', 1, '1970-01-01T00:00:00+00:00')
+ON CONFLICT (name) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS engine_versions (
   id BIGSERIAL PRIMARY KEY,
   engine_id BIGINT NOT NULL REFERENCES engines(id) ON DELETE CASCADE,
   version TEXT NOT NULL,
-  binary_filename TEXT NOT NULL,
-  binary_sha256 TEXT NOT NULL CHECK (binary_sha256 ~ '^[0-9a-f]{64}$'),
-  binary_size BIGINT NOT NULL CHECK (binary_size > 0),
-  storage_key TEXT NOT NULL CHECK (storage_key ~ '^[0-9a-f]{64}$'),
+  git_host_id BIGINT REFERENCES git_hosts(id) ON DELETE SET NULL,
+  repository_url TEXT NOT NULL,
+  repository_full_name TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('release', 'commit')),
+  dockerfile TEXT NOT NULL,
+  build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
   uci_options TEXT NOT NULL DEFAULT '{}',
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
   created_at TEXT NOT NULL,
   UNIQUE (engine_id, version)
 );
+
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS git_host_id BIGINT REFERENCES git_hosts(id) ON DELETE SET NULL;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_url TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_full_name TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_ref TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_kind TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS dockerfile TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS build_hash TEXT;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'engine_versions' AND column_name = 'binary_filename') THEN
+    ALTER TABLE engine_versions ALTER COLUMN binary_filename DROP NOT NULL;
+    ALTER TABLE engine_versions ALTER COLUMN binary_sha256 DROP NOT NULL;
+    ALTER TABLE engine_versions ALTER COLUMN binary_size DROP NOT NULL;
+    ALTER TABLE engine_versions ALTER COLUMN storage_key DROP NOT NULL;
+  END IF;
+END $$;
+UPDATE engine_versions
+SET active = 0
+WHERE repository_url IS NULL OR source_ref IS NULL OR dockerfile IS NULL OR build_hash IS NULL;
 
 CREATE TABLE IF NOT EXISTS categories (
   id BIGSERIAL PRIMARY KEY,
@@ -107,21 +155,6 @@ CREATE TABLE IF NOT EXISTS games (
   UNIQUE (tournament_id, round, pair_index, white_engine_id, black_engine_id)
 );
 
-CREATE TABLE IF NOT EXISTS worker_pools (
-  id BIGSERIAL PRIMARY KEY,
-  label TEXT NOT NULL,
-  enrollment_token_hash TEXT,
-  enrollment_expires_at TEXT,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'enrolled', 'revoked')),
-  machine_id TEXT,
-  slot_count INTEGER NOT NULL CHECK (slot_count > 0),
-  assigned_threads INTEGER NOT NULL CHECK (assigned_threads > 0),
-  assigned_hash_mb INTEGER NOT NULL CHECK (assigned_hash_mb > 0),
-  created_at TEXT NOT NULL,
-  enrolled_at TEXT
-);
-
 CREATE TABLE IF NOT EXISTS workers (
   id BIGSERIAL PRIMARY KEY,
   label TEXT NOT NULL,
@@ -133,10 +166,6 @@ CREATE TABLE IF NOT EXISTS workers (
   app_commit TEXT,
   protocol_version INTEGER,
   machine_id TEXT,
-  pool_id BIGINT REFERENCES worker_pools(id) ON DELETE SET NULL,
-  pool_slot_token_hash TEXT,
-  assigned_threads INTEGER NOT NULL DEFAULT 1 CHECK (assigned_threads > 0),
-  assigned_hash_mb INTEGER NOT NULL DEFAULT 32 CHECK (assigned_hash_mb > 0),
   hw TEXT,
   last_seen TEXT
 );
@@ -154,26 +183,235 @@ CREATE TABLE IF NOT EXISTS game_assignments (
   last_error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS game_assignment_progress (
+  id BIGSERIAL PRIMARY KEY,
+  assignment_id BIGINT NOT NULL REFERENCES game_assignments(id) ON DELETE CASCADE,
+  assignment_key TEXT NOT NULL,
+  game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  source TEXT NOT NULL CHECK (source IN ('server', 'worker')),
+  stage TEXT NOT NULL,
+  stage_label TEXT NOT NULL,
+  stage_order INTEGER NOT NULL CHECK (stage_order >= 0),
+  substage TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  detail TEXT NOT NULL,
+  engine_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
+  engine_name TEXT,
+  current_value BIGINT CHECK (current_value IS NULL OR current_value >= 0),
+  total_value BIGINT CHECK (total_value IS NULL OR total_value > 0),
+  metadata TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worker_failures (
   id BIGSERIAL PRIMARY KEY,
   worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
   worker_label TEXT NOT NULL,
-  pool_id BIGINT REFERENCES worker_pools(id) ON DELETE SET NULL,
   machine_id TEXT,
   assignment_id BIGINT REFERENCES game_assignments(id) ON DELETE SET NULL,
   game_id BIGINT REFERENCES games(id) ON DELETE SET NULL,
   engine_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
   engine_name TEXT NOT NULL,
-  stage TEXT NOT NULL
-    CHECK (stage IN ('cache', 'download', 'verify', 'start', 'runtime')),
+  stage TEXT NOT NULL,
   error TEXT NOT NULL,
   occurred_at TEXT NOT NULL
 );
+
+ALTER TABLE worker_failures DROP CONSTRAINT IF EXISTS worker_failures_stage_check;
 
 CREATE INDEX IF NOT EXISTS idx_worker_failures_worker_time
   ON worker_failures(worker_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_worker_failures_machine_time
   ON worker_failures(machine_id, occurred_at DESC);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'workers'
+      AND column_name = 'pool_id'
+  ) THEN
+    UPDATE games
+    SET status = 'pending'
+    WHERE status IN ('assigned', 'live')
+      AND id IN (
+        SELECT assignment.game_id
+        FROM game_assignments assignment
+        JOIN workers worker ON worker.id = assignment.worker_id
+        WHERE worker.pool_id IS NOT NULL
+          AND assignment.status IN ('assigned', 'acked', 'live')
+      );
+    UPDATE game_assignments assignment
+    SET status = 'abandoned',
+        finished_at = CURRENT_TIMESTAMP::text,
+        last_error = 'legacy machine pool retired',
+        worker_id = NULL
+    FROM workers worker
+    WHERE worker.id = assignment.worker_id
+      AND worker.pool_id IS NOT NULL
+      AND assignment.status IN ('assigned', 'acked', 'live');
+    DELETE FROM workers WHERE pool_id IS NOT NULL;
+    ALTER TABLE worker_failures DROP COLUMN IF EXISTS pool_id;
+    ALTER TABLE workers DROP COLUMN IF EXISTS pool_id;
+    ALTER TABLE workers DROP COLUMN IF EXISTS pool_slot_token_hash;
+    ALTER TABLE workers DROP COLUMN IF EXISTS assigned_threads;
+    ALTER TABLE workers DROP COLUMN IF EXISTS assigned_hash_mb;
+    DROP TABLE IF EXISTS worker_pools;
+  END IF;
+  UPDATE games
+  SET status = 'pending'
+  WHERE status IN ('assigned', 'live')
+    AND id IN (
+      SELECT assignment.game_id
+      FROM game_assignments assignment
+      JOIN (
+        SELECT id
+        FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY machine_id
+                   ORDER BY CASE WHEN status = 'revoked' THEN 1 ELSE 0 END,
+                            last_seen DESC NULLS LAST,
+                            id
+                 ) AS position
+          FROM workers
+          WHERE machine_id IS NOT NULL
+        ) ranked
+        WHERE ranked.position > 1
+      ) duplicate_worker ON duplicate_worker.id = assignment.worker_id
+      WHERE assignment.status IN ('assigned', 'acked', 'live')
+    );
+  UPDATE game_assignments assignment
+  SET status = 'abandoned',
+      finished_at = CURRENT_TIMESTAMP::text,
+      last_error = 'duplicate machine worker retired',
+      worker_id = NULL
+  FROM (
+    SELECT id
+    FROM (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY machine_id
+               ORDER BY CASE WHEN status = 'revoked' THEN 1 ELSE 0 END,
+                        last_seen DESC NULLS LAST,
+                        id
+             ) AS position
+      FROM workers
+      WHERE machine_id IS NOT NULL
+    ) ranked
+    WHERE ranked.position > 1
+  ) duplicate_worker
+  WHERE duplicate_worker.id = assignment.worker_id
+    AND assignment.status IN ('assigned', 'acked', 'live');
+  DELETE FROM workers worker
+  USING (
+    SELECT id
+    FROM (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY machine_id
+               ORDER BY CASE WHEN status = 'revoked' THEN 1 ELSE 0 END,
+                        last_seen DESC NULLS LAST,
+                        id
+             ) AS position
+      FROM workers
+      WHERE machine_id IS NOT NULL
+    ) ranked
+    WHERE ranked.position > 1
+  ) duplicate_worker
+  WHERE duplicate_worker.id = worker.id;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS benchmark_hardware (
+  hardware_key TEXT PRIMARY KEY CHECK (hardware_key ~ '^[0-9a-f]{64}$'),
+  machine_id TEXT NOT NULL,
+  hw TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION reject_benchmark_hardware_mutation()
+RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'benchmark hardware records are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS benchmark_hardware_immutable ON benchmark_hardware;
+CREATE TRIGGER benchmark_hardware_immutable
+BEFORE UPDATE OR DELETE ON benchmark_hardware
+FOR EACH ROW EXECUTE FUNCTION reject_benchmark_hardware_mutation();
+
+CREATE TABLE IF NOT EXISTS benchmarkers (
+  id BIGSERIAL PRIMARY KEY,
+  label TEXT NOT NULL,
+  token_hash TEXT,
+  token_expires_at TEXT,
+  status TEXT NOT NULL DEFAULT 'minted'
+    CHECK (status IN ('minted', 'connected', 'busy', 'offline', 'revoked')),
+  session_id TEXT,
+  app_commit TEXT,
+  protocol_version INTEGER,
+  machine_id TEXT,
+  hardware_key TEXT REFERENCES benchmark_hardware(hardware_key),
+  hw TEXT,
+  created_at TEXT NOT NULL,
+  last_seen TEXT
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  job_key TEXT NOT NULL UNIQUE,
+  benchmarker_id BIGINT REFERENCES benchmarkers(id) ON DELETE SET NULL,
+  engine_version_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
+  engine_spec TEXT NOT NULL,
+  engine_name TEXT NOT NULL,
+  engine_version TEXT NOT NULL,
+  build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
+  hardware_key TEXT NOT NULL REFERENCES benchmark_hardware(hardware_key),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+  attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+  scheduled_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  next_retry_at TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  UNIQUE (build_hash, hardware_key)
+);
+
+CREATE TABLE IF NOT EXISTS engine_benchmarks (
+  id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL UNIQUE REFERENCES benchmark_jobs(id),
+  engine_version_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
+  engine_name TEXT NOT NULL,
+  engine_version TEXT NOT NULL,
+  build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
+  hardware_key TEXT NOT NULL REFERENCES benchmark_hardware(hardware_key),
+  nps BIGINT NOT NULL CHECK (nps > 0),
+  elapsed_ms BIGINT NOT NULL CHECK (elapsed_ms >= 0),
+  output TEXT NOT NULL DEFAULT '',
+  recorded_at TEXT NOT NULL,
+  UNIQUE (build_hash, hardware_key)
+);
+
+CREATE TABLE IF NOT EXISTS game_hardware_scores (
+  game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+  assignment_id BIGINT NOT NULL REFERENCES game_assignments(id) ON DELETE CASCADE,
+  worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  engine_version_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  color TEXT NOT NULL CHECK (color IN ('white', 'black')),
+  benchmark_hardware_key TEXT NOT NULL REFERENCES benchmark_hardware(hardware_key),
+  benchmark_nps BIGINT NOT NULL CHECK (benchmark_nps > 0),
+  worker_nps BIGINT NOT NULL CHECK (worker_nps > 0),
+  hardware_score DOUBLE PRECISION NOT NULL CHECK (hardware_score > 0),
+  elapsed_ms BIGINT NOT NULL CHECK (elapsed_ms >= 0),
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY (game_id, engine_version_id),
+  UNIQUE (game_id, color)
+);
 
 CREATE TABLE IF NOT EXISTS moves (
   game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
@@ -253,9 +491,16 @@ CREATE TABLE IF NOT EXISTS openings (
   suite_id BIGINT NOT NULL REFERENCES opening_suites(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
   name TEXT NOT NULL DEFAULT '',
+  start_fen TEXT NOT NULL,
+  moves TEXT NOT NULL DEFAULT '[]',
   fen TEXT NOT NULL,
   UNIQUE (suite_id, position)
 );
+
+ALTER TABLE openings ADD COLUMN IF NOT EXISTS start_fen TEXT;
+ALTER TABLE openings ADD COLUMN IF NOT EXISTS moves TEXT NOT NULL DEFAULT '[]';
+UPDATE openings SET start_fen = fen WHERE start_fen IS NULL OR start_fen = '';
+ALTER TABLE openings ALTER COLUMN start_fen SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chat_messages (
   id BIGSERIAL PRIMARY KEY,
@@ -299,18 +544,67 @@ CREATE TABLE IF NOT EXISTS runner_commands (
   error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS deployment_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  requested_ref TEXT NOT NULL,
+  target_commit TEXT CHECK (target_commit IS NULL OR target_commit ~ '^[0-9a-f]{40}$'),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending', 'resolving', 'updating_workers', 'building', 'migrating',
+      'restarting', 'verifying', 'succeeded', 'failed'
+    )),
+  requested_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS deployment_targets (
+  id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('server', 'worker')),
+  target_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  label TEXT NOT NULL,
+  repository_url TEXT,
+  target_commit TEXT CHECK (target_commit IS NULL OR target_commit ~ '^[0-9a-f]{40}$'),
+  current_commit TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending', 'waiting', 'updating', 'restarting', 'succeeded',
+      'deferred', 'failed'
+    )),
+  detail TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_games_tournament_status ON games(tournament_id, status);
 CREATE INDEX IF NOT EXISTS idx_games_round_pair ON games(tournament_id, round, pair_index);
 CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(tournament_id, round, match_index);
 CREATE INDEX IF NOT EXISTS idx_rating_history_engine_category_at ON rating_history(engine_id, category_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 4)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 12)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_machine_active ON workers(machine_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_machine_id ON workers(machine_id)
+  WHERE machine_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignments(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_game_assignments_game_status ON game_assignments(game_id, status);
+CREATE INDEX IF NOT EXISTS idx_game_assignment_progress_current
+  ON game_assignment_progress(game_id, assignment_key, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_token_hash ON workers(token_hash) WHERE token_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_session_id ON workers(session_id) WHERE session_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_pools_enrollment_token_hash ON worker_pools(enrollment_token_hash) WHERE enrollment_token_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmarkers_token_hash ON benchmarkers(token_hash) WHERE token_hash IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmarkers_session_id ON benchmarkers(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_benchmarkers_status ON benchmarkers(status);
+CREATE INDEX IF NOT EXISTS idx_benchmark_jobs_claim ON benchmark_jobs(hardware_key, status, next_retry_at, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_engine_benchmarks_engine ON engine_benchmarks(engine_version_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_game_hardware_scores_engine ON game_hardware_scores(engine_version_id, game_id);
+CREATE INDEX IF NOT EXISTS idx_deployment_jobs_status_id ON deployment_jobs(status, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deployment_jobs_one_active
+  ON deployment_jobs ((TRUE))
+  WHERE status NOT IN ('succeeded', 'failed');
+CREATE INDEX IF NOT EXISTS idx_deployment_targets_job ON deployment_targets(job_id, target_kind, target_id);
+CREATE INDEX IF NOT EXISTS idx_deployment_targets_worker_pending ON deployment_targets(target_id, status)
+  WHERE target_kind = 'worker' AND target_id IS NOT NULL;

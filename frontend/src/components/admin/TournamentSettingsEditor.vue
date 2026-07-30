@@ -82,6 +82,40 @@ function patchSeconds(field: string, value: number): void {
 function numberOption(key: string): number {
   return Number((model.value.format_options as unknown as Record<string, unknown>)[key] ?? 0)
 }
+
+function setDrawAdjudication(enabled: boolean): void {
+  patch({
+    adjudication: {
+      ...model.value.adjudication,
+      draw: enabled
+        ? model.value.adjudication.draw ?? { min_fullmove: 40, max_abs_cp: 10, consecutive_plies: 8 }
+        : null,
+    },
+  })
+}
+
+function patchDrawAdjudication(key: 'min_fullmove' | 'max_abs_cp' | 'consecutive_plies', value: number): void {
+  const draw = model.value.adjudication.draw
+  if (!draw) return
+  patch({ adjudication: { ...model.value.adjudication, draw: { ...draw, [key]: value } } })
+}
+
+function setWinAdjudication(enabled: boolean): void {
+  patch({
+    adjudication: {
+      ...model.value.adjudication,
+      resign: enabled
+        ? model.value.adjudication.resign ?? { min_abs_cp: 800, consecutive_plies: 6 }
+        : null,
+    },
+  })
+}
+
+function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: number): void {
+  const resign = model.value.adjudication.resign
+  if (!resign) return
+  patch({ adjudication: { ...model.value.adjudication, resign: { ...resign, [key]: value } } })
+}
 </script>
 
 <template>
@@ -186,6 +220,56 @@ function numberOption(key: string): number {
       </div>
     </fieldset>
 
+    <fieldset v-if="!structureOnly" class="form-section">
+      <legend>Adjudication</legend>
+      <label class="choice-row">
+        <input type="checkbox" :checked="model.adjudication.draw !== null" @change="setDrawAdjudication(($event.target as HTMLInputElement).checked)">
+        <span>
+          <strong>Draw agreement</strong>
+          <small>End the game as a draw after both engines remain within the configured evaluation range.</small>
+        </span>
+      </label>
+      <div v-if="model.adjudication.draw" class="field-grid field-grid--wide nested-fields">
+        <label class="field">
+          <span class="field__label">From full move</span>
+          <input class="input" type="number" min="1" step="1" :value="model.adjudication.draw.min_fullmove" @input="patchDrawAdjudication('min_fullmove', Number(($event.target as HTMLInputElement).value))">
+        </label>
+        <label class="field">
+          <span class="field__label">Maximum absolute evaluation <small>centipawns</small></span>
+          <input class="input" type="number" min="0" step="1" :value="model.adjudication.draw.max_abs_cp" @input="patchDrawAdjudication('max_abs_cp', Number(($event.target as HTMLInputElement).value))">
+        </label>
+        <label class="field">
+          <span class="field__label">Consecutive plies</span>
+          <input class="input" type="number" min="2" step="1" :value="model.adjudication.draw.consecutive_plies" @input="patchDrawAdjudication('consecutive_plies', Number(($event.target as HTMLInputElement).value))">
+        </label>
+      </div>
+
+      <label class="choice-row">
+        <input type="checkbox" :checked="model.adjudication.resign !== null" @change="setWinAdjudication(($event.target as HTMLInputElement).checked)">
+        <span>
+          <strong>Win adjudication</strong>
+          <small>End the game when both engines consistently evaluate the same side beyond the configured threshold.</small>
+        </span>
+      </label>
+      <div v-if="model.adjudication.resign" class="field-grid field-grid--wide nested-fields">
+        <label class="field">
+          <span class="field__label">Minimum absolute evaluation <small>centipawns</small></span>
+          <input class="input" type="number" min="1" step="1" :value="model.adjudication.resign.min_abs_cp" @input="patchWinAdjudication('min_abs_cp', Number(($event.target as HTMLInputElement).value))">
+        </label>
+        <label class="field">
+          <span class="field__label">Consecutive plies</span>
+          <input class="input" type="number" min="2" step="1" :value="model.adjudication.resign.consecutive_plies" @input="patchWinAdjudication('consecutive_plies', Number(($event.target as HTMLInputElement).value))">
+        </label>
+      </div>
+
+      <div class="field-grid field-grid--wide nested-fields">
+        <label class="field">
+          <span class="field__label">Maximum full moves <small>optional</small></span>
+          <input class="input" type="number" min="1" step="1" :value="model.adjudication.max_moves ?? ''" placeholder="No limit" @input="patch({ adjudication: { ...model.adjudication, max_moves: Number(($event.target as HTMLInputElement).value) || null } })">
+        </label>
+      </div>
+    </fieldset>
+
     <fieldset class="form-section">
       <legend>Execution</legend>
       <div class="field-grid field-grid--wide">
@@ -199,10 +283,6 @@ function numberOption(key: string): number {
             <option value="">No opening suite</option>
             <option v-for="suite in openingSuites" :key="suite.id" :value="suite.id">{{ suite.name }}</option>
           </select>
-        </label>
-        <label v-if="!structureOnly" class="field">
-          <span class="field__label">Maximum full moves <small>optional</small></span>
-          <input class="input" type="number" min="1" step="1" :value="model.adjudication.max_moves ?? ''" placeholder="No limit" @input="patch({ adjudication: { ...model.adjudication, max_moves: Number(($event.target as HTMLInputElement).value) || null } })">
         </label>
       </div>
       <label v-if="allowRated && !structureOnly" class="choice-row">
@@ -228,4 +308,6 @@ function numberOption(key: string): number {
 .choice-row span { display: grid; gap: .16rem; }
 .choice-row strong { font-size: .86rem; }
 .choice-row small { color: var(--color-text-muted, #64748b); font-size: .76rem; line-height: 1.4; }
+.nested-fields { margin: .8rem 0 1rem 1.65rem; }
+@media (max-width: 40rem) { .nested-fields { margin-left: 0; } }
 </style>

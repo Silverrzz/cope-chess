@@ -56,6 +56,8 @@ export interface MoveRecord {
 export interface OpeningRecord {
   name: string
   fen: string
+  book_moves?: string[]
+  final_fen?: string
 }
 
 export interface EngineRecord {
@@ -64,9 +66,11 @@ export interface EngineRecord {
   name: string
   author?: string | null
   version?: string | null
-  binary_filename?: string | null
-  binary_sha256?: string | null
-  binary_size?: number | null
+  repository_url?: string | null
+  repository_full_name?: string | null
+  source_ref?: string | null
+  source_kind?: "release" | "commit" | null
+  build_hash?: string | null
   created_at?: string | null
   uci_options?: Record<string, unknown>
   active?: boolean
@@ -122,6 +126,29 @@ export interface ClockState {
   observed_at?: string | null
 }
 
+export interface GameProgressEvent {
+  id: Identifier
+  source: 'server' | 'worker'
+  stage: string
+  stage_label: string
+  stage_order: number
+  substage: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  detail: string
+  engine_id?: Identifier | null
+  engine_name?: string | null
+  current?: number | null
+  total?: number | null
+  metadata?: Record<string, unknown>
+  occurred_at: string
+}
+
+export interface GameProgress {
+  current: GameProgressEvent
+  stages: GameProgressEvent[]
+  events: GameProgressEvent[]
+}
+
 export interface ChatMessage {
   id?: Identifier
   tournament_id?: Identifier
@@ -155,6 +182,7 @@ export interface TournamentDetailResponse {
   engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
+  game_progress?: GameProgress | null
   standings?: StandingRecord[]
   settings?: Array<{ label: string; value: string } | [string, string]>
   engine_hardware?: HardwareRecord[]
@@ -171,6 +199,7 @@ export interface LiveSnapshot {
   engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
+  game_progress?: GameProgress | null
   standings?: StandingRecord[]
   games?: GameRecord[]
 }

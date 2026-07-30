@@ -45,6 +45,11 @@ function validate(): string {
   if (!Number.isInteger(form.default_config.concurrency) || form.default_config.concurrency < 1) return 'Concurrent games must be a whole number of at least 1.'
   if (!Number.isInteger(form.default_config.engine_threads) || form.default_config.engine_threads < 1) return 'Engine threads must be a whole number of at least 1.'
   if (!Number.isInteger(form.default_config.engine_hash_mb) || form.default_config.engine_hash_mb < 1) return 'Engine hash must be a whole number of at least 1 MB.'
+  const draw = form.default_config.adjudication.draw
+  if (draw && (!Number.isInteger(draw.min_fullmove) || draw.min_fullmove < 1 || !Number.isInteger(draw.max_abs_cp) || draw.max_abs_cp < 0 || !Number.isInteger(draw.consecutive_plies) || draw.consecutive_plies < 2)) return 'Enter valid draw-agreement settings with at least 2 consecutive plies.'
+  const resign = form.default_config.adjudication.resign
+  if (resign && (!Number.isInteger(resign.min_abs_cp) || resign.min_abs_cp < 1 || !Number.isInteger(resign.consecutive_plies) || resign.consecutive_plies < 2)) return 'Enter valid win-adjudication settings with at least 2 consecutive plies.'
+  if (form.default_config.adjudication.max_moves !== null && (!Number.isInteger(form.default_config.adjudication.max_moves) || form.default_config.adjudication.max_moves < 1)) return 'Maximum moves must be a whole number of at least 1.'
   return ''
 }
 

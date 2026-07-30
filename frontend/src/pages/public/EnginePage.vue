@@ -82,14 +82,15 @@ async function load(): Promise<void> {
         <section class="panel build-panel" aria-labelledby="build-title">
           <header>
             <div>
-              <h2 id="build-title">Version artifact</h2>
+              <h2 id="build-title">Source version</h2>
             </div>
           </header>
           <dl class="build-details">
             <div><dt>Version</dt><dd>{{ data.engine.version || '-' }}</dd></div>
-            <div><dt>Binary</dt><dd><code>{{ data.engine.binary_filename || '-' }}</code></dd></div>
-            <div class="detail-wide"><dt>SHA-256</dt><dd><code :title="data.engine.binary_sha256 || undefined">{{ data.engine.binary_sha256 || '-' }}</code></dd></div>
-            <div><dt>Size</dt><dd>{{ data.engine.binary_size ? `${data.engine.binary_size.toLocaleString()} bytes` : '-' }}</dd></div>
+            <div><dt>Source type</dt><dd>{{ data.engine.source_kind || '-' }}</dd></div>
+            <div><dt>Reference</dt><dd><code>{{ data.engine.source_ref || '-' }}</code></dd></div>
+            <div class="detail-wide"><dt>Repository</dt><dd><a v-if="data.engine.repository_url" class="source-link" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>-</span></dd></div>
+            <div class="detail-wide"><dt>Build cache key</dt><dd><code :title="data.engine.build_hash || undefined">{{ data.engine.build_hash || '-' }}</code></dd></div>
           </dl>
         </section>
 
@@ -174,7 +175,6 @@ async function load(): Promise<void> {
 
 .source-link {
   display: inline-block;
-  margin-block-start: 0.75rem;
   color: var(--color-accent, #2f78c4);
   font-size: 0.76rem;
   font-weight: 700;

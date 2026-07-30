@@ -6,6 +6,7 @@ import { parseFen } from './chess'
 interface MoveCell {
   ply: number
   label: string
+  isBook: boolean
 }
 
 interface MoveRow {
@@ -18,12 +19,14 @@ const props = withDefaults(defineProps<{
   moves?: string[]
   uciMoves?: string[]
   fen?: string | null
+  bookPlies?: number
   modelValue?: number
   title?: string
 }>(), {
   moves: () => [],
   uciMoves: () => [],
   fen: 'startpos',
+  bookPlies: 0,
   modelValue: 0,
   title: 'Moves',
 })
@@ -43,6 +46,7 @@ const rows = computed<MoveRow[]>(() => {
     const cell: MoveCell = {
       ply: index + 1,
       label: san || props.uciMoves[index] || `Move ${index + 1}`,
+      isBook: index < props.bookPlies,
     }
     if (side === 'w') {
       result.push({ number, white: cell })
@@ -87,7 +91,7 @@ function scrollCurrentMoveIntoView(): void {
   <section class="move-list" aria-labelledby="move-list-title">
     <header class="move-list__header">
       <h2 id="move-list-title">{{ title }}</h2>
-      <span>{{ moves.length }} plies</span>
+      <span>{{ moves.length }} plies<template v-if="bookPlies"> / {{ bookPlies }} book</template></span>
     </header>
     <div v-if="rows.length" ref="list" class="move-list__scroll" tabindex="0">
       <ol class="move-list__rows">
@@ -96,16 +100,20 @@ function scrollCurrentMoveIntoView(): void {
           <button
             v-if="row.white"
             type="button"
-            :aria-label="`Move ${row.number}, White, ${row.white.label}`"
+            :aria-label="`Move ${row.number}, White, ${row.white.label}${row.white.isBook ? ', opening book' : ''}`"
             :aria-current="modelValue === row.white.ply ? 'step' : undefined"
+            :data-book="row.white.isBook || undefined"
+            :title="row.white.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.white.ply)"
           >{{ row.white.label }}</button>
           <span v-else class="move-placeholder">...</span>
           <button
             v-if="row.black"
             type="button"
-            :aria-label="`Move ${row.number}, Black, ${row.black.label}`"
+            :aria-label="`Move ${row.number}, Black, ${row.black.label}${row.black.isBook ? ', opening book' : ''}`"
             :aria-current="modelValue === row.black.ply ? 'step' : undefined"
+            :data-book="row.black.isBook || undefined"
+            :title="row.black.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.black.ply)"
           >{{ row.black.label }}</button>
           <span v-else class="move-placeholder"></span>
@@ -204,6 +212,11 @@ function scrollCurrentMoveIntoView(): void {
 .move-row button:hover {
   color: var(--color-accent, #2f78c4);
   background: color-mix(in srgb, var(--color-accent, #2f78c4) 9%, transparent);
+}
+
+.move-row button[data-book='true'] {
+  color: var(--color-text-muted, #607080);
+  font-style: italic;
 }
 
 .move-row button[aria-current='step'] {

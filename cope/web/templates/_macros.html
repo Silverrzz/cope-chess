@@ -184,7 +184,7 @@
     <div class="field field--checkbox">
       <label>
         <input type="checkbox" name="adjudication_draw" data-toggle-panel="draw-rules" {% if values.adjudication_draw %}checked{% endif %}>
-        Adjudicate drawn positions
+        Draw agreement by engine evaluation
       </label>
     </div>
     <div class="field-row field-row--nested" id="draw-rules" {% if not values.adjudication_draw %}hidden{% endif %}>
@@ -198,14 +198,14 @@
       </div>
       <div class="field">
         <label for="draw_plies">Consecutive plies</label>
-        <input class="input input--small" id="draw_plies" type="number" min="1" name="draw_plies" value="{{ values.draw_plies }}">
+        <input class="input input--small" id="draw_plies" type="number" min="2" name="draw_plies" value="{{ values.draw_plies }}">
       </div>
     </div>
 
     <div class="field field--checkbox">
       <label>
         <input type="checkbox" name="adjudication_resign" data-toggle-panel="resign-rules" {% if values.adjudication_resign %}checked{% endif %}>
-        Adjudicate hopeless positions
+        Win adjudication by engine evaluation
       </label>
     </div>
     <div class="field-row field-row--nested" id="resign-rules" {% if not values.adjudication_resign %}hidden{% endif %}>
@@ -215,20 +215,7 @@
       </div>
       <div class="field">
         <label for="resign_plies">Consecutive plies</label>
-        <input class="input input--small" id="resign_plies" type="number" min="1" name="resign_plies" value="{{ values.resign_plies }}">
-      </div>
-    </div>
-
-    <div class="field field--checkbox">
-      <label>
-        <input type="checkbox" name="adjudication_syzygy" data-toggle-panel="syzygy-rules" {% if values.adjudication_syzygy %}checked{% endif %}>
-        Adjudicate with Syzygy tablebases
-      </label>
-    </div>
-    <div class="field-row field-row--nested" id="syzygy-rules" {% if not values.adjudication_syzygy %}hidden{% endif %}>
-      <div class="field">
-        <label for="syzygy_max_pieces">Max pieces</label>
-        <input class="input input--small" id="syzygy_max_pieces" type="number" min="2" max="7" name="syzygy_max_pieces" value="{{ values.syzygy_max_pieces }}">
+        <input class="input input--small" id="resign_plies" type="number" min="2" name="resign_plies" value="{{ values.resign_plies }}">
       </div>
     </div>
 

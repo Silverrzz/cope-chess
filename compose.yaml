@@ -12,9 +12,8 @@ x-cope-service: &cope-service
     COPE_WEB_EVENT_TOKEN_FILE: /run/secrets/cope_event_token
     COPE_WEB_STREAM_URL: ws://web:8701/internal/stream
     COPE_WORKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/worker
+    COPE_BENCHMARKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/benchmarker
     COPE_OPENING_IMPORT_MAX_BYTES: ${COPE_OPENING_IMPORT_MAX_BYTES:-67108864}
-    COPE_ENGINE_BINARY_DIR: /var/lib/cope/engine-binaries
-    COPE_ENGINE_BINARY_MAX_BYTES: ${COPE_ENGINE_BINARY_MAX_BYTES:-1073741824}
   secrets:
     - cope_admin_token
     - cope_event_token
@@ -78,8 +77,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    volumes:
-      - engine-binaries:/var/lib/cope/engine-binaries
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8701/health/ready', timeout=3)"]
       interval: 15s
@@ -118,6 +115,42 @@ services:
       web:
         condition: service_healthy
 
+  updater:
+    <<: *cope-service
+    user: "0:0"
+    command:
+      - updater
+      - --source-dir
+      - /workspace
+    environment:
+      <<: *cope-environment
+      COPE_UPDATE_REPOSITORY_URL: ${COPE_UPDATE_REPOSITORY_URL:-}
+      COPE_UPDATE_REF: ${COPE_UPDATE_REF:-main}
+      COPE_COMPOSE_PROJECT: ${COPE_COMPOSE_PROJECT:-}
+      COPE_UPDATE_WORKER_WAIT_S: ${COPE_UPDATE_WORKER_WAIT_S:-1800}
+      COPE_UPDATE_SERVICE_WAIT_S: ${COPE_UPDATE_SERVICE_WAIT_S:-180}
+      COPE_UPDATE_ALLOW_ROLLBACK: ${COPE_UPDATE_ALLOW_ROLLBACK:-false}
+    volumes:
+      - ${COPE_HOST_SOURCE_DIR:-.}:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+
+  benchmark-server:
+    <<: *cope-service
+    command:
+      - benchmark-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8703"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
@@ -128,13 +161,15 @@ services:
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${COPE_HOST_SOURCE_DIR:-.}/deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
       web:
         condition: service_healthy
       worker-server:
+        condition: service_started
+      benchmark-server:
         condition: service_started
     logging:
       driver: json-file
@@ -164,6 +199,5 @@ secrets:
 
 volumes:
   postgres-data:
-  engine-binaries:
   caddy-data:
   caddy-config:

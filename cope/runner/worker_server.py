@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import secrets
 import threading
 import time
@@ -16,20 +17,23 @@ from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServerProtocol, serve
 
 from cope.core.models import (
+    AssignmentCleanupComplete,
     AssignmentComplete,
     AssignmentFailed,
+    AssignmentProgress,
     AssignmentReady,
+    EngineClock,
     EngineCommand,
+    EngineCommandStarted,
     EngineCommandResult,
     EngineInfo,
+    EngineStop,
     PROTOCOL_VERSION,
-    WorkerPoolEnrollmentHello,
-    WorkerPoolSlotCredential,
-    WorkerPoolSlotHello,
-    WorkerPoolWelcome,
     WorkerResources,
     WorkerSessionHello,
     WorkerTokenHello,
+    WorkerUpdateCommand,
+    WorkerUpdateStatus,
     WorkerWelcome,
 )
 from cope.core.protocol import (
@@ -46,20 +50,22 @@ from cope.db import (
     connect_database,
     disconnect_worker,
     fail_game_assignment,
+    finish_game_assignment,
     acknowledge_game_assignment,
     get_game,
     get_worker,
     get_worker_by_session_id,
-    get_worker_by_pool_slot_token,
     get_worker_by_token,
-    get_worker_pool_by_token,
-    enroll_worker_pool,
     list_workers,
     record_worker_failure,
+    record_game_hardware_score,
+    record_game_assignment_progress,
+    reconcile_worker_deployment,
     set_service_endpoint,
     touch_workers_seen,
     touch_service_heartbeat,
     update_worker_status,
+    update_deployment_target_status,
     upsert_worker_connection,
     worker_token_is_valid,
 )
@@ -74,12 +80,12 @@ from cope.runner.events import (
     set_runner_wake_handler,
     start_event_publisher,
 )
+from cope.tournament.engine_instance import EngineCommandOutput
 
 
 LOG = logging.getLogger("cope.worker_server")
 WORKER_CONNECTION_REPLACED_CLOSE_CODE = 4001
 ASSIGNABLE_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
-ENGINE_FAILURE_BACKOFF_S = 60.0
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -288,35 +294,44 @@ class WorkerHandshakeServer:
                 raw_message,
                 "hello",
                 WorkerTokenHello
-                | WorkerSessionHello
-                | WorkerPoolSlotHello
-                | WorkerPoolEnrollmentHello,
+                | WorkerSessionHello,
             )
-            self._validate_app_version(hello)
-            if isinstance(hello, WorkerPoolEnrollmentHello):
-                welcome = self._enroll_worker_pool(hello)
-                await _send_message(websocket, "pool_welcome", welcome)
-                publish_workers_changed(
-                    "worker.pool_enrolled",
-                    {"pool_id": welcome.pool_id, "slot_count": len(welcome.slots)},
-                )
-                await websocket.close(code=1000, reason="worker pool enrolled")
-                return
             authenticated_worker = self._authenticate_worker(hello)
-            session_id = _new_session_id()
+            session_id = (
+                authenticated_worker.session_id
+                if isinstance(hello, WorkerSessionHello)
+                else _new_session_id()
+            )
+            if not session_id:
+                raise ProtocolValidationError("worker session is unavailable")
             label = _worker_label(authenticated_worker, hello)
             worker = self._record_connection(authenticated_worker, label, session_id, hello)
+            update = self._worker_update_command(worker.id, hello.app_version)
 
             welcome = WorkerWelcome(
                 worker_id=worker.id,
                 session_id=session_id,
                 heartbeat_interval_ms=self._config.heartbeat_interval_ms,
-                resources=worker.resources,
+                capacity=WorkerResources(
+                    threads=hello.hw.physical_cores,
+                    hash_mb=hello.hw.total_ram_mb,
+                ),
+                update=update,
             )
             await _send_message(websocket, "welcome", welcome)
+            previous = self._connections.get(worker.id)
             self._connections[worker.id] = (worker.session_id or "", websocket)
+            if previous is not None and previous[1] is not websocket:
+                with contextlib.suppress(ConnectionClosed):
+                    await previous[1].close(
+                        code=WORKER_CONNECTION_REPLACED_CLOSE_CODE,
+                        reason="worker connection replaced",
+                    )
             LOG.info("worker accepted worker_id=%s label=%s", worker.id, label)
             publish_workers_changed("worker.connected", {"worker_id": worker.id})
+            if update is not None:
+                await self._serve_worker_update(websocket, worker, update)
+                return
             await self._wake_workers()
             await self._serve_worker(websocket, worker)
         except ProtocolError as error:
@@ -328,16 +343,17 @@ class WorkerHandshakeServer:
         finally:
             if worker is not None:
                 live = self._connections.get(worker.id)
-                if live is not None and live[0] == worker.session_id:
+                current_connection = live is not None and live[1] is websocket
+                if current_connection:
                     self._connections.pop(worker.id, None)
                     self._worker_capabilities.pop(worker.id, None)
-                try:
-                    tournament_ids = self._record_worker_disconnected(worker)
-                    for tournament_id in tournament_ids:
-                        publish_tournament_event(tournament_id)
-                    await self._wake_workers()
-                except Exception:
-                    LOG.exception("worker disconnect cleanup failed worker_id=%s", worker.id)
+                    try:
+                        tournament_ids = self._record_worker_disconnected(worker)
+                        for tournament_id in tournament_ids:
+                            publish_tournament_event(tournament_id)
+                        await self._wake_workers()
+                    except Exception:
+                        LOG.exception("worker disconnect cleanup failed worker_id=%s", worker.id)
 
     async def _serve_worker(
         self,
@@ -345,161 +361,118 @@ class WorkerHandshakeServer:
         worker: WorkerRecord,
     ) -> None:
         wake_generation = self._work_generation
-        closed = asyncio.create_task(websocket.wait_closed())
+        inboxes: dict[int, asyncio.Queue] = {}
+        assignments: dict[int, asyncio.Task] = {}
+        assignment_resources: dict[int, WorkerResources] = {}
+        send_lock = asyncio.Lock()
+        receiver = asyncio.create_task(
+            self._route_worker_messages(websocket, inboxes),
+            name=f"worker-receiver-{worker.id}",
+        )
         worker_status = "connected"
         try:
             while True:
-                if websocket.closed:
-                    return
-
-                try:
+                pending_update = self._worker_update_command(
+                    worker.id,
+                    worker.app_commit or "",
+                )
+                while pending_update is None and not websocket.closed:
                     assignment = await self._claim_next_assignment(
                         worker,
                         wake_generation,
+                        (
+                            sum(
+                                resources.threads
+                                for resources in assignment_resources.values()
+                            ),
+                            sum(
+                                resources.hash_mb
+                                for resources in assignment_resources.values()
+                            ),
+                        ),
                     )
-                except WorkerConnectionInactive as error:
-                    LOG.info(
-                        "worker session inactive worker_id=%s reason=%s",
-                        worker.id,
-                        error,
+                    if assignment is None:
+                        break
+                    assignment_id = assignment.assignment.assignment_id
+                    inbox: asyncio.Queue = asyncio.Queue()
+                    inboxes[assignment_id] = inbox
+                    task = asyncio.create_task(
+                        self._serve_worker_assignment(
+                            websocket,
+                            worker,
+                            assignment,
+                            inbox=inbox,
+                            send_lock=send_lock,
+                        ),
+                        name=f"server-assignment-{assignment_id}",
                     )
-                    await websocket.close(
-                        code=WORKER_CONNECTION_REPLACED_CLOSE_CODE,
-                        reason=_close_reason(error),
-                    )
-                    return
-
-                if assignment is None:
-                    if worker_status != "ready":
+                    assignments[assignment_id] = task
+                    assignment_resources[assignment_id] = assignment.required_resources
+                    if worker_status != "busy":
                         if not self._record_worker_status(
                             worker.id,
-                            "ready",
+                            "busy",
                             session_id=worker.session_id,
                         ):
+                            task.cancel()
                             raise WorkerConnectionInactive(
                                 "worker session is no longer current"
                             )
-                        worker_status = "ready"
-                    next_generation = await self._wait_for_work_or_disconnect(
-                        wake_generation,
-                        closed,
-                    )
-                    if next_generation is None:
-                        return
-                    wake_generation = next_generation
-                    continue
+                        worker_status = "busy"
 
-                if not self._record_worker_status(
-                    worker.id,
-                    "downloading",
-                    session_id=worker.session_id,
-                ):
-                    self._fail_assignment(
-                        assignment,
-                        RuntimeError("worker session is no longer current"),
-                    )
-                    raise WorkerConnectionInactive("worker session is no longer current")
-                worker_status = "downloading"
-
-                payload = assignment.assignment
-                LOG.info(
-                    "dispatching assignment worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s",
-                    worker.id,
-                    payload.assignment_id,
-                    payload.game_id,
-                    assignment.tournament_name,
-                    assignment.round,
-                )
-                transport = WorkerEngineTransport(
-                    websocket,
-                    assignment,
-                    failure_handler=lambda failure: self._record_runtime_failure(
-                        worker,
-                        assignment,
-                        failure,
-                    ),
-                )
-                try:
-                    await _send_message(websocket, "assignment", assignment)
-                    ready = await self._receive_assignment_ready(websocket, assignment)
-                    self._acknowledge_assignment(ready)
-                    if not self._record_worker_status(
-                        worker.id,
-                        "busy",
-                        session_id=worker.session_id,
-                    ):
-                        raise WorkerConnectionInactive("worker session is no longer current")
-                    worker_status = "busy"
-                    await asyncio.to_thread(
-                        self._run_assignment_game,
-                        assignment,
-                        transport,
-                    )
-                except AssignmentPreparationFailed as error:
-                    self._fail_preparation_assignment(worker, assignment, error.failure)
-                    LOG.error(
-                        "assignment preparation failed worker_id=%s machine_id=%s "
-                        "assignment_id=%s game_id=%s engine_id=%s engine=%s stage=%s error=%s",
-                        worker.id,
-                        worker.machine_id,
-                        payload.assignment_id,
-                        payload.game_id,
-                        error.failure.engine_id,
-                        error.failure.engine_name,
-                        error.failure.stage,
-                        error.failure.error,
-                    )
-                    await self._wake_workers()
-                    await asyncio.sleep(ENGINE_FAILURE_BACKOFF_S)
-                    continue
-                except asyncio.CancelledError:
-                    try:
-                        self._fail_assignment(assignment, RuntimeError("runner shutting down"))
-                    except Exception:
-                        LOG.exception(
-                            "assignment cleanup failed worker_id=%s assignment_id=%s game_id=%s",
-                            worker.id,
-                            payload.assignment_id,
-                            payload.game_id,
-                        )
-                    raise
-                except Exception as error:
-                    self._fail_assignment(assignment, error)
-                    LOG.exception(
-                        "assignment failed worker_id=%s assignment_id=%s game_id=%s",
-                        worker.id,
-                        payload.assignment_id,
-                        payload.game_id,
-                    )
-                    if websocket.closed:
-                        raise
+                if pending_update is not None and not assignments:
+                    receiver.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await receiver
                     await _send_message(
                         websocket,
-                        "assignment_complete",
-                        AssignmentComplete(**payload.message_fields()),
+                        "worker_update",
+                        pending_update,
+                        lock=send_lock,
                     )
-                    LOG.info(
-                        "assignment failed complete sent worker_id=%s assignment_id=%s game_id=%s",
+                    await self._serve_worker_update(websocket, worker, pending_update)
+                    return
+                if not assignments and worker_status != "ready":
+                    if not self._record_worker_status(
                         worker.id,
-                        payload.assignment_id,
-                        payload.game_id,
-                    )
+                        "ready",
+                        session_id=worker.session_id,
+                    ):
+                        raise WorkerConnectionInactive(
+                            "worker session is no longer current"
+                        )
+                    worker_status = "ready"
+
+                work = asyncio.create_task(self._wait_for_work(wake_generation))
+                done, _pending = await asyncio.wait(
+                    {receiver, work, *assignments.values()},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if receiver in done:
+                    work.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await work
+                    receiver.result()
+                    return
+                if work in done:
+                    wake_generation = work.result()
+                else:
+                    work.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await work
+
+                completed = [
+                    assignment_id
+                    for assignment_id, task in assignments.items()
+                    if task.done()
+                ]
+                for assignment_id in completed:
+                    task = assignments.pop(assignment_id)
+                    assignment_resources.pop(assignment_id, None)
+                    inboxes.pop(assignment_id, None)
+                    task.result()
+                if completed:
                     await self._wake_workers()
-                    continue
-                finally:
-                    transport.close()
-                await _send_message(
-                    websocket,
-                    "assignment_complete",
-                    AssignmentComplete(**payload.message_fields()),
-                )
-                LOG.info(
-                    "assignment complete worker_id=%s assignment_id=%s game_id=%s",
-                    worker.id,
-                    payload.assignment_id,
-                    payload.game_id,
-                )
-                await self._wake_workers()
         except WorkerConnectionInactive as error:
             LOG.info(
                 "worker session inactive worker_id=%s reason=%s",
@@ -512,10 +485,284 @@ class WorkerHandshakeServer:
                     reason=_close_reason(error),
                 )
         finally:
-            if not closed.done():
-                closed.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await closed
+            receiver.cancel()
+            for task in assignments.values():
+                task.cancel()
+            await asyncio.gather(
+                receiver,
+                *assignments.values(),
+                return_exceptions=True,
+            )
+
+    async def _route_worker_messages(
+        self,
+        websocket: WebSocketServerProtocol,
+        inboxes: dict[int, asyncio.Queue],
+    ) -> None:
+        while True:
+            envelope = decode_envelope(await websocket.recv())
+            assignment_id = envelope.data.get("assignment_id")
+            if not isinstance(assignment_id, int):
+                raise ProtocolValidationError(
+                    f"{envelope.type} message has no assignment id"
+                )
+            inbox = inboxes.get(assignment_id)
+            if inbox is None:
+                raise ProtocolValidationError(
+                    f"{envelope.type} references inactive assignment {assignment_id}"
+                )
+            await inbox.put(envelope)
+
+    async def _serve_worker_assignment(
+        self,
+        websocket: WebSocketServerProtocol,
+        worker: WorkerRecord,
+        assignment,
+        *,
+        inbox: asyncio.Queue,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        payload = assignment.assignment
+        LOG.info(
+            "dispatching assignment worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s",
+            worker.id,
+            payload.assignment_id,
+            payload.game_id,
+            assignment.tournament_name,
+            assignment.round,
+        )
+        transport = WorkerEngineTransport(
+            websocket,
+            assignment,
+            inbox=inbox,
+            send_lock=send_lock,
+            failure_handler=lambda failure: self._record_runtime_failure(
+                worker,
+                assignment,
+                failure,
+            ),
+            progress_handler=lambda progress: self._record_worker_progress(
+                assignment,
+                progress,
+            ),
+        )
+        game_completed = False
+        try:
+            for step in assignment.workflow:
+                self._record_assignment_progress(
+                    assignment,
+                    stage=step.key,
+                    substage="waiting",
+                    status="pending",
+                    detail=f"{step.label} is waiting to start",
+                )
+            self._record_assignment_progress(
+                assignment,
+                stage="assignment",
+                substage="dispatch",
+                status="running",
+                detail=f"Dispatching game {payload.game_id} to worker {worker.id}",
+            )
+            await _send_message(
+                websocket,
+                "assignment",
+                assignment,
+                lock=send_lock,
+            )
+            ready = await self._receive_assignment_ready(inbox, assignment)
+            self._acknowledge_assignment(worker, assignment, ready)
+            self._record_assignment_progress(
+                assignment,
+                stage="benchmark",
+                substage="ready_barrier",
+                status="completed",
+                detail=f"Worker {worker.id} hardware scores were validated and stored",
+                current=len(ready.hardware_scores),
+                total=len(assignment.engines),
+                metadata={
+                    "hardware_scores": {
+                        str(engine_id): score.model_dump(mode="json")
+                        for engine_id, score in ready.hardware_scores.items()
+                    },
+                    "benchmark_hardware_key": assignment.benchmark_reference.hardware_key,
+                },
+            )
+            await asyncio.to_thread(
+                self._run_assignment_game,
+                assignment,
+                transport,
+                lambda stage, substage, status, detail, current=None, total=None, metadata=None:
+                    self._record_assignment_progress(
+                        assignment,
+                        stage=stage,
+                        substage=substage,
+                        status=status,
+                        detail=detail,
+                        current=current,
+                        total=total,
+                        metadata=metadata,
+                    ),
+            )
+            game_completed = True
+        except AssignmentPreparationFailed as error:
+            self._fail_preparation_assignment(worker, assignment, error.failure)
+            LOG.error(
+                "assignment preparation failed worker_id=%s machine_id=%s "
+                "assignment_id=%s game_id=%s engine_id=%s engine=%s stage=%s error=%s",
+                worker.id,
+                worker.machine_id,
+                payload.assignment_id,
+                payload.game_id,
+                error.failure.engine_id,
+                error.failure.engine_name,
+                error.failure.stage,
+                error.failure.error,
+            )
+        except asyncio.CancelledError:
+            try:
+                self._fail_assignment(
+                    assignment,
+                    RuntimeError("worker assignment stopped"),
+                )
+            except Exception:
+                LOG.exception(
+                    "assignment cleanup failed worker_id=%s assignment_id=%s game_id=%s",
+                    worker.id,
+                    payload.assignment_id,
+                    payload.game_id,
+                )
+            raise
+        except Exception as error:
+            with contextlib.suppress(Exception):
+                self._record_assignment_progress(
+                    assignment,
+                    stage="conclude",
+                    substage="pipeline_failed",
+                    status="failed",
+                    detail=(str(error).strip() or error.__class__.__name__)[:4000],
+                )
+            self._fail_assignment(assignment, error)
+            LOG.exception(
+                "assignment failed worker_id=%s assignment_id=%s game_id=%s",
+                worker.id,
+                payload.assignment_id,
+                payload.game_id,
+            )
+            if websocket.closed:
+                raise
+        finally:
+            transport.close()
+
+        if not websocket.closed:
+            await _send_message(
+                websocket,
+                "assignment_complete",
+                AssignmentComplete(**payload.message_fields()),
+                lock=send_lock,
+            )
+            await self._receive_assignment_cleanup(inbox, assignment)
+            if game_completed:
+                self._finish_assignment(assignment)
+            LOG.info(
+                "assignment complete worker_id=%s assignment_id=%s game_id=%s",
+                worker.id,
+                payload.assignment_id,
+                payload.game_id,
+            )
+
+    def _finish_assignment(self, assignment) -> None:
+        payload = assignment.assignment
+        connection = connect_database(self._config.db_path)
+        try:
+            finish_game_assignment(
+                connection,
+                payload.assignment_id,
+                payload.assignment_key,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _record_assignment_progress(
+        self,
+        assignment,
+        *,
+        stage: str,
+        substage: str,
+        status: str,
+        detail: str,
+        engine_id: int | None = None,
+        engine_name: str | None = None,
+        current: int | None = None,
+        total: int | None = None,
+        metadata: dict | None = None,
+        source: str = "server",
+    ) -> None:
+        steps = {step.key: step for step in assignment.workflow}
+        step = steps.get(stage)
+        if step is None:
+            raise ProtocolValidationError(f"assignment workflow has no {stage!r} stage")
+        if source == "worker" and step.owner == "server":
+            raise ProtocolValidationError(f"worker cannot update server workflow stage {stage!r}")
+        if source == "server" and step.owner == "worker" and status != "pending":
+            raise ProtocolValidationError(f"server cannot update worker workflow stage {stage!r}")
+        progress = AssignmentProgress(
+            **assignment.assignment.message_fields(),
+            stage=stage,
+            stage_label=step.label,
+            stage_order=step.order,
+            substage=substage,
+            status=status,
+            detail=detail,
+            engine_id=engine_id,
+            engine_name=engine_name,
+            current=current,
+            total=total,
+            metadata=metadata or {},
+        )
+        connection = connect_database(self._config.db_path)
+        try:
+            record_game_assignment_progress(connection, progress, source=source)
+            game = get_game(connection, progress.game_id)
+            connection.commit()
+        finally:
+            connection.close()
+        if game is not None:
+            publish_tournament_event(game.tournament_id)
+
+    def _record_worker_progress(self, assignment, progress: AssignmentProgress) -> None:
+        if not progress.matches_assignment(assignment.assignment):
+            raise ProtocolValidationError("assignment progress mismatch")
+        step = next(
+            (item for item in assignment.workflow if item.key == progress.stage),
+            None,
+        )
+        if (
+            step is None
+            or step.label != progress.stage_label
+            or step.order != progress.stage_order
+        ):
+            raise ProtocolValidationError("assignment progress stage is not in the workflow")
+        if progress.engine_id is not None:
+            engine = assignment.engines.get(progress.engine_id)
+            if engine is None or engine.name != progress.engine_name:
+                raise ProtocolValidationError("assignment progress engine mismatch")
+        self._record_assignment_progress(
+            assignment,
+            stage=progress.stage,
+            substage=progress.substage,
+            status=progress.status,
+            detail=progress.detail,
+            engine_id=progress.engine_id,
+            engine_name=progress.engine_name,
+            current=progress.current,
+            total=progress.total,
+            metadata=progress.metadata,
+            source="worker",
+        )
 
     async def _wake_workers(self) -> None:
         if self._wake_pending:
@@ -537,85 +784,90 @@ class WorkerHandshakeServer:
             )
             return self._work_generation
 
-    async def _wait_for_work_or_disconnect(
+    def _worker_update_command(
         self,
-        wake_generation: int,
-        closed: asyncio.Task,
-    ) -> int | None:
-        work = asyncio.create_task(self._wait_for_work(wake_generation))
-        done, pending = await asyncio.wait(
-            {work, closed},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if closed in done:
-            for task in pending:
-                task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await work
-            return None
-        return work.result()
-
-    def _validate_app_version(
-        self,
-        hello: WorkerTokenHello
-        | WorkerSessionHello
-        | WorkerPoolSlotHello
-        | WorkerPoolEnrollmentHello,
-    ) -> None:
-        expected = self._config.expected_app_version
-        if expected is not None and hello.app_version != expected:
-            raise ProtocolValidationError(
-                f"app_version mismatch: expected {expected}, got {hello.app_version}"
-            )
-
-    def _enroll_worker_pool(
-        self,
-        hello: WorkerPoolEnrollmentHello,
-    ) -> WorkerPoolWelcome:
+        worker_id: int,
+        app_commit: str,
+    ) -> WorkerUpdateCommand | None:
         connection = connect_database(self._config.db_path)
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            pool = get_worker_pool_by_token(connection, hello.enrollment_token)
-            if pool is None:
-                raise ProtocolValidationError("invalid or expired worker pool enrollment token")
-            try:
-                credentials = enroll_worker_pool(
+            target = reconcile_worker_deployment(connection, worker_id, app_commit)
+            if target is None:
+                connection.commit()
+                return None
+            if not target.target_commit or not target.repository_url:
+                update_deployment_target_status(
                     connection,
-                    pool=pool,
-                    machine_id=hello.machine_id,
-                    hw=hello.hw,
-                    app_commit=hello.app_version,
-                    protocol_version=PROTOCOL_VERSION,
+                    target.id,
+                    "failed",
+                    current_commit=app_commit,
+                    detail="Deployment repository URL is unavailable.",
                 )
-            except ValueError as error:
-                raise ProtocolValidationError(str(error)) from error
+                connection.commit()
+                raise ProtocolValidationError("worker deployment source is unavailable")
             connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+            return WorkerUpdateCommand(
+                job_id=target.job_id,
+                target_commit=target.target_commit,
+                repository_url=target.repository_url,
+            )
         finally:
             connection.close()
-        return WorkerPoolWelcome(
-            pool_id=pool.id,
-            label=pool.label,
-            machine_id=hello.machine_id,
-            slots=[
-                WorkerPoolSlotCredential(
-                    worker_id=credential.worker_id,
-                    label=credential.label,
-                    slot_token=credential.token,
-                    resources=WorkerResources(
-                        threads=pool.assigned_threads,
-                        hash_mb=pool.assigned_hash_mb,
-                    ),
+
+    async def _serve_worker_update(
+        self,
+        websocket: WebSocketServerProtocol,
+        worker: WorkerRecord,
+        command: WorkerUpdateCommand,
+    ) -> None:
+        while True:
+            status = await _receive_message(
+                websocket,
+                "worker_update_status",
+                WorkerUpdateStatus,
+            )
+            if status.job_id != command.job_id or status.target_commit != command.target_commit:
+                raise ProtocolValidationError("worker update status does not match the deployment")
+            connection = connect_database(self._config.db_path)
+            try:
+                target = reconcile_worker_deployment(
+                    connection,
+                    worker.id,
+                    worker.app_commit or "",
                 )
-                for credential in credentials
-            ],
-        )
+                if target is None:
+                    connection.commit()
+                    return
+                mapped = {
+                    "accepted": "updating",
+                    "installing": "updating",
+                    "restarting": "restarting",
+                    "failed": "failed",
+                }[status.status]
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    mapped,
+                    current_commit=worker.app_commit,
+                    detail=status.detail,
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            publish_workers_changed(
+                "worker.update",
+                {"worker_id": worker.id, "status": status.status},
+            )
+            if status.status == "restarting":
+                await websocket.close(code=1000, reason="worker update installed")
+                return
+            if status.status == "failed":
+                await websocket.close(code=1011, reason="worker update failed")
+                return
 
     def _authenticate_worker(
         self,
-        hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
+        hello: WorkerTokenHello | WorkerSessionHello,
     ) -> WorkerRecord:
         connection = connect_database(self._config.db_path)
         try:
@@ -623,12 +875,6 @@ class WorkerHandshakeServer:
                 worker = get_worker_by_token(connection, hello.token)
                 if worker is None or not worker_token_is_valid(worker):
                     raise ProtocolValidationError("invalid or expired worker token")
-                return worker
-
-            if isinstance(hello, WorkerPoolSlotHello):
-                worker = get_worker_by_pool_slot_token(connection, hello.slot_token)
-                if worker is None or worker.status == "revoked":
-                    raise ProtocolValidationError("invalid worker pool slot credential")
                 return worker
 
             worker = get_worker_by_session_id(connection, hello.session_id)
@@ -643,12 +889,12 @@ class WorkerHandshakeServer:
         worker: WorkerRecord,
         label: str,
         session_id: str,
-        hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
+        hello: WorkerTokenHello | WorkerSessionHello,
     ) -> WorkerRecord:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            self._validate_worker_resources(connection, worker, hello)
+            self._validate_worker_machine(connection, worker, hello)
             tournament_ids = disconnect_worker(
                 connection,
                 worker.id,
@@ -677,62 +923,31 @@ class WorkerHandshakeServer:
             publish_tournament_event(tournament_id)
         return current
 
-    def _validate_worker_resources(
+    def _validate_worker_machine(
         self,
         connection,
         worker: WorkerRecord,
-        hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
+        hello: WorkerTokenHello | WorkerSessionHello,
     ) -> None:
-        if hello.resources != worker.resources:
-            raise ProtocolValidationError(
-                "worker resource arguments do not match its registered reservation: "
-                f"expected {worker.assigned_threads} threads and "
-                f"{worker.assigned_hash_mb}MB hash"
-            )
-
-        expected_hardware = hello.hw.model_dump_json()
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+            (hello.machine_id,),
+        )
         machine = connection.execute(
             """
-            SELECT
-              COALESCE(SUM(assigned_threads), 0) AS reserved_threads,
-              COALESCE(SUM(assigned_hash_mb), 0) AS reserved_hash_mb,
-              COALESCE(BOOL_AND(hw IS NULL OR hw = ?), TRUE) AS hardware_matches
+            SELECT id, label
             FROM workers
             WHERE id != ?
               AND machine_id = ?
-              AND status != 'revoked'
-              AND (pool_id IS NOT NULL OR status IN ('connected', 'downloading', 'ready', 'busy'))
+            ORDER BY id
+            LIMIT 1
             """,
-            (expected_hardware, worker.id, hello.machine_id),
+            (worker.id, hello.machine_id),
         ).fetchone()
-        if machine is not None and not machine["hardware_matches"]:
+        if machine is not None:
             raise ProtocolValidationError(
-                "connected workers with the same machine id reported different hardware"
+                f"machine is already registered as worker {machine['id']} ({machine['label']})"
             )
-
-        reserved_threads = hello.resources.threads + int(machine["reserved_threads"] or 0)
-        if reserved_threads > hello.hw.physical_cores:
-            raise ProtocolValidationError(
-                f"machine resource oversubscription: workers reserve {reserved_threads} threads "
-                f"but only {hello.hw.physical_cores} physical cores are available"
-            )
-
-        reserved_hash_mb = hello.resources.hash_mb + int(machine["reserved_hash_mb"] or 0)
-        if reserved_hash_mb > hello.hw.total_ram_mb:
-            raise ProtocolValidationError(
-                f"machine resource oversubscription: workers reserve {reserved_hash_mb}MB hash "
-                f"but only {hello.hw.total_ram_mb}MB RAM is available"
-            )
-
-    def _connected_worker(self, worker_id: int) -> WorkerRecord:
-        connection = connect_database(self._config.db_path)
-        try:
-            worker = get_worker(connection, worker_id)
-            if worker is None:
-                raise RuntimeError(f"worker {worker_id} disappeared after connection")
-            return worker
-        finally:
-            connection.close()
 
     def _record_worker_status(
         self,
@@ -778,6 +993,7 @@ class WorkerHandshakeServer:
         self,
         worker: WorkerRecord,
         wake_generation: int,
+        used_resources: tuple[int, int],
     ):
         capability = self._worker_capabilities.get(
             worker.id,
@@ -788,17 +1004,28 @@ class WorkerHandshakeServer:
         async with self._assignment_lock:
             if self._empty_claim_generation.get(capability) == wake_generation:
                 return None
-            assignment = self._claim_next_assignment_from_database(worker)
+            assignment = self._claim_next_assignment_from_database(
+                worker,
+                used_resources,
+            )
             if assignment is None:
                 self._empty_claim_generation[capability] = wake_generation
             return assignment
 
-    def _claim_next_assignment_from_database(self, worker: WorkerRecord):
+    def _claim_next_assignment_from_database(
+        self,
+        worker: WorkerRecord,
+        used_resources: tuple[int, int],
+    ):
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
             live_worker = self._validate_assignable_worker(connection, worker)
-            assignment = next_worker_assignment(connection, live_worker)
+            assignment = next_worker_assignment(
+                connection,
+                live_worker,
+                used_resources=used_resources,
+            )
             if assignment is not None:
                 connection.commit()
                 game = get_game(connection, assignment.assignment.game_id)
@@ -827,10 +1054,15 @@ class WorkerHandshakeServer:
             raise WorkerConnectionInactive(f"worker is {live_worker.status}")
         return live_worker
 
-    def _run_assignment_game(self, assignment, transport) -> None:
+    def _run_assignment_game(self, assignment, transport, progress_handler) -> None:
         connection = connect_database(self._config.db_path)
         try:
-            run_worker_assignment_game(connection, assignment, transport)
+            run_worker_assignment_game(
+                connection,
+                assignment,
+                transport,
+                progress_handler=progress_handler,
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -840,11 +1072,16 @@ class WorkerHandshakeServer:
 
     async def _receive_assignment_ready(
         self,
-        websocket: WebSocketServerProtocol,
+        inbox: asyncio.Queue,
         assignment,
     ) -> AssignmentReady:
-        raw_message = await websocket.recv()
-        envelope = decode_envelope(raw_message)
+        while True:
+            envelope = await inbox.get()
+            if envelope.type == "assignment_progress":
+                progress = AssignmentProgress.model_validate(envelope.data)
+                self._record_worker_progress(assignment, progress)
+                continue
+            break
         if envelope.type == "assignment_failed":
             failure = AssignmentFailed.model_validate(envelope.data)
             if not failure.matches_assignment(assignment.assignment):
@@ -867,9 +1104,45 @@ class WorkerHandshakeServer:
             raise ProtocolValidationError(
                 "assignment_ready must include every assigned engine"
             )
+        if set(ready.hardware_scores) != expected:
+            raise ProtocolValidationError(
+                "assignment_ready must include hardware scores for every assigned engine"
+            )
+        for engine_id, score in ready.hardware_scores.items():
+            benchmark_nps = assignment.benchmark_reference.engine_nps[engine_id]
+            if score.benchmark_nps != benchmark_nps:
+                raise ProtocolValidationError("assignment_ready benchmark NPS mismatch")
+            calculated = score.worker_nps / benchmark_nps
+            if not math.isclose(score.hardware_score, calculated, rel_tol=1e-12):
+                raise ProtocolValidationError("assignment_ready hardware score mismatch")
         return ready
 
-    def _acknowledge_assignment(self, ready: AssignmentReady) -> None:
+    async def _receive_assignment_cleanup(
+        self,
+        inbox: asyncio.Queue,
+        assignment,
+    ) -> None:
+        while True:
+            envelope = await inbox.get()
+            if envelope.type == "assignment_progress":
+                progress = AssignmentProgress.model_validate(envelope.data)
+                self._record_worker_progress(assignment, progress)
+                continue
+            if envelope.type != "assignment_cleanup_complete":
+                raise ProtocolValidationError(
+                    f"expected assignment_cleanup_complete, got {envelope.type}"
+                )
+            complete = AssignmentCleanupComplete.model_validate(envelope.data)
+            if not complete.matches_assignment(assignment.assignment):
+                raise ProtocolValidationError("assignment cleanup mismatch")
+            return
+
+    def _acknowledge_assignment(
+        self,
+        worker: WorkerRecord,
+        assignment,
+        ready: AssignmentReady,
+    ) -> None:
         connection = connect_database(self._config.db_path)
         try:
             acknowledge_game_assignment(
@@ -877,6 +1150,24 @@ class WorkerHandshakeServer:
                 ready.assignment_id,
                 ready.assignment_key,
             )
+            colors = {
+                engine_id: color.name.lower()
+                for color, engine_id in assignment.assignment.slots.items()
+            }
+            for engine_id, score in ready.hardware_scores.items():
+                record_game_hardware_score(
+                    connection,
+                    game_id=ready.game_id,
+                    assignment_id=ready.assignment_id,
+                    worker_id=worker.id,
+                    engine_version_id=engine_id,
+                    color=colors[engine_id],
+                    benchmark_hardware_key=assignment.benchmark_reference.hardware_key,
+                    benchmark_nps=score.benchmark_nps,
+                    worker_nps=score.worker_nps,
+                    hardware_score=score.worker_nps / score.benchmark_nps,
+                    elapsed_ms=score.elapsed_ms,
+                )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -992,12 +1283,7 @@ class WorkerHandshakeServer:
 
 
 def _worker_capability_key(worker: WorkerRecord) -> tuple:
-    hardware = worker.hw.model_dump_json() if worker.hw is not None else ""
-    return (
-        worker.assigned_threads,
-        worker.assigned_hash_mb,
-        hardware,
-    )
+    return (worker.id,)
 
 
 class WorkerEngineTransport:
@@ -1006,17 +1292,25 @@ class WorkerEngineTransport:
         websocket: WebSocketServerProtocol,
         assignment,
         *,
+        inbox: asyncio.Queue,
+        send_lock: asyncio.Lock,
         failure_handler: Callable[[AssignmentFailed], None],
+        progress_handler: Callable[[AssignmentProgress], None],
     ):
         self._websocket = websocket
         self._assignment = assignment
+        self._inbox = inbox
+        self._send_lock = send_lock
         self._loop = asyncio.get_running_loop()
         self._command_lock = asyncio.Lock()
         self._closed = threading.Event()
         self._pending: set[Future] = set()
         self._pending_lock = threading.Lock()
         self._failure_handler = failure_handler
+        self._progress_handler = progress_handler
         self._failure_reported = False
+        self._clock_samples: dict[int, tuple[int, bool]] = {}
+        self._clock_lock = threading.Lock()
 
     def close(self) -> None:
         self._closed.set()
@@ -1030,7 +1324,7 @@ class WorkerEngineTransport:
         engine_id: int,
         command: str,
         info_handler: Callable[[str], None] | None = None,
-    ) -> list[str]:
+    ) -> EngineCommandOutput:
         with self._pending_lock:
             if self._closed.is_set():
                 raise RuntimeError("worker transport closed")
@@ -1045,12 +1339,44 @@ class WorkerEngineTransport:
             with self._pending_lock:
                 self._pending.discard(future)
 
+    def current_command_elapsed_ms(self, engine_id: int) -> int | None:
+        with self._clock_lock:
+            sample = self._clock_samples.get(engine_id)
+        if sample is None:
+            return None
+        return sample[0]
+
+    def begin_engine_search(self, engine_id: int) -> None:
+        with self._clock_lock:
+            self._clock_samples.pop(engine_id, None)
+
+    def stop_engine_search(self, engine_id: int) -> None:
+        if self._closed.is_set():
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            self._send_engine_stop(engine_id),
+            self._loop,
+        )
+        future.result()
+
+    async def _send_engine_stop(self, engine_id: int) -> None:
+        assignment = self._assignment.assignment
+        await _send_message(
+            self._websocket,
+            "engine_stop",
+            EngineStop(
+                **assignment.message_fields(),
+                engine_id=engine_id,
+            ),
+            lock=self._send_lock,
+        )
+
     async def _execute_engine_command(
         self,
         engine_id: int,
         command: str,
         info_handler: Callable[[str], None] | None,
-    ) -> list[str]:
+    ) -> EngineCommandOutput:
         async with self._command_lock:
             return await self._execute_engine_command_locked(engine_id, command, info_handler)
 
@@ -1059,8 +1385,11 @@ class WorkerEngineTransport:
         engine_id: int,
         command: str,
         info_handler: Callable[[str], None] | None,
-    ) -> list[str]:
+    ) -> EngineCommandOutput:
         assignment = self._assignment.assignment
+        is_search = command.startswith("go")
+        with self._clock_lock:
+            self._clock_samples.pop(engine_id, None)
         await _send_message(
             self._websocket,
             "engine_command",
@@ -1069,14 +1398,34 @@ class WorkerEngineTransport:
                 engine_id=engine_id,
                 command=command,
             ),
+            lock=self._send_lock,
         )
 
         while True:
-            raw_message = await self._websocket.recv()
-            envelope = decode_envelope(raw_message)
+            envelope = await self._inbox.get()
+            if envelope.type == "assignment_progress":
+                progress = _validate_worker_payload(AssignmentProgress, envelope.data)
+                self._progress_handler(progress)
+                continue
+            if envelope.type == "engine_command_started":
+                started = _validate_worker_payload(EngineCommandStarted, envelope.data)
+                self._validate_engine_reply(started, engine_id)
+                if is_search:
+                    self._record_clock_sample(engine_id, 0, running=True)
+                continue
+
+            if envelope.type == "engine_clock":
+                clock = _validate_worker_payload(EngineClock, envelope.data)
+                self._validate_engine_reply(clock, engine_id)
+                if is_search:
+                    self._record_clock_sample(engine_id, clock.elapsed_ms, running=True)
+                continue
+
             if envelope.type == "engine_info":
                 info = _validate_worker_payload(EngineInfo, envelope.data)
                 self._validate_engine_reply(info, engine_id)
+                if is_search:
+                    self._record_clock_sample(engine_id, info.elapsed_ms, running=True)
                 if info_handler is not None:
                     for line in info.lines:
                         try:
@@ -1108,11 +1457,26 @@ class WorkerEngineTransport:
 
             result = _validate_worker_payload(EngineCommandResult, envelope.data)
             self._validate_engine_reply(result, engine_id)
-            return result.lines
+            if is_search:
+                self._record_clock_sample(engine_id, result.elapsed_ms, running=False)
+            return EngineCommandOutput(lines=result.lines, elapsed_ms=result.elapsed_ms)
+
+    def _record_clock_sample(
+        self,
+        engine_id: int,
+        elapsed_ms: int,
+        *,
+        running: bool,
+    ) -> None:
+        with self._clock_lock:
+            current = self._clock_samples.get(engine_id)
+            if current is not None:
+                elapsed_ms = max(elapsed_ms, current[0])
+            self._clock_samples[engine_id] = (elapsed_ms, running)
 
     def _validate_engine_reply(
         self,
-        result: EngineCommandResult | EngineInfo,
+        result: EngineCommandResult | EngineCommandStarted | EngineClock | EngineInfo,
         engine_id: int,
     ) -> None:
         if not result.matches_assignment(self._assignment.assignment) or result.engine_id != engine_id:
@@ -1134,8 +1498,19 @@ async def _send_message(
     websocket: WebSocketServerProtocol,
     message_type: str,
     data,
+    *,
+    lock: asyncio.Lock | None = None,
 ) -> None:
-    await websocket.send(encode_message(make_message(message_type, data)))
+    payload = encode_message(make_message(message_type, data))
+    if lock is None:
+        await websocket.send(payload)
+        return
+    async with lock:
+        await websocket.send(payload)
+
+
+async def _receive_message(websocket, message_type: str, data_type):
+    return decode_message(await websocket.recv(), message_type, data_type)
 
 
 def _validate_worker_payload(model_type, data):
@@ -1146,19 +1521,17 @@ def _validate_worker_payload(model_type, data):
 
 
 def _hello_label(
-    hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
+    hello: WorkerTokenHello | WorkerSessionHello,
 ) -> str:
     if isinstance(hello, WorkerTokenHello):
         return hello.label_hint or "token worker"
 
-    if isinstance(hello, WorkerPoolSlotHello):
-        return "pool worker"
     return "session worker"
 
 
 def _worker_label(
     worker: WorkerRecord,
-    hello: WorkerTokenHello | WorkerSessionHello | WorkerPoolSlotHello,
+    hello: WorkerTokenHello | WorkerSessionHello,
 ) -> str:
     if worker.label:
         return worker.label
