@@ -92,10 +92,12 @@ def install_client_release(
             reported = _run(
                 [str(_venv_executable(venv, "cope")), "version"],
                 capture=True,
+                environment=_release_environment(),
             )
             if f"version={target_commit}" not in reported:
                 raise RuntimeError(
-                    f"installed {client_name} release reported the wrong version"
+                    f"installed {client_name} release reported the wrong version: "
+                    + (reported[-500:] or "no version output")
                 )
         except Exception:
             if source.exists():
@@ -147,8 +149,19 @@ def _release_ready(release: Path, target_commit: str) -> bool:
     executable = _venv_executable(release / "venv", "cope")
     if not executable.is_file():
         return False
-    result = _run([str(executable), "version"], check=False, capture=True)
+    result = _run(
+        [str(executable), "version"],
+        check=False,
+        capture=True,
+        environment=_release_environment(),
+    )
     return f"version={target_commit}" in result
+
+
+def _release_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("COPE_BUILD_VERSION", None)
+    return environment
 
 
 def _prune_releases(
@@ -222,6 +235,7 @@ def _run(
     *,
     check: bool = True,
     capture: bool = False,
+    environment: dict[str, str] | None = None,
 ) -> str:
     LOG.info("running command=%s", " ".join(command))
     result = subprocess.run(
@@ -229,6 +243,7 @@ def _run(
         capture_output=capture,
         check=False,
         text=True,
+        env=environment,
     )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
