@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { api } from '@/api/client'
 import ChessBoard from '@/components/chess/ChessBoard.vue'
@@ -45,8 +45,6 @@ const data = ref<HomeResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 let controller: AbortController | null = null
-
-const activeCount = computed(() => data.value?.running_tournaments.length || 0)
 
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
