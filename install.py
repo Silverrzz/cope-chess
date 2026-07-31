@@ -337,19 +337,32 @@ def _configure_clients(
 
 def _start_client(key: str, settings: dict[str, str]) -> None:
     RUNTIME.mkdir(parents=True, exist_ok=True)
-    container = _container_name(key)
-    status = _container_status(container)
-    current_version = _container_label(container, "cope-chess.installer-version")
-    if status == "running" and current_version == INSTALLER_VERSION:
-        print(f"{_target(key).label} is already running in {container}.")
-        return
-    if status:
-        _run(["docker", "rm", "--force", container])
+    machine_id = _client_machine_id(key)
     state_path = (
         RUNTIME / "worker.json"
         if key == "worker"
         else RUNTIME / "benchmarker.session"
     )
+    container = _container_name(key)
+    status = _container_status(container)
+    current_installer_version = _container_label(container, "cope-chess.installer-version")
+    current_build_version = _container_label(container, "cope-chess.build-version")
+    current_machine_id = _container_label(container, "cope-chess.machine-id")
+    current_image_id = _container_image_id(container)
+    desired_image_id = _image_id(IMAGE)
+    build_version = _build_version()
+    if (
+        status == "running"
+        and current_installer_version == INSTALLER_VERSION
+        and current_build_version == build_version
+        and current_machine_id == machine_id
+        and current_image_id == desired_image_id
+        and state_path.is_file()
+    ):
+        print(f"{_target(key).label} is already running in {container}.")
+        return
+    if status:
+        _run(["docker", "rm", "--force", container])
     token = None
     if not state_path.is_file():
         token = _registration_token(key, settings)
@@ -364,6 +377,10 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         container,
         "--label",
         f"cope-chess.installer-version={INSTALLER_VERSION}",
+        "--label",
+        f"cope-chess.build-version={build_version}",
+        "--label",
+        f"cope-chess.machine-id={machine_id}",
         "--init",
         "--restart",
         "unless-stopped",
@@ -376,7 +393,7 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         "--mount",
         f"type=volume,source={_cache_volume()},target=/root/.cope-worker/engines",
         "--env",
-        f"COPE_BUILD_VERSION={_build_version()}",
+        f"COPE_BUILD_VERSION={build_version}",
     ]
     if settings[f"{key}_server_url"].startswith(
         ("ws://worker-server:", "ws://benchmark-server:")
@@ -417,6 +434,8 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
             settings[f"{key}_server_url"],
             "--label-hint",
             f"{socket.gethostname()}-{key}",
+            "--machine-id",
+            machine_id,
         ]
     )
     if key == "worker":
@@ -687,9 +706,44 @@ def _cache_volume() -> str:
     return f"cope-chess-engine-cache-{digest}"
 
 
+def _client_machine_id(key: str) -> str:
+    path = RUNTIME / f"{key}.machine-id"
+    try:
+        machine_id = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        machine_id = secrets.token_hex(32)
+        path.write_text(machine_id + "\n", encoding="utf-8")
+        _restrict_file(path)
+    if not 8 <= len(machine_id) <= 128:
+        raise SystemExit(f"Invalid persisted {key} machine identity in {path}.")
+    return machine_id
+
+
 def _container_status(name: str) -> str:
     result = subprocess.run(
         ["docker", "inspect", "--format", "{{.State.Status}}", name],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _container_image_id(name: str) -> str:
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Image}}", name],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _image_id(name: str) -> str:
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", name],
         cwd=ROOT,
         capture_output=True,
         check=False,

@@ -11,10 +11,8 @@ const menuOpen = ref(false);
 const compactGameLayout = computed(() => route.name === "tournament");
 
 const navItems = [
-  { label: "Live", to: "/" },
   { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
-  { label: "Archive", to: "/archive" },
 ] as const;
 
 function navActive(path: string): boolean {

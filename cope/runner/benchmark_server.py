@@ -40,10 +40,8 @@ from cope.db import (
     fail_benchmark_job,
     get_benchmarker_by_session_id,
     get_benchmarker_by_token,
-    list_engines,
     register_benchmarker_connection,
     reset_benchmark_service_state,
-    schedule_benchmark_jobs,
     set_service_endpoint,
     touch_service_heartbeat,
     update_benchmarker_status,
@@ -365,23 +363,12 @@ class BenchmarkServer:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            scheduled = schedule_benchmark_jobs(
-                connection,
-                hardware_key=benchmarker.hardware_key,
-                engines=list_engines(connection, active_only=True),
-            )
             job = claim_benchmark_job(
                 connection,
                 benchmarker_id=benchmarker.id,
                 hardware_key=benchmarker.hardware_key,
             )
             connection.commit()
-            if scheduled:
-                LOG.info(
-                    "scheduled benchmark jobs count=%s hardware_key=%s",
-                    scheduled,
-                    benchmarker.hardware_key,
-                )
             return job
         except Exception:
             connection.rollback()
@@ -425,6 +412,7 @@ class BenchmarkServer:
             benchmarker,
             job,
             f"{failure.stage}: {failure.error}",
+            output=failure.output,
         )
 
     def _fail_interrupted_job(
@@ -439,6 +427,8 @@ class BenchmarkServer:
         benchmarker: BenchmarkerRecord,
         job: BenchmarkJobRecord,
         error: str,
+        *,
+        output: str = "",
     ) -> None:
         connection = connect_database(self._config.db_path)
         try:
@@ -448,6 +438,7 @@ class BenchmarkServer:
                 job=job,
                 benchmarker_id=benchmarker.id,
                 error=error,
+                output=output,
                 retry_seconds=self._config.retry_interval_s,
             )
             connection.commit()

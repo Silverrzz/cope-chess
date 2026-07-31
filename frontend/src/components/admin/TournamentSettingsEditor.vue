@@ -42,12 +42,12 @@ function patch(patchValue: Partial<TournamentSettings>): void {
 
 function setFormat(format: TournamentFormat): void {
   const options = format === 'round_robin'
-    ? { games_per_pairing: 2 }
+    ? { cycles: 1 }
     : format === 'swiss'
       ? { rounds: 7 }
       : format === 'knockout'
-        ? { games_per_match: 2, tiebreak: 'armageddon' as const }
-        : { hero_engine_id: props.participants[0] ?? 0, games_per_opponent: 2 }
+        ? { tiebreak: 'extra_pair' as const }
+        : { hero_engine_id: props.participants[0] ?? 0 }
   patch({ format, format_options: options })
 }
 
@@ -134,8 +134,9 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
         </label>
 
         <label v-if="model.format === 'round_robin'" class="field">
-          <span class="field__label">Games per pairing</span>
-          <input class="input" type="number" min="1" step="1" :value="numberOption('games_per_pairing')" @input="patchFormatOption('games_per_pairing', Number(($event.target as HTMLInputElement).value))">
+          <span class="field__label">Cycles</span>
+          <input class="input" type="number" min="1" step="1" :value="numberOption('cycles')" @input="patchFormatOption('cycles', Number(($event.target as HTMLInputElement).value))">
+          <small class="field__help">Each cycle gives every pairing one game with each colour.</small>
         </label>
 
         <label v-else-if="model.format === 'swiss'" class="field">
@@ -143,31 +144,13 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
           <input class="input" type="number" min="1" step="1" :value="numberOption('rounds')" @input="patchFormatOption('rounds', Number(($event.target as HTMLInputElement).value))">
         </label>
 
-        <template v-else-if="model.format === 'knockout'">
-          <label class="field">
-            <span class="field__label">Games per match</span>
-            <input class="input" type="number" min="1" step="1" :value="numberOption('games_per_match')" @input="patchFormatOption('games_per_match', Number(($event.target as HTMLInputElement).value))">
-          </label>
-          <label class="field">
-            <span class="field__label">Tiebreak</span>
-            <select class="input" :value="'tiebreak' in model.format_options ? model.format_options.tiebreak : 'armageddon'" @change="patchFormatOption('tiebreak', ($event.target as HTMLSelectElement).value)">
-              <option value="armageddon">Armageddon</option>
-              <option value="extra_pair">Extra game pair</option>
-            </select>
-          </label>
-        </template>
-
-        <template v-else-if="allowGauntlet">
+        <template v-else-if="model.format === 'gauntlet' && allowGauntlet">
           <label class="field">
             <span class="field__label">Hero engine</span>
             <select class="input" :value="numberOption('hero_engine_id')" @change="patchFormatOption('hero_engine_id', Number(($event.target as HTMLSelectElement).value))">
               <option value="0" disabled>Select a participant</option>
-              <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }}</option>
+              <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option>
             </select>
-          </label>
-          <label class="field">
-            <span class="field__label">Games per opponent</span>
-            <input class="input" type="number" min="1" step="1" :value="numberOption('games_per_opponent')" @input="patchFormatOption('games_per_opponent', Number(($event.target as HTMLInputElement).value))">
           </label>
         </template>
       </div>

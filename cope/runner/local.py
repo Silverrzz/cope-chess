@@ -42,7 +42,6 @@ from cope.db import (
     TournamentRecord,
     WorkerRecord,
     assign_game_to_worker,
-    claim_tournament_worker_profile,
     connect_database,
     finish_game,
     get_engine,
@@ -61,7 +60,6 @@ from cope.db import (
     set_tournament_current_round_at_least,
     set_tournament_status,
     touch_service_heartbeat,
-    worker_hardware_profile,
 )
 
 from .scheduler import TournamentPreparation, advance_tournament, prepare_scheduled_tournaments
@@ -242,10 +240,6 @@ def next_worker_assignment(
 
         if worker.hw is None:
             continue
-        hardware_profile = worker_hardware_profile(worker.hw)
-        if tournament.worker_profile is not None and tournament.worker_profile != hardware_profile:
-            continue
-
         game = _next_playable_game_for_worker(connection, games, worker)
         if game is None:
             continue
@@ -255,13 +249,6 @@ def next_worker_assignment(
             tuple(engines.values()),
         )
         if benchmark_reference is None:
-            continue
-
-        if not claim_tournament_worker_profile(
-            connection,
-            tournament.id,
-            hardware_profile,
-        ):
             continue
 
         set_tournament_current_round_at_least(connection, tournament.id, game.round)
@@ -351,8 +338,7 @@ def run_worker_assignment_game(
         raise RuntimeError("assignment opening start position does not match the game")
     if assignment.opening_moves != opening_moves:
         raise RuntimeError("assignment opening moves do not match the game")
-    played_opening_moves = _played_opening_move_count(recorded_moves, opening_moves)
-    _apply_recorded_moves(board, recorded_moves)
+    _validate_new_game_attempt(recorded_moves)
     LOG.info(
         "starting game assignment_id=%s game_id=%s tournament=%s round=%s opening=%s",
         assignment.assignment.assignment_id,
@@ -420,7 +406,7 @@ def run_worker_assignment_game(
         "opening_select",
         "running",
         f"Selecting {opening_label}",
-        current=played_opening_moves,
+        current=0,
         total=max(len(opening_moves), 1),
         metadata={
             "start_fen": assignment.initial_fen,
@@ -435,14 +421,11 @@ def run_worker_assignment_game(
         "opening_start_position",
         "completed",
         f"Both engines initialized at the start position for {opening_label}",
-        current=played_opening_moves,
+        current=0,
         total=max(len(opening_moves), 1),
         metadata={"fen": board.fen()},
     )
-    for book_index, uci in enumerate(
-        opening_moves[played_opening_moves:],
-        start=played_opening_moves + 1,
-    ):
+    for book_index, uci in enumerate(opening_moves, start=1):
         _validated_assignment_record(connection, assignment)
         progress(
             "opening",
@@ -905,7 +888,8 @@ def _tournament_engine_options(
     tournament: TournamentRecord,
     engine_id: int,
 ) -> dict[str, str | int | bool]:
-    options = dict(tournament.config.uci_options.get(engine_id, {}))
+    del engine_id
+    options = dict(tournament.config.uci_options)
     options["Threads"] = tournament.config.engine_threads
     options["Hash"] = tournament.config.engine_hash_mb
     return options
@@ -1036,41 +1020,12 @@ def _starting_board(opening: OpeningPositionRecord | None) -> chess.Board:
     return chess.Board(opening.start_fen)
 
 
-def _played_opening_move_count(
-    recorded_moves: tuple[MoveRecord, ...],
-    opening_moves: tuple[str, ...],
-) -> int:
-    book_moves: list[MoveRecord] = []
-    engine_move_seen = False
-    for move in recorded_moves:
-        if move.is_book:
-            if engine_move_seen:
-                raise RuntimeError("recorded book move appears after engine play")
-            book_moves.append(move)
-        else:
-            engine_move_seen = True
-    if len(book_moves) > len(opening_moves):
-        raise RuntimeError("recorded game has more book moves than its opening")
-    for index, move in enumerate(book_moves):
-        if move.uci != opening_moves[index]:
-            raise RuntimeError(
-                f"recorded book move {move.uci} does not match opening move "
-                f"{opening_moves[index]} at book ply {index + 1}"
-            )
-    if engine_move_seen and len(book_moves) != len(opening_moves):
-        raise RuntimeError("engine play started before the opening book was completed")
-    return len(book_moves)
-
-
-def _apply_recorded_moves(
-    board: chess.Board,
-    moves: tuple[MoveRecord, ...],
-) -> None:
-    for move_record in moves:
-        move = chess.Move.from_uci(move_record.uci)
-        if move not in board.legal_moves:
-            raise RuntimeError(f"recorded move {move_record.uci} is illegal at ply {move_record.ply}")
-        board.push(move)
+def _validate_new_game_attempt(recorded_moves: tuple[MoveRecord, ...]) -> None:
+    if recorded_moves:
+        raise RuntimeError(
+            "game assignment contains moves from an earlier attempt; "
+            "interrupted games must be reset before reassignment"
+        )
 
 
 def _max_plies(tournament: TournamentRecord) -> int:

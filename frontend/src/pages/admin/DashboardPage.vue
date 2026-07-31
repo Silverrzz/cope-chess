@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
-import { useConfirm } from '@/composables/useConfirm'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
@@ -23,14 +22,12 @@ interface DashboardData {
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
 const error = ref('')
-const commitPending = ref<number | null>(null)
 const actionMessage = ref('')
-const { confirm } = useConfirm()
 
 const metrics = computed(() => [
   { label: 'Tournaments', value: data.value?.db_stats.tournaments, to: '/admin/tournaments', icon: 'tournament' },
   { label: 'Engines', value: data.value?.db_stats.engines, to: '/admin/engines', icon: 'engine' },
-  { label: 'Categories', value: data.value?.db_stats.categories, to: '/admin/categories', icon: 'category' },
+  { label: 'Rating lists', value: data.value?.db_stats.rating_lists, to: '/admin/ratings', icon: 'category' },
   { label: 'Opening suites', value: data.value?.db_stats.opening_suites, to: '/admin/openings', icon: 'opening' },
   { label: 'Workers', value: data.value?.db_stats.workers, to: '/admin/workers', icon: 'worker' },
 ])
@@ -51,26 +48,6 @@ async function load(): Promise<void> {
     error.value = errorText(cause)
   } finally {
     loading.value = false
-  }
-}
-
-async function commit(tournament: Tournament): Promise<void> {
-  const accepted = await confirm({
-    title: 'Commit rating results?',
-    message: `Apply ${tournament.name} to the category ratings? Applied rating results are permanent.`,
-    confirmLabel: 'Commit ratings',
-  })
-  if (!accepted) return
-  commitPending.value = tournament.id
-  actionMessage.value = ''
-  try {
-    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${tournament.id}/commit-results`, {})
-    actionMessage.value = response.message
-    await load()
-  } catch (cause) {
-    error.value = errorText(cause)
-  } finally {
-    commitPending.value = null
   }
 }
 
@@ -147,7 +124,7 @@ onMounted(load)
           <div class="commit-list">
             <div v-for="tournament in data.complete_tournaments" :key="tournament.id">
               <span><RouterLink :to="`/admin/tournaments/${tournament.id}`">{{ tournament.name }}</RouterLink><small>{{ tournament.config.participants.length }} participants</small></span>
-              <button class="button button--primary button--small" type="button" :disabled="commitPending === tournament.id" @click="commit(tournament)">{{ commitPending === tournament.id ? 'Requesting…' : 'Commit results' }}</button>
+              <RouterLink class="button button--primary button--small" :to="`/admin/tournaments/${tournament.id}`">Commit results</RouterLink>
             </div>
           </div>
         </section>

@@ -14,24 +14,6 @@
     <script type="application/json" data-viewer-moves>{{ viewer_move_payloads | tojson }}</script>
     <div class="arena__grid">
       <div class="arena__analysis">
-        {% if game_progress %}
-          <section class="game-pipeline" data-live-game-progress>
-            <header>
-              <span>Current activity</span>
-              <strong data-live-progress-stage>{{ game_progress.current.stage_label }}</strong>
-            </header>
-            <p data-live-progress-detail>{{ game_progress.current.detail }}</p>
-            <ol data-live-progress-stages>
-              {% for stage in game_progress.stages %}
-                <li data-progress-stage="{{ stage.stage }}" data-progress-status="{{ stage.status }}">
-                  <span></span>
-                  <strong>{{ stage.stage_label }}</strong>
-                  <small>{{ stage.detail }}</small>
-                </li>
-              {% endfor %}
-            </ol>
-          </section>
-        {% endif %}
         <article class="engine-console engine-console--black">
           <div class="engine-console__main">
             <header>

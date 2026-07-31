@@ -170,7 +170,6 @@ function progress(item: TournamentSummary): number {
             <div>
               <h2 id="recent-title">Recent results</h2>
             </div>
-            <RouterLink to="/archive">Archive</RouterLink>
           </div>
           <GameTable
             v-if="data.recent_games.length"

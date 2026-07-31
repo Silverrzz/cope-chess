@@ -703,44 +703,6 @@ document.querySelectorAll("[data-tournament-live]").forEach((arena) => {
     return result || "-";
   }
 
-  function renderGameProgress(progress) {
-    if (!progress?.current) return;
-    let panel = arena.querySelector("[data-live-game-progress]");
-    if (!panel) {
-      panel = document.createElement("section");
-      panel.className = "game-pipeline";
-      panel.dataset.liveGameProgress = "";
-      const analysis = arena.querySelector(".arena__analysis");
-      if (analysis) analysis.prepend(panel);
-    }
-    panel.replaceChildren();
-    const header = document.createElement("header");
-    const heading = document.createElement("span");
-    heading.textContent = "Current activity";
-    const stage = document.createElement("strong");
-    stage.dataset.liveProgressStage = "";
-    stage.textContent = progress.current.stage_label || progress.current.stage;
-    header.append(heading, stage);
-    const detail = document.createElement("p");
-    detail.dataset.liveProgressDetail = "";
-    detail.textContent = progress.current.detail || "";
-    const stages = document.createElement("ol");
-    stages.dataset.liveProgressStages = "";
-    (progress.stages || []).forEach((item) => {
-      const row = document.createElement("li");
-      row.dataset.progressStage = item.stage || "";
-      row.dataset.progressStatus = item.status || "pending";
-      const indicator = document.createElement("span");
-      const label = document.createElement("strong");
-      label.textContent = item.stage_label || item.stage || "";
-      const description = document.createElement("small");
-      description.textContent = item.detail || "";
-      row.append(indicator, label, description);
-      stages.append(row);
-    });
-    panel.append(header, detail, stages);
-  }
-
   function parseReplayMoves() {
     const script = arena.querySelector("[data-viewer-moves]");
     if (!script) return [];
@@ -878,7 +840,6 @@ document.querySelectorAll("[data-tournament-live]").forEach((arena) => {
     setEngineData("white", payload.engine_data?.white, { gameChanged, gameMoves: moves });
     setEngineData("black", payload.engine_data?.black, { gameChanged, gameMoves: moves });
     setClocks(payload.clocks);
-    renderGameProgress(payload.game_progress);
     renderStandings(payload.standings);
     renderGames(payload.games);
 

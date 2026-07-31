@@ -15,9 +15,26 @@ export interface Engine {
   build_hash: string
   uci_options: Record<string, string | number | boolean>
   active: boolean
-  version_active?: boolean
+  benchmark_current?: boolean
   engine_active?: boolean
   created_at?: string
+}
+
+export interface EngineBenchmarkJob {
+  id: Id
+  build_hash: string
+  hardware_key: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  attempt: number
+  scheduled_at: string
+  started_at: string | null
+  finished_at: string | null
+  next_retry_at: string | null
+  error: string
+  output: string
+  benchmarker: { id: Id | null; label: string; status: string | null } | null
+  hardware: { cpu_model: string; physical_cores: number; logical_cores: number; ram_gb: number } | null
+  result: { nps: number; elapsed_ms: number; recorded_at: string } | null
 }
 
 export interface EngineFamily {
@@ -48,10 +65,10 @@ export type TournamentFormat = 'round_robin' | 'swiss' | 'knockout' | 'gauntlet'
 export type TimeControlCategory = 'increment' | 'movetime' | 'movestogo' | 'movenodes'
 
 export type FormatOptions =
-  | { games_per_pairing: number }
+  | { cycles: number }
   | { rounds: number }
-  | { games_per_match: number; tiebreak: 'armageddon' | 'extra_pair' }
-  | { hero_engine_id: number; games_per_opponent: number }
+  | { tiebreak: 'extra_pair' }
+  | { hero_engine_id: number }
 
 export type TimeControl =
   | { category: 'increment'; initial_ms: number; increment_ms: number }
@@ -87,19 +104,15 @@ export interface CategorySettings extends TournamentSettings {
 }
 
 export interface TournamentConfig extends TournamentSettings {
-  category_id: number | null
-  category_settings_linked: boolean
   participants: number[]
   engine_threads: number
   engine_hash_mb: number
-  uci_options: Record<string, Record<string, string | number | boolean>>
+  uci_options: Record<string, string | number | boolean>
 }
 
 export interface Tournament {
   id: Id
   name: string
-  category_id: number | null
-  settings_unlinked?: boolean
   config: TournamentConfig
   status: string
   current_round?: number
@@ -158,10 +171,6 @@ export interface FormSeed {
   form_values?: Record<string, unknown>
   form_name?: string
   form_participants?: number[]
-  form_category_id?: number | null
-  form_linked?: boolean
-  categories: Category[]
-  category_defaults?: Record<string, Record<string, unknown>>
   engine_options: Engine[]
   opening_suites: OpeningSuite[]
   editing?: Tournament | boolean | null

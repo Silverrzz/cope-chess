@@ -93,20 +93,14 @@ def build_tournament_config(form: FormValues) -> TournamentConfig:
     if len(participants) < 2:
         errors.append("Select at least two participating engines.")
 
-    linked = form_flag(form, "category_settings_linked")
-    category = form_value(form, "category_id")
-    category_id = int(category) if linked and category.isdigit() else None
-
     if errors:
         raise FormError(errors)
 
     try:
         config_values = {key: value for key, value in settings.items() if key != "rated"}
         return TournamentConfig(
-            category_id=category_id,
-            category_settings_linked=linked,
             participants=participants,
-            rated=settings["rated"] if linked else False,
+            rated=settings["rated"],
             **config_values,
         )
     except ValidationError as exc:
@@ -120,29 +114,21 @@ def _format_options(form: FormValues, format_name: str, errors: list[str]) -> An
                 rounds=_int_field(form, "swiss_rounds", errors, "Swiss rounds", minimum=1, default=7),
             )
         if format_name == "knockout":
-            return KnockoutFormatOptions(
-                games_per_match=_int_field(
-                    form, "knockout_games_per_match", errors, "Games per match", minimum=1, default=2
-                ),
-                tiebreak=form_value(form, "knockout_tiebreak", "armageddon"),
-            )
+            return KnockoutFormatOptions()
         if format_name == "gauntlet":
             return GauntletFormatOptions(
                 hero_engine_id=_int_field(
                     form, "gauntlet_hero_engine_id", errors, "Gauntlet hero engine", minimum=1, default=0
                 ),
-                games_per_opponent=_int_field(
-                    form, "gauntlet_games_per_opponent", errors, "Games per opponent", minimum=1, default=2
-                ),
             )
         return RoundRobinFormatOptions(
-            games_per_pairing=_int_field(
+            cycles=_int_field(
                 form,
-                "round_robin_games_per_pairing",
+                "round_robin_cycles",
                 errors,
-                "Games per pairing",
+                "Round robin cycles",
                 minimum=1,
-                default=2,
+                default=1,
             )
         )
     except ValidationError as exc:
@@ -284,12 +270,9 @@ def settings_form_values(settings: dict[str, Any]) -> dict[str, Any]:
         "rated": settings.get("rated", True),
         "lag_compensation_ms": settings.get("lag_compensation_ms", 50),
         "opening_suite_id": settings.get("opening_suite_id") or "",
-        "round_robin_games_per_pairing": 2,
+        "round_robin_cycles": 1,
         "swiss_rounds": 7,
-        "knockout_games_per_match": 2,
-        "knockout_tiebreak": "armageddon",
         "gauntlet_hero_engine_id": "",
-        "gauntlet_games_per_opponent": 2,
         "tc_type": "increment",
         "tc_initial_s": 60,
         "tc_increment_s": 1,
@@ -307,14 +290,11 @@ def settings_form_values(settings: dict[str, Any]) -> dict[str, Any]:
     }
 
     options = settings.get("format_options") or {}
-    values["round_robin_games_per_pairing"] = options.get("games_per_pairing", 2)
-    values["swiss_rounds"] = options.get("rounds", values["swiss_rounds"])
-    values["knockout_games_per_match"] = options.get("games_per_match", values["knockout_games_per_match"])
-    values["knockout_tiebreak"] = options.get("tiebreak", values["knockout_tiebreak"])
-    values["gauntlet_hero_engine_id"] = options.get("hero_engine_id", values["gauntlet_hero_engine_id"])
-    values["gauntlet_games_per_opponent"] = options.get(
-        "games_per_opponent", values["gauntlet_games_per_opponent"]
+    values["round_robin_cycles"] = options.get(
+        "cycles", max(1, (options.get("games_per_pairing", 2) + 1) // 2)
     )
+    values["swiss_rounds"] = options.get("rounds", values["swiss_rounds"])
+    values["gauntlet_hero_engine_id"] = options.get("hero_engine_id", values["gauntlet_hero_engine_id"])
 
     time_control = settings.get("time_control") or {}
     values["tc_type"] = time_control.get("category", "increment")

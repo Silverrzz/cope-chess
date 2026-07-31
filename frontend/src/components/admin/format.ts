@@ -51,7 +51,7 @@ function formatSeconds(milliseconds: number): string {
 export function defaultSettings(): TournamentSettings {
   return {
     format: 'round_robin',
-    format_options: { games_per_pairing: 2 },
+    format_options: { cycles: 1 },
     time_control: { category: 'increment', initial_ms: 60_000, increment_ms: 1_000 },
     concurrency: 1,
     opening_suite_id: null,
@@ -100,16 +100,14 @@ export function settingsFromFlat(values: Record<string, unknown> = {}): Tourname
     settings.format_options = { rounds: positiveInt(values.swiss_rounds, 7) }
   } else if (format === 'knockout') {
     settings.format_options = {
-      games_per_match: positiveInt(values.knockout_games_per_match, 2),
-      tiebreak: values.knockout_tiebreak === 'extra_pair' ? 'extra_pair' : 'armageddon',
+      tiebreak: 'extra_pair',
     }
   } else if (format === 'gauntlet') {
     settings.format_options = {
       hero_engine_id: positiveInt(values.gauntlet_hero_engine_id, 0),
-      games_per_opponent: positiveInt(values.gauntlet_games_per_opponent, 2),
     }
   } else {
-    settings.format_options = { games_per_pairing: positiveInt(values.round_robin_games_per_pairing, 2) }
+    settings.format_options = { cycles: positiveInt(values.round_robin_cycles, 1) }
   }
 
   const category = values.tc_type ?? values.time_control_category ?? 'increment'
@@ -163,9 +161,23 @@ export function settingsFromFlat(values: Record<string, unknown> = {}): Tourname
 export function normalizeSettings(value: Partial<TournamentSettings> | undefined): TournamentSettings {
   const defaults = defaultSettings()
   if (!value || !value.format || !value.time_control) return defaults
+  const rawOptions = (value.format_options || {}) as unknown as Record<string, unknown>
+  const format_options: TournamentSettings['format_options'] = value.format === 'round_robin'
+    ? {
+        cycles: positiveInt(
+          rawOptions.cycles,
+          Math.max(1, Math.ceil(positiveInt(rawOptions.games_per_pairing, 2) / 2)),
+        ),
+      }
+    : value.format === 'swiss'
+      ? { rounds: positiveInt(rawOptions.rounds, 7) }
+      : value.format === 'knockout'
+        ? { tiebreak: 'extra_pair' }
+        : { hero_engine_id: positiveInt(rawOptions.hero_engine_id, 0) }
   return {
     ...defaults,
     ...cloneData(value),
+    format_options,
     adjudication: {
       draw: value.adjudication?.draw
         ? {
@@ -200,13 +212,8 @@ export function configFromSeed(seed: FormSeed): TournamentConfig {
   const editing = typeof seed.editing === 'object' && seed.editing ? seed.editing : null
   if (editing?.config) return normalizeConfig(editing.config)
 
-  const categoryId = seed.form_category_id !== undefined
-    ? seed.form_category_id
-    : seed.categories[0]?.id ?? null
   return {
     ...settingsFromFlat(seed.form_values),
-    category_id: categoryId,
-    category_settings_linked: seed.form_linked ?? seed.categories.length > 0,
     participants: [...(seed.form_participants ?? [])],
     engine_threads: 1,
     engine_hash_mb: 16,
@@ -215,8 +222,10 @@ export function configFromSeed(seed: FormSeed): TournamentConfig {
 }
 
 function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {
+  const normalized = normalizeSettings(config)
   return {
     ...config,
+    ...normalized,
     engine_threads: positiveInt(config.engine_threads, 1),
     engine_hash_mb: positiveInt(config.engine_hash_mb, 16),
     uci_options: config.uci_options ?? {},
@@ -227,15 +236,15 @@ export function estimateGames(format: TournamentFormat, options: TournamentSetti
   if (players < 2) return 0
   if (format === 'round_robin') {
     const pairs = (players * (players - 1)) / 2
-    return pairs * ('games_per_pairing' in options ? options.games_per_pairing : 0)
+    return pairs * 2 * ('cycles' in options ? options.cycles : 0)
   }
   if (format === 'swiss') {
-    return Math.floor(players / 2) * ('rounds' in options ? options.rounds : 0)
+    return Math.floor(players / 2) * 2 * ('rounds' in options ? options.rounds : 0)
   }
   if (format === 'knockout') {
-    return (players - 1) * ('games_per_match' in options ? options.games_per_match : 0)
+    return (players - 1) * 2
   }
-  return (players - 1) * ('games_per_opponent' in options ? options.games_per_opponent : 0)
+  return (players - 1) * 2
 }
 
 export function errorText(error: unknown): string {

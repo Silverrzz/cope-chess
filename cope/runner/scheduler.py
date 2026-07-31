@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from cope.core.models import (
     GauntletFormatOptions,
     KnockoutFormatOptions,
-    KnockoutTiebreak,
     RoundRobinFormatOptions,
     SwissFormatOptions,
     TournamentFormat,
@@ -125,30 +124,42 @@ def generate_round_robin_games(
 
     participants = tournament.config.participants
     created_games = 0
-    opening_offset = len(list_games(connection, tournament.id))
+    opening_offset = len(list_games(connection, tournament.id)) // 2
     opening_ids = _opening_ids(connection, tournament)
     round_pairings = _round_robin_pairings(participants)
     rounds_per_cycle = len(round_pairings)
+    pairings_per_cycle = sum(len(pairings) for pairings in round_pairings)
+    round_pairing_offsets: list[int] = []
+    next_pairing_offset = 0
+    for pairings in round_pairings:
+        round_pairing_offsets.append(next_pairing_offset)
+        next_pairing_offset += len(pairings)
 
-    for cycle_index in range(options.games_per_pairing):
-        for base_round, pairings in enumerate(round_pairings, start=1):
-            round_number = base_round + cycle_index * rounds_per_cycle
-            for pair_index, pairing in enumerate(pairings, start=1):
-                white_engine_id, black_engine_id = pairing
-                if cycle_index % 2 == 1:
-                    white_engine_id, black_engine_id = black_engine_id, white_engine_id
-                _create_scheduled_game(
-                    connection,
-                    tournament,
-                    round_number=round_number,
-                    pair_index=pair_index,
-                    white_engine_id=white_engine_id,
-                    black_engine_id=black_engine_id,
-                    game_number=cycle_index + 1,
-                    opening_offset=opening_offset + created_games,
-                    opening_ids=opening_ids,
-                )
-                created_games += 1
+    for cycle_index in range(options.cycles):
+        for leg_index in range(2):
+            for base_round, pairings in enumerate(round_pairings, start=1):
+                round_number = base_round + (cycle_index * 2 + leg_index) * rounds_per_cycle
+                for pair_index, pairing in enumerate(pairings, start=1):
+                    white_engine_id, black_engine_id = pairing
+                    if leg_index == 1:
+                        white_engine_id, black_engine_id = black_engine_id, white_engine_id
+                    _create_scheduled_game(
+                        connection,
+                        tournament,
+                        round_number=round_number,
+                        pair_index=pair_index,
+                        white_engine_id=white_engine_id,
+                        black_engine_id=black_engine_id,
+                        game_number=cycle_index * 2 + leg_index + 1,
+                        opening_offset=(
+                            opening_offset
+                            + cycle_index * pairings_per_cycle
+                            + round_pairing_offsets[base_round - 1]
+                            + pair_index - 1
+                        ),
+                        opening_ids=opening_ids,
+                    )
+                    created_games += 1
     return created_games
 
 
@@ -163,9 +174,9 @@ def generate_gauntlet_games(
     hero = options.hero_engine_id
     opponents = [engine_id for engine_id in tournament.config.participants if engine_id != hero]
     created_games = 0
-    opening_offset = len(list_games(connection, tournament.id))
+    opening_offset = len(list_games(connection, tournament.id)) // 2
     opening_ids = _opening_ids(connection, tournament)
-    for game_number in range(1, options.games_per_opponent + 1):
+    for game_number in range(1, 3):
         for opponent_index, opponent in enumerate(opponents, start=1):
             round_number = (game_number - 1) * len(opponents) + opponent_index
             hero_is_white = (game_number + opponent_index) % 2 == 0
@@ -178,7 +189,7 @@ def generate_gauntlet_games(
                 white_engine_id=white,
                 black_engine_id=black,
                 game_number=game_number,
-                opening_offset=opening_offset + created_games,
+                opening_offset=opening_offset + opponent_index - 1,
                 opening_ids=opening_ids,
             )
             created_games += 1
@@ -224,7 +235,7 @@ def generate_swiss_round(
         pairings = _swiss_pairings(ranked, points, opponents)
 
     created_games = 0
-    opening_offset = len(games)
+    opening_offset = len(games) // 2
     opening_ids = _opening_ids(connection, tournament)
     match_index = 1
     for first, second in pairings:
@@ -237,18 +248,23 @@ def generate_swiss_round(
             engine1_id=first,
             engine2_id=second,
         )
-        _create_scheduled_game(
-            connection,
-            tournament,
-            round_number=round_number,
-            pair_index=match_index,
-            white_engine_id=white,
-            black_engine_id=black,
-            match_id=match_id,
-            opening_offset=opening_offset + created_games,
-            opening_ids=opening_ids,
-        )
-        created_games += 1
+        for game_number, (game_white, game_black) in enumerate(
+            ((white, black), (black, white)),
+            start=1,
+        ):
+            _create_scheduled_game(
+                connection,
+                tournament,
+                round_number=round_number,
+                pair_index=match_index,
+                white_engine_id=game_white,
+                black_engine_id=game_black,
+                match_id=match_id,
+                game_number=game_number,
+                opening_offset=opening_offset + match_index - 1,
+                opening_ids=opening_ids,
+            )
+            created_games += 1
         match_index += 1
 
     if bye is not None:
@@ -312,7 +328,12 @@ def _advance_swiss(
         games = games_by_match.get(match.id, ())
         if not games:
             return TournamentAdvance()
-        winner = _game_winner(games[0])
+        first_points, second_points = _match_points(match, games)
+        winner = (
+            match.engine1_id if first_points > second_points
+            else match.engine2_id if second_points > first_points
+            else None
+        )
         finish_tournament_match(connection, match.id, winner_engine_id=winner)
 
     if current_round >= options.rounds:
@@ -394,7 +415,7 @@ def _create_knockout_round(
         raise ValueError("knockout tournament has invalid format options")
     created_games = 0
     pair_index = 1
-    opening_offset = len(list_games(connection, tournament.id))
+    opening_offset = len(list_games(connection, tournament.id)) // 2
     opening_ids = _opening_ids(connection, tournament)
     for match_index, (first, second) in enumerate(pairings, start=1):
         entrant = first if first is not None else second
@@ -414,7 +435,7 @@ def _create_knockout_round(
         if is_bye:
             continue
         assert first is not None and second is not None
-        for game_number in range(1, options.games_per_match + 1):
+        for game_number in range(1, 3):
             white, black = (first, second) if game_number % 2 else (second, first)
             _create_scheduled_game(
                 connection,
@@ -425,7 +446,7 @@ def _create_knockout_round(
                 black_engine_id=black,
                 match_id=match_id,
                 game_number=game_number,
-                opening_offset=opening_offset + created_games,
+                opening_offset=opening_offset + match_index - 1,
                 opening_ids=opening_ids,
             )
             pair_index += 1
@@ -447,7 +468,7 @@ def _resolve_knockout_match(
 
     first_points, second_points = _match_points(match, games)
     extra_games = [game for game in games if game.tiebreak_kind == "extra_pair"]
-    base_complete = len(games) >= options.games_per_match
+    base_complete = len(games) >= 2
     extra_complete = not extra_games or len(extra_games) % 2 == 0
     if base_complete and extra_complete and first_points != second_points:
         return (match.engine1_id if first_points > second_points else match.engine2_id), 0
@@ -455,24 +476,14 @@ def _resolve_knockout_match(
     if not base_complete or not extra_complete:
         return None, 0
 
-    if options.tiebreak == KnockoutTiebreak.ARMAGEDDON:
-        created = _append_knockout_games(
-            connection,
-            tournament,
-            match,
-            games,
-            count=1,
-            tiebreak_kind="armageddon",
-        )
-    else:
-        created = _append_knockout_games(
-            connection,
-            tournament,
-            match,
-            games,
-            count=2,
-            tiebreak_kind="extra_pair",
-        )
+    created = _append_knockout_games(
+        connection,
+        tournament,
+        match,
+        games,
+        count=2,
+        tiebreak_kind="extra_pair",
+    )
     return None, created
 
 
@@ -491,7 +502,7 @@ def _append_knockout_games(
     tournament_games = list_games(connection, tournament.id)
     round_games = [game for game in tournament_games if game.round == match.round]
     next_pair_index = max((game.pair_index for game in round_games), default=0) + 1
-    opening_offset = len(tournament_games)
+    opening_offset = len(tournament_games) // 2
     opening_ids = _opening_ids(connection, tournament)
     for offset in range(count):
         game_number = next_game_number + offset
@@ -510,7 +521,7 @@ def _append_knockout_games(
             match_id=match.id,
             game_number=game_number,
             tiebreak_kind=tiebreak_kind,
-            opening_offset=opening_offset + offset,
+            opening_offset=opening_offset + (offset // 2),
             opening_ids=opening_ids,
         )
     return count

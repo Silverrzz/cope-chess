@@ -93,7 +93,9 @@ class EngineSpec(StrictModel):
     version: str = Field(min_length=1, max_length=80)
     repository_url: str = Field(min_length=1, max_length=1000)
     source_ref: str = Field(min_length=1, max_length=200)
-    dockerfile: str = Field(min_length=1, max_length=100_000)
+    # A newly-created version is intentionally unconfigured until an admin
+    # supplies a Dockerfile and explicitly requests a benchmark.
+    dockerfile: str = Field(default="", max_length=100_000)
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
 
@@ -120,7 +122,18 @@ class KnockoutTiebreak(StrEnum):
 
 
 class RoundRobinFormatOptions(StrictModel):
-    games_per_pairing: int = Field(default=2, gt=0)
+    cycles: int = Field(default=1, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_games_per_pairing(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "games_per_pairing" not in data:
+            return data
+        migrated = dict(data)
+        legacy_games = migrated.pop("games_per_pairing")
+        if "cycles" not in migrated and isinstance(legacy_games, int):
+            migrated["cycles"] = max(1, (legacy_games + 1) // 2)
+        return migrated
 
 
 class SwissFormatOptions(StrictModel):
@@ -128,13 +141,30 @@ class SwissFormatOptions(StrictModel):
 
 
 class KnockoutFormatOptions(StrictModel):
-    games_per_match: int = Field(gt=0)
-    tiebreak: KnockoutTiebreak
+    tiebreak: Literal["extra_pair"] = "extra_pair"
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_game_count(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        normalized.pop("games_per_match", None)
+        normalized["tiebreak"] = "extra_pair"
+        return normalized
 
 
 class GauntletFormatOptions(StrictModel):
     hero_engine_id: int = Field(gt=0)
-    games_per_opponent: int = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_game_count(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        normalized.pop("games_per_opponent", None)
+        return normalized
 
 
 FormatOptions = (
@@ -143,8 +173,6 @@ FormatOptions = (
 
 
 class TournamentConfig(StrictModel):
-    category_id: int | None = Field(default=1, gt=0)
-    category_settings_linked: bool = True
     format: TournamentFormat
     format_options: FormatOptions
     participants: list[int] = Field(min_length=2)
@@ -156,17 +184,42 @@ class TournamentConfig(StrictModel):
     lag_compensation_ms: int = Field(default=50, ge=0)
     engine_threads: int = Field(default=1, gt=0)
     engine_hash_mb: int = Field(default=16, gt=0)
-    uci_options: dict[int, dict[str, UciOptionValue]] = Field(default_factory=dict)
+    uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
+
+    @property
+    def category_id(self) -> None:
+        """Legacy view compatibility; rating lists no longer configure tournaments."""
+        return None
+
+    @property
+    def category_settings_linked(self) -> bool:
+        return False
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_category_fields(cls, data: Any) -> Any:
+    def remove_legacy_category_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             data = dict(data)
             data.pop("rating_category", None)
             data.pop("hardware_mode", None)
-            data.setdefault("category_id", 1)
-            data.setdefault("category_settings_linked", data["category_id"] is not None)
+            data.pop("category_id", None)
+            data.pop("category_settings_linked", None)
+            legacy_options = data.get("uci_options")
+            if isinstance(legacy_options, dict) and legacy_options and all(
+                isinstance(options, dict) for options in legacy_options.values()
+            ):
+                # Older tournaments stored overrides per participant. Only options
+                # shared by every participant can be represented by the new,
+                # tournament-wide UCI option model.
+                option_sets = list(legacy_options.values())
+                shared = dict(option_sets[0])
+                for options in option_sets[1:]:
+                    shared = {
+                        name: value
+                        for name, value in shared.items()
+                        if options.get(name) == value
+                    }
+                data["uci_options"] = shared
         return data
 
     @field_validator("participants")
@@ -182,27 +235,19 @@ class TournamentConfig(StrictModel):
     @classmethod
     def validate_tournament_uci_options(
         cls,
-        value: dict[int, dict[str, UciOptionValue]],
-    ) -> dict[int, dict[str, UciOptionValue]]:
-        for engine_id, options in value.items():
-            if engine_id <= 0:
-                raise ValueError("UCI option engine ids must be positive")
-            for name in options:
-                if not name.strip():
-                    raise ValueError("UCI option names must be non-empty")
-                if name.strip().lower() in {"threads", "hash"}:
-                    raise ValueError(
-                        "Threads and Hash are controlled by tournament resource settings"
-                    )
+        value: dict[str, UciOptionValue],
+    ) -> dict[str, UciOptionValue]:
+        for name in value:
+            if not name.strip():
+                raise ValueError("UCI option names must be non-empty")
+            if name.strip().lower() in {"threads", "hash"}:
+                raise ValueError(
+                    "Threads and Hash are controlled by tournament resource settings"
+                )
         return value
 
     @model_validator(mode="after")
     def validate_format_options(self) -> TournamentConfig:
-        if self.category_settings_linked != (self.category_id is not None):
-            raise ValueError(
-                "category tournaments must use category settings and custom tournaments "
-                "must not have a rating category"
-            )
         expected: dict[TournamentFormat, type[StrictModel]] = {
             TournamentFormat.ROUND_ROBIN: RoundRobinFormatOptions,
             TournamentFormat.SWISS: SwissFormatOptions,
@@ -216,10 +261,6 @@ class TournamentConfig(StrictModel):
         if isinstance(self.format_options, GauntletFormatOptions):
             if self.format_options.hero_engine_id not in self.participants:
                 raise ValueError("gauntlet hero_engine_id must be in participants")
-
-        unknown_option_engines = set(self.uci_options).difference(self.participants)
-        if unknown_option_engines:
-            raise ValueError("UCI options can only target tournament participants")
 
         return self
 

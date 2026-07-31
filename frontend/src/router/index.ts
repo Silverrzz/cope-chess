@@ -45,12 +45,6 @@ const router = createRouter({
           meta: { title: "Engine" },
         },
         {
-          path: "archive",
-          name: "archive",
-          component: () => import("@/pages/public/ArchivePage.vue"),
-          meta: { title: "Archive" },
-        },
-        {
           path: ":pathMatch(.*)*",
           name: "not-found",
           component: () => import("@/pages/NotFoundPage.vue"),
@@ -86,6 +80,19 @@ const router = createRouter({
           name: "admin-tournaments",
           component: () => import("@/pages/admin/AdminTournamentsPage.vue"),
           meta: { title: "Manage tournaments" },
+        },
+        {
+          path: "ratings",
+          name: "admin-ratings",
+          component: () => import("@/pages/admin/AdminRatingsPage.vue"),
+          meta: { title: "Manage ratings" },
+        },
+        {
+          path: "ratings/:id",
+          name: "admin-rating-list",
+          component: () => import("@/pages/admin/AdminRatingListPage.vue"),
+          props: true,
+          meta: { title: "Rating list" },
         },
         {
           path: "tournaments/new",
@@ -132,25 +139,6 @@ const router = createRouter({
           component: () => import("@/pages/admin/EngineVersionPage.vue"),
           props: true,
           meta: { title: "Engine version" },
-        },
-        {
-          path: "categories",
-          name: "admin-categories",
-          component: () => import("@/pages/admin/CategoriesPage.vue"),
-          meta: { title: "Categories" },
-        },
-        {
-          path: "categories/new",
-          name: "admin-category-new",
-          component: () => import("@/pages/admin/CategoryFormPage.vue"),
-          meta: { title: "Create category" },
-        },
-        {
-          path: "categories/:id",
-          name: "admin-category-edit",
-          component: () => import("@/pages/admin/CategoryFormPage.vue"),
-          props: true,
-          meta: { title: "Edit category" },
         },
         {
           path: "openings",

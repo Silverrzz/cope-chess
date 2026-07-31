@@ -126,29 +126,6 @@ export interface ClockState {
   observed_at?: string | null
 }
 
-export interface GameProgressEvent {
-  id: Identifier
-  source: 'server' | 'worker'
-  stage: string
-  stage_label: string
-  stage_order: number
-  substage: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  detail: string
-  engine_id?: Identifier | null
-  engine_name?: string | null
-  current?: number | null
-  total?: number | null
-  metadata?: Record<string, unknown>
-  occurred_at: string
-}
-
-export interface GameProgress {
-  current: GameProgressEvent
-  stages: GameProgressEvent[]
-  events: GameProgressEvent[]
-}
-
 export interface ChatMessage {
   id?: Identifier
   tournament_id?: Identifier
@@ -182,7 +159,6 @@ export interface TournamentDetailResponse {
   engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
-  game_progress?: GameProgress | null
   standings?: StandingRecord[]
   settings?: Array<{ label: string; value: string } | [string, string]>
   engine_hardware?: HardwareRecord[]
@@ -199,7 +175,6 @@ export interface LiveSnapshot {
   engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
-  game_progress?: GameProgress | null
   standings?: StandingRecord[]
   games?: GameRecord[]
 }

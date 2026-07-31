@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -11,36 +12,37 @@ from datetime import UTC, datetime
 from typing import Any
 
 import chess
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.datastructures import UploadFile
 
 from cope.core.models import OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
-    category_tournament_count,
-    create_category,
     create_deployment_job,
     create_engine,
     create_engine_version,
     create_git_host,
     create_opening_suite,
+    create_rating_list,
     create_tournament,
     create_worker,
+    connect_database,
     database_stats,
     database_schema_version,
-    delete_category,
     delete_chat_message,
     delete_engine,
     delete_engine_version,
     delete_git_host,
     delete_opening_suite,
+    delete_rating_list,
     delete_tournament,
     delete_worker,
     engine_game_count,
-    get_category,
+    engine_build_is_benchmarked,
+    engine_result_summary,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
@@ -51,34 +53,37 @@ from cope.db import (
     get_openai_api_key,
     get_game,
     get_opening_suite,
+    get_rating_list,
     get_tournament,
-    get_tournament_rating_commit,
     get_worker,
-    list_categories,
     list_deployment_jobs,
     list_deployment_targets,
     list_chat_messages,
     list_engine_games,
     list_engine_records,
+    list_engine_benchmark_jobs,
+    list_engines,
     list_engine_families,
     list_engine_versions,
     list_git_hosts,
     list_games,
     list_games_by_status,
     list_opening_suites,
+    list_rating_lists,
     list_rating_rows,
     list_service_heartbeats,
     list_suite_openings,
     list_tournaments,
+    list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
     list_workers,
     mint_worker_token_for_worker,
     replace_suite_openings,
+    reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
     set_tournament_status,
     suite_opening_count,
-    update_category,
     update_chat_settings,
     update_engine,
     update_engine_version,
@@ -100,21 +105,117 @@ from cope.web.engine_sources import (
 from cope.web.openings import format_opening, parse_opening_uploads, parse_openings
 from cope.web.requests import read_form
 from cope.version import app_version
+from cope.ratings import (
+    RatingCommitError,
+    recalculate_ratings,
+    uncommit_tournament_ratings,
+)
 
 
 LOG = logging.getLogger("cope.web.api")
-DEFAULT_ENGINE_DOCKERFILE = """FROM ubuntu:24.04
-WORKDIR /opt/cope
-COPY . .
-RUN test -x ./engine
-ENTRYPOINT ["./engine"]
-"""
 
 
 def _engine_version_admin_payload(version) -> dict[str, Any]:
     payload = jsonable_encoder(version)
-    payload["active"] = version.version_active
+    payload["benchmark_current"] = version.benchmark_current
+    payload["active"] = version.active
     return payload
+
+
+def _benchmark_job_admin_payload(item) -> dict[str, Any]:
+    """Stable, intentionally small API shape for engine-version observability."""
+    job = item.job
+    result = item.result
+    return {
+        "id": job.id,
+        "build_hash": job.build_hash,
+        "hardware_key": job.hardware_key,
+        "status": job.status,
+        "attempt": job.attempt,
+        "scheduled_at": job.scheduled_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "next_retry_at": job.next_retry_at,
+        "error": job.error,
+        "output": result.output if result is not None else job.output,
+        "benchmarker": None if item.benchmarker_label is None else {
+            "id": job.benchmarker_id,
+            "label": item.benchmarker_label,
+            "status": item.benchmarker_status,
+        },
+        "hardware": jsonable_encoder(item.hardware),
+        "result": None if result is None else {
+            "nps": result.nps,
+            "elapsed_ms": result.elapsed_ms,
+            "recorded_at": result.recorded_at,
+        },
+    }
+
+
+def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    rating_lists = list_rating_lists(connection)
+    tournaments: list[dict[str, Any]] = []
+    commits = connection.execute(
+        """
+        SELECT rating_commit.*, tournament.name AS tournament_name,
+               tournament.status AS tournament_status,
+               rating_list.name AS rating_list_name
+        FROM tournament_rating_list_commits rating_commit
+        JOIN tournaments tournament ON tournament.id = rating_commit.tournament_id
+        JOIN rating_lists rating_list ON rating_list.id = rating_commit.rating_list_id
+        WHERE rating_commit.status = 'applied'
+        ORDER BY COALESCE(rating_commit.applied_at, rating_commit.requested_at) DESC,
+                 rating_commit.tournament_id DESC
+        """
+    )
+    for commit in commits:
+        games = connection.execute(
+            """
+            SELECT id FROM games
+            WHERE tournament_id = ? AND status = 'finished'
+              AND result IN ('1-0', '0-1', '1/2-1/2')
+            ORDER BY id
+            """,
+            (commit["tournament_id"],),
+        ).fetchall()
+        game_ids = tuple(int(game["id"]) for game in games)
+        complete_hardware_games = 0
+        if game_ids:
+            placeholders = ", ".join("?" for _ in game_ids)
+            complete_hardware_games = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*) AS count FROM (
+                      SELECT game_id FROM game_hardware_scores
+                      WHERE game_id IN ({placeholders})
+                      GROUP BY game_id HAVING COUNT(*) = 2
+                    ) scores
+                    """,
+                    game_ids,
+                ).fetchone()["count"]
+            )
+        tournaments.append(
+            {
+                "tournament_id": commit["tournament_id"],
+                "tournament_name": commit["tournament_name"],
+                "tournament_status": commit["tournament_status"],
+                "rating_list_id": commit["rating_list_id"],
+                "rating_list_name": commit["rating_list_name"],
+                "requested_at": commit["requested_at"],
+                "applied_at": commit["applied_at"],
+                "games": len(game_ids),
+                "hardware_games": complete_hardware_games,
+                "missing_hardware_games": len(game_ids) - complete_hardware_games,
+            }
+        )
+    return {
+        "rating_lists": jsonable_encoder(rating_lists),
+        "tournaments": tournaments,
+        "ratings": {
+            str(rating_list.id): jsonable_encoder(list_rating_rows(connection, rating_list.id))
+            for rating_list in rating_lists
+        },
+    }
 
 
 class TournamentPayload(BaseModel):
@@ -127,6 +228,22 @@ class TournamentPayload(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("tournament name cannot be blank")
+        return value
+
+
+class RatingCommitPayload(BaseModel):
+    rating_list_ids: list[int] = Field(min_length=1)
+
+
+class RatingListPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("rating list name cannot be blank")
         return value
 
 
@@ -155,9 +272,8 @@ class EnginePayload(BaseModel):
 
 class EngineVersionUpdatePayload(BaseModel):
     version: str = Field(min_length=1, max_length=80)
-    dockerfile: str = Field(min_length=1, max_length=100_000)
+    dockerfile: str = Field(default="", max_length=100_000)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
-    active: bool = True
 
     @field_validator("version")
     @classmethod
@@ -171,6 +287,8 @@ class EngineVersionUpdatePayload(BaseModel):
     @classmethod
     def validate_dockerfile(cls, value: str) -> str:
         value = value.strip()
+        if not value:
+            return ""
         if not value.startswith("FROM "):
             raise ValueError("Dockerfile must start with FROM")
         return value + "\n"
@@ -183,7 +301,6 @@ class EngineVersionCreatePayload(BaseModel):
     source_ref: str = Field(min_length=1, max_length=200)
     source_kind: str = Field(pattern=r"^(release|commit)$")
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
-    active: bool = True
 
     @field_validator("version", "repository_full_name", "source_ref")
     @classmethod
@@ -192,6 +309,15 @@ class EngineVersionCreatePayload(BaseModel):
         if not value:
             raise ValueError("value cannot be blank")
         return value
+
+
+class DockerfileGenerationPayload(BaseModel):
+    additional_context: str = Field(default="", max_length=4_000)
+
+    @field_validator("additional_context")
+    @classmethod
+    def strip_additional_context(cls, value: str) -> str:
+        return value.strip()
 
 
 class AppSettingsPayload(BaseModel):
@@ -230,21 +356,6 @@ class GitHostPayload(BaseModel):
     def validate_host_url(cls, value: str) -> str:
         if not value.startswith(("https://", "http://")):
             raise ValueError("Git host URLs must use HTTP or HTTPS")
-        return value
-
-
-class CategoryPayload(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=500)
-    default_config: dict[str, Any]
-    active: bool = True
-
-    @field_validator("name")
-    @classmethod
-    def strip_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("category name cannot be blank")
         return value
 
 
@@ -430,11 +541,6 @@ def register_api_routes(app: FastAPI) -> None:
                 "engine_data": engine_data,
                 "clocks": clocks,
                 "clock_state": clock_state,
-                "game_progress": (
-                    web_app._game_progress_view(connection, viewer_game.id)
-                    if viewer_game
-                    else None
-                ),
                 "standings": web_app._standings(connection, tournament, games, engines),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),
                 "engine_hardware": web_app._engine_hardware_view(connection, tournament),
@@ -457,14 +563,21 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        categories = list_categories(connection, active_only=True)
-        category_id = web_app._selected_category_id(request, categories)
-        category = get_category(connection, category_id) if category_id else None
+        rating_lists = list_rating_lists(connection)
+        raw_id = request.query_params.get("rating_list_id")
+        try:
+            selected_id = int(raw_id) if raw_id else None
+        except ValueError:
+            selected_id = None
+        rating_list = next(
+            (item for item in rating_lists if item.id == selected_id),
+            rating_lists[0] if rating_lists else None,
+        )
         return _json(
             {
-                "category": category,
-                "categories": categories,
-                "ratings": list_rating_rows(connection, category.id) if category else [],
+                "rating_list": rating_list,
+                "rating_lists": rating_lists,
+                "ratings": list_rating_rows(connection, rating_list.id) if rating_list else [],
             }
         )
 
@@ -482,23 +595,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "engine": engine,
                 "games": games,
                 "engines": web_app._engine_names(connection),
-                "record": web_app._engine_record_summary(games, engine_id),
-            }
-        )
-
-    @app.get("/api/archive")
-    def public_archive(connection: sqlite3.Connection = Depends(web_app._database)):
-        engines = web_app._engine_names(connection)
-        tournaments = [
-            web_app._tournament_summary(connection, tournament, engines)
-            for tournament in list_tournaments(connection)
-            if tournament.status in {"finished", "aborted"}
-        ]
-        return _json(
-            {
-                "tournaments": tournaments,
-                "games": list_games_by_status(connection, "finished", limit=50),
-                "engines": engines,
+                "record": engine_result_summary(connection, engine_id),
             }
         )
 
@@ -568,6 +665,99 @@ def register_api_routes(app: FastAPI) -> None:
                     "schema_version": database_schema_version(connection),
                     "services": list_service_heartbeats(connection),
                 },
+            }
+        )
+
+    @app.get("/api/admin/ratings")
+    def admin_ratings(connection: sqlite3.Connection = Depends(web_app._database)):
+        return _json(_admin_ratings_payload(connection))
+
+    @app.post("/api/admin/rating-lists")
+    def admin_create_rating_list(
+        payload: RatingListPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            rating_list_id = create_rating_list(connection, payload.name)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail="A rating list with that name already exists.") from exc
+        _publish_admin_change(web_app, request)
+        return _json({"id": rating_list_id, "message": "Rating list created."}, status_code=201)
+
+    @app.get("/api/admin/rating-lists/{rating_list_id}")
+    def admin_rating_list(
+        rating_list_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        rating_list = get_rating_list(connection, rating_list_id)
+        if rating_list is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        payload = _admin_ratings_payload(connection)
+        return _json({
+            "rating_list": rating_list,
+            "ratings": list_rating_rows(connection, rating_list_id),
+            "tournaments": [
+                item for item in payload["tournaments"]
+                if item["rating_list_id"] == rating_list_id
+            ],
+        })
+
+    @app.delete("/api/admin/rating-lists/{rating_list_id}")
+    def admin_delete_rating_list(
+        rating_list_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_rating_list(connection, rating_list_id) is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        delete_rating_list(connection, rating_list_id)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Rating list deleted."})
+
+    @app.post("/api/admin/ratings/recalculate")
+    def admin_recalculate_ratings(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            result = recalculate_ratings(connection)
+            connection.commit()
+        except RatingCommitError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "result": jsonable_encoder(result),
+                "message": (
+                    f"Recalculated {result.engines_updated} engine ratings from "
+                    f"{result.games_applied} games in {result.tournaments_applied} tournaments."
+                ),
+            }
+        )
+
+    @app.delete("/api/admin/rating-lists/{rating_list_id}/tournaments/{tournament_id}")
+    def admin_uncommit_tournament_ratings(
+        rating_list_id: int,
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            result = uncommit_tournament_ratings(connection, tournament_id, rating_list_id)
+            connection.commit()
+        except RatingCommitError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "result": jsonable_encoder(result),
+                "message": "Tournament uncommitted and affected ratings recalculated.",
             }
         )
 
@@ -743,21 +933,16 @@ def register_api_routes(app: FastAPI) -> None:
             "tournament": tournament,
             "games": list_games(connection, tournament.id),
             "engines": web_app._engine_names(connection),
-            "category": (
-                get_category(connection, tournament.category_id)
-                if tournament.category_id is not None
-                else None
-            ),
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
-            "commit": get_tournament_rating_commit(connection, tournament.id),
+            "commits": list_tournament_rating_commits(connection, tournament.id),
+            "rating_lists": list_rating_lists(connection),
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
             "capabilities": {
                 "editable": tournament.status == "draft",
                 "deletable": tournament.status not in {"scheduled", "running"},
                 "can_commit_ratings": (
-                    tournament.status == "finished"
+                    tournament.status in {"finished", "aborted"}
                     and tournament.config.rated
-                    and tournament.category_id is not None
                 ),
             },
         }
@@ -844,6 +1029,7 @@ def register_api_routes(app: FastAPI) -> None:
     @app.post("/api/admin/tournaments/{tournament_id}/commit-results")
     def admin_commit_tournament_results(
         tournament_id: int,
+        payload: RatingCommitPayload,
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
@@ -854,7 +1040,9 @@ def register_api_routes(app: FastAPI) -> None:
                 detail="Tournament is not finished or aborted.",
             )
         try:
-            requested = request_tournament_rating_commit(connection, tournament)
+            requested = request_tournament_rating_commit(
+                connection, tournament, payload.rating_list_ids
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         connection.commit()
@@ -862,11 +1050,27 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "message": (
-                    "Rating commit requested."
+                    f"Rating commit requested for {requested} list{'s' if requested != 1 else ''}."
                     if requested
-                    else "Rating commit is already queued or applied."
+                    else "Those rating commits are already queued or applied."
                 )
             }
+        )
+
+    @app.get("/api/admin/tournaments/{tournament_id}/pgn")
+    def admin_tournament_pgn(
+        tournament_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        pgns = [game.pgn.strip() for game in list_games(connection, tournament_id) if game.pgn]
+        if not pgns:
+            raise HTTPException(status_code=409, detail="No completed game PGNs are available.")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", tournament.name).strip("-") or f"tournament-{tournament_id}"
+        return Response(
+            content="\n\n".join(pgns) + "\n",
+            media_type="application/x-chess-pgn; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.pgn"'},
         )
 
     @app.delete("/api/admin/tournaments/{tournament_id}")
@@ -1004,16 +1208,34 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/admin/repositories/search")
     def admin_search_repositories(
         q: str,
+        host_id: list[int] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         query = q.strip()
         if len(query) < 2 or len(query) > 200:
             raise HTTPException(status_code=422, detail="Enter at least two characters.")
+        hosts = list_git_hosts(connection, enabled_only=True)
+        if host_id is not None:
+            selected_host_ids = set(host_id)
+            hosts = tuple(host for host in hosts if host.id in selected_host_ids)
+        if not hosts:
+            raise HTTPException(status_code=422, detail="Select at least one enabled Git host.")
         try:
-            results = search_repositories(list_git_hosts(connection, enabled_only=True), query)
+            results = search_repositories(hosts, query)
         except SourceServiceError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return _json({"repositories": results})
+
+    @app.get("/api/admin/git-hosts")
+    def admin_list_git_hosts(connection: sqlite3.Connection = Depends(web_app._database)):
+        return _json(
+            {
+                "git_hosts": [
+                    {"id": host.id, "name": host.name, "provider": host.provider}
+                    for host in list_git_hosts(connection, enabled_only=True)
+                ]
+            }
+        )
 
     @app.get("/api/admin/repositories/releases")
     def admin_repository_releases(
@@ -1178,9 +1400,9 @@ def register_api_routes(app: FastAPI) -> None:
                 repository_full_name=payload.repository_full_name,
                 source_ref=payload.source_ref,
                 source_kind=payload.source_kind,
-                dockerfile=DEFAULT_ENGINE_DOCKERFILE,
+                dockerfile="",
                 uci_options=payload.uci_options,
-                active=payload.active,
+                active=True,
             )
             connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -1199,7 +1421,13 @@ def register_api_routes(app: FastAPI) -> None:
         version = get_engine_version_record(connection, version_id)
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
-        return _json({"version": _engine_version_admin_payload(version)})
+        return _json({
+            "version": _engine_version_admin_payload(version),
+            "benchmarks": [
+                _benchmark_job_admin_payload(item)
+                for item in list_engine_benchmark_jobs(connection, engine_version_id=version_id)
+            ],
+        })
 
     @app.put("/api/admin/engine-versions/{version_id}")
     def admin_update_engine_version(
@@ -1208,7 +1436,8 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        if get_engine_version_record(connection, version_id) is None:
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
         options = payload.uci_options
         if any(not str(name).strip() for name in options):
@@ -1220,7 +1449,7 @@ def register_api_routes(app: FastAPI) -> None:
                 version=payload.version,
                 dockerfile=payload.dockerfile,
                 uci_options=options,
-                active=payload.active,
+                active=True,
             )
             connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -1228,9 +1457,76 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"id": version_id, "message": "Engine version updated."})
 
+    @app.get("/api/admin/engine-versions/{version_id}/events")
+    async def admin_engine_version_events(version_id: int, request: Request):
+        """Stream benchmark state without replacing or reloading the edit form."""
+        connection = connect_database(request.app.state.db_path)
+        try:
+            if get_engine_version_record(connection, version_id) is None:
+                raise HTTPException(status_code=404, detail="Engine version not found.")
+        finally:
+            connection.close()
+
+        def snapshot() -> dict[str, Any]:
+            current = connect_database(request.app.state.db_path)
+            try:
+                return {
+                    "benchmarks": [
+                        _benchmark_job_admin_payload(item)
+                        for item in list_engine_benchmark_jobs(
+                            current, engine_version_id=version_id
+                        )
+                    ]
+                }
+            finally:
+                current.close()
+
+        async def stream():
+            previous = ""
+            while not await request.is_disconnected():
+                payload = snapshot()
+                encoded = json.dumps(payload, separators=(",", ":"))
+                if encoded != previous:
+                    previous = encoded
+                    yield f"event: engine-version.snapshot\ndata: {encoded}\n\n"
+                else:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/admin/engine-versions/{version_id}/benchmarks/reschedule")
+    def admin_reschedule_engine_benchmarks(
+        version_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = next((item for item in list_engines(connection) if item.engine_id == version_id), None)
+        if engine is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        if not engine.dockerfile.strip():
+            raise HTTPException(
+                status_code=409,
+                detail="Add and save a Dockerfile before requesting a benchmark.",
+            )
+        try:
+            count = reschedule_engine_benchmarks(connection, engine=engine)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        if count:
+            return _json({"message": f"Queued {count} benchmark {'job' if count == 1 else 'jobs'}."})
+        return _json({"message": "No benchmark hardware is registered yet. Connect a benchmarker, then request the benchmark again."})
+
     @app.post("/api/admin/engine-versions/{version_id}/generate-dockerfile")
     def admin_generate_engine_dockerfile(
         version_id: int,
+        payload: DockerfileGenerationPayload,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         version = get_engine_version_record(connection, version_id)
@@ -1261,6 +1557,7 @@ def register_api_routes(app: FastAPI) -> None:
                 full_name=version.repository_full_name,
                 source_ref=version.source_ref,
                 context=context,
+                additional_context=payload.additional_context,
             )
         except SourceServiceError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1279,129 +1576,6 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _publish_admin_change(web_app, request)
         return _json({"message": "Engine version deleted."})
-
-    # Categories
-
-    @app.get("/api/admin/categories")
-    def admin_categories(connection: sqlite3.Connection = Depends(web_app._database)):
-        categories = list_categories(connection)
-        return _json(
-            {
-                "categories": categories,
-                "tournament_counts": {
-                    category.id: category_tournament_count(connection, category.id)
-                    for category in categories
-                },
-            }
-        )
-
-    @app.get("/api/admin/categories/form")
-    def admin_category_form(
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        return _json(
-            {
-                "category": None,
-                "default_config": _category_settings({}),
-                "engine_options": [
-                    engine for engine in list_engine_records(connection) if engine.active
-                ],
-                "opening_suites": list_opening_suites(connection),
-                "tournaments": [],
-            }
-        )
-
-    @app.get("/api/admin/categories/{category_id}")
-    def admin_category(
-        category_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        category = get_category(connection, category_id)
-        if category is None:
-            raise HTTPException(status_code=404, detail="Category not found.")
-        return _json(
-            {
-                "category": category,
-                "default_config": _category_settings(category.default_config),
-                "engine_options": [
-                    engine for engine in list_engine_records(connection) if engine.active
-                ],
-                "opening_suites": list_opening_suites(connection),
-                "tournaments": [
-                    tournament
-                    for tournament in list_tournaments(connection)
-                    if tournament.category_id == category_id
-                ],
-            }
-        )
-
-    @app.post("/api/admin/categories")
-    def admin_create_category(
-        payload: CategoryPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        defaults = _category_settings(payload.default_config)
-        _validate_opening_suite_reference(connection, defaults.get("opening_suite_id"))
-        try:
-            category_id = create_category(
-                connection,
-                name=payload.name,
-                description=payload.description,
-                default_config=defaults,
-                active=payload.active,
-            )
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {"id": category_id, "message": "Category created."},
-            status_code=201,
-        )
-
-    @app.put("/api/admin/categories/{category_id}")
-    def admin_update_category(
-        category_id: int,
-        payload: CategoryPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if get_category(connection, category_id) is None:
-            raise HTTPException(status_code=404, detail="Category not found.")
-        defaults = _category_settings(payload.default_config)
-        _validate_opening_suite_reference(connection, defaults.get("opening_suite_id"))
-        try:
-            update_category(
-                connection,
-                category_id,
-                name=payload.name,
-                description=payload.description,
-                default_config=defaults,
-                active=payload.active,
-            )
-            _propagate_category_defaults(connection, category_id, defaults)
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json({"id": category_id, "message": "Category updated."})
-
-    @app.delete("/api/admin/categories/{category_id}")
-    def admin_delete_category(
-        category_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if get_category(connection, category_id) is None:
-            raise HTTPException(status_code=404, detail="Category not found.")
-        try:
-            delete_category(connection, category_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        return _json({"message": "Category deleted."})
 
     # Opening suites
 
@@ -1791,7 +1965,7 @@ def _require_tournament(connection: sqlite3.Connection, tournament_id: int):
 def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "format": "round_robin",
-        "format_options": {"games_per_pairing": 2},
+        "format_options": {"cycles": 1},
         "time_control": {
             "category": "increment",
             "initial_ms": 60_000,
@@ -1820,8 +1994,6 @@ def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
     merged = {**defaults, **{key: item for key, item in value.items() if key in category_keys}}
     try:
         config = TournamentConfig(
-            category_id=1,
-            category_settings_linked=True,
             participants=[1, 2],
             **merged,
         )
@@ -1831,12 +2003,7 @@ def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
             detail=[error["msg"] for error in exc.errors()],
         ) from exc
     serialized = config.model_dump(mode="json")
-    for key in (
-        "category_id",
-        "category_settings_linked",
-        "participants",
-        "uci_options",
-    ):
+    for key in ("participants", "uci_options"):
         serialized.pop(key, None)
     return serialized
 
@@ -1852,37 +2019,17 @@ def _validated_tournament_config(
     unavailable = [
         engine_id for engine_id in submitted.participants
         if not records[engine_id].active
+        or not engine_build_is_benchmarked(
+            connection,
+            engine_version_id=engine_id,
+            build_hash=records[engine_id].build_hash,
+        )
     ]
     if unavailable:
         raise HTTPException(status_code=422, detail="Every participant must be active.")
 
-    if submitted.category_id is None:
-        _validate_opening_suite_reference(connection, submitted.opening_suite_id)
-        return submitted.model_copy(update={"rated": False})
-
-    category = get_category(connection, submitted.category_id)
-    if category is None or not category.active:
-        raise HTTPException(status_code=422, detail="Choose an active rating category.")
-    settings = _category_settings(category.default_config)
     _validate_opening_suite_reference(connection, submitted.opening_suite_id)
-    settings.update(
-        format=submitted.format,
-        format_options=submitted.format_options,
-        concurrency=submitted.concurrency,
-        opening_suite_id=submitted.opening_suite_id,
-    )
-    try:
-        return TournamentConfig(
-            category_id=submitted.category_id,
-            category_settings_linked=True,
-            participants=submitted.participants,
-            **settings,
-        )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=[error["msg"] for error in exc.errors()],
-        ) from exc
+    return submitted
 
 
 def _validate_opening_suite_reference(
@@ -1893,38 +2040,6 @@ def _validate_opening_suite_reference(
         raise HTTPException(status_code=422, detail="Choose an existing opening suite.")
 
 
-def _propagate_category_defaults(
-    connection: sqlite3.Connection,
-    category_id: int,
-    defaults: dict[str, Any],
-) -> None:
-    for tournament in list_tournaments(connection):
-        if (
-            tournament.category_id != category_id
-            or not tournament.config.category_settings_linked
-            or tournament.status != "draft"
-        ):
-            continue
-        config = TournamentConfig(
-            category_id=category_id,
-            category_settings_linked=True,
-            participants=tournament.config.participants,
-            **{
-                **defaults,
-                "format": tournament.config.format,
-                "format_options": tournament.config.format_options,
-                "concurrency": tournament.config.concurrency,
-                "opening_suite_id": tournament.config.opening_suite_id,
-            },
-        )
-        update_tournament(
-            connection,
-            tournament.id,
-            name=tournament.name,
-            config=config,
-        )
-
-
 def _tournament_form_payload(
     web_app,
     request: Request,
@@ -1932,21 +2047,13 @@ def _tournament_form_payload(
     *,
     tournament=None,
 ) -> dict[str, Any]:
-    categories = list_categories(connection, active_only=True)
-    default_category = categories[0] if categories else None
     if tournament is not None:
         config = tournament.config.model_dump(mode="json")
         name = tournament.name
         participants = list(tournament.config.participants)
-        category_id = tournament.category_id
-        linked = tournament.config.category_settings_linked
     else:
-        default_settings = _category_settings(
-            default_category.default_config if default_category else {}
-        )
+        default_settings = _category_settings({})
         config = {
-            "category_id": default_category.id if default_category else None,
-            "category_settings_linked": default_category is not None,
             "participants": [],
             "engine_threads": 1,
             "engine_hash_mb": 16,
@@ -1955,27 +2062,24 @@ def _tournament_form_payload(
         }
         name = ""
         participants = []
-        category_id = default_category.id if default_category else None
-        linked = default_category is not None
 
     participant_ids = set(participants)
     engines = [
         engine
         for engine in list_engine_records(connection)
-        if engine.active or engine.id in participant_ids
+        if (
+            engine.active
+            and engine_build_is_benchmarked(
+                connection,
+                engine_version_id=engine.id,
+                build_hash=engine.build_hash,
+            )
+        ) or engine.id in participant_ids
     ]
-    category_defaults = {
-        str(category.id): _category_settings(category.default_config)
-        for category in categories
-    }
     return {
         "name": name,
         "config": config,
         "participants": participants,
-        "category_id": category_id,
-        "linked": linked,
-        "categories": categories,
-        "category_defaults": category_defaults,
         "engine_options": engines,
         "opening_suites": list_opening_suites(connection),
         "editing": tournament is not None,
@@ -1983,8 +2087,6 @@ def _tournament_form_payload(
         # the old flattened form context while migrating.
         "form_name": name,
         "form_participants": participants,
-        "form_category_id": category_id,
-        "form_linked": linked,
         "form_values": forms.settings_form_values(config),
     }
 

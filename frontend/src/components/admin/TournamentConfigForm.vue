@@ -5,7 +5,7 @@ import EngineOptionsEditor from './EngineOptionsEditor.vue'
 import InlineFeedback from './InlineFeedback.vue'
 import ParticipantPicker from './ParticipantPicker.vue'
 import TournamentSettingsEditor from './TournamentSettingsEditor.vue'
-import { cloneData, configFromSeed, estimateGames, formatTimeControl, humanize, normalizeSettings, settingsFromFlat } from './format'
+import { cloneData, configFromSeed, estimateGames, formatTimeControl, humanize } from './format'
 import type { FormSeed, TournamentConfig, TournamentSettings } from './types'
 
 const props = withDefaults(defineProps<{
@@ -24,7 +24,6 @@ const emit = defineEmits<{
 
 const name = ref(props.seed.form_name ?? (typeof props.seed.editing === 'object' && props.seed.editing ? props.seed.editing.name : ''))
 const config = ref<TournamentConfig>(configFromSeed(props.seed))
-const lastCategoryId = ref<number | null>(config.value.category_id ?? props.seed.categories[0]?.id ?? null)
 const error = ref('')
 
 const settings = computed<TournamentSettings>({
@@ -32,18 +31,16 @@ const settings = computed<TournamentSettings>({
   set: (value) => { config.value = { ...config.value, ...value } },
 })
 
-const selectedCategory = computed(() => props.seed.categories.find((category) => category.id === config.value.category_id))
 const selectedOpening = computed(() => props.seed.opening_suites.find((suite) => suite.id === config.value.opening_suite_id))
 const selectedParticipantNames = computed(() => props.seed.engine_options
   .filter((engine) => config.value.participants.includes(engine.id))
-  .map((engine) => engine.name))
+  .map((engine) => `${engine.name} ${engine.version}`))
 const gameEstimate = computed(() => estimateGames(config.value.format, config.value.format_options, config.value.participants.length))
 const waves = computed(() => gameEstimate.value ? Math.ceil(gameEstimate.value / Math.max(config.value.concurrency, 1)) : 0)
 
 watch(() => props.seed, (seed) => {
   name.value = seed.form_name ?? (typeof seed.editing === 'object' && seed.editing ? seed.editing.name : '')
   config.value = configFromSeed(seed)
-  lastCategoryId.value = config.value.category_id ?? seed.categories[0]?.id ?? null
 }, { deep: true })
 
 watch(() => config.value.participants, (participants) => {
@@ -53,77 +50,16 @@ watch(() => config.value.participants, (participants) => {
       format_options: { ...config.value.format_options, hero_engine_id: participants[0] ?? 0 },
     }
   }
-  config.value.uci_options = Object.fromEntries(
-    Object.entries(config.value.uci_options ?? {}).filter(([engineId]) => participants.includes(Number(engineId))),
-  )
 }, { deep: true })
-
-function engineOptions(engineId: number): Record<string, string | number | boolean> {
-  return config.value.uci_options?.[String(engineId)] ?? {}
-}
-
-function setEngineOptions(engineId: number, options: Record<string, string | number | boolean>): void {
-  config.value.uci_options = { ...config.value.uci_options, [String(engineId)]: options }
-}
-
-function categoryDefaults(categoryId: number): TournamentSettings {
-  const raw = props.seed.category_defaults?.[String(categoryId)]
-    ?? props.seed.categories.find((category) => category.id === categoryId)?.default_config
-  if (!raw) return settings.value
-  if ('time_control' in raw || 'format_options' in raw) return normalizeSettings(raw as Partial<TournamentSettings>)
-  return settingsFromFlat(raw as Record<string, unknown>)
-}
-
-function selectCategory(categoryId: number): void {
-  config.value.category_id = categoryId
-  config.value.category_settings_linked = true
-  lastCategoryId.value = categoryId
-  applyDefaults(categoryId)
-}
-
-function setLinked(linked: boolean): void {
-  config.value.category_settings_linked = linked
-  if (!linked) {
-    lastCategoryId.value = config.value.category_id
-    config.value.category_id = null
-    config.value.rated = false
-    return
-  }
-  const categoryId = lastCategoryId.value ?? props.seed.categories[0]?.id ?? null
-  config.value.category_id = categoryId
-  if (categoryId !== null) applyDefaults(categoryId)
-}
-
-function applyDefaults(categoryId: number): void {
-  const defaults = categoryDefaults(categoryId) as TournamentSettings & { engine_threads?: number; engine_hash_mb?: number }
-  const tournamentFields = {
-    format: config.value.format,
-    format_options: config.value.format_options,
-    concurrency: config.value.concurrency,
-    opening_suite_id: config.value.opening_suite_id,
-  }
-  config.value = {
-    ...config.value,
-    ...defaults,
-    ...tournamentFields,
-    engine_threads: defaults.engine_threads ?? 1,
-    engine_hash_mb: defaults.engine_hash_mb ?? 16,
-    uci_options: {},
-  }
-}
 
 function validate(): string {
   if (!name.value.trim()) return 'Enter a tournament name.'
-  if (config.value.category_settings_linked && !props.seed.categories.some((category) => category.id === config.value.category_id)) return 'Create or select an active rating category.'
-  if (!config.value.category_settings_linked && config.value.category_id !== null) return 'Custom tournaments cannot have a rating category.'
   if (config.value.participants.length < 2) return 'Select at least two participating engines.'
   if (new Set(config.value.participants).size !== config.value.participants.length) return 'Each participant can only be selected once.'
   if (!Number.isInteger(config.value.concurrency) || config.value.concurrency < 1) return 'Concurrent games must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_threads) || config.value.engine_threads < 1) return 'Engine threads must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_hash_mb) || config.value.engine_hash_mb < 1) return 'Engine hash must be a whole number of at least 1 MB.'
-  for (const options of Object.values(config.value.uci_options ?? {})) {
-    if (Object.keys(options).some((name) => ['threads', 'hash'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
-  }
+  if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
   if (config.value.adjudication.max_moves !== null && (!Number.isInteger(config.value.adjudication.max_moves) || config.value.adjudication.max_moves < 1)) return 'Maximum moves must be a whole number of at least 1.'
   const draw = config.value.adjudication.draw
   if (draw && (!Number.isInteger(draw.min_fullmove) || draw.min_fullmove < 1)) return 'Draw adjudication must start from a whole full move of at least 1.'
@@ -134,12 +70,10 @@ function validate(): string {
   if (resign && (!Number.isInteger(resign.consecutive_plies) || resign.consecutive_plies < 2)) return 'Win adjudication requires at least 2 consecutive plies.'
 
   const options = config.value.format_options
-  if (config.value.format === 'round_robin' && (!('games_per_pairing' in options) || !Number.isInteger(options.games_per_pairing) || options.games_per_pairing < 1)) return 'Games per pairing must be a whole number of at least 1.'
+  if (config.value.format === 'round_robin' && (!('cycles' in options) || !Number.isInteger(options.cycles) || options.cycles < 1)) return 'Cycles must be a whole number of at least 1.'
   if (config.value.format === 'swiss' && (!('rounds' in options) || !Number.isInteger(options.rounds) || options.rounds < 1)) return 'Swiss rounds must be a whole number of at least 1.'
-  if (config.value.format === 'knockout' && (!('games_per_match' in options) || !Number.isInteger(options.games_per_match) || options.games_per_match < 1)) return 'Games per match must be a whole number of at least 1.'
   if (config.value.format === 'gauntlet') {
     if (!('hero_engine_id' in options) || !config.value.participants.includes(options.hero_engine_id)) return 'Select a hero from the participating engines.'
-    if (!Number.isInteger(options.games_per_opponent) || options.games_per_opponent < 1) return 'Games per opponent must be a whole number of at least 1.'
   }
 
   const control = config.value.time_control
@@ -165,26 +99,12 @@ function submit(): void {
       <section class="panel form-panel">
         <div class="form-panel__heading">
           <span class="step-number" aria-hidden="true">1</span>
-          <div><h2>Identity and ratings</h2></div>
+          <div><h2>Tournament identity</h2></div>
         </div>
         <div class="field-grid">
           <label class="field field--span-2">
             <span class="field__label">Tournament name</span>
             <input v-model="name" class="input" required maxlength="120" autocomplete="off">
-          </label>
-          <label v-if="config.category_settings_linked && seed.categories.length" class="field">
-            <span class="field__label">Rating category</span>
-            <select class="input" :value="config.category_id" required @change="selectCategory(Number(($event.target as HTMLSelectElement).value))">
-              <option v-for="category in seed.categories" :key="category.id" :value="category.id">{{ category.name }}</option>
-            </select>
-          </label>
-          <div v-else-if="config.category_settings_linked" class="missing-category field--span-2" role="alert">
-            <div><strong>No active rating categories</strong></div>
-            <RouterLink class="button button--secondary button--small" to="/admin/categories/new">Create category</RouterLink>
-          </div>
-          <label class="choice-card">
-            <input type="checkbox" :checked="config.category_settings_linked" @change="setLinked(($event.target as HTMLInputElement).checked)">
-            <span><strong>Use a rating category</strong></span>
           </label>
         </div>
       </section>
@@ -205,46 +125,35 @@ function submit(): void {
           <span class="step-number" aria-hidden="true">3</span>
           <div><h2>Play settings</h2></div>
         </div>
-        <AdminEmptyState v-if="config.category_settings_linked && !seed.categories.length" title="Category required" />
-        <div v-else-if="config.category_settings_linked" class="category-settings">
-          <div class="linked-settings">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8.5 11V8.5a3.5 3.5 0 0 1 7 0V11M6 11h12v9H6z" /></svg>
-            <div><strong>{{ selectedCategory?.name ?? 'Category' }}</strong></div>
-            <button class="button button--secondary button--small" type="button" @click="setLinked(false)">Use independent settings</button>
-          </div>
-          <TournamentSettingsEditor v-model="settings" :engines="seed.engine_options" :opening-suites="seed.opening_suites" :participants="config.participants" :allow-rated="false" structure-only />
-        </div>
-        <div v-else class="custom-settings">
-          <TournamentSettingsEditor v-model="settings" :engines="seed.engine_options" :opening-suites="seed.opening_suites" :participants="config.participants" :allow-rated="false" />
+        <div class="custom-settings">
+          <TournamentSettingsEditor v-model="settings" :engines="seed.engine_options" :opening-suites="seed.opening_suites" :participants="config.participants" />
         </div>
       </section>
 
       <section class="panel form-panel">
         <div class="form-panel__heading">
           <span class="step-number" aria-hidden="true">4</span>
-          <div><h2>{{ config.category_settings_linked ? 'Engine resources' : 'Engine resources and UCI options' }}</h2></div>
+          <div><h2>Engine resources and UCI options</h2></div>
         </div>
         <div class="field-grid">
           <label class="field">
             <span class="field__label">Threads per engine</span>
-            <input v-model.number="config.engine_threads" class="input" type="number" min="1" step="1" :disabled="config.category_settings_linked">
+            <input v-model.number="config.engine_threads" class="input" type="number" min="1" step="1">
           </label>
           <label class="field">
             <span class="field__label">Hash per engine <small>MB</small></span>
-            <input v-model.number="config.engine_hash_mb" class="input" type="number" min="1" step="1" :disabled="config.category_settings_linked">
+            <input v-model.number="config.engine_hash_mb" class="input" type="number" min="1" step="1">
           </label>
         </div>
-        <div v-if="!config.category_settings_linked && selectedParticipantNames.length" class="tournament-options">
-          <details v-for="engine in seed.engine_options.filter((item) => config.participants.includes(item.id))" :key="engine.id">
-            <summary><strong>{{ engine.name }}</strong><span>{{ Object.keys(engineOptions(engine.id)).length }} additional option{{ Object.keys(engineOptions(engine.id)).length === 1 ? '' : 's' }}</span></summary>
-            <div><EngineOptionsEditor :model-value="engineOptions(engine.id)" @update:model-value="setEngineOptions(engine.id, $event)" /></div>
-          </details>
+        <div class="tournament-options">
+          <p>These options are applied to every engine for every game in this tournament.</p>
+          <EngineOptionsEditor v-model="config.uci_options" />
         </div>
       </section>
 
       <div class="form-actions">
         <button class="button button--ghost" type="button" :disabled="pending" @click="emit('cancel')">Cancel</button>
-        <button class="button button--primary" type="submit" :disabled="pending || !seed.engine_options.length || (config.category_settings_linked && !seed.categories.length)" :aria-busy="pending">
+        <button class="button button--primary" type="submit" :disabled="pending || !seed.engine_options.length" :aria-busy="pending">
           <span v-if="pending" class="button-spinner" aria-hidden="true" />
           {{ pending ? 'Saving…' : submitLabel }}
         </button>
@@ -257,7 +166,6 @@ function submit(): void {
         <strong>{{ gameEstimate.toLocaleString() }} <small>estimated games</small></strong>
       </div>
       <dl>
-        <div><dt>Category</dt><dd>{{ selectedCategory?.name ?? 'None (custom)' }}</dd></div>
         <div><dt>Participants</dt><dd>{{ config.participants.length }}</dd></div>
         <div><dt>Format</dt><dd>{{ humanize(config.format) }}</dd></div>
         <div><dt>Time control</dt><dd>{{ formatTimeControl(config.time_control) }}</dd></div>
@@ -266,7 +174,7 @@ function submit(): void {
         <div><dt>Estimated waves</dt><dd>{{ waves.toLocaleString() }}</dd></div>
         <div><dt>Engine threads</dt><dd>{{ config.engine_threads }}</dd></div>
         <div><dt>Hash per engine</dt><dd>{{ config.engine_hash_mb.toLocaleString() }} MB</dd></div>
-        <div><dt>Ratings</dt><dd>{{ config.category_id === null ? 'Not eligible' : config.rated ? 'Rated' : 'Unrated' }}</dd></div>
+        <div><dt>Ratings</dt><dd>{{ config.rated ? 'Eligible to commit' : 'Unrated' }}</dd></div>
       </dl>
       <div v-if="selectedParticipantNames.length" class="tournament-summary__engines">
         <span v-for="engine in selectedParticipantNames.slice(0, 5)" :key="engine">{{ engine }}</span>

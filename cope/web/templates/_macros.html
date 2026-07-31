@@ -71,29 +71,14 @@
     </div>
 
     <div class="field" data-format-field="round_robin">
-      <label for="round_robin_games_per_pairing">Games per pairing</label>
-      <input class="input input--small" id="round_robin_games_per_pairing" type="number" min="1" name="round_robin_games_per_pairing" value="{{ values.round_robin_games_per_pairing }}">
-      <p class="field-help">Each pairing plays this many times, alternating colours.</p>
+      <label for="round_robin_cycles">Cycles</label>
+      <input class="input input--small" id="round_robin_cycles" type="number" min="1" name="round_robin_cycles" value="{{ values.round_robin_cycles }}">
+      <p class="field-help">Each cycle gives every pairing two games: one with each colour.</p>
     </div>
 
     <div class="field" data-format-field="swiss">
       <label for="swiss_rounds">Rounds</label>
       <input class="input input--small" id="swiss_rounds" type="number" min="1" name="swiss_rounds" value="{{ values.swiss_rounds }}">
-    </div>
-
-    <div class="field-row" data-format-field="knockout">
-      <div class="field">
-        <label for="knockout_games_per_match">Games per match</label>
-        <input class="input input--small" id="knockout_games_per_match" type="number" min="1" name="knockout_games_per_match" value="{{ values.knockout_games_per_match }}">
-        <p class="field-help">Base games in each knockout match, before any tiebreak games.</p>
-      </div>
-      <div class="field">
-        <label for="knockout_tiebreak">Tiebreak</label>
-        <select class="input" id="knockout_tiebreak" name="knockout_tiebreak">
-          <option value="armageddon" {% if values.knockout_tiebreak == "armageddon" %}selected{% endif %}>Armageddon (Black advances on a draw)</option>
-          <option value="extra_pair" {% if values.knockout_tiebreak == "extra_pair" %}selected{% endif %}>Extra game pair</option>
-        </select>
-      </div>
     </div>
 
     <div class="field-row" data-format-field="gauntlet">
@@ -106,11 +91,6 @@
           {% endfor %}
         </select>
         <p class="field-help">The fixed gauntlet engine. It plays every other selected engine.</p>
-      </div>
-      <div class="field">
-        <label for="gauntlet_games_per_opponent">Hero games per opponent</label>
-        <input class="input input--small" id="gauntlet_games_per_opponent" type="number" min="1" name="gauntlet_games_per_opponent" value="{{ values.gauntlet_games_per_opponent }}">
-        <p class="field-help">Total games the hero plays against each opponent.</p>
       </div>
     </div>
   </fieldset>

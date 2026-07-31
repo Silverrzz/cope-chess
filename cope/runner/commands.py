@@ -68,7 +68,7 @@ def _dispatch_runner_command(
         announce_results_committed(
             connection,
             tournament_id=result.tournament_id,
-            category_id=result.category_id,
+            rating_list_id=result.rating_list_id,
             games_applied=result.games_applied,
             engines_updated=result.engines_updated,
         )
@@ -84,17 +84,17 @@ def _fail_linked_rating_commit(
     if command.command != "commit_tournament_results":
         return
     tournament_id = command.payload.get("tournament_id")
-    category_id = command.payload.get("category_id")
+    rating_list_id = command.payload.get("rating_list_id")
     if (
         isinstance(tournament_id, bool)
         or not isinstance(tournament_id, int)
-        or isinstance(category_id, bool)
-        or not isinstance(category_id, int)
+        or isinstance(rating_list_id, bool)
+        or not isinstance(rating_list_id, int)
     ):
         return
     connection.execute(
         """
-        UPDATE tournament_rating_commits
+        UPDATE tournament_rating_list_commits
         SET command_id = COALESCE(command_id, ?),
             status = 'failed',
             applied_at = NULL,
@@ -102,10 +102,10 @@ def _fail_linked_rating_commit(
         WHERE status IN ('pending', 'claimed')
           AND (
             command_id = ?
-            OR (command_id IS NULL AND tournament_id = ? AND category_id = ?)
+            OR (command_id IS NULL AND tournament_id = ? AND rating_list_id = ?)
           )
         """,
-        (command.id, error, command.id, tournament_id, category_id),
+        (command.id, error, command.id, tournament_id, rating_list_id),
     )
 
 

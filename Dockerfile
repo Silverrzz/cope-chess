@@ -15,7 +15,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     COPE_BUILD_VERSION=${COPE_BUILD_VERSION}
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y git postgresql-client \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        git \
+        git-lfs \
+        postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 cope \
     && useradd --system --uid 10001 --gid cope --home-dir /app cope

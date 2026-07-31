@@ -10,16 +10,17 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import TournamentConfigForm from '@/components/admin/TournamentConfigForm.vue'
 import { errorText, formatDate, formatTimeControl, humanize } from '@/components/admin/format'
-import type { Category, Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/components/admin/types'
+import type { Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/components/admin/types'
 
-interface Commit { status: string; requested_at: string; applied_at?: string | null; error?: string | null }
+interface Commit { rating_list_id: number; status: string; requested_at: string; applied_at?: string | null; error?: string | null }
+interface RatingList { id: number; name: string }
 interface Response {
   tournament: Tournament
   games: Game[]
   engines: Engine[] | Record<string, Engine | string>
-  category?: Category | null
   settings?: Array<[string, string] | { label: string; value: string }> | Record<string, string>
-  commit?: Commit | null
+  commits: Commit[]
+  rating_lists: RatingList[]
   actions: Record<string, string>
   form?: FormSeed
 }
@@ -32,6 +33,8 @@ const data = ref<Response | null>(null)
 const loading = ref(true)
 const error = ref('')
 const pending = ref('')
+const showCommit = ref(false)
+const selectedLists = ref<number[]>([])
 const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => data.value?.games.some(
   (game) => game.status === 'finished' && game.result !== null,
@@ -83,17 +86,14 @@ async function saveDraft(payload: { name: string; config: TournamentConfig }): P
 }
 
 async function commitRatings(): Promise<void> {
-  const accepted = await confirm({
-    title: 'Commit rating results?',
-    message: `Apply ${data.value?.tournament.name ?? 'this tournament'} to the category ratings? Applied rating results are permanent.`,
-    confirmLabel: 'Commit ratings',
-  })
-  if (!accepted) return
+  if (!selectedLists.value.length) { error.value = 'Choose at least one rating list.'; return }
   pending.value = 'commit'
   try {
-    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/commit-results`)
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/commit-results`, { body: { rating_list_ids: selectedLists.value } })
     toast.success(response.message)
     await load()
+    showCommit.value = false
+    selectedLists.value = []
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
   finally { pending.value = '' }
 }
@@ -118,8 +118,8 @@ onMounted(load)
   <div class="admin-page page-stack">
     <div v-if="loading" class="panel detail-loading" role="status">Loading tournament…</div>
     <template v-else-if="data">
-      <AdminPageHeader :title="data.tournament.name" :description="`${data.category?.name ?? 'Custom tournament'} · Created ${formatDate(data.tournament.created_at)}`">
-        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
+      <AdminPageHeader :title="data.tournament.name" :description="`Created ${formatDate(data.tournament.created_at)}`">
+        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><a class="button button--secondary" :href="`/api/admin/tournaments/${id}/pgn`">Download tournament PGN</a><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
       </AdminPageHeader>
       <InlineFeedback :message="error" />
 
@@ -127,21 +127,27 @@ onMounted(load)
         <div class="control-bar__status"><span>Current state</span><StatusBadge :status="data.tournament.status" /></div>
         <div class="control-bar__actions">
           <button v-for="(_, action) in data.actions" :key="action" class="button" :class="action === 'abort' ? 'button--danger' : 'button--primary'" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? 'Working…' : humanize(String(action)) }}</button>
-          <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated && data.tournament.category_id !== null && (!data.commit || data.commit.status === 'failed')" class="button button--primary" type="button" :disabled="!!pending" @click="commitRatings">{{ pending === 'commit' ? 'Requesting…' : data.commit ? 'Retry rating commit' : 'Commit ratings' }}</button>
-          <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && (!data.commit || data.commit.status === 'failed')" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
+          <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit">Commit ratings</button>
+          <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
         </div>
       </section>
 
-      <section v-if="data.commit" class="panel commit-panel">
-        <div><h2>Rating commit</h2><p>Requested {{ formatDate(data.commit.requested_at) }}<template v-if="data.commit.applied_at"> · Applied {{ formatDate(data.commit.applied_at) }}</template></p></div>
-        <StatusBadge :status="data.commit.status" />
-        <p v-if="data.commit.error" class="commit-panel__error" role="alert">{{ data.commit.error }}</p>
+      <section v-if="showCommit" class="panel commit-picker">
+        <div><h2>Commit results to rating lists</h2><p>Select one or more independent lists.</p></div>
+        <label v-for="ratingList in data.rating_lists" :key="ratingList.id"><input v-model="selectedLists" type="checkbox" :value="ratingList.id" :disabled="data.commits.some((item) => item.rating_list_id === ratingList.id && ['pending','claimed','applied'].includes(item.status))"><span>{{ ratingList.name }}</span></label>
+        <button class="button button--primary button--small" :disabled="pending === 'commit' || !selectedLists.length" @click="commitRatings">{{ pending === 'commit' ? 'Requesting…' : 'Commit selected lists' }}</button>
+      </section>
+
+      <section v-for="item in data.commits" :key="item.rating_list_id" class="panel commit-panel">
+        <div><h2>{{ data.rating_lists.find((list) => list.id === item.rating_list_id)?.name ?? 'Rating list' }}</h2><p>Requested {{ formatDate(item.requested_at) }}<template v-if="item.applied_at"> · Applied {{ formatDate(item.applied_at) }}</template></p></div>
+        <StatusBadge :status="item.status" />
+        <p v-if="item.error" class="commit-panel__error" role="alert">{{ item.error }}</p>
       </section>
 
       <TournamentConfigForm v-if="data.tournament.status === 'draft' && data.form" :seed="data.form" :pending="pending === 'save'" submit-label="Save draft" @submit="saveDraft" @cancel="router.push('/admin/tournaments')" />
 
       <section v-else class="panel settings-panel">
-        <div class="settings-panel__heading"><div><h2>Settings</h2></div><span v-if="data.tournament.settings_unlinked">Custom settings</span></div>
+        <div class="settings-panel__heading"><div><h2>Settings</h2></div></div>
         <dl v-if="settingsRows.length" class="definition-list">
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
         </dl>
@@ -179,6 +185,11 @@ onMounted(load)
 .control-bar__status > span { color: var(--color-text-muted, #64748b); font-size: .72rem; font-weight: 650; }
 .control-bar__actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }
 .commit-panel { align-items: center; display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1rem; }
+.commit-picker { display: flex; flex-wrap: wrap; gap: .75rem 1rem; padding: 1rem; }
+.commit-picker > div { flex: 1 0 100%; }
+.commit-picker h2 { font-size: .92rem; margin: 0; }
+.commit-picker p { color: var(--color-text-muted); font-size: .73rem; margin: .2rem 0 0; }
+.commit-picker label { align-items: center; display: flex; gap: .4rem; font-size: .78rem; }
 .commit-panel h2, .settings-panel h2, .games-panel h2 { font-size: .92rem; margin: 0; }
 .commit-panel p, .settings-panel__heading p, .games-panel__heading p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
 .commit-panel__error { background: color-mix(in srgb, var(--color-danger, #b42318) 8%, transparent); border-radius: .4rem; color: var(--color-danger, #b42318) !important; grid-column: 1 / -1; padding: .65rem; }

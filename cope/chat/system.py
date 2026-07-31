@@ -177,7 +177,7 @@ def announce_results_committed(
     connection: sqlite3.Connection,
     *,
     tournament_id: int,
-    category_id: int,
+    rating_list_id: int,
     games_applied: int,
     engines_updated: int,
 ) -> ChatMessageRecord:
@@ -186,13 +186,13 @@ def announce_results_committed(
         SystemAnnouncement(
             tournament_id=tournament_id,
             event=SystemEvent.RESULTS_COMMITTED,
-            event_key=f"tournament.results_committed.{category_id}",
+            event_key=f"tournament.results_committed.{rating_list_id}",
             text=(
                 f"Tournament results committed to ratings: {games_applied} games applied "
                 f"across {engines_updated} engines."
             ),
             metadata={
-                "category_id": category_id,
+                "rating_list_id": rating_list_id,
                 "games_applied": games_applied,
                 "engines_updated": engines_updated,
             },

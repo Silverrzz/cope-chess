@@ -59,6 +59,7 @@ from cope.db import (
     delete_tournament,
     delete_worker,
     engine_game_count,
+    engine_result_summary,
     get_category,
     get_chat_settings,
     get_chat_message,
@@ -79,8 +80,6 @@ from cope.db import (
     list_engines,
     list_games_by_status,
     list_games,
-    list_game_assignment_progress,
-    list_game_assignment_stage_progress,
     list_moves,
     list_opening_suites,
     list_rating_rows,
@@ -719,11 +718,6 @@ def create_app(
                 "viewer_locked": viewer_locked,
                 "engine_data": _engine_data(viewer_game, viewer_moves),
                 "clocks": _clock_data(viewer_moves),
-                "game_progress": (
-                    _game_progress_view(connection, viewer_game.id)
-                    if viewer_game
-                    else None
-                ),
                 "standings": _standings(connection, tournament, games, engines),
                 "settings": _settings_view(connection, tournament),
                 "engine_hardware": _engine_hardware_view(connection, tournament),
@@ -894,29 +888,7 @@ def create_app(
                 "engine": engine,
                 "games": games,
                 "engines": _engine_names(connection),
-                "record": _engine_record_summary(games, engine_id),
-            },
-        )
-
-    @app.get("/archive")
-    def archive(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engines = _engine_names(connection)
-        tournaments = [
-            _tournament_summary(connection, tournament, engines)
-            for tournament in list_tournaments(connection)
-            if tournament.status in {"finished", "aborted"}
-        ]
-        return templates.TemplateResponse(
-            request,
-            "archive.html",
-            {
-                "active_nav": "archive",
-                "tournaments": tournaments,
-                "games": list_games_by_status(connection, "finished", limit=50),
-                "engines": engines,
+                "record": engine_result_summary(connection, engine_id),
             },
         )
 
@@ -3245,58 +3217,6 @@ def _game_payload(
     return payload
 
 
-def _game_progress_view(
-    connection: sqlite3.Connection,
-    game_id: int,
-) -> dict[str, Any] | None:
-    records = list_game_assignment_progress(connection, game_id, limit=100)
-    if not records:
-        return None
-    events = [
-        {
-            "id": record.id,
-            "source": record.source,
-            "stage": record.stage,
-            "stage_label": record.stage_label,
-            "stage_order": record.stage_order,
-            "substage": record.substage,
-            "status": record.status,
-            "detail": record.detail,
-            "engine_id": record.engine_id,
-            "engine_name": record.engine_name,
-            "current": record.current,
-            "total": record.total,
-            "metadata": record.metadata,
-            "occurred_at": record.occurred_at,
-        }
-        for record in records
-    ]
-    stages = [
-        {
-            "id": record.id,
-            "source": record.source,
-            "stage": record.stage,
-            "stage_label": record.stage_label,
-            "stage_order": record.stage_order,
-            "substage": record.substage,
-            "status": record.status,
-            "detail": record.detail,
-            "engine_id": record.engine_id,
-            "engine_name": record.engine_name,
-            "current": record.current,
-            "total": record.total,
-            "metadata": record.metadata,
-            "occurred_at": record.occurred_at,
-        }
-        for record in list_game_assignment_stage_progress(connection, game_id)
-    ]
-    return {
-        "current": events[-1],
-        "stages": stages,
-        "events": events,
-    }
-
-
 def _move_payload(move: MoveRecord) -> dict[str, Any]:
     return {
         "ply": move.ply,
@@ -3353,11 +3273,6 @@ def _tournament_live_payload(
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
-        "game_progress": (
-            _game_progress_view(connection, viewer_game.id)
-            if viewer_game
-            else None
-        ),
         "standings": _standings(connection, tournament, games, engines),
         "games": [_game_payload(game, engines) for game in games],
     }
@@ -3520,23 +3435,6 @@ def _opening_view(connection: sqlite3.Connection, opening_id: int | None) -> dic
         "book_moves": list(opening.moves),
         "final_fen": opening.fen,
     }
-
-
-def _engine_record_summary(games: tuple[GameRecord, ...], engine_id: int) -> dict[str, int]:
-    record = {"wins": 0, "draws": 0, "losses": 0, "games": 0}
-    for game in games:
-        if game.result is None:
-            continue
-        record["games"] += 1
-        if game.result == "1/2-1/2":
-            record["draws"] += 1
-        elif game.result == "1-0" and game.white_engine_id == engine_id:
-            record["wins"] += 1
-        elif game.result == "0-1" and game.black_engine_id == engine_id:
-            record["wins"] += 1
-        else:
-            record["losses"] += 1
-    return record
 
 
 def _tournament_index_context(
@@ -3714,11 +3612,9 @@ def _settings_view(
 
     options = config.format_options
     option_labels = {
-        "games_per_pairing": "Games per pairing",
+        "cycles": "Cycles",
         "rounds": "Rounds",
-        "games_per_match": "Games per match",
         "tiebreak": "Tiebreak",
-        "games_per_opponent": "Games per opponent",
         "hero_engine_id": "Gauntlet hero",
     }
     for field, value in options.model_dump(mode="json").items():
@@ -3740,15 +3636,12 @@ def _settings_view(
         ]
     )
 
-    for engine_id in config.participants:
-        engine_name = engines.get(engine_id, f"Engine {engine_id}")
-        for option_name, value in sorted(
-            config.uci_options.get(engine_id, {}).items(),
-            key=lambda item: item[0].lower(),
-        ):
-            if isinstance(value, bool):
-                value = "Yes" if value else "No"
-            rows.append((f"{engine_name} UCI: {option_name}", str(value)))
+    for option_name, value in sorted(
+        config.uci_options.items(), key=lambda item: item[0].lower()
+    ):
+        if isinstance(value, bool):
+            value = "Yes" if value else "No"
+        rows.append((f"Tournament UCI: {option_name}", str(value)))
 
     if config.opening_suite_id:
         suite = get_opening_suite(connection, config.opening_suite_id)
@@ -3776,26 +3669,6 @@ def _settings_view(
         )
     if adjudication.max_moves:
         rows.append(("Maximum moves", str(adjudication.max_moves)))
-
-    if tournament.worker_profile:
-        try:
-            profile = json.loads(tournament.worker_profile)
-        except (TypeError, json.JSONDecodeError):
-            profile = None
-        if isinstance(profile, dict):
-            rows.append(
-                (
-                    "Pinned worker class",
-                    f"{profile.get('cpu_model', 'Unknown CPU')}, "
-                    f"{profile.get('physical_cores', '?')}P/"
-                    f"{profile.get('logical_cores', '?')}T, "
-                    f"{profile.get('os', 'Unknown OS')}",
-                )
-            )
-        else:
-            rows.append(("Pinned worker class", "Unknown worker profile"))
-    else:
-        rows.append(("Pinned worker class", "Selected by the first eligible worker"))
 
     return rows
 

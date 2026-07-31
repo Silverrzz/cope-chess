@@ -46,8 +46,8 @@ function clear(): void {
       <label v-for="engine in visibleEngines" :key="engine.id" class="participant-card" :class="{ 'participant-card--selected': selected.has(engine.id) }">
         <input type="checkbox" :checked="selected.has(engine.id)" @change="toggle(engine.id)">
         <span class="participant-card__body">
-          <strong>{{ engine.name }}</strong>
-          <span v-if="engine.author || engine.version">{{ [engine.author, engine.version].filter(Boolean).join(' · ') }}</span>
+          <strong>{{ engine.name }} <span class="participant-card__version">{{ engine.version }}</span></strong>
+          <span v-if="engine.author">{{ engine.author }}</span>
         </span>
         <svg class="participant-card__check" aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4.2 4L19 6.5" /></svg>
       </label>
@@ -72,6 +72,7 @@ function clear(): void {
 .participant-card__body { display: grid; flex: 1 1 auto; min-width: 0; }
 .participant-card__body strong, .participant-card__body span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .participant-card__body span { color: var(--color-text-muted, #64748b); font-size: .76rem; margin-top: .14rem; }
+.participant-card__body strong .participant-card__version { color: var(--color-accent, #315fcc); font-size: .72rem; margin-left: .25rem; }
 .participant-card__check { fill: none; height: 1rem; opacity: 0; stroke: var(--color-accent, #315fcc); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.2; width: 1rem; }
 .participant-card--selected .participant-card__check { opacity: 1; }
 .participant-picker__empty { color: var(--color-text-muted, #64748b); margin: .5rem 0; text-align: center; }

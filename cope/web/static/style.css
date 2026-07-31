@@ -1245,83 +1245,9 @@ textarea.input {
 
 .arena__analysis {
   display: grid;
-  grid-template-rows: auto repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 8px;
   overflow: hidden;
-}
-
-.game-pipeline {
-  display: grid;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid rgba(77, 141, 255, 0.28);
-  border-radius: 8px;
-  background: rgba(77, 141, 255, 0.06);
-}
-
-.game-pipeline header,
-.game-pipeline li {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
-}
-
-.game-pipeline header span,
-.game-pipeline small {
-  color: #9aa4b2;
-  font-size: 11px;
-}
-
-.game-pipeline p,
-.game-pipeline ol {
-  margin: 0;
-}
-
-.game-pipeline p {
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.game-pipeline ol {
-  display: flex;
-  gap: 5px;
-  overflow-x: auto;
-  padding: 0;
-  list-style: none;
-}
-
-.game-pipeline li {
-  flex: 0 0 auto;
-  grid-template-columns: auto;
-  padding: 4px 6px;
-  border-radius: 6px;
-  background: #121923;
-}
-
-.game-pipeline li > span {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #2a3443;
-}
-
-.game-pipeline li[data-progress-status=running] > span {
-  background: #4d8dff;
-}
-
-.game-pipeline li[data-progress-status=completed] > span {
-  background: #3ecf8e;
-}
-
-.game-pipeline li[data-progress-status=failed] > span {
-  background: #e5484d;
-}
-
-.game-pipeline li small {
-  display: none;
 }
 
 .arena__chat-column {

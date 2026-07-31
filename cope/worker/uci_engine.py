@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Iterator
 
@@ -482,6 +482,19 @@ class UciEngineProcess:
                     ["git", "-C", str(repository), "checkout", "--detach", "FETCH_HEAD"],
                     cwd=None,
                 )
+                _run_checked(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "submodule",
+                        "update",
+                        "--init",
+                        "--recursive",
+                    ],
+                    cwd=None,
+                    env={"GIT_LFS_SKIP_SMUDGE": "1"},
+                )
                 self.report_progress(
                     "engines",
                     "source_download",
@@ -496,6 +509,13 @@ class UciEngineProcess:
                     f"Building the {self._spec.name} engine image",
                 )
                 (repository / "Dockerfile.cope").write_text(self._spec.dockerfile, encoding="utf-8")
+                # The supplied Dockerfile is built against Cope's complete checkout. An
+                # upstream .dockerignore may belong to a completely different Dockerfile
+                # (and some repositories exclude their entire source tree), so it must not
+                # control the Cope build context. Keep only the parent repository metadata
+                # out of the context; nested submodule metadata remains available to builds
+                # that need to run Git LFS commands inside a submodule.
+                (repository / ".dockerignore").write_text("/.git\n", encoding="utf-8")
                 image_name = f"cope-engine-{artifact_key[:24]}"
                 container_name = f"{image_name}-{os.getpid()}-{threading.get_ident()}"
                 _run_checked(
@@ -758,7 +778,13 @@ def _exclusive_artifact_lock(path: Path) -> Iterator[None]:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _run_checked(command, *, cwd: Path | None, shell: bool = False) -> None:
+def _run_checked(
+    command,
+    *,
+    cwd: Path | None,
+    shell: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> None:
     LOG.info(
         "worker command started cwd=%s shell=%s command=%s",
         cwd,
@@ -769,6 +795,7 @@ def _run_checked(command, *, cwd: Path | None, shell: bool = False) -> None:
         completed = subprocess.run(
             command,
             cwd=None if cwd is None else str(cwd),
+            env=None if env is None else {**os.environ, **env},
             shell=shell,
             text=True,
             stdout=subprocess.PIPE,

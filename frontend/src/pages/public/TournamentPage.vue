@@ -106,10 +106,9 @@ const activeTab = computed<TabKey>(() => {
   return ['standings', 'games', 'settings'].includes(tab) ? tab as TabKey : 'standings'
 })
 const viewerGame = computed(() => data.value?.viewer_game || null)
-const isSettingUp = computed(() => viewerGame.value?.status === 'assigned')
-const gameProgress = computed(() => data.value?.game_progress || null)
-const currentProgress = computed(() => gameProgress.value?.current || null)
-const recentProgressEvents = computed(() => (gameProgress.value?.events || []).slice(-12).reverse())
+const isPending = computed(() => viewerGame.value?.status === 'pending')
+const isAssigned = computed(() => viewerGame.value?.status === 'assigned')
+const assignedOpening = { name: 'Start position', fen: 'startpos' }
 const pgnDownloadUrl = computed(() => {
   const game = viewerGame.value
   return game?.status === 'finished'
@@ -406,6 +405,7 @@ function handleChatSettings(event: Event): void {
 
 function applySnapshot(snapshot: LiveSnapshot): void {
   if (!data.value) return
+  loadError.value = ''
   if (snapshot.tournament) data.value.tournament = { ...data.value.tournament, ...snapshot.tournament }
   if (snapshot.games) data.value.games = mergeGames(data.value.games, snapshot.games)
 
@@ -441,7 +441,6 @@ function applySnapshot(snapshot: LiveSnapshot): void {
       }
     }
     if (snapshot.clock_state) applyClockState(snapshot.clock_state, snapshot.clock_state.observed_at || undefined)
-    if (snapshot.game_progress) data.value.game_progress = snapshot.game_progress
   } else if (displayedGameUpdate && sameId(displayedGameUpdate.id, selectedGameId.value)) {
     data.value.viewer_game = { ...displayedGame, ...displayedGameUpdate } as GameRecord
   }
@@ -560,20 +559,11 @@ function selectGame(event: Event): void {
   void router.push({ query: { ...route.query, game_id: value } })
 }
 
-function gameLabel(game: GameRecord): string {
+function gameLabel(game: GameRecord, index: number): string {
   const white = engineName(data.value?.engines, game.white_engine_id, game.white_name)
   const black = engineName(data.value?.engines, game.black_engine_id, game.black_name)
   const outcome = game.result ? `, ${game.result}` : `, ${statusLabel(game.status)}`
-  return `Round ${game.round ?? '-'}, ${white} vs ${black}${outcome}`
-}
-
-function progressWidth(current?: number | null, total?: number | null): string {
-  if (current == null || total == null || total <= 0) return '0%'
-  return `${Math.max(0, Math.min(100, Math.round(current / total * 100)))}%`
-}
-
-function progressSubstage(value: string): string {
-  return value.replaceAll('_', ' ')
+  return `Game ${index + 1}, ${white} vs ${black}${outcome}`
 }
 
 function tabTarget(tab: TabKey): RouteLocationRaw {
@@ -665,7 +655,7 @@ function queryValue(value: unknown): string {
               <StreamIndicator v-if="!tournamentComplete" :state="streamState" />
             </span>
             <select :value="selectedGameId" @change="selectGame">
-              <option v-for="game in data.games" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
+              <option v-for="(game, index) in data.games" :key="game.id" :value="String(game.id)">{{ gameLabel(game, index) }}</option>
             </select>
           </label>
         </div>
@@ -673,55 +663,59 @@ function queryValue(value: unknown): string {
 
       <p v-if="loadError" class="inline-error" role="alert">{{ loadError }} <button type="button" @click="loadDetail(true)">Try again</button></p>
 
-      <section ref="arenaElement" v-if="viewerGame && (!isSettingUp || currentProgress?.stage === 'opening')" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
-        <div class="engine-column">
-          <EnginePanel
-            side="black"
-            :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
-            :engine-id="viewerGame.black_engine_id"
-            :clock="blackClock"
-            :analysis="blackAnalysis"
-            :position-fen="currentPositionFen"
-            :active="activeSide === 'black'"
-          />
-          <EnginePanel
-            side="white"
-            :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
-            :engine-id="viewerGame.white_engine_id"
-            :clock="whiteClock"
-            :analysis="whiteAnalysis"
-            :position-fen="currentPositionFen"
-            :active="activeSide === 'white'"
-          />
-          <section v-if="currentProgress" class="game-progress-live" aria-label="Current game activity">
-            <span>{{ currentProgress.stage_label }}</span>
-            <strong>{{ currentProgress.detail }}</strong>
-            <small>
-              {{ progressSubstage(currentProgress.substage) }}
-              <template v-if="currentProgress.engine_name"> / {{ currentProgress.engine_name }}</template>
-            </small>
-          </section>
-          <dl class="game-facts">
-            <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
-            <div><dt>Status</dt><dd>{{ statusLabel(viewerGame.status) }}</dd></div>
-            <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
-            <div><dt>Termination</dt><dd>{{ viewerGame.termination ? statusLabel(viewerGame.termination) : '-' }}</dd></div>
-          </dl>
-        </div>
+      <section ref="arenaElement" v-if="viewerGame" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+        <article v-if="isPending" class="waiting-screen" aria-labelledby="waiting-title">
+          <div>
+            <h2 id="waiting-title">Waiting for this game to start</h2>
+            <p>The board will appear once the game is ready.</p>
+          </div>
+        </article>
 
-        <div ref="boardColumnElement" class="board-column">
-          <ChessViewer
-            :opening="opening"
-            :moves="moves"
-            :model-value="selectedPly"
-            :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
-            @update:model-value="selectedPly = $event"
-            @position="currentPositionFen = $event.fen"
-          />
-        </div>
+        <template v-else>
+          <div class="engine-column">
+            <EnginePanel
+              side="black"
+              :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
+              :engine-id="viewerGame.black_engine_id"
+              :clock="blackClock"
+              :analysis="blackAnalysis"
+              :position-fen="currentPositionFen"
+              :active="!isAssigned && activeSide === 'black'"
+              :loading="isAssigned"
+            />
+            <EnginePanel
+              side="white"
+              :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
+              :engine-id="viewerGame.white_engine_id"
+              :clock="whiteClock"
+              :analysis="whiteAnalysis"
+              :position-fen="currentPositionFen"
+              :active="!isAssigned && activeSide === 'white'"
+              :loading="isAssigned"
+            />
+            <dl class="game-facts">
+              <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
+              <div><dt>Status</dt><dd>{{ statusLabel(viewerGame.status) }}</dd></div>
+              <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
+              <div><dt>Termination</dt><dd>{{ viewerGame.termination ? statusLabel(viewerGame.termination) : '-' }}</dd></div>
+            </dl>
+          </div>
 
-        <aside class="activity-column" aria-label="Game activity">
+          <div ref="boardColumnElement" class="board-column">
+            <ChessViewer
+              :opening="isAssigned ? assignedOpening : opening"
+              :moves="isAssigned ? [] : moves"
+              :model-value="isAssigned ? 0 : selectedPly"
+              :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
+              @update:model-value="selectedPly = $event"
+              @position="currentPositionFen = $event.fen"
+            />
+          </div>
+        </template>
+
+        <aside class="activity-column" :class="{ 'activity-column--waiting': isPending }" aria-label="Game activity">
           <MoveList
+            v-if="!isPending"
             class="arena-moves"
             :moves="moves.map((move) => move.san || move.uci)"
             :uci-moves="moves.map((move) => move.uci)"
@@ -738,70 +732,6 @@ function queryValue(value: unknown): string {
             @sent="appendChatMessage"
           />
         </aside>
-      </section>
-
-      <section v-else-if="viewerGame" class="setup-arena" aria-labelledby="setup-title">
-        <article class="setup-card">
-          <div class="setup-card__indicator" aria-hidden="true">
-            <span></span><span></span><span></span>
-          </div>
-          <h2 id="setup-title">{{ currentProgress?.stage_label || 'Preparing the game environment' }}</h2>
-          <p v-if="currentProgress" class="setup-card__current">
-            <strong>{{ currentProgress.detail }}</strong>
-            <span>
-              {{ progressSubstage(currentProgress.substage) }}
-              <template v-if="currentProgress.engine_name"> / {{ currentProgress.engine_name }}</template>
-            </span>
-          </p>
-          <div class="setup-card__engines" aria-label="Engines being prepared">
-            <RouterLink :to="`/engines/${viewerGame.white_engine_id}`">
-              <span>White</span>
-              <strong>{{ engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name) }}</strong>
-            </RouterLink>
-            <span class="setup-card__versus">vs</span>
-            <RouterLink :to="`/engines/${viewerGame.black_engine_id}`">
-              <span>Black</span>
-              <strong>{{ engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name) }}</strong>
-            </RouterLink>
-          </div>
-          <dl class="setup-card__facts">
-            <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
-            <div><dt>Game</dt><dd>{{ viewerGame.id }}</dd></div>
-            <div><dt>Status</dt><dd>Setting up</dd></div>
-          </dl>
-          <ol v-if="gameProgress?.stages.length" class="setup-stages" aria-label="Game setup workflow">
-            <li
-              v-for="stage in gameProgress.stages"
-              :key="stage.stage"
-              :class="`is-${stage.status}`"
-            >
-              <span class="setup-stages__state" aria-hidden="true"></span>
-              <span>
-                <strong>{{ stage.stage_label }}</strong>
-                <small>{{ stage.detail }}</small>
-              </span>
-              <span v-if="stage.current != null && stage.total" class="setup-stages__meter">
-                <span :style="{ width: progressWidth(stage.current, stage.total) }"></span>
-              </span>
-            </li>
-          </ol>
-          <section v-if="recentProgressEvents.length" class="setup-log" aria-label="Recent setup details">
-            <h3>Latest pipeline details</h3>
-            <ul>
-              <li v-for="event in recentProgressEvents" :key="event.id">
-                <span>{{ event.source }}</span>
-                <strong>{{ event.detail }}</strong>
-              </li>
-            </ul>
-          </section>
-        </article>
-        <ChatPanel
-          class="setup-chat"
-          :messages="orderedMessages"
-          :settings="data.chat_settings || {}"
-          :tournament-id="data.tournament.id"
-          @sent="appendChatMessage"
-        />
       </section>
 
       <section v-else class="empty-arena">
@@ -1051,6 +981,10 @@ function queryValue(value: unknown): string {
   height: var(--arena-content-height);
 }
 
+.activity-column--waiting {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .activity-column > * {
   min-width: 0;
   min-height: 0;
@@ -1092,30 +1026,6 @@ function queryValue(value: unknown): string {
   white-space: nowrap;
 }
 
-.game-progress-live {
-  display: grid;
-  gap: 0.18rem;
-  padding: 0.65rem 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--color-accent, #2f78c4) 30%, var(--color-border, #d5dbe1));
-  border-radius: var(--radius-md, 0.5rem);
-  background: color-mix(in srgb, var(--color-accent, #2f78c4) 7%, var(--color-surface, #fff));
-}
-
-.game-progress-live span,
-.game-progress-live small {
-  color: var(--color-text-muted, #607080);
-  font-size: 0.59rem;
-  font-weight: 750;
-  text-transform: capitalize;
-}
-
-.game-progress-live strong {
-  overflow: hidden;
-  font-size: 0.72rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .empty-arena {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.36fr);
@@ -1128,166 +1038,33 @@ function queryValue(value: unknown): string {
   min-height: 0;
 }
 
-.setup-arena {
+.waiting-screen {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(20rem, 0.55fr);
-  gap: clamp(0.7rem, 1.5vw, 1.2rem);
-  min-height: min(36rem, calc(100dvh - 13rem));
-}
-
-.setup-card {
-  display: grid;
-  align-content: start;
-  justify-items: center;
-  max-height: min(46rem, calc(100dvh - 13rem));
-  overflow-y: auto;
-  padding: clamp(1.4rem, 3vw, 2.5rem);
+  grid-column: 1 / 3;
+  place-items: center;
+  height: var(--arena-content-height);
+  min-height: 0;
+  padding: clamp(2rem, 6vw, 5rem);
   border: 1px solid var(--color-border, #d5dbe1);
   border-radius: var(--radius-lg, 0.75rem);
-  background:
-    radial-gradient(circle at 50% 15%, color-mix(in srgb, var(--color-accent, #2f78c4) 10%, transparent), transparent 42%),
-    var(--color-surface, #fff);
+  background: var(--color-surface, #fff);
   text-align: center;
 }
 
-.setup-card__indicator {
-  display: flex;
-  gap: 0.38rem;
-  margin-block-end: 1.1rem;
-}
-
-.setup-card__indicator span {
-  width: 0.58rem;
-  height: 0.58rem;
-  border-radius: 50%;
-  background: var(--color-accent, #2f78c4);
-  animation: setup-pulse 1.35s ease-in-out infinite;
-}
-
-.setup-card__indicator span:nth-child(2) { animation-delay: 0.15s; }
-.setup-card__indicator span:nth-child(3) { animation-delay: 0.3s; }
-
-.setup-card h2,
-.setup-card__facts {
+.waiting-screen h2,
+.waiting-screen p {
   margin: 0;
 }
 
-.setup-card h2 {
-  max-width: 42rem;
-  margin-block-start: 0.45rem;
+.waiting-screen h2 {
   font-size: clamp(1.35rem, 2.5vw, 2rem);
   letter-spacing: -0.025em;
 }
 
-.setup-card__current {
-  display: grid;
-  gap: 0.25rem;
-  max-width: 48rem;
-  margin: 0.7rem 0 0;
-}
-
-.setup-card__current strong { font-size: 0.9rem; }
-.setup-card__current span { color: var(--color-text-muted, #607080); font-size: 0.68rem; text-transform: capitalize; }
-
-.setup-card__engines {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  width: min(100%, 48rem);
-  gap: 0.8rem;
-  margin-block-start: 1.6rem;
-}
-
-.setup-card__engines a {
-  display: grid;
-  gap: 0.22rem;
-  min-width: 0;
-  padding: 0.9rem 1rem;
-  border: 1px solid var(--color-border, #d5dbe1);
-  border-radius: var(--radius-md, 0.5rem);
-  background: var(--color-surface-raised, var(--color-surface, #fff));
-  color: inherit;
-  text-decoration: none;
-}
-
-.setup-card__engines a:hover { border-color: var(--color-border-strong, #99a8bb); }
-.setup-card__engines a > span { color: var(--color-text-muted, #607080); font-size: 0.6rem; font-weight: 750; text-transform: uppercase; }
-.setup-card__engines strong { overflow: hidden; font-size: 0.88rem; text-overflow: ellipsis; white-space: nowrap; }
-.setup-card__versus { color: var(--color-text-muted, #607080); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
-
-.setup-card__facts {
-  display: flex;
-  gap: 1.5rem;
-  margin-block-start: 1.35rem;
-}
-
-.setup-card__facts div { display: grid; gap: 0.15rem; }
-.setup-card__facts dt { color: var(--color-text-muted, #607080); font-size: 0.58rem; font-weight: 750; letter-spacing: 0.045em; text-transform: uppercase; }
-.setup-card__facts dd { margin: 0; font-size: 0.76rem; font-weight: 750; }
-
-.setup-stages {
-  display: grid;
-  width: min(100%, 48rem);
-  gap: 0.35rem;
-  margin: 1.35rem 0 0;
-  padding: 0;
-  text-align: left;
-  list-style: none;
-}
-
-.setup-stages li {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.7rem;
-  align-items: center;
-  padding: 0.58rem 0.7rem;
-  border: 1px solid var(--color-border, #d5dbe1);
-  border-radius: var(--radius-sm, 0.35rem);
-  background: var(--color-surface-raised, var(--color-surface, #fff));
-}
-
-.setup-stages li > span:nth-child(2) { display: grid; min-width: 0; gap: 0.12rem; }
-.setup-stages strong { font-size: 0.74rem; }
-.setup-stages small { overflow: hidden; color: var(--color-text-muted, #607080); font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap; }
-
-.setup-stages__state {
-  width: 0.62rem;
-  height: 0.62rem;
-  border: 2px solid var(--color-border-strong, #99a8bb);
-  border-radius: 50%;
-}
-
-.setup-stages .is-running { border-color: color-mix(in srgb, var(--color-accent, #2f78c4) 42%, var(--color-border, #d5dbe1)); }
-.setup-stages .is-running .setup-stages__state { border-color: var(--color-accent, #2f78c4); background: var(--color-accent, #2f78c4); }
-.setup-stages .is-completed .setup-stages__state { border-color: #278459; background: #278459; }
-.setup-stages .is-failed .setup-stages__state { border-color: #b53b3b; background: #b53b3b; }
-
-.setup-stages__meter {
-  grid-column: 2;
-  height: 0.2rem;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--color-border, #d5dbe1);
-}
-
-.setup-stages__meter span { display: block; height: 100%; background: var(--color-accent, #2f78c4); }
-
-.setup-log {
-  width: min(100%, 48rem);
-  margin-block-start: 1rem;
-  text-align: left;
-}
-
-.setup-log h3 { margin: 0 0 0.4rem; font-size: 0.68rem; text-transform: uppercase; }
-.setup-log ul { display: grid; gap: 0.2rem; max-height: 8rem; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
-.setup-log li { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr); gap: 0.45rem; font-size: 0.64rem; }
-.setup-log li span { color: var(--color-text-muted, #607080); text-transform: uppercase; }
-.setup-log li strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.setup-chat { min-height: 0; }
-
-@keyframes setup-pulse {
-  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-0.25rem); }
+.waiting-screen p {
+  margin-block-start: 0.45rem;
+  color: var(--color-text-muted, #607080);
+  font-size: 0.78rem;
 }
 
 .tournament-data {
@@ -1392,8 +1169,8 @@ function queryValue(value: unknown): string {
   .engine-column .game-facts { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
   .activity-column { grid-column: 1; grid-row: 3; }
-  .setup-arena { grid-template-columns: 1fr; }
-  .setup-chat { min-height: 24rem; }
+  .activity-column--waiting { grid-row: 2; }
+  .waiting-screen { grid-column: 1; grid-row: 1; }
 }
 
 @media (max-width: 40rem) {
@@ -1401,11 +1178,9 @@ function queryValue(value: unknown): string {
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
+  .activity-column--waiting { grid-template-rows: minmax(18rem, 26rem); }
   .empty-arena { grid-template-columns: 1fr; height: auto; }
   .empty-chat { height: min(36rem, calc(100dvh - 8rem)); }
-  .setup-card { padding: 2rem 1rem; }
-  .setup-card__engines { grid-template-columns: 1fr; }
-  .setup-card__versus { padding-block: 0.1rem; }
   .settings-list { grid-template-columns: 1fr; }
 }
 </style>

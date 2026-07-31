@@ -51,7 +51,7 @@ class WorkerActivityRecord:
 
 
 _DB_STAT_TABLES = (
-    "categories",
+    "rating_lists",
     "engines",
     "tournaments",
     "games",
@@ -148,7 +148,8 @@ def list_engine_games(
     rows = connection.execute(
         """
         SELECT * FROM games
-        WHERE white_engine_id = ? OR black_engine_id = ?
+        WHERE result IS NOT NULL
+          AND (white_engine_id = ? OR black_engine_id = ?)
         ORDER BY id DESC
         LIMIT ?
         """,
@@ -157,39 +158,73 @@ def list_engine_games(
     return tuple(_game_from_row(row) for row in rows)
 
 
+def engine_result_summary(
+    connection: sqlite3.Connection,
+    engine_id: int,
+) -> dict[str, int]:
+    row = connection.execute(
+        """
+        SELECT
+          COUNT(*) AS games,
+          COALESCE(SUM(CASE WHEN result = '1/2-1/2' THEN 1 ELSE 0 END), 0) AS draws,
+          COALESCE(SUM(CASE
+            WHEN result = '1-0' AND white_engine_id = ? THEN 1
+            WHEN result = '0-1' AND black_engine_id = ? THEN 1
+            ELSE 0
+          END), 0) AS wins,
+          COALESCE(SUM(CASE
+            WHEN result = '0-1' AND white_engine_id = ? THEN 1
+            WHEN result = '1-0' AND black_engine_id = ? THEN 1
+            ELSE 0
+          END), 0) AS losses
+        FROM games
+        WHERE result IS NOT NULL
+          AND (white_engine_id = ? OR black_engine_id = ?)
+        """,
+        (engine_id, engine_id, engine_id, engine_id, engine_id, engine_id),
+    ).fetchone()
+    return {
+        "wins": int(row["wins"]),
+        "draws": int(row["draws"]),
+        "losses": int(row["losses"]),
+        "games": int(row["games"]),
+    }
+
+
 def list_rating_rows(
     connection: sqlite3.Connection,
-    category_id: int,
+    rating_list_id: int,
 ) -> tuple[RatingRowRecord, ...]:
-    if not _table_exists(connection, "ratings"):
+    if not _table_exists(connection, "rating_list_ratings"):
         return ()
 
     rows = connection.execute(
         """
         SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
                ratings.elo, ratings.games_played, ratings.updated_at
-        FROM ratings
+        FROM rating_list_ratings ratings
         JOIN engine_versions version ON version.id = ratings.engine_id
         JOIN engines engine ON engine.id = version.engine_id
-        WHERE ratings.category_id = ?
+        WHERE ratings.rating_list_id = ?
         ORDER BY ratings.elo DESC, engine.name, version.version
         """,
-        (category_id,),
+        (rating_list_id,),
     )
     history = connection.execute(
         """
         SELECT
           rating_history.engine_id,
           rating_history.elo_before AS engine_elo,
+          rating_history.expected_score,
           opponent.elo_before AS opponent_elo
-        FROM rating_history
-        JOIN rating_history AS opponent
+        FROM rating_list_history rating_history
+        JOIN rating_list_history AS opponent
           ON opponent.game_id = rating_history.game_id
-         AND opponent.category_id = rating_history.category_id
+         AND opponent.rating_list_id = rating_history.rating_list_id
          AND opponent.engine_id = rating_history.opponent_engine_id
-        WHERE rating_history.category_id = ?
+        WHERE rating_history.rating_list_id = ?
         """,
-        (category_id,),
+        (rating_list_id,),
     )
     metrics: dict[int, dict[str, float]] = {}
     for item in history:
@@ -201,8 +236,15 @@ def list_rating_rows(
         )
         engine_elo = float(item["engine_elo"])
         opponent_elo = float(item["opponent_elo"])
-        difference = max(-4000.0, min(4000.0, opponent_elo - engine_elo))
-        expected = 1.0 / (1.0 + 10.0 ** (difference / 400.0))
+        expected = (
+            float(item["expected_score"])
+            if item["expected_score"] is not None
+            else 1.0 / (
+                1.0
+                + 10.0
+                ** (max(-4000.0, min(4000.0, opponent_elo - engine_elo)) / 400.0)
+            )
+        )
         values["count"] += 1
         values["opponent_total"] += opponent_elo
         values["delta_total"] += opponent_elo - engine_elo
@@ -419,7 +461,7 @@ def list_uncommitted_finished_tournaments(
         row["tournament_id"]
         for row in connection.execute(
             """
-            SELECT tournament_id FROM tournament_rating_commits
+            SELECT tournament_id FROM tournament_rating_list_commits
             WHERE status IN ('pending', 'claimed', 'applied')
             """
         )
@@ -429,7 +471,6 @@ def list_uncommitted_finished_tournaments(
         for tournament in list_tournaments(connection)
         if tournament.status in {"finished", "aborted"}
         and tournament.config.rated
-        and tournament.category_id is not None
         and (
             tournament.status == "finished"
             or connection.execute(

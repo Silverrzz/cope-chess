@@ -6,7 +6,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Iterable
 
 from cope.core.models import (
     AssignmentProgress,
@@ -29,11 +29,16 @@ class CategoryRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RatingListRecord:
+    id: int
+    name: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class TournamentRecord:
     id: int
     name: str
-    category_id: int | None
-    settings_unlinked: bool
     config: TournamentConfig
     status: str
     current_round: int
@@ -41,6 +46,15 @@ class TournamentRecord:
     created_at: str
     started_at: str | None
     finished_at: str | None
+
+    @property
+    def category_id(self) -> None:
+        """Compatibility for legacy server-rendered views; tournaments are list-agnostic."""
+        return None
+
+    @property
+    def settings_unlinked(self) -> bool:
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +203,7 @@ class EngineVersionRecord:
     build_hash: str
     uci_options: dict[str, Any]
     active: bool
-    version_active: bool
+    benchmark_current: bool
     engine_active: bool
     created_at: str
 
@@ -268,7 +282,7 @@ class ServiceEndpointRecord:
 @dataclass(frozen=True, slots=True)
 class TournamentRatingCommitRecord:
     tournament_id: int
-    category_id: int
+    rating_list_id: int
     command_id: int | None
     status: str
     requested_at: str
@@ -496,14 +510,19 @@ def delete_engine(connection: sqlite3.Connection, engine_id: int) -> None:
 
 def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> None:
     if engine_game_count(connection, version_id) > 0:
-        raise ValueError("engine version has recorded games; deactivate it instead of deleting")
+        raise ValueError("engine version has recorded games and cannot be deleted")
     row = connection.execute("SELECT COUNT(*) AS count FROM participants WHERE engine_id = ?", (version_id,)).fetchone()
     if int(row["count"]) > 0:
-        raise ValueError("engine version participates in tournaments; deactivate it instead")
+        raise ValueError("engine version participates in tournaments and cannot be deleted")
     record = get_engine_version_record(connection, version_id)
     if record is None:
         raise ValueError("engine version not found")
     connection.execute("DELETE FROM ratings WHERE engine_id = ?", (version_id,))
+    connection.execute("DELETE FROM rating_list_ratings WHERE engine_id = ?", (version_id,))
+    connection.execute(
+        "DELETE FROM rating_list_history WHERE engine_id = ? OR opponent_engine_id = ?",
+        (version_id, version_id),
+    )
     connection.execute("DELETE FROM engine_versions WHERE id = ?", (version_id,))
 
 
@@ -643,7 +662,11 @@ def get_engine_family(connection: sqlite3.Connection, engine_id: int) -> EngineR
 
 def get_engine_version_record(connection: sqlite3.Connection, version_id: int) -> EngineVersionRecord | None:
     row = connection.execute(
-        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
+        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                  EXISTS (
+                    SELECT 1 FROM engine_benchmarks benchmark
+                    WHERE benchmark.build_hash = version.build_hash
+                  ) AS benchmark_current
            FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
            WHERE version.id = ?""",
         (version_id,),
@@ -664,7 +687,11 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
     return tuple(
         _engine_version_from_row(row)
         for row in connection.execute(
-            """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
+            """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                      EXISTS (
+                        SELECT 1 FROM engine_benchmarks benchmark
+                        WHERE benchmark.build_hash = version.build_hash
+                      ) AS benchmark_current
                FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
                ORDER BY engine.name, version.created_at DESC, version.id DESC"""
         )
@@ -785,8 +812,12 @@ def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -
              FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id"""
     params: tuple[Any, ...] = ()
     if active_only:
-        sql = f"{sql} WHERE version.active = ? AND engine.active = ?"
-        params = (1, 1)
+        sql = f"""{sql} WHERE engine.active = ?
+                 AND EXISTS (
+                   SELECT 1 FROM engine_benchmarks benchmark
+                   WHERE benchmark.build_hash = version.build_hash
+                 )"""
+        params = (1,)
     sql = f"{sql} ORDER BY version.id"
     return tuple(_engine_from_row(row) for row in connection.execute(sql, params))
 
@@ -798,7 +829,6 @@ def create_tournament(
     *,
     status: str = "draft",
 ) -> int:
-    config = _resolve_tournament_category_config(connection, config)
     created_at = utc_now()
     cursor = connection.execute(
         """
@@ -809,8 +839,8 @@ def create_tournament(
         """,
         (
             name,
-            config.category_id,
-            int(not config.category_settings_linked),
+            None,
+            1,
             config.model_dump_json(),
             status,
             created_at,
@@ -947,7 +977,6 @@ def update_tournament(
     config: TournamentConfig,
 ) -> None:
     """Update a tournament's name, config, and participant list."""
-    config = _resolve_tournament_category_config(connection, config)
     connection.execute(
         """
         UPDATE tournaments
@@ -956,8 +985,8 @@ def update_tournament(
         """,
         (
             name,
-            config.category_id,
-            int(not config.category_settings_linked),
+            None,
+            1,
             config.model_dump_json(),
             tournament_id,
         ),
@@ -975,76 +1004,10 @@ def update_tournament(
     )
 
 
-def _resolve_tournament_category_config(
-    connection: sqlite3.Connection,
-    config: TournamentConfig,
-) -> TournamentConfig:
-    if config.category_id is None:
-        return config.model_copy(update={"rated": False})
-
-    category = get_category(connection, config.category_id)
-    if category is None or not category.active:
-        raise ValueError("tournament rating category must be active")
-
-    settings: dict[str, Any] = {
-        "format": "round_robin",
-        "format_options": {"games_per_pairing": 2},
-        "time_control": {
-            "category": "increment",
-            "initial_ms": 60_000,
-            "increment_ms": 1_000,
-        },
-        "concurrency": 1,
-        "opening_suite_id": None,
-        "adjudication": {
-            "draw": None,
-            "resign": None,
-            "max_moves": None,
-        },
-        "rated": True,
-        "lag_compensation_ms": 50,
-        "engine_threads": 1,
-        "engine_hash_mb": 16,
-    }
-    category_keys = {
-        "time_control",
-        "adjudication",
-        "rated",
-        "lag_compensation_ms",
-        "engine_threads",
-        "engine_hash_mb",
-    }
-    settings.update(
-        {
-            key: value
-            for key, value in category.default_config.items()
-            if key in category_keys
-        }
-    )
-    if isinstance(settings["adjudication"], dict):
-        settings["adjudication"] = {
-            key: value
-            for key, value in settings["adjudication"].items()
-            if key in {"draw", "resign", "max_moves"}
-        }
-    settings.update(
-        format=config.format,
-        format_options=config.format_options,
-        concurrency=config.concurrency,
-        opening_suite_id=config.opening_suite_id,
-    )
-    return TournamentConfig(
-        category_id=category.id,
-        category_settings_linked=True,
-        participants=config.participants,
-        **settings,
-    )
-
-
 def delete_tournament(connection: sqlite3.Connection, tournament_id: int) -> None:
     """Delete a tournament and its games, moves, and participants (cascade)."""
-    rating_commit = get_tournament_rating_commit(connection, tournament_id)
-    if rating_commit is not None:
+    rating_commits = list_tournament_rating_commits(connection, tournament_id)
+    for rating_commit in rating_commits:
         if rating_commit.status == "applied":
             raise ValueError("tournament results are already part of the ratings")
         if rating_commit.status in {"pending", "claimed"}:
@@ -1539,7 +1502,7 @@ def fail_game_assignment(
     assignment = get_game_assignment(connection, assignment_id)
     if assignment is None or assignment.assignment_key != assignment_key:
         return
-    connection.execute(
+    cursor = connection.execute(
         """
         UPDATE game_assignments
         SET status = 'abandoned', finished_at = ?, last_error = ?
@@ -1547,14 +1510,8 @@ def fail_game_assignment(
         """,
         (utc_now(), error[:500], assignment_id, assignment_key),
     )
-    connection.execute(
-        """
-        UPDATE games
-        SET status = 'pending'
-        WHERE id = ? AND status IN ('assigned', 'live')
-        """,
-        (assignment.game_id,),
-    )
+    if cursor.rowcount == 1:
+        _reset_games_for_replay(connection, (assignment.game_id,))
 
 
 def create_worker(
@@ -1948,20 +1905,7 @@ def _release_worker_active_assignments(
     now: str,
     reason: str,
 ) -> None:
-    connection.execute(
-        """
-        UPDATE games
-        SET status = 'pending'
-        WHERE status IN ('assigned', 'live')
-          AND id IN (
-            SELECT game_id
-            FROM game_assignments
-            WHERE worker_id = ?
-              AND status IN ('assigned', 'acked', 'live')
-          )
-        """,
-        (worker_id,),
-    )
+    game_ids = _active_worker_game_ids(connection, worker_id)
     connection.execute(
         """
         UPDATE game_assignments
@@ -1974,24 +1918,62 @@ def _release_worker_active_assignments(
         """,
         (now, reason[:500], worker_id),
     )
+    _reset_games_for_replay(connection, game_ids)
 
 
-def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
-    """Delete a worker and return its active assignments to the pending pool."""
-    connection.execute(
-        """
-        UPDATE games
-        SET status = 'pending'
-        WHERE status IN ('assigned', 'live')
-          AND id IN (
+def _active_worker_game_ids(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> tuple[int, ...]:
+    return tuple(
+        int(row["game_id"])
+        for row in connection.execute(
+            """
             SELECT game_id
             FROM game_assignments
             WHERE worker_id = ?
               AND status IN ('assigned', 'acked', 'live')
-          )
-        """,
-        (worker_id,),
+            """,
+            (worker_id,),
+        )
     )
+
+
+def _reset_games_for_replay(
+    connection: sqlite3.Connection,
+    game_ids: Iterable[int],
+) -> None:
+    """Discard every attempt-scoped artifact before games are reassigned."""
+    ids = tuple(dict.fromkeys(int(game_id) for game_id in game_ids))
+    if not ids:
+        return
+    placeholders = ", ".join("?" for _ in ids)
+    connection.execute(f"DELETE FROM moves WHERE game_id IN ({placeholders})", ids)
+    connection.execute(
+        f"DELETE FROM game_hardware_scores WHERE game_id IN ({placeholders})",
+        ids,
+    )
+    connection.execute(
+        f"""
+        UPDATE games
+        SET status = 'pending',
+            result = NULL,
+            termination = NULL,
+            pgn = NULL,
+            white_hw = NULL,
+            black_hw = NULL,
+            started_at = NULL,
+            finished_at = NULL
+        WHERE id IN ({placeholders})
+          AND status IN ('pending', 'assigned', 'live')
+        """,
+        ids,
+    )
+
+
+def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
+    """Delete a worker and return its active assignments to the pending pool."""
+    game_ids = _active_worker_game_ids(connection, worker_id)
     connection.execute(
         """
         UPDATE game_assignments
@@ -2008,6 +1990,7 @@ def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
         """,
         (utc_now(), worker_id),
     )
+    _reset_games_for_replay(connection, game_ids)
     connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 
@@ -2630,7 +2613,8 @@ def fail_runner_command(
 def request_tournament_rating_commit(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
-) -> bool:
+    rating_list_ids: Iterable[int] | None = None,
+) -> int:
     if tournament.status not in {"finished", "aborted"}:
         raise ValueError("tournament is not finished or aborted")
     if tournament.status == "aborted":
@@ -2646,47 +2630,54 @@ def request_tournament_rating_commit(
             raise ValueError("aborted tournament has no finished games")
     if not tournament.config.rated:
         raise ValueError("unrated tournament results cannot be committed")
-    if tournament.category_id is None or not tournament.config.category_settings_linked:
-        raise ValueError("custom tournament results cannot be committed to ratings")
+    if rating_list_ids is None:
+        rating_list_ids = (item.id for item in list_rating_lists(connection))
+    selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
+    if not selected or any(value <= 0 for value in selected):
+        raise ValueError("choose at least one rating list")
+    placeholders = ", ".join("?" for _ in selected)
+    found = {
+        int(row["id"])
+        for row in connection.execute(
+            f"SELECT id FROM rating_lists WHERE id IN ({placeholders})", selected
+        )
+    }
+    if found != set(selected):
+        raise ValueError("one or more rating lists do not exist")
 
-    existing = get_tournament_rating_commit(connection, tournament.id)
-    if existing is not None:
-        if existing.status in {"claimed", "applied"}:
-            return False
-        if existing.status == "pending" and existing.command_id is not None:
+    requested = 0
+    now = utc_now()
+    for rating_list_id in selected:
+        existing = connection.execute(
+            "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
+            (tournament.id, rating_list_id),
+        ).fetchone()
+        if existing is not None and existing["status"] in {"claimed", "applied"}:
+            continue
+        if existing is not None and existing["status"] == "pending" and existing["command_id"] is not None:
             command = connection.execute(
-                "SELECT status FROM runner_commands WHERE id = ?",
-                (existing.command_id,),
+                "SELECT status FROM runner_commands WHERE id = ?", (existing["command_id"],)
             ).fetchone()
             if command is not None and command["status"] in {"pending", "claimed"}:
-                return False
-
-    now = utc_now()
-    command_id = enqueue_runner_command(
-        connection,
-        "commit_tournament_results",
-        {
-            "tournament_id": tournament.id,
-            "category_id": tournament.category_id,
-        },
-    )
-    connection.execute(
-        """
-        INSERT INTO tournament_rating_commits (
-          tournament_id, category_id, command_id, status, requested_at
+                continue
+        command_id = enqueue_runner_command(
+            connection,
+            "commit_tournament_results",
+            {"tournament_id": tournament.id, "rating_list_id": rating_list_id},
         )
-        VALUES (?, ?, ?, 'pending', ?)
-        ON CONFLICT(tournament_id) DO UPDATE SET
-          status = 'pending',
-          category_id = excluded.category_id,
-          command_id = excluded.command_id,
-          requested_at = excluded.requested_at,
-          applied_at = NULL,
-          error = NULL
-        """,
-        (tournament.id, tournament.category_id, command_id, now),
-    )
-    return True
+        connection.execute(
+            """
+            INSERT INTO tournament_rating_list_commits (
+              tournament_id, rating_list_id, command_id, status, requested_at
+            ) VALUES (?, ?, ?, 'pending', ?)
+            ON CONFLICT(tournament_id, rating_list_id) DO UPDATE SET
+              status = 'pending', command_id = excluded.command_id,
+              requested_at = excluded.requested_at, applied_at = NULL, error = NULL
+            """,
+            (tournament.id, rating_list_id, command_id, now),
+        )
+        requested += 1
+    return requested
 
 
 def get_tournament_rating_commit(
@@ -2694,12 +2685,48 @@ def get_tournament_rating_commit(
     tournament_id: int,
 ) -> TournamentRatingCommitRecord | None:
     row = connection.execute(
-        "SELECT * FROM tournament_rating_commits WHERE tournament_id = ?",
+        "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? ORDER BY rating_list_id LIMIT 1",
         (tournament_id,),
     ).fetchone()
     if row is None:
         return None
     return _tournament_rating_commit_from_row(row)
+
+
+def list_tournament_rating_commits(
+    connection: sqlite3.Connection, tournament_id: int
+) -> tuple[TournamentRatingCommitRecord, ...]:
+    return tuple(
+        _tournament_rating_commit_from_row(row)
+        for row in connection.execute(
+            "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? ORDER BY rating_list_id",
+            (tournament_id,),
+        )
+    )
+
+
+def create_rating_list(connection: sqlite3.Connection, name: str) -> int:
+    cursor = connection.execute(
+        "INSERT INTO rating_lists (name, created_at) VALUES (?, ?)",
+        (name.strip(), utc_now()),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> RatingListRecord | None:
+    row = connection.execute("SELECT * FROM rating_lists WHERE id = ?", (rating_list_id,)).fetchone()
+    return None if row is None else RatingListRecord(row["id"], row["name"], row["created_at"])
+
+
+def list_rating_lists(connection: sqlite3.Connection) -> tuple[RatingListRecord, ...]:
+    return tuple(
+        RatingListRecord(row["id"], row["name"], row["created_at"])
+        for row in connection.execute("SELECT * FROM rating_lists ORDER BY name, id")
+    )
+
+
+def delete_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> None:
+    connection.execute("DELETE FROM rating_lists WHERE id = ?", (rating_list_id,))
 
 
 def _category_from_row(row: sqlite3.Row) -> CategoryRecord:
@@ -2745,6 +2772,8 @@ def _engine_record_from_row(row: sqlite3.Row) -> EngineRecord:
 
 
 def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
+    benchmark_current = bool(row["benchmark_current"])
+    engine_active = bool(row["engine_active"])
     return EngineVersionRecord(
         id=row["id"], engine_id=row["engine_id"], name=row["name"], author=row["author"],
         version=row["version"], git_host_id=row["git_host_id"],
@@ -2755,8 +2784,9 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         dockerfile=row["dockerfile"] or "",
         build_hash=row["build_hash"] or "",
         uci_options=json.loads(row["uci_options"]),
-        active=bool(row["active"]) and bool(row.get("engine_active", True)),
-        version_active=bool(row["active"]), engine_active=bool(row.get("engine_active", True)),
+        active=engine_active and benchmark_current,
+        benchmark_current=benchmark_current,
+        engine_active=engine_active,
         created_at=row["created_at"],
     )
 
@@ -2811,18 +2841,11 @@ def _chat_message_from_row(row: sqlite3.Row) -> ChatMessageRecord:
 
 
 def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
-    is_custom = row["category_id"] is None
     config_data = json.loads(row["config"])
-    config_data.update(
-        category_id=row["category_id"],
-        category_settings_linked=not is_custom,
-    )
     config = TournamentConfig.model_validate(config_data)
     return TournamentRecord(
         id=row["id"],
         name=row["name"],
-        category_id=row["category_id"],
-        settings_unlinked=is_custom,
         config=config,
         status=row["status"],
         current_round=row["current_round"],
@@ -2836,7 +2859,7 @@ def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
 def _tournament_rating_commit_from_row(row: sqlite3.Row) -> TournamentRatingCommitRecord:
     return TournamentRatingCommitRecord(
         tournament_id=row["tournament_id"],
-        category_id=row["category_id"],
+        rating_list_id=row["rating_list_id"],
         command_id=row["command_id"],
         status=row["status"],
         requested_at=row["requested_at"],

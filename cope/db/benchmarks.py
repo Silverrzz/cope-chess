@@ -52,6 +52,7 @@ class BenchmarkJobRecord:
     finished_at: str | None
     next_retry_at: str | None
     error: str
+    output: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,17 @@ class EngineBenchmarkRecord:
     elapsed_ms: int
     output: str
     recorded_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EngineBenchmarkJobViewRecord:
+    """A benchmark job together with its execution and benchmarker details."""
+
+    job: BenchmarkJobRecord
+    benchmarker_label: str | None
+    benchmarker_status: str | None
+    hardware: HardwareInfo | None
+    result: EngineBenchmarkRecord | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +417,7 @@ def fail_benchmark_job(
     job: BenchmarkJobRecord,
     benchmarker_id: int,
     error: str,
+    output: str = "",
     retry_seconds: int,
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
@@ -415,10 +428,10 @@ def fail_benchmark_job(
     connection.execute(
         """
         UPDATE benchmark_jobs
-        SET status = 'failed', finished_at = ?, next_retry_at = ?, error = ?
+        SET status = 'failed', finished_at = ?, next_retry_at = ?, error = ?, output = ?
         WHERE id = ?
         """,
-        (now, retry_at, error[-8000:], current.id),
+        (now, retry_at, error[-8000:], output[-64_000:], current.id),
     )
 
 
@@ -447,6 +460,148 @@ def list_engine_benchmarks(
         parameters,
     )
     return tuple(_engine_benchmark_from_row(row) for row in rows)
+
+
+def engine_build_is_benchmarked(
+    connection: sqlite3.Connection,
+    *,
+    engine_version_id: int,
+    build_hash: str,
+) -> bool:
+    """Return whether this exact version build has a successful bench result."""
+    # Benchmark results are canonical for an artifact, not for the database row
+    # that happened to schedule them.  Multiple registered versions can point at
+    # the same repository/ref/Dockerfile and therefore share a build hash.
+    del engine_version_id
+    row = connection.execute(
+        """
+        SELECT 1 FROM engine_benchmarks
+        WHERE build_hash = ?
+        LIMIT 1
+        """,
+        (build_hash,),
+    ).fetchone()
+    return row is not None
+
+
+def list_engine_benchmark_jobs(
+    connection: sqlite3.Connection,
+    *,
+    engine_version_id: int,
+) -> tuple[EngineBenchmarkJobViewRecord, ...]:
+    """Return all attempts for an engine version, newest first.
+
+    Keeping jobs whose build hash is no longer current is intentional: an admin
+    needs to be able to see why an earlier Dockerfile revision failed.
+    """
+    rows = connection.execute(
+        """
+        SELECT job.*, benchmarker.label AS benchmarker_label,
+               benchmarker.status AS benchmarker_status,
+               hardware.hw AS hardware_hw,
+               result.id AS result_id, result.job_id AS result_job_id,
+               result.engine_version_id AS result_engine_version_id,
+               result.engine_name AS result_engine_name,
+               result.engine_version AS result_engine_version,
+               result.build_hash AS result_build_hash,
+               result.hardware_key AS result_hardware_key,
+               result.nps AS result_nps, result.elapsed_ms AS result_elapsed_ms,
+               result.output AS result_output, result.recorded_at AS result_recorded_at
+        FROM benchmark_jobs job
+        LEFT JOIN benchmarkers benchmarker ON benchmarker.id = job.benchmarker_id
+        LEFT JOIN benchmark_hardware hardware ON hardware.hardware_key = job.hardware_key
+        LEFT JOIN engine_benchmarks result ON result.job_id = job.id
+        WHERE job.engine_version_id = ?
+           OR job.build_hash = (
+             SELECT build_hash FROM engine_versions WHERE id = ?
+           )
+        ORDER BY job.scheduled_at DESC, job.id DESC
+        """,
+        (engine_version_id, engine_version_id),
+    )
+    result: list[EngineBenchmarkJobViewRecord] = []
+    for row in rows:
+        job = _benchmark_job_from_row(row)
+        benchmark = None
+        if row["result_id"] is not None:
+            benchmark = EngineBenchmarkRecord(
+                id=int(row["result_id"]), job_id=int(row["result_job_id"]),
+                engine_version_id=row["result_engine_version_id"], engine_name=str(row["result_engine_name"]),
+                engine_version=str(row["result_engine_version"]), build_hash=str(row["result_build_hash"]),
+                hardware_key=str(row["result_hardware_key"]), nps=int(row["result_nps"]),
+                elapsed_ms=int(row["result_elapsed_ms"]), output=str(row["result_output"]),
+                recorded_at=str(row["result_recorded_at"]),
+            )
+        result.append(EngineBenchmarkJobViewRecord(
+            job=job, benchmarker_label=row["benchmarker_label"], benchmarker_status=row["benchmarker_status"],
+            hardware=None if not row["hardware_hw"] else HardwareInfo.model_validate_json(row["hardware_hw"]),
+            result=benchmark,
+        ))
+    return tuple(result)
+
+
+def reschedule_engine_benchmarks(
+    connection: sqlite3.Connection,
+    *,
+    engine: EngineSpec,
+) -> int:
+    """Queue a fresh run of an engine build on every known benchmark profile.
+
+    A build has one canonical result per hardware profile. Rescheduling replaces
+    that result rather than fabricating multiple competing references for the
+    same build/profile pair.
+    """
+    now = _utc_now()
+    running = connection.execute(
+        """
+        SELECT 1 FROM benchmark_jobs
+        WHERE build_hash = ? AND status = 'running'
+        LIMIT 1
+        """,
+        (engine.build_hash,),
+    ).fetchone()
+    if running is not None:
+        raise ValueError("A benchmark for this build is already running.")
+    # A requested re-run invalidates the current reference immediately. The
+    # version becomes available again automatically when this build succeeds.
+    jobs = connection.execute(
+        """
+        SELECT id FROM benchmark_jobs
+        WHERE build_hash = ?
+        """,
+        (engine.build_hash,),
+    ).fetchall()
+    job_ids = tuple(int(row["id"]) for row in jobs)
+    if job_ids:
+        placeholders = ", ".join("?" for _ in job_ids)
+        connection.execute(
+            f"DELETE FROM engine_benchmarks WHERE job_id IN ({placeholders})",
+            job_ids,
+        )
+        connection.execute(
+            f"""
+            UPDATE benchmark_jobs
+            SET benchmarker_id = NULL, status = 'queued', scheduled_at = ?,
+                started_at = NULL, finished_at = NULL, next_retry_at = NULL,
+                error = '', output = ''
+            WHERE id IN ({placeholders})
+            """,
+            (now, *job_ids),
+        )
+    hardware_rows = connection.execute(
+        """
+        SELECT DISTINCT hardware_key FROM benchmarkers
+        WHERE hardware_key IS NOT NULL AND status != 'revoked'
+        """
+    )
+    scheduled = len(job_ids)
+    for row in hardware_rows:
+        scheduled += schedule_benchmark_jobs(
+            connection,
+            hardware_key=str(row["hardware_key"]),
+            engines=(engine,),
+        )
+    return scheduled
 
 
 def get_common_benchmark_reference(
@@ -642,6 +797,7 @@ def _benchmark_job_from_row(row) -> BenchmarkJobRecord:
         finished_at=row["finished_at"],
         next_retry_at=row["next_retry_at"],
         error=str(row["error"]),
+        output=str(row["output"] or ""),
     )
 
 

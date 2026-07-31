@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
+import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
 import { formatNodes, formatNps } from './format'
@@ -14,6 +15,7 @@ const props = withDefaults(defineProps<{
   analysis?: EngineAnalysis | null
   positionFen?: string | null
   active?: boolean
+  loading?: boolean
 }>(), {
   name: '',
   engineId: null,
@@ -21,6 +23,7 @@ const props = withDefaults(defineProps<{
   analysis: null,
   positionFen: 'startpos',
   active: false,
+  loading: false,
 })
 
 const title = computed(() => props.name || (props.side === 'white' ? 'White' : 'Black'))
@@ -33,50 +36,60 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 </script>
 
 <template>
-  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active }]">
-    <header>
-      <div>
-        <span>{{ side }}</span>
-        <strong>
-          <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
-          <template v-else>{{ title }}</template>
-        </strong>
-      </div>
-      <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
-    </header>
-
-    <div class="engine-panel__body">
-      <div class="engine-panel__details">
-        <div class="evaluation">
-          <span>Evaluation</span>
-          <strong>{{ analysis?.eval ?? '-' }}</strong>
-        </div>
-
-        <dl class="engine-stats">
-          <div><dt>Depth</dt><dd>{{ analysis?.depth ?? '-' }}</dd></div>
-          <div><dt>Nodes</dt><dd>{{ formatNodes(analysis?.nodes) }}</dd></div>
-          <div><dt>NPS</dt><dd>{{ formatNps(analysis?.nps) }}</dd></div>
-        </dl>
-
-        <div class="analysis-line">
-          <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-          <p :title="info">{{ analysis?.pv || info }}</p>
-        </div>
-      </div>
-
-      <div class="pv-preview">
-        <span>PV position</span>
-        <ChessBoard
-          :fen="pvRootFen"
-          :moves="pvMoves"
-          :orientation="side"
-          :controls="false"
-          :coordinates="false"
-          compact
-          :label="`${title} principal variation final position`"
-        />
-      </div>
+  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
+    <div v-if="loading" class="engine-panel__loading">
+      <strong>
+        <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
+        <template v-else>{{ title }}</template>
+      </strong>
+      <BaseSpinner :size="22" :label="`${title} is preparing`" />
     </div>
+
+    <template v-else>
+      <header>
+        <div>
+          <span>{{ side }}</span>
+          <strong>
+            <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
+            <template v-else>{{ title }}</template>
+          </strong>
+        </div>
+        <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
+      </header>
+
+      <div class="engine-panel__body">
+        <div class="engine-panel__details">
+          <div class="evaluation">
+            <span>Evaluation</span>
+            <strong>{{ analysis?.eval ?? '-' }}</strong>
+          </div>
+
+          <dl class="engine-stats">
+            <div><dt>Depth</dt><dd>{{ analysis?.depth ?? '-' }}</dd></div>
+            <div><dt>Nodes</dt><dd>{{ formatNodes(analysis?.nodes) }}</dd></div>
+            <div><dt>NPS</dt><dd>{{ formatNps(analysis?.nps) }}</dd></div>
+          </dl>
+
+          <div class="analysis-line">
+            <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
+            <p :title="info">{{ analysis?.pv || info }}</p>
+          </div>
+        </div>
+
+        <div class="pv-preview">
+          <span>PV position</span>
+          <ChessBoard
+            :fen="pvRootFen"
+            :moves="pvMoves"
+            :orientation="side"
+            :controls="false"
+            :coordinates="false"
+            compact
+            :label="`${title} principal variation final position`"
+          />
+        </div>
+      </div>
+    </template>
   </article>
 </template>
 
@@ -116,6 +129,36 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   border-color: var(--color-border-strong, #99a8bb);
   border-inline-start-color: var(--side-color);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--side-color) 22%, var(--color-border-strong, #99a8bb));
+}
+
+.engine-panel--loading {
+  display: grid;
+  place-items: center;
+}
+
+.engine-panel__loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.engine-panel__loading strong {
+  overflow: hidden;
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.engine-panel__loading a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.engine-panel__loading a:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
 }
 
 .engine-panel header {

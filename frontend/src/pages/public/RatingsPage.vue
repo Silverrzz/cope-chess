@@ -7,11 +7,9 @@ import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import type { EngineRecord, Identifier } from '@/components/public/types'
 
-interface CategoryRecord {
+interface RatingListRecord {
   id: Identifier
   name: string
-  description?: string | null
-  active?: boolean
 }
 
 interface RatingRecord {
@@ -24,8 +22,8 @@ interface RatingRecord {
 }
 
 interface RatingsResponse {
-  category: CategoryRecord | null
-  categories: CategoryRecord[]
+  rating_list: RatingListRecord | null
+  rating_lists: RatingListRecord[]
   ratings: RatingRecord[]
 }
 
@@ -36,15 +34,15 @@ const loading = ref(true)
 const loadError = ref('')
 let controller: AbortController | null = null
 
-const routeCategory = computed(() => {
-  const value = Array.isArray(route.query.category_id) ? route.query.category_id[0] : route.query.category_id
+const routeRatingList = computed(() => {
+  const value = Array.isArray(route.query.rating_list_id) ? route.query.rating_list_id[0] : route.query.rating_list_id
   return value ? String(value) : ''
 })
-const selectedCategory = computed(() => routeCategory.value || String(data.value?.category?.id || ''))
+const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
 
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
-watch(routeCategory, (next, previous) => {
+watch(routeRatingList, (next, previous) => {
   if (next !== previous) void load()
 })
 
@@ -55,7 +53,7 @@ async function load(): Promise<void> {
   loadError.value = ''
   try {
     data.value = await api.get<RatingsResponse>('/api/ratings', {
-      query: routeCategory.value ? { category_id: routeCategory.value } : {},
+      query: routeRatingList.value ? { rating_list_id: routeRatingList.value } : {},
       signal: controller.signal,
     })
   } catch (error) {
@@ -81,9 +79,9 @@ function signedRating(value?: number | null): string {
   return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString()}`
 }
 
-function selectCategory(event: Event): void {
-  const categoryId = (event.target as HTMLSelectElement).value
-  void router.push({ path: '/ratings', query: categoryId ? { category_id: categoryId } : {} })
+function selectRatingList(event: Event): void {
+  const ratingListId = (event.target as HTMLSelectElement).value
+  void router.push({ path: '/ratings', query: ratingListId ? { rating_list_id: ratingListId } : {} })
 }
 </script>
 
@@ -97,22 +95,21 @@ function selectCategory(event: Event): void {
         <div>
           <h1>Ratings</h1>
         </div>
-        <label v-if="data.categories.length" class="category-picker">
+        <label v-if="data.rating_lists.length" class="category-picker">
           <span>Rating list</span>
-          <select :value="selectedCategory" @change="selectCategory">
-            <option v-for="category in data.categories" :key="category.id" :value="String(category.id)">{{ category.name }}</option>
+          <select :value="selectedRatingList" @change="selectRatingList">
+            <option v-for="ratingList in data.rating_lists" :key="ratingList.id" :value="String(ratingList.id)">{{ ratingList.name }}</option>
           </select>
         </label>
       </header>
 
-      <section v-if="data.category" class="category-overview" aria-label="Selected rating list summary">
+      <section v-if="data.rating_list" class="category-overview" aria-label="Selected rating list summary">
         <div class="category-overview__copy">
           <span>Selected list</span>
-          <h2>{{ data.category.name }}</h2>
-          <p v-if="data.category.description">{{ data.category.description }}</p>
+          <h2>{{ data.rating_list.name }}</h2>
         </div>
         <dl>
-          <div><dt>Category</dt><dd>{{ data.category.name }}</dd></div>
+          <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>
           <div><dt>Rated engines</dt><dd>{{ data.ratings.length }}</dd></div>
           <div><dt>Games represented</dt><dd>{{ Math.max(0, Math.round(data.ratings.reduce((sum, row) => sum + row.games_played, 0) / 2)) }}</dd></div>
         </dl>
@@ -124,7 +121,7 @@ function selectCategory(event: Event): void {
 
         <div v-if="data.ratings.length" class="ratings-table-wrap">
           <table class="ratings-table">
-            <caption class="sr-only">{{ data.category?.name }} engine ratings</caption>
+            <caption class="sr-only">{{ data.rating_list?.name }} engine ratings</caption>
             <thead>
               <tr>
                 <th class="rank-column">Rank</th>
@@ -140,7 +137,7 @@ function selectCategory(event: Event): void {
             <tbody>
               <tr v-for="(row, index) in data.ratings" :key="engineId(row.engine)">
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
-                <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }}</RouterLink></td>
+                <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small>{{ row.engine.version }}</small></RouterLink></td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
                 <td class="error-column" data-label="95% error">
                   <span v-if="row.error_margin !== null && row.error_margin !== undefined" class="error-estimate" :title="`Approximate 95% interval: ${ratingLabel((row.elo ?? 0) - row.error_margin)} to ${ratingLabel((row.elo ?? 0) + row.error_margin)}`">
@@ -160,7 +157,7 @@ function selectCategory(event: Event): void {
           v-else
           kind="empty"
           compact
-          :title="data.category ? 'No ratings yet' : 'No active categories'"
+          :title="data.rating_list ? 'No ratings yet' : 'No rating lists'"
         />
       </section>
     </template>
