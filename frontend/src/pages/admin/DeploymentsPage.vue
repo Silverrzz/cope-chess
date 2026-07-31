@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { api } from "@/api/client";
+import { ApiError, api } from "@/api/client";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import AdminPageHeader from "@/components/admin/AdminPageHeader.vue";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
@@ -48,8 +48,11 @@ const loading = ref(true);
 const submitting = ref(false);
 const error = ref("");
 const message = ref("");
+const reconnecting = ref(false);
+const connectionRestored = ref(false);
 const { confirm } = useConfirm();
 let timer: number | undefined;
+let restoredTimer: number | undefined;
 
 const activeJob = computed(() =>
   data.value?.jobs.find((job) => !["succeeded", "failed"].includes(job.status)) ?? null,
@@ -66,15 +69,37 @@ function shortVersion(value: string | null): string {
   return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value;
 }
 
+function restartInterruption(cause: unknown): boolean {
+  return cause instanceof ApiError && (cause.status === 0 || cause.status >= 500);
+}
+
+function markConnectionRestored(): void {
+  connectionRestored.value = true;
+  if (restoredTimer !== undefined) window.clearTimeout(restoredTimer);
+  restoredTimer = window.setTimeout(() => {
+    connectionRestored.value = false;
+    restoredTimer = undefined;
+  }, 5000);
+}
+
 async function load(silent = false): Promise<void> {
   if (!silent) loading.value = true;
   try {
     const payload = await api.get<DeploymentsPayload>("/api/admin/deployments");
+    const recovered = reconnecting.value;
     data.value = payload;
     if (!refName.value) refName.value = payload.default_ref;
     error.value = "";
+    reconnecting.value = false;
+    if (recovered) markConnectionRestored();
   } catch (cause) {
-    error.value = errorText(cause);
+    if (data.value && activeJob.value && restartInterruption(cause)) {
+      reconnecting.value = true;
+      connectionRestored.value = false;
+      error.value = "";
+    } else {
+      error.value = errorText(cause);
+    }
   } finally {
     loading.value = false;
   }
@@ -111,6 +136,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (timer !== undefined) window.clearInterval(timer);
+  if (restoredTimer !== undefined) window.clearTimeout(restoredTimer);
 });
 </script>
 
@@ -120,6 +146,14 @@ onBeforeUnmount(() => {
       title="Updates"
       description="Pull, rebuild, migrate, restart, and reconcile the complete platform from one place."
     />
+    <section v-if="reconnecting" class="connection-notice connection-notice--reconnecting" role="status" aria-live="polite">
+      <span class="connection-spinner" aria-hidden="true" />
+      <span><strong>Control panel is restarting</strong><small>The deployment is still running. Reconnecting automatically…</small></span>
+    </section>
+    <section v-else-if="connectionRestored" class="connection-notice connection-notice--restored" role="status">
+      <span class="connection-dot" aria-hidden="true" />
+      <span><strong>Control panel reconnected</strong><small>Live deployment tracking has resumed.</small></span>
+    </section>
     <InlineFeedback :message="error" />
     <InlineFeedback :message="message" tone="info" />
 
@@ -185,6 +219,15 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .deployments-page { display: grid; gap: 1rem; }
+.connection-notice { align-items: center; border: 1px solid; border-radius: var(--radius-md, .6rem); display: flex; gap: .75rem; padding: .8rem .9rem; }
+.connection-notice > span:last-child { display: grid; gap: .15rem; }
+.connection-notice strong { font-size: .82rem; }
+.connection-notice small { font-size: .72rem; }
+.connection-notice--reconnecting { background: color-mix(in srgb, var(--color-accent) 8%, transparent); border-color: color-mix(in srgb, var(--color-accent) 28%, transparent); color: var(--color-accent); }
+.connection-notice--restored { background: color-mix(in srgb, var(--color-success, #15803d) 8%, transparent); border-color: color-mix(in srgb, var(--color-success, #15803d) 28%, transparent); color: var(--color-success, #15803d); }
+.connection-spinner { animation: connection-spin .8s linear infinite; border: 2px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; border-top-color: currentColor; height: 1rem; width: 1rem; }
+.connection-dot { background: currentColor; border-radius: 50%; box-shadow: 0 0 0 .22rem color-mix(in srgb, currentColor 15%, transparent); height: .55rem; width: .55rem; }
+@keyframes connection-spin { to { transform: rotate(360deg); } }
 .loading-panel { color: var(--color-text-muted); min-height: 10rem; padding: 2rem; }
 .update-panel { display: grid; gap: 1rem; padding: 1rem; }
 .version-grid { display: grid; gap: .8rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
