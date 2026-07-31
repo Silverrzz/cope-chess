@@ -109,7 +109,7 @@ async function deploy(): Promise<void> {
   const target = refName.value.trim() || data.value?.default_ref || "main";
   const accepted = await confirm({
     title: "Update and rebuild the platform?",
-    message: `Deploy ${target} to the server, every registered worker, and every benchmarker. Active games and benchmarks will finish before their client restarts.`,
+    message: `Deploy ${target} to the server, every registered worker, and every benchmarker. Active games and benchmarks will finish before their client restarts.${updaterOnline.value ? "" : " The updater is offline, so this deployment will remain queued until it reconnects."}`,
     confirmLabel: "Update & rebuild",
   });
   if (!accepted) return;
@@ -178,13 +178,16 @@ onBeforeUnmount(() => {
             type="submit"
             variant="primary"
             :loading="submitting"
-            :disabled="Boolean(activeJob) || !updaterOnline"
+            :disabled="Boolean(activeJob)"
           >
             Update & rebuild
           </BaseButton>
         </form>
         <p v-if="activeJob" class="active-note">
           Deployment #{{ activeJob.id }} is {{ humanize(activeJob.status).toLowerCase() }}. The control panel may reconnect while the web service restarts.
+        </p>
+        <p v-else-if="!updaterOnline" class="active-note">
+          The updater is offline. You can queue an update now and it will start when the updater reconnects.
         </p>
       </section>
 

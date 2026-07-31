@@ -20,20 +20,36 @@ interface WorkerListItem {
   hardware?: { reported: boolean; summary: string; detail: string; cores?: string; memory?: string }
 }
 
+interface BenchmarkerListItem {
+  id: number
+  label: string
+  status: string
+  last_seen?: string | null
+  machine_id?: string | null
+  app_commit?: string | null
+  hardware?: { reported: boolean; summary: string; detail: string }
+}
+
 interface WorkerSnapshot {
   workers: WorkerListItem[]
   total_workers: number
   connected_workers: number
+  benchmarkers?: BenchmarkerListItem[]
+  total_benchmarkers?: number
+  connected_benchmarkers?: number
 }
 
 const router = useRouter()
 const toast = useToast()
 const { confirm } = useConfirm()
 const workers = ref<WorkerListItem[]>([])
+const benchmarkers = ref<BenchmarkerListItem[]>([])
 const page = ref(1)
 const perPage = 100
 const totalWorkers = ref(0)
 const connectedWorkers = ref(0)
+const totalBenchmarkers = ref(0)
+const connectedBenchmarkers = ref(0)
 const loading = ref(true)
 const error = ref('')
 const streamConnected = ref(false)
@@ -42,7 +58,9 @@ const showCreate = ref(false)
 const label = ref('')
 const deleting = ref<number | null>(null)
 const revoking = ref<number | null>(null)
+const forgettingBenchmarker = ref<number | null>(null)
 let source: EventSource | null = null
+let refreshTimer: number | undefined
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalWorkers.value / perPage)))
 
@@ -50,16 +68,19 @@ function applySnapshot(snapshot: WorkerSnapshot): void {
   workers.value = snapshot.workers
   totalWorkers.value = snapshot.total_workers ?? snapshot.workers.length
   connectedWorkers.value = snapshot.connected_workers ?? 0
+  benchmarkers.value = snapshot.benchmarkers ?? []
+  totalBenchmarkers.value = snapshot.total_benchmarkers ?? benchmarkers.value.length
+  connectedBenchmarkers.value = snapshot.connected_benchmarkers ?? 0
 }
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(silent = false): Promise<void> {
+  if (!silent) loading.value = true
   try {
     applySnapshot(await api.get<WorkerSnapshot>(`/api/admin/workers?page=${page.value}&per_page=${perPage}`))
   } catch (cause) {
     error.value = errorText(cause)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -76,6 +97,7 @@ function connectStream(): void {
       return
     }
   })
+  source.addEventListener('workers.changed', () => { void load(true) })
 }
 
 async function changePage(nextPage: number): Promise<void> {
@@ -132,13 +154,41 @@ async function revoke(worker: WorkerListItem): Promise<void> {
   }
 }
 
-onMounted(async () => { await load(); connectStream() })
-onBeforeUnmount(() => source?.close())
+async function forgetBenchmarker(benchmarker: BenchmarkerListItem): Promise<void> {
+  const accepted = await confirm({ title: 'Forget benchmarker?', message: `Forget “${benchmarker.label}”? It will be disconnected, its credentials will stop working, and any active benchmark will return to the queue.`, confirmLabel: 'Forget benchmarker', tone: 'danger' })
+  if (!accepted) return
+  forgettingBenchmarker.value = benchmarker.id
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/benchmarkers/${benchmarker.id}`)
+    toast.success(response.message)
+    await load(true)
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    forgettingBenchmarker.value = null
+  }
+}
+
+function shortVersion(value?: string | null): string {
+  if (!value) return '—'
+  return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value
+}
+
+onMounted(async () => {
+  await load()
+  connectStream()
+  refreshTimer = window.setInterval(() => { void load(true) }, 10_000)
+})
+onBeforeUnmount(() => {
+  source?.close()
+  if (refreshTimer !== undefined) window.clearInterval(refreshTimer)
+})
 </script>
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Workers" description="Each machine runs one worker that fills its capacity with independent tournament processes.">
+    <AdminPageHeader title="Workers" description="Manage tournament workers and benchmark clients from one place.">
       <template #actions><button class="button button--primary" type="button" @click="showCreate = !showCreate">New machine worker</button></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
@@ -150,8 +200,10 @@ onBeforeUnmount(() => source?.close())
     </form>
 
     <section class="worker-summary" aria-label="Worker summary">
-      <div><strong>{{ totalWorkers }}</strong><span>Machines</span></div>
-      <div><strong>{{ connectedWorkers }}</strong><span>Connected</span></div>
+      <div><strong>{{ totalWorkers }}</strong><span>Workers</span></div>
+      <div><strong>{{ connectedWorkers }}</strong><span>Workers online</span></div>
+      <div><strong>{{ totalBenchmarkers }}</strong><span>Benchmarkers</span></div>
+      <div><strong>{{ connectedBenchmarkers }}</strong><span>Benchmarkers online</span></div>
       <div><span class="stream-dot" :class="{ connected: streamConnected }" aria-hidden="true" /><strong>{{ streamConnected ? 'Live' : 'Reconnecting' }}</strong><span>Status stream</span></div>
     </section>
 
@@ -180,13 +232,35 @@ onBeforeUnmount(() => source?.close())
         <button class="button button--ghost button--small" type="button" :disabled="page >= totalPages" @click="changePage(page + 1)">Next</button>
       </nav>
     </section>
+
+    <section class="panel worker-panel">
+      <header class="panel-heading"><div><h2>Benchmarkers</h2><p>Dedicated clients that measure engine performance for build activation and worker calibration.</p></div><span>{{ totalBenchmarkers }}</span></header>
+      <div v-if="loading" class="index-loading" role="status">Loading benchmarkers…</div>
+      <div v-else-if="benchmarkers.length" class="table-scroll">
+        <table class="data-table benchmarker-table">
+          <thead><tr><th>Benchmarker</th><th>Status</th><th>Hardware</th><th>Machine</th><th>Release</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            <tr v-for="benchmarker in benchmarkers" :key="benchmarker.id">
+              <td class="identity-cell"><strong>{{ benchmarker.label }}</strong><small>#{{ benchmarker.id }}</small></td>
+              <td><StatusBadge :status="benchmarker.status" /></td>
+              <td><span>{{ benchmarker.hardware?.summary ?? 'Not reported' }}</span><small>{{ benchmarker.hardware?.detail }}</small></td>
+              <td><code>{{ benchmarker.machine_id?.slice(0, 12) ?? '—' }}</code></td>
+              <td><code>{{ shortVersion(benchmarker.app_commit) }}</code></td>
+              <td>{{ formatDate(benchmarker.last_seen) }}</td>
+              <td class="row-actions"><button class="button button--danger button--small" type="button" :disabled="forgettingBenchmarker === benchmarker.id" @click="forgetBenchmarker(benchmarker)">{{ forgettingBenchmarker === benchmarker.id ? 'Forgetting…' : 'Forget' }}</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <AdminEmptyState v-else title="No benchmarkers registered" description="Registered benchmark clients will appear here." />
+    </section>
   </div>
 </template>
 
 <style scoped>
 .create-worker { align-items: end; display: grid; gap: 1rem; grid-template-columns: minmax(16rem, 1.5fr) minmax(14rem, 1fr) auto; padding: 1rem; }
 .create-worker h2 { font-size: .9rem; margin: 0; }.create-worker p { color: var(--color-text-muted, #64748b); font-size: .72rem; margin: .2rem 0 0; }.create-worker label { display: grid; font-size: .76rem; font-weight: 650; gap: .35rem; }
-.worker-summary { display: grid; gap: .75rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }.worker-summary > div { align-items: center; background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: var(--radius-md, .6rem); display: flex; gap: .5rem; padding: .7rem .8rem; }.worker-summary strong { font-size: .9rem; }.worker-summary span:last-child { color: var(--color-text-muted, #64748b); font-size: .7rem; margin-left: auto; }.stream-dot { background: var(--color-danger, #b42318); border-radius: 50%; height: .5rem; width: .5rem; }.stream-dot.connected { background: var(--color-success, #15803d); box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--color-success, #15803d) 15%, transparent); }
-.worker-panel { overflow: hidden; padding: 0; }.table-scroll { overflow-x: auto; }.data-table { border-collapse: collapse; min-width: 72rem; width: 100%; }.data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .75rem; text-align: left; text-transform: uppercase; }.data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .74rem; padding: .7rem .75rem; vertical-align: middle; }.worker-row--warning { background: color-mix(in srgb, var(--color-warning, #b7791f) 6%, transparent); }.data-table td:first-child a { color: inherit; display: grid; text-decoration: none; }.data-table small { color: var(--color-text-muted, #64748b); display: block; font-size: .64rem; margin-top: .15rem; }.work-cell { max-width: 20rem; }.work-cell strong, .work-cell small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.state-label { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .66rem; padding: .28rem .45rem; }.row-actions { align-items: center; display: flex; gap: .3rem; justify-content: flex-end; }.row-actions svg { fill: none; height: 1rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 1rem; }.index-loading { color: var(--color-text-muted, #64748b); min-height: 14rem; padding: 2rem; }.worker-pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .65rem .75rem; }.worker-pagination span { color: var(--color-text-muted, #64748b); font-size: .7rem; }
+.worker-summary { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }.worker-summary > div { align-items: center; background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: var(--radius-md, .6rem); display: flex; gap: .5rem; padding: .7rem .8rem; }.worker-summary strong { font-size: .9rem; }.worker-summary span:last-child { color: var(--color-text-muted, #64748b); font-size: .7rem; margin-left: auto; }.stream-dot { background: var(--color-danger, #b42318); border-radius: 50%; height: .5rem; width: .5rem; }.stream-dot.connected { background: var(--color-success, #15803d); box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--color-success, #15803d) 15%, transparent); }
+.worker-panel { overflow: hidden; padding: 0; }.panel-heading { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; gap: 1rem; justify-content: space-between; padding: .8rem .9rem; }.panel-heading h2 { font-size: .88rem; margin: 0; }.panel-heading p { color: var(--color-text-muted, #64748b); font-size: .68rem; margin: .2rem 0 0; }.panel-heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .68rem; padding: .25rem .5rem; }.table-scroll { overflow-x: auto; }.data-table { border-collapse: collapse; min-width: 72rem; width: 100%; }.benchmarker-table { min-width: 62rem; }.data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .75rem; text-align: left; text-transform: uppercase; }.data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .74rem; padding: .7rem .75rem; vertical-align: middle; }.worker-row--warning { background: color-mix(in srgb, var(--color-warning, #b7791f) 6%, transparent); }.data-table td:first-child a,.identity-cell { color: inherit; display: grid; text-decoration: none; }.data-table small { color: var(--color-text-muted, #64748b); display: block; font-size: .64rem; margin-top: .15rem; }.data-table code { font-size: .68rem; }.work-cell { max-width: 20rem; }.work-cell strong, .work-cell small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.state-label { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .66rem; padding: .28rem .45rem; }.row-actions { align-items: center; display: flex; gap: .3rem; justify-content: flex-end; }.row-actions svg { fill: none; height: 1rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 1rem; }.index-loading { color: var(--color-text-muted, #64748b); min-height: 14rem; padding: 2rem; }.worker-pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .65rem .75rem; }.worker-pagination span { color: var(--color-text-muted, #64748b); font-size: .7rem; }
 @media (max-width: 50rem) { .create-worker { align-items: stretch; grid-template-columns: 1fr; }.worker-summary { grid-template-columns: 1fr; } }
 </style>

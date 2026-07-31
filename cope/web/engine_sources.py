@@ -367,7 +367,19 @@ def _request_bytes(
             data = response.read(maximum + 1)
     except urllib.error.HTTPError as exc:
         detail = exc.read(4096).decode("utf-8", errors="replace")
-        raise SourceServiceError(f"Git host returned HTTP {exc.code}: {detail}") from exc
+        message = _git_host_error_message(detail)
+        if host.provider == "github" and exc.code == 403 and "rate limit" in message.lower():
+            if host.access_token:
+                message += (
+                    f" The API token configured for {host.name} is also rate limited or "
+                    "does not authenticate successfully."
+                )
+            else:
+                message += (
+                    f" Add a GitHub API token for {host.name} under Settings > Git hosts, "
+                    "then retry."
+                )
+        raise SourceServiceError(f"Git host returned HTTP {exc.code}: {message}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise SourceServiceError(f"could not reach Git host: {exc}") from exc
     if len(data) > maximum:
@@ -375,6 +387,16 @@ def _request_bytes(
             return data[:maximum]
         raise SourceServiceError("Git host response is too large")
     return data
+
+
+def _git_host_error_message(detail: str) -> str:
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        return detail.strip()
+    if isinstance(payload, dict) and payload.get("message"):
+        return str(payload["message"]).strip()
+    return detail.strip()
 
 
 def _archive_context(archive: bytes) -> str:

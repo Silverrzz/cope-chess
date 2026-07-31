@@ -8,7 +8,6 @@ import os
 import re
 import secrets
 import sqlite3
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -43,7 +42,9 @@ from cope.db import (
     engine_game_count,
     engine_build_is_benchmarked,
     engine_result_summary,
+    forget_benchmarker,
     forget_engine_benchmarks,
+    get_benchmarker,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
@@ -795,22 +796,6 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
-        updater = next(
-            (
-                item
-                for item in list_service_heartbeats(connection)
-                if item["service"] == "updater"
-            ),
-            None,
-        )
-        if updater is None:
-            raise HTTPException(status_code=503, detail="The deployment updater is offline.")
-        try:
-            updater_age = datetime.now(UTC) - datetime.fromisoformat(updater["last_seen"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=503, detail="The deployment updater heartbeat is invalid.")
-        if updater_age.total_seconds() > 30:
-            raise HTTPException(status_code=503, detail="The deployment updater is offline.")
         try:
             job_id = create_deployment_job(
                 connection,
@@ -1899,6 +1884,19 @@ def register_api_routes(app: FastAPI) -> None:
         connection.commit()
         _publish_admin_change(web_app, request)
         return _json({"message": "Worker deleted."})
+
+    @app.delete("/api/admin/benchmarkers/{benchmarker_id}")
+    def admin_benchmarker_forget(
+        benchmarker_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_benchmarker(connection, benchmarker_id) is None:
+            raise HTTPException(status_code=404, detail="Benchmarker not found.")
+        forget_benchmarker(connection, benchmarker_id)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Benchmarker forgotten."})
 
     # Chat moderation
 

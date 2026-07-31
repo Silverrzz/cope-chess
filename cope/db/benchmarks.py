@@ -233,6 +233,40 @@ def get_benchmarker(
     return None if row is None else _benchmarker_from_row(row)
 
 
+def list_benchmarkers(
+    connection: sqlite3.Connection,
+) -> tuple[BenchmarkerRecord, ...]:
+    rows = connection.execute(
+        "SELECT * FROM benchmarkers WHERE status != 'revoked' ORDER BY id"
+    )
+    return tuple(_benchmarker_from_row(row) for row in rows)
+
+
+def forget_benchmarker(
+    connection: sqlite3.Connection,
+    benchmarker_id: int,
+) -> bool:
+    if get_benchmarker(connection, benchmarker_id) is None:
+        return False
+    now = _utc_now()
+    connection.execute(
+        """
+        UPDATE benchmark_jobs
+        SET benchmarker_id = NULL, status = 'queued', scheduled_at = ?,
+            started_at = NULL, finished_at = NULL, next_retry_at = NULL,
+            error = '', output = ''
+        WHERE benchmarker_id = ? AND status = 'running'
+        """,
+        (now, benchmarker_id),
+    )
+    connection.execute(
+        "UPDATE benchmark_jobs SET benchmarker_id = NULL WHERE benchmarker_id = ?",
+        (benchmarker_id,),
+    )
+    connection.execute("DELETE FROM benchmarkers WHERE id = ?", (benchmarker_id,))
+    return True
+
+
 def update_benchmarker_status(
     connection: sqlite3.Connection,
     benchmarker_id: int,

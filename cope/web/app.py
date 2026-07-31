@@ -74,6 +74,7 @@ from cope.db import (
     get_worker_activity,
     get_service_endpoint,
     list_categories,
+    list_benchmarkers,
     list_chat_messages,
     list_engine_games,
     list_engine_records,
@@ -2232,6 +2233,7 @@ def _workers_snapshot_payload(
     worker_offset: int = 0,
 ) -> dict[str, Any]:
     workers = list(list_workers(connection))
+    benchmarkers = list(list_benchmarkers(connection))
     visible_workers = workers[worker_offset:]
     if worker_limit is not None:
         visible_workers = visible_workers[:worker_limit]
@@ -2249,6 +2251,15 @@ def _workers_snapshot_payload(
         "connected_workers": sum(
             row["status"] in CONNECTED_WORKER_STATUSES for row in summary_rows
         ),
+        "benchmarkers": [
+            _benchmarker_admin_payload(benchmarker)
+            for benchmarker in benchmarkers
+        ],
+        "total_benchmarkers": len(benchmarkers),
+        "connected_benchmarkers": sum(
+            benchmarker.status in {"connected", "busy"}
+            for benchmarker in benchmarkers
+        ),
         "machines": _worker_machine_payloads(summary_rows),
     }
 
@@ -2261,6 +2272,7 @@ def _publish_admin_post_streams(request: Request) -> None:
     if (
         path.startswith("/admin/workers")
         or path.startswith("/api/admin/workers")
+        or path.startswith("/api/admin/benchmarkers")
     ):
         hub.publish("workers", "workers.changed", {}, source="web")
     tournament_id = _admin_tournament_path_id(path)
@@ -2517,6 +2529,33 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
         "last_seen": worker.last_seen,
         "work": row["work"],
         "machine": row["machine"],
+        "hardware": hardware,
+    }
+
+
+def _benchmarker_admin_payload(benchmarker) -> dict[str, Any]:
+    hardware = {
+        "reported": False,
+        "summary": "Not reported",
+        "detail": "",
+    }
+    if benchmarker.hw is not None:
+        hardware = {
+            "reported": True,
+            "summary": benchmarker.hw.cpu_model,
+            "detail": (
+                f"{benchmarker.hw.physical_cores} physical / "
+                f"{benchmarker.hw.logical_cores} logical cores · "
+                f"{benchmarker.hw.ram_gb}GB RAM"
+            ),
+        }
+    return {
+        "id": benchmarker.id,
+        "label": benchmarker.label,
+        "status": benchmarker.status,
+        "last_seen": benchmarker.last_seen,
+        "machine_id": benchmarker.machine_id,
+        "app_commit": benchmarker.app_commit,
         "hardware": hardware,
     }
 
