@@ -11,7 +11,6 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
-import chess
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -21,6 +20,7 @@ from starlette.datastructures import UploadFile
 from cope.core.models import OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
+    append_suite_openings,
     create_deployment_job,
     create_engine,
     create_engine_version,
@@ -102,7 +102,7 @@ from cope.web.engine_sources import (
     repository_context,
     search_repositories,
 )
-from cope.web.openings import format_opening, parse_opening_uploads, parse_openings
+from cope.web.openings import format_opening, parse_opening_input
 from cope.web.requests import read_form
 from cope.version import app_version
 from cope.ratings import (
@@ -1653,15 +1653,19 @@ def register_api_routes(app: FastAPI) -> None:
         name = values.get("name", "").strip()
         if not name:
             raise HTTPException(status_code=422, detail="Suite name is required.")
-        openings = _opening_values(values.get("positions", ""), files)
         try:
-            suite_id = create_opening_suite(
+            openings = await asyncio.to_thread(
+                _opening_values,
+                values.get("positions", ""),
+                files,
+            )
+            suite_id = await asyncio.to_thread(
+                _create_opening_import,
                 connection,
                 name=name,
                 description=values.get("description", "").strip(),
+                openings=openings,
             )
-            replace_suite_openings(connection, suite_id, openings)
-            connection.commit()
         except (ValueError, sqlite3.IntegrityError) as exc:
             raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
         _publish_admin_change(web_app, request)
@@ -1689,42 +1693,30 @@ def register_api_routes(app: FastAPI) -> None:
         mode = values.get("mode", "replace")
         if mode not in {"replace", "append", "keep"}:
             raise HTTPException(status_code=422, detail="Choose a valid import mode.")
-        existing = [
-            OpeningLine(
-                name=opening.name,
-                start_fen=opening.start_fen,
-                moves=opening.moves,
-                fen=opening.fen,
-            )
-            for opening in list_suite_openings(connection, suite_id)
-        ]
-        incoming = _opening_values(
-            values.get("positions", ""),
-            files,
-            allow_empty=mode == "keep",
-        )
-        if mode == "keep":
-            openings = existing
-        elif mode == "append":
-            openings = _deduplicate_openings(existing + incoming)
-        else:
-            openings = incoming
         try:
-            update_opening_suite(
+            openings = []
+            if mode != "keep":
+                openings = await asyncio.to_thread(
+                    _opening_values,
+                    values.get("positions", ""),
+                    files,
+                )
+            position_count = await asyncio.to_thread(
+                _update_opening_import,
                 connection,
                 suite_id,
                 name=name,
                 description=values.get("description", "").strip(),
+                openings=openings,
+                mode=mode,
             )
-            replace_suite_openings(connection, suite_id, openings)
-            connection.commit()
         except (ValueError, sqlite3.IntegrityError) as exc:
             raise HTTPException(status_code=409, detail=web_app._friendly_error(exc)) from exc
         _publish_admin_change(web_app, request)
         return _json(
             {
                 "id": suite_id,
-                "position_count": len(openings),
+                "position_count": position_count,
                 "message": "Opening suite updated.",
             }
         )
@@ -2091,6 +2083,55 @@ def _tournament_form_payload(
     }
 
 
+def _create_opening_import(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    description: str,
+    openings: list[OpeningLine],
+) -> int:
+    try:
+        suite_id = create_opening_suite(
+            connection,
+            name=name,
+            description=description,
+        )
+        replace_suite_openings(connection, suite_id, openings)
+        connection.commit()
+        return suite_id
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _update_opening_import(
+    connection: sqlite3.Connection,
+    suite_id: int,
+    *,
+    name: str,
+    description: str,
+    openings: list[OpeningLine],
+    mode: str,
+) -> int:
+    try:
+        update_opening_suite(
+            connection,
+            suite_id,
+            name=name,
+            description=description,
+        )
+        if mode == "append":
+            append_suite_openings(connection, suite_id, openings)
+        elif mode == "replace":
+            replace_suite_openings(connection, suite_id, openings)
+        position_count = suite_opening_count(connection, suite_id)
+        connection.commit()
+        return position_count
+    except Exception:
+        connection.rollback()
+        raise
+
+
 async def _read_opening_form(
     request: Request,
 ) -> tuple[dict[str, str], list[tuple[str, str]]]:
@@ -2116,49 +2157,18 @@ async def _read_opening_form(
 def _opening_values(
     positions: str,
     files: list[tuple[str, str]],
-    *,
-    allow_empty: bool = False,
 ) -> list[OpeningLine]:
     try:
-        openings = parse_openings(positions)
-        openings.extend(parse_opening_uploads(files))
+        openings = parse_opening_input(positions, files)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     openings = _deduplicate_openings(openings)
-    if not openings and not allow_empty:
+    if not openings:
         raise HTTPException(
             status_code=422,
             detail="Add at least one valid opening position.",
         )
-    errors: list[str] = []
-    validated: list[OpeningLine] = []
-    for index, opening in enumerate(openings, start=1):
-        try:
-            board = (
-                chess.Board()
-                if opening.start_fen == "startpos"
-                else chess.Board(opening.start_fen)
-            )
-            start_fen = board.fen()
-            for uci in opening.moves:
-                move = chess.Move.from_uci(uci)
-                if move not in board.legal_moves:
-                    raise ValueError(f"illegal opening move {uci} at ply {board.ply() + 1}")
-                board.push(move)
-        except ValueError as exc:
-            errors.append(f"Position {index}: {exc}")
-            continue
-        validated.append(
-            OpeningLine(
-                name=opening.name.strip(),
-                start_fen=start_fen,
-                moves=opening.moves,
-                fen=board.fen(),
-            )
-        )
-    if errors:
-        raise HTTPException(status_code=422, detail=errors[:20])
-    return validated
+    return openings
 
 
 def _deduplicate_openings(
@@ -2172,14 +2182,7 @@ def _deduplicate_openings(
         if not normalized or key in seen:
             continue
         seen.add(key)
-        result.append(
-            OpeningLine(
-                name=opening.name.strip(),
-                start_fen=normalized,
-                moves=opening.moves,
-                fen=opening.fen.strip(),
-            )
-        )
+        result.append(opening)
     return result
 
 

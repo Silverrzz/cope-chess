@@ -126,7 +126,7 @@ from cope.network import (
 )
 from cope.web import forms
 from cope.web.forms import FormError, form_flag, form_value
-from cope.web.openings import format_opening, parse_opening_uploads, parse_openings
+from cope.web.openings import format_opening, parse_opening_input
 from cope.web.requests import read_form, read_form_with_files
 from cope.version import app_version
 
@@ -1489,19 +1489,22 @@ def create_app(
         if not name:
             raise HTTPException(status_code=422, detail="Suite name is required.")
         try:
-            openings = parse_openings(form_value(form, "positions"))
-            openings.extend(parse_opening_uploads(files))
-            suite_id = create_opening_suite(
+            openings = await asyncio.to_thread(
+                parse_opening_input,
+                form_value(form, "positions"),
+                files,
+            )
+            await asyncio.to_thread(
+                _create_opening_import,
                 connection,
                 name=name,
                 description=form_value(form, "description"),
+                openings=openings,
             )
-            replace_suite_openings(connection, suite_id, openings)
-            connection.commit()
         except (ValueError, sqlite3.IntegrityError) as exc:
             raise HTTPException(status_code=409, detail=_friendly_error(exc)) from exc
         return RedirectResponse(
-            url=f"/admin/openings/{suite_id}",
+            url="/admin/openings",
             status_code=303,
         )
 
@@ -1550,20 +1553,23 @@ def create_app(
         if not name:
             raise HTTPException(status_code=422, detail="Suite name is required.")
         try:
-            update_opening_suite(
+            openings = await asyncio.to_thread(
+                parse_opening_input,
+                form_value(form, "positions"),
+                files,
+            )
+            await asyncio.to_thread(
+                _replace_opening_import,
                 connection,
                 suite_id,
                 name=name,
                 description=form_value(form, "description"),
+                openings=openings,
             )
-            openings = parse_openings(form_value(form, "positions"))
-            openings.extend(parse_opening_uploads(files))
-            replace_suite_openings(connection, suite_id, openings)
-            connection.commit()
         except (ValueError, sqlite3.IntegrityError) as exc:
             raise HTTPException(status_code=409, detail=_friendly_error(exc)) from exc
         return RedirectResponse(
-            url=f"/admin/openings/{suite_id}",
+            url="/admin/openings",
             status_code=303,
         )
 
@@ -1988,6 +1994,49 @@ def _database(request: Request) -> Iterator[sqlite3.Connection]:
         yield connection
     finally:
         connection.close()
+
+
+def _create_opening_import(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    description: str,
+    openings: list[OpeningLine],
+) -> int:
+    try:
+        suite_id = create_opening_suite(
+            connection,
+            name=name,
+            description=description,
+        )
+        replace_suite_openings(connection, suite_id, openings)
+        connection.commit()
+        return suite_id
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _replace_opening_import(
+    connection: sqlite3.Connection,
+    suite_id: int,
+    *,
+    name: str,
+    description: str,
+    openings: list[OpeningLine],
+) -> None:
+    try:
+        update_opening_suite(
+            connection,
+            suite_id,
+            name=name,
+            description=description,
+        )
+        replace_suite_openings(connection, suite_id, openings)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def _change_tournament_status(

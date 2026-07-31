@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import sqlite3
 from dataclasses import dataclass
 
@@ -742,7 +743,9 @@ def _opening_ids(
     if suite_id is None:
         return ()
     openings: tuple[OpeningRecord, ...] = list_suite_openings(connection, suite_id)
-    return tuple(opening.id for opening in openings)
+    opening_ids = [opening.id for opening in openings]
+    random.shuffle(opening_ids)
+    return tuple(opening_ids)
 
 
 def _refresh_tournament(

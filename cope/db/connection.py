@@ -159,6 +159,17 @@ class DatabaseConnection:
             raise sqlite3.DatabaseError(str(exc)) from exc
         return DatabaseCursor(self, cursor)
 
+    def copy_rows(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
+        try:
+            with self._connection().cursor() as cursor:
+                with cursor.copy(sql) as copy:
+                    for row in rows:
+                        copy.write_row(tuple(row))
+        except psycopg.IntegrityError as exc:
+            raise sqlite3.IntegrityError(str(exc)) from exc
+        except psycopg.Error as exc:
+            raise sqlite3.DatabaseError(str(exc)) from exc
+
     def commit(self) -> None:
         if self._raw is None:
             return

@@ -69,36 +69,65 @@ def parse_opening_uploads(files: UploadedTextFiles) -> list[OpeningLine]:
 
 
 def _parse_pgn_openings(text: str) -> list[OpeningLine]:
+    import chess
     import chess.pgn
+
+    class OpeningVisitor(chess.pgn.BaseVisitor):
+        def begin_game(self) -> None:
+            self.name = ""
+            self.event = ""
+            self.moves: list[str] = []
+            self.start_fen = ""
+            self.board = None
+
+        def visit_header(self, tagname: str, tagvalue: str) -> None:
+            value = tagvalue.strip()
+            if tagname == "Opening":
+                self.name = value
+            elif tagname == "Event":
+                self.event = value
+
+        def begin_variation(self):
+            return chess.pgn.SKIP
+
+        def visit_move(self, board, move) -> None:
+            self.moves.append(move.uci())
+
+        def visit_board(self, board) -> None:
+            if not self.start_fen:
+                self.start_fen = board.fen()
+            self.board = board
+
+        def result(self):
+            if self.board is None:
+                return None
+            return self.name, self.event, self.start_fen, tuple(self.moves), self.board.fen()
 
     openings: list[OpeningLine] = []
     stream = io.StringIO(text)
     while True:
-        game = chess.pgn.read_game(stream)
-        if game is None:
+        parsed = chess.pgn.read_game(stream, Visitor=OpeningVisitor)
+        if parsed is None:
             break
-        board = game.board()
-        start_fen = board.fen()
-        moves: list[str] = []
-        for move in game.mainline_moves():
-            moves.append(move.uci())
-            board.push(move)
+        name, event, start_fen, moves, fen = parsed
         name = next(
-            (
-                value
-                for key in ("Opening", "Event")
-                if (value := game.headers.get(key, "").strip()) not in {"?", "-"}
-            ),
+            (value for value in (name, event) if value not in {"", "?", "-"}),
             f"PGN line {len(openings) + 1}",
         )
         openings.append(
             OpeningLine(
                 name=name,
                 start_fen=start_fen,
-                moves=tuple(moves),
-                fen=board.fen(),
+                moves=moves,
+                fen=fen,
             )
         )
+    return openings
+
+
+def parse_opening_input(text: str, files: UploadedTextFiles) -> list[OpeningLine]:
+    openings = parse_openings(text)
+    openings.extend(parse_opening_uploads(files))
     return openings
 
 

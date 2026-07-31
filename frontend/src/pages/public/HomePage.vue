@@ -83,11 +83,6 @@ function progress(item: TournamentSummary): number {
         <div>
           <h1>COPE Chess</h1>
         </div>
-        <div class="live-summary" :class="{ 'live-summary--active': activeCount }" role="status">
-          <span aria-hidden="true"></span>
-          <strong>{{ activeCount }}</strong>
-          <p>{{ activeCount === 1 ? 'tournament running' : 'tournaments running' }}</p>
-        </div>
       </section>
 
       <section class="section-stack" aria-labelledby="running-tournaments-title">
@@ -216,42 +211,6 @@ function progress(item: TournamentSummary): number {
   font-size: clamp(2rem, 5vw, 4rem);
   letter-spacing: -0.045em;
   line-height: 0.98;
-}
-
-.live-summary {
-  display: grid;
-  grid-template-columns: auto auto;
-  align-items: center;
-  gap: 0 0.5rem;
-  min-width: 9.5rem;
-  padding: 0.8rem 1rem;
-  border: 1px solid var(--color-border, #d5dbe1);
-  border-radius: var(--radius-md, 0.5rem);
-  background: var(--color-surface, #fff);
-}
-
-.live-summary > span {
-  width: 0.58rem;
-  height: 0.58rem;
-  border-radius: 50%;
-  background: var(--color-text-muted, #607080);
-}
-
-.live-summary--active > span {
-  background: var(--color-success, #16794b);
-  box-shadow: 0 0 0 0.24rem color-mix(in srgb, var(--color-success, #16794b) 14%, transparent);
-}
-
-.live-summary strong {
-  font-size: 1.25rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.live-summary p {
-  grid-column: 1 / -1;
-  margin-block-start: 0.1rem;
-  color: var(--color-text-muted, #607080);
-  font-size: 0.7rem;
 }
 
 .section-heading,
@@ -494,7 +453,6 @@ function progress(item: TournamentSummary): number {
 
 @media (max-width: 42rem) {
   .home-heading { align-items: stretch; flex-direction: column; }
-  .live-summary { align-self: flex-start; }
   .live-card { grid-template-columns: 7rem minmax(0, 1fr); }
   .live-card dl { flex-wrap: wrap; }
   .upcoming-row { grid-template-columns: minmax(0, 1fr) auto; }

@@ -2053,11 +2053,8 @@ def replace_suite_openings(
     openings: list[OpeningLine],
 ) -> int:
     connection.execute("DELETE FROM openings WHERE suite_id = ?", (suite_id,))
-    connection.executemany(
-        """
-        INSERT INTO openings (suite_id, position, name, start_fen, moves, fen)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
+    _insert_opening_rows(
+        connection,
         (
             (
                 suite_id,
@@ -2071,6 +2068,73 @@ def replace_suite_openings(
         ),
     )
     return len(openings)
+
+
+def append_suite_openings(
+    connection: sqlite3.Connection,
+    suite_id: int,
+    openings: list[OpeningLine],
+) -> int:
+    if not openings:
+        return 0
+    rows = connection.execute(
+        "SELECT start_fen, moves FROM openings WHERE suite_id = ?",
+        (suite_id,),
+    )
+    seen = {(row["start_fen"], row["moves"]) for row in rows}
+    pending: list[tuple[OpeningLine, str]] = []
+    for opening in openings:
+        moves = json.dumps(opening.moves)
+        key = (opening.start_fen, moves)
+        if key in seen:
+            continue
+        seen.add(key)
+        pending.append((opening, moves))
+    if not pending:
+        return 0
+    row = connection.execute(
+        "SELECT COALESCE(MAX(position), 0) AS position FROM openings WHERE suite_id = ?",
+        (suite_id,),
+    ).fetchone()
+    first_position = int(row["position"]) + 1
+    _insert_opening_rows(
+        connection,
+        (
+            (
+                suite_id,
+                position,
+                opening.name,
+                opening.start_fen,
+                moves,
+                opening.fen,
+            )
+            for position, (opening, moves) in enumerate(
+                pending,
+                start=first_position,
+            )
+        ),
+    )
+    return len(pending)
+
+
+def _insert_opening_rows(
+    connection: sqlite3.Connection,
+    rows: Iterable[Iterable[Any]],
+) -> None:
+    copy_rows = getattr(connection, "copy_rows", None)
+    if copy_rows is not None:
+        copy_rows(
+            "COPY openings (suite_id, position, name, start_fen, moves, fen) FROM STDIN",
+            rows,
+        )
+        return
+    connection.executemany(
+        """
+        INSERT INTO openings (suite_id, position, name, start_fen, moves, fen)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
 
 
 def list_suite_openings(
