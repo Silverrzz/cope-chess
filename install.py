@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-INSTALLER_VERSION = "3"
+INSTALLER_VERSION = "4"
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print available targets and exit",
     )
+    parser.add_argument(
+        "--worker-install",
+        choices=("docker", "native"),
+        help="run the worker in Docker or directly in a local virtual environment",
+    )
     args = parser.parse_args(argv)
     if args.list_targets:
         for target in TARGETS:
@@ -63,21 +68,35 @@ def main(argv: list[str] | None = None) -> int:
         print("Nothing selected.")
         return 0
     settings = _load_settings()
+    worker_install = ""
+    if "worker" in selected:
+        worker_install = args.worker_install or _select_worker_install(
+            settings.get("worker_install", "docker")
+        )
+        settings["worker_install"] = worker_install
     print(f"\nHost: {platform.system()} {platform.release()} ({platform.machine()})")
     print("Selected: " + ", ".join(_target(key).label for key in selected))
     if "server" in selected:
         settings = _prepare_server(settings, start=not args.prepare_only)
     clients = [key for key in selected if key in {"worker", "benchmarker"}]
     if clients:
-        _prepare_clients(clients, image_ready="server" in selected)
+        docker_clients = [key for key in clients if key != "worker" or worker_install == "docker"]
+        if docker_clients:
+            _prepare_clients(docker_clients, image_ready="server" in selected)
+        if "worker" in clients and worker_install == "native":
+            _prepare_native_client("worker")
         settings = _configure_clients(
             clients,
             settings,
             local_server="server" in selected,
+            native_worker=worker_install == "native",
         )
         if not args.prepare_only:
             for key in clients:
-                _start_client(key, settings)
+                if key == "worker" and worker_install == "native":
+                    _start_native_client(key, settings)
+                else:
+                    _start_client(key, settings)
     _save_settings(settings)
     print("\nCOPE installation complete.")
     if args.prepare_only:
@@ -86,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Server: https://{settings['domain']}")
     for key in clients:
         if not args.prepare_only:
-            print(f"{_target(key).label} log: docker logs --follow {_container_name(key)}")
+            if key == "worker" and worker_install == "native":
+                print(f"{_target(key).label} log: {RUNTIME / 'worker.log'}")
+            else:
+                print(f"{_target(key).label} log: docker logs --follow {_container_name(key)}")
     return 0
 
 
@@ -212,6 +234,13 @@ def _target(key: str) -> Target:
     return next(target for target in TARGETS if target.key == key)
 
 
+def _select_worker_install(default: str) -> str:
+    value = _prompt("Worker installation (docker/native)", default).lower()
+    if value not in {"docker", "native"}:
+        raise SystemExit("Worker installation must be 'docker' or 'native'.")
+    return value
+
+
 def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
     _require_command("docker")
     _run(["docker", "compose", "version"])
@@ -313,24 +342,40 @@ def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
         )
 
 
+def _prepare_native_client(key: str) -> None:
+    if key != "worker":
+        raise SystemExit("Only the game worker supports native installation.")
+    venv = RUNTIME / "native-venv"
+    python = _venv_executable(venv, "python")
+    if not python.is_file():
+        print("\nCreating the native worker virtual environment...")
+        RUNTIME.mkdir(parents=True, exist_ok=True)
+        _run([sys.executable, "-m", "venv", str(venv)])
+    print("Installing the native worker...")
+    _run([str(python), "-m", "pip", "install", "--upgrade", f"{ROOT}[worker]"])
+
+
 def _configure_clients(
     clients: list[str],
     settings: dict[str, str],
     *,
     local_server: bool,
+    native_worker: bool = False,
 ) -> dict[str, str]:
     domain = settings.get("domain", "")
     for key in clients:
         setting = f"{key}_server_url"
         path = "worker" if key == "worker" else "benchmarker"
         default = settings.get(setting, "")
-        if local_server:
+        if local_server and not (key == "worker" and native_worker):
             port = "8702" if key == "worker" else "8703"
             service = "worker-server" if key == "worker" else "benchmark-server"
             default = f"ws://{service}:{port}/{path}"
         if not default:
             port = "8702" if key == "worker" else "8703"
             default = f"ws://127.0.0.1:{port}"
+        if local_server and key == "worker" and native_worker and domain:
+            default = f"wss://{domain}/worker"
         settings[setting] = _prompt(f"{_target(key).label} server URL", default)
     return settings
 
@@ -445,6 +490,64 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
     print(f"Starting {_target(key).label.lower()}...")
     _run(command, capture=True)
     print(f"{_target(key).label} started in {container}.")
+
+
+def _start_native_client(key: str, settings: dict[str, str]) -> None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    pid_path = RUNTIME / f"{key}.pid"
+    existing_pid = _read_pid(pid_path)
+    if existing_pid and _process_running(existing_pid):
+        print(f"{_target(key).label} is already running as process {existing_pid}.")
+        return
+    pid_path.unlink(missing_ok=True)
+    state_path = RUNTIME / "worker.json"
+    token_path = RUNTIME / "worker.token"
+    if not state_path.is_file():
+        token_path.write_text(_registration_token(key, settings) + "\n", encoding="utf-8")
+        _restrict_file(token_path)
+    command = [
+        str(_venv_executable(RUNTIME / "native-venv", "cope")),
+        key,
+        "--server-url",
+        settings[f"{key}_server_url"],
+        "--label-hint",
+        f"{socket.gethostname()}-{key}",
+        "--machine-id",
+        _client_machine_id(key),
+        "--state-file",
+        str(state_path),
+    ]
+    if not state_path.is_file():
+        command.extend(["--token-file", str(token_path)])
+    environment = os.environ.copy()
+    environment["COPE_BUILD_VERSION"] = _build_version()
+    environment["COPE_UPDATE_ROOT"] = str(RUNTIME / "native-update")
+    log_path = RUNTIME / f"{key}.log"
+    print(f"Starting {_target(key).label.lower()} natively...")
+    with log_path.open("ab") as log:
+        if os.name == "nt":
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            )
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    _restrict_file(pid_path)
+    print(f"{_target(key).label} started as process {process.pid}.")
 
 
 def _registration_token(key: str, settings: dict[str, str]) -> str:
@@ -717,6 +820,32 @@ def _client_machine_id(key: str) -> str:
     if not 8 <= len(machine_id) <= 128:
         raise SystemExit(f"Invalid persisted {key} machine identity in {path}.")
     return machine_id
+
+
+def _venv_executable(venv: Path, name: str) -> Path:
+    if os.name == "nt":
+        return venv / "Scripts" / f"{name}.exe"
+    return venv / "bin" / name
+
+
+def _read_pid(path: Path) -> int | None:
+    try:
+        value = int(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _process_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _container_status(name: str) -> str:
