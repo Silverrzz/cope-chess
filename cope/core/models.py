@@ -588,6 +588,7 @@ class BenchmarkerTokenHello(StrictModel):
     hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
+    supports_updates: bool = False
 
 
 class BenchmarkerSessionHello(StrictModel):
@@ -596,12 +597,22 @@ class BenchmarkerSessionHello(StrictModel):
     hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
+    supports_updates: bool = False
+
+
+class BenchmarkerUpdateCommand(WorkerUpdateCommand):
+    pass
+
+
+class BenchmarkerUpdateStatus(WorkerUpdateStatus):
+    pass
 
 
 class BenchmarkerWelcome(StrictModel):
     benchmarker_id: int = Field(gt=0)
     session_id: str = Field(min_length=1)
     poll_interval_ms: int = Field(gt=0)
+    update: BenchmarkerUpdateCommand | None = None
 
 
 class BenchmarkAssignment(StrictModel):

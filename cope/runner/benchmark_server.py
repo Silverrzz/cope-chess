@@ -17,6 +17,8 @@ from cope.core.models import (
     BenchmarkFailed,
     BenchmarkerSessionHello,
     BenchmarkerTokenHello,
+    BenchmarkerUpdateCommand,
+    BenchmarkerUpdateStatus,
     BenchmarkerWelcome,
     BenchmarkResult,
 )
@@ -40,11 +42,13 @@ from cope.db import (
     fail_benchmark_job,
     get_benchmarker_by_session_id,
     get_benchmarker_by_token,
+    reconcile_benchmarker_deployment,
     register_benchmarker_connection,
     reset_benchmark_service_state,
     set_service_endpoint,
     touch_service_heartbeat,
     update_benchmarker_status,
+    update_deployment_target_status,
 )
 from cope.network import (
     DEFAULT_BENCHMARKER_PATH,
@@ -181,6 +185,11 @@ class BenchmarkServer:
                 session_id,
                 hello,
             )
+            update = self._benchmarker_update_command(
+                benchmarker.id,
+                hello.app_version,
+                hello.supports_updates,
+            )
             old = self._connections.get(benchmarker.id)
             self._connections[benchmarker.id] = (session_id, websocket)
             if old is not None and old[0] != session_id:
@@ -189,18 +198,20 @@ class BenchmarkServer:
                         code=CONNECTION_REPLACED_CLOSE_CODE,
                         reason="benchmarker session replaced",
                     )
+            welcome = BenchmarkerWelcome(
+                benchmarker_id=benchmarker.id,
+                session_id=session_id,
+                poll_interval_ms=max(
+                    1,
+                    round(self._config.poll_interval_s * 1000),
+                ),
+                update=update,
+            )
             await websocket.send(
                 encode_message(
                     make_message(
                         "benchmark_welcome",
-                        BenchmarkerWelcome(
-                            benchmarker_id=benchmarker.id,
-                            session_id=session_id,
-                            poll_interval_ms=max(
-                                1,
-                                round(self._config.poll_interval_s * 1000),
-                            ),
-                        ),
+                        welcome.model_dump(mode="json", exclude_none=True),
                     )
                 )
             )
@@ -210,7 +221,27 @@ class BenchmarkServer:
                 benchmarker.label,
                 benchmarker.hardware_key,
             )
+            if update is not None:
+                await self._serve_benchmarker_update(websocket, benchmarker, update)
+                return
             while True:
+                pending_update = self._benchmarker_update_command(
+                    benchmarker.id,
+                    benchmarker.app_commit or "",
+                    hello.supports_updates,
+                )
+                if pending_update is not None:
+                    await websocket.send(
+                        encode_message(
+                            make_message("benchmarker_update", pending_update)
+                        )
+                    )
+                    await self._serve_benchmarker_update(
+                        websocket,
+                        benchmarker,
+                        pending_update,
+                    )
+                    return
                 active_job = self._claim_next_job(benchmarker)
                 if active_job is None:
                     closed = asyncio.create_task(websocket.wait_closed())
@@ -375,6 +406,98 @@ class BenchmarkServer:
             raise
         finally:
             connection.close()
+
+    def _benchmarker_update_command(
+        self,
+        benchmarker_id: int,
+        app_commit: str,
+        supports_updates: bool,
+    ) -> BenchmarkerUpdateCommand | None:
+        connection = connect_database(self._config.db_path)
+        try:
+            target = reconcile_benchmarker_deployment(
+                connection,
+                benchmarker_id,
+                app_commit,
+            )
+            if target is None:
+                connection.commit()
+                return None
+            if not target.target_commit or not target.repository_url:
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    "failed",
+                    current_commit=app_commit,
+                    detail="Deployment repository URL is unavailable.",
+                )
+                connection.commit()
+                raise ProtocolValidationError(
+                    "benchmarker deployment source is unavailable"
+                )
+            if not supports_updates:
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    "deferred",
+                    current_commit=app_commit,
+                    detail="Benchmarker requires a one-time reinstall before automatic updates are available.",
+                )
+                connection.commit()
+                return None
+            connection.commit()
+            return BenchmarkerUpdateCommand(
+                job_id=target.job_id,
+                target_commit=target.target_commit,
+                repository_url=target.repository_url,
+            )
+        finally:
+            connection.close()
+
+    async def _serve_benchmarker_update(
+        self,
+        websocket: WebSocketServerProtocol,
+        benchmarker: BenchmarkerRecord,
+        command: BenchmarkerUpdateCommand,
+    ) -> None:
+        while True:
+            status = decode_message(
+                await websocket.recv(),
+                "benchmarker_update_status",
+                BenchmarkerUpdateStatus,
+            )
+            if status.job_id != command.job_id or status.target_commit != command.target_commit:
+                raise ProtocolValidationError(
+                    "benchmarker update status does not match the deployment"
+                )
+            connection = connect_database(self._config.db_path)
+            try:
+                target = reconcile_benchmarker_deployment(
+                    connection,
+                    benchmarker.id,
+                    benchmarker.app_commit or "",
+                )
+                if target is None:
+                    connection.commit()
+                    return
+                mapped = {
+                    "accepted": "updating",
+                    "installing": "updating",
+                    "restarting": "restarting",
+                    "failed": "failed",
+                }[status.status]
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    mapped,
+                    current_commit=benchmarker.app_commit,
+                    detail=status.detail,
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            if status.status in {"restarting", "failed"}:
+                return
 
     def _complete_job(
         self,

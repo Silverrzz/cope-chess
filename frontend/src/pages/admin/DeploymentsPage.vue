@@ -13,7 +13,7 @@ import { useConfirm } from "@/composables/useConfirm";
 
 interface DeploymentTarget {
   id: number;
-  target_kind: "server" | "worker";
+  target_kind: "server" | "worker" | "benchmarker";
   target_id: number | null;
   label: string;
   current_commit: string | null;
@@ -84,7 +84,7 @@ async function deploy(): Promise<void> {
   const target = refName.value.trim() || data.value?.default_ref || "main";
   const accepted = await confirm({
     title: "Update and rebuild the platform?",
-    message: `Deploy ${target} to the server and every registered worker. Active games will finish before their worker restarts.`,
+    message: `Deploy ${target} to the server, every registered worker, and every benchmarker. Active games and benchmarks will finish before their client restarts.`,
     confirmLabel: "Update & rebuild",
   });
   if (!accepted) return;
@@ -167,7 +167,7 @@ onBeforeUnmount(() => {
           <InlineFeedback v-if="job.error" :message="job.error" />
           <div class="target-list">
             <div v-for="target in job.targets" :key="target.id" class="target-row">
-              <span class="target-kind">{{ target.target_kind === "server" ? "Platform" : "Worker" }}</span>
+              <span class="target-kind">{{ target.target_kind === "server" ? "Platform" : target.target_kind === "benchmarker" ? "Benchmarker" : "Worker" }}</span>
               <span class="target-name">
                 <strong>{{ target.label }}</strong>
                 <small v-if="target.detail">{{ target.detail }}</small>

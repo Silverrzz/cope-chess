@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-INSTALLER_VERSION = "4"
+INSTALLER_VERSION = "5"
 
 
 @dataclass(frozen=True)
@@ -444,8 +444,10 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         ("ws://worker-server:", "ws://benchmark-server:")
     ):
         command.extend(["--network", _compose_network()])
-    if key == "worker":
-        update_root = RUNTIME / "update"
+    if key in {"worker", "benchmarker"}:
+        update_root = RUNTIME / (
+            "update" if key == "worker" else "benchmarker-update"
+        )
         update_root.mkdir(parents=True, exist_ok=True)
         command.extend(
             [

@@ -14,9 +14,11 @@ from urllib.parse import urlsplit
 
 from cope.db import (
     DEFAULT_DB_PATH,
+    activate_benchmarker_deployment_targets,
     claim_deployment_job,
     connect_database,
     fail_interrupted_deployment_jobs,
+    get_benchmarker,
     get_worker,
     list_deployment_targets,
     list_service_heartbeats,
@@ -157,6 +159,9 @@ def _run_deployment(
         _set_job_status(config, job_id, "updating_workers")
         _prepare_worker_targets(config, job_id)
         _wait_for_workers(config, job_id)
+        _prepare_benchmarker_targets(config, job_id)
+        _activate_benchmarker_targets(config, job_id)
+        _wait_for_benchmarkers(config, job_id)
         _set_job_status(config, job_id, "restarting")
         _set_server_target(config, job_id, "restarting")
         restart_started_at = datetime.now(UTC)
@@ -176,7 +181,7 @@ def _run_deployment(
         _reload_caddy(config, source_dir)
         _set_job_status(config, job_id, "verifying")
         _wait_for_services(config, target_commit, restart_started_at)
-        _wait_for_worker_reconnections(config, job_id)
+        _wait_for_client_reconnections(config, job_id)
         _set_server_target(
             config,
             job_id,
@@ -373,6 +378,105 @@ def _wait_for_workers(config: UpdaterConfig, job_id: int) -> None:
         time.sleep(2.0)
 
 
+def _prepare_benchmarker_targets(config: UpdaterConfig, job_id: int) -> None:
+    connection = connect_database(config.db_path)
+    try:
+        for target in list_deployment_targets(connection, job_id):
+            if target.target_kind != "benchmarker" or target.target_id is None:
+                continue
+            benchmarker = get_benchmarker(connection, target.target_id)
+            if benchmarker is None or benchmarker.status == "revoked":
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    "deferred",
+                    detail="Benchmarker is unavailable and will update on its next connection.",
+                )
+            elif benchmarker.status not in {"connected", "busy"}:
+                update_deployment_target_status(
+                    connection,
+                    target.id,
+                    "deferred",
+                    current_commit=benchmarker.app_commit,
+                    detail="Benchmarker is offline and will update before accepting new work.",
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _activate_benchmarker_targets(config: UpdaterConfig, job_id: int) -> None:
+    connection = connect_database(config.db_path)
+    try:
+        activate_benchmarker_deployment_targets(connection, job_id)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _wait_for_benchmarkers(config: UpdaterConfig, job_id: int) -> None:
+    deadline = time.monotonic() + max(config.worker_wait_s, 1.0)
+    while True:
+        connection = connect_database(config.db_path)
+        try:
+            targets = [
+                target
+                for target in list_deployment_targets(connection, job_id)
+                if target.target_kind == "benchmarker"
+            ]
+            failed = [target for target in targets if target.status == "failed"]
+            active = [
+                target
+                for target in targets
+                if target.status in {"pending", "waiting", "updating", "restarting"}
+            ]
+            if failed:
+                labels = ", ".join(target.label for target in failed)
+                raise RuntimeError(f"benchmarker update failed: {labels}")
+            if not active:
+                return
+            if time.monotonic() >= deadline:
+                blocked: list[str] = []
+                for target in active:
+                    benchmarker = (
+                        get_benchmarker(connection, target.target_id)
+                        if target.target_id is not None
+                        else None
+                    )
+                    if benchmarker is None or benchmarker.status not in {
+                        "connected",
+                        "busy",
+                    }:
+                        update_deployment_target_status(
+                            connection,
+                            target.id,
+                            "deferred",
+                            current_commit=(
+                                None if benchmarker is None else benchmarker.app_commit
+                            ),
+                            detail="Benchmarker is offline and will update before accepting new work.",
+                        )
+                    else:
+                        blocked.append(target.label)
+                        update_deployment_target_status(
+                            connection,
+                            target.id,
+                            "failed",
+                            current_commit=benchmarker.app_commit,
+                            detail="Benchmarker did not drain and update before the deployment timeout.",
+                        )
+                connection.commit()
+                if blocked:
+                    raise RuntimeError(
+                        "benchmarkers did not drain before the update timeout: "
+                        + ", ".join(blocked)
+                    )
+                return
+        finally:
+            connection.close()
+        time.sleep(2.0)
+
+
 def _wait_for_services(
     config: UpdaterConfig,
     target_commit: str,
@@ -411,7 +515,7 @@ def _wait_for_services(
     raise RuntimeError(f"updated services did not become ready: {', '.join(missing)}")
 
 
-def _wait_for_worker_reconnections(config: UpdaterConfig, job_id: int) -> None:
+def _wait_for_client_reconnections(config: UpdaterConfig, job_id: int) -> None:
     deadline = time.monotonic() + max(config.service_wait_s, 1.0)
     while True:
         connection = connect_database(config.db_path)
@@ -419,7 +523,7 @@ def _wait_for_worker_reconnections(config: UpdaterConfig, job_id: int) -> None:
             active = [
                 target
                 for target in list_deployment_targets(connection, job_id)
-                if target.target_kind == "worker"
+                if target.target_kind in {"worker", "benchmarker"}
                 and target.status in {"pending", "waiting", "updating", "restarting"}
             ]
             if not active:
@@ -430,7 +534,7 @@ def _wait_for_worker_reconnections(config: UpdaterConfig, job_id: int) -> None:
                         connection,
                         target.id,
                         "deferred",
-                        detail="Worker release is installed and will reconcile on reconnect.",
+                        detail="Client release is installed and will reconcile on reconnect.",
                     )
                 connection.commit()
                 return

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -16,6 +18,8 @@ from cope.core.models import (
     BenchmarkFailed,
     BenchmarkerSessionHello,
     BenchmarkerTokenHello,
+    BenchmarkerUpdateCommand,
+    BenchmarkerUpdateStatus,
     BenchmarkerWelcome,
     BenchmarkResult,
 )
@@ -25,7 +29,8 @@ from cope.core.protocol import (
     encode_message,
     make_message,
 )
-from cope.worker.client import _detect_hardware, _detect_machine_id
+from cope.worker.client import _detect_hardware, _detect_machine_id, _restart_arguments
+from cope.worker.update import install_client_release
 from cope.worker.uci_engine import EnginePreparationError, UciEngineProcess
 
 
@@ -62,7 +67,15 @@ async def run_benchmarker_client(config: BenchmarkerClientConfig) -> None:
     while True:
         state.connected = False
         try:
-            await _run_connection(config, state)
+            restart = await _run_connection(config, state)
+            if restart is not None:
+                restart_executable, target_commit = restart
+                os.environ["COPE_BUILD_VERSION"] = target_commit
+                os.environ["COPE_UPDATE_ROOT"] = str(restart_executable.parents[4])
+                os.execv(
+                    str(restart_executable),
+                    [str(restart_executable), *_restart_arguments(sys.argv[1:])],
+                )
         except ConnectionClosed as error:
             reason = error.reason or str(error) or error.__class__.__name__
             LOG.warning("benchmark server connection closed code=%s reason=%s", error.code, reason)
@@ -82,7 +95,7 @@ async def run_benchmarker_client(config: BenchmarkerClientConfig) -> None:
 async def _run_connection(
     config: BenchmarkerClientConfig,
     state: _ConnectionState,
-) -> None:
+) -> tuple[Path, str] | None:
     connection_config = (
         config
         if state.session_id is None
@@ -105,6 +118,7 @@ async def _run_connection(
             hardware_key=hardware_key,
             hw=hw,
             app_version=connection_config.app_version,
+            supports_updates=True,
         )
     else:
         hello = BenchmarkerSessionHello(
@@ -113,6 +127,7 @@ async def _run_connection(
             hardware_key=hardware_key,
             hw=hw,
             app_version=connection_config.app_version,
+            supports_updates=True,
         )
 
     LOG.info(
@@ -136,8 +151,13 @@ async def _run_connection(
             welcome.benchmarker_id,
             hardware_key,
         )
+        if welcome.update is not None:
+            return await _apply_benchmarker_update(websocket, welcome.update)
         while True:
             envelope = decode_envelope(await websocket.recv())
+            if envelope.type == "benchmarker_update":
+                update = BenchmarkerUpdateCommand.model_validate(envelope.data)
+                return await _apply_benchmarker_update(websocket, update)
             if envelope.type != "benchmark_assignment":
                 raise ProtocolValidationError(
                     f"expected benchmark_assignment, got {envelope.type}"
@@ -152,6 +172,76 @@ async def _run_connection(
                 welcome.session_id,
             )
             await websocket.send(encode_message(make_message(message_type, result)))
+
+
+async def _apply_benchmarker_update(
+    websocket,
+    update: BenchmarkerUpdateCommand,
+) -> tuple[Path, str]:
+    status_fields = {
+        "job_id": update.job_id,
+        "target_commit": update.target_commit,
+    }
+    await websocket.send(
+        encode_message(
+            make_message(
+                "benchmarker_update_status",
+                BenchmarkerUpdateStatus(
+                    **status_fields,
+                    status="accepted",
+                    detail="Benchmarker accepted the deployment.",
+                ),
+            )
+        )
+    )
+    try:
+        await websocket.send(
+            encode_message(
+                make_message(
+                    "benchmarker_update_status",
+                    BenchmarkerUpdateStatus(
+                        **status_fields,
+                        status="installing",
+                        detail="Fetching and building the benchmarker release.",
+                    ),
+                )
+            )
+        )
+        executable = await asyncio.to_thread(
+            install_client_release,
+            client_name="benchmarker",
+            target_commit=update.target_commit,
+            repository_url=update.repository_url,
+        )
+    except Exception as error:
+        detail = (str(error).strip() or error.__class__.__name__)[:4000]
+        await websocket.send(
+            encode_message(
+                make_message(
+                    "benchmarker_update_status",
+                    BenchmarkerUpdateStatus(
+                        **status_fields,
+                        status="failed",
+                        detail=detail,
+                    ),
+                )
+            )
+        )
+        raise RuntimeError(f"benchmarker update failed: {detail}") from error
+    await websocket.send(
+        encode_message(
+            make_message(
+                "benchmarker_update_status",
+                BenchmarkerUpdateStatus(
+                    **status_fields,
+                    status="restarting",
+                    detail="Release installed; restarting on the new version.",
+                ),
+            )
+        )
+    )
+    await websocket.close(code=1000, reason="benchmarker update installed")
+    return executable, update.target_commit
 
 
 def _run_benchmark(

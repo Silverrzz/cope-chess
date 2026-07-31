@@ -2311,6 +2311,18 @@ def create_deployment_job(
         """,
         (job_id, now),
     )
+    connection.execute(
+        """
+        INSERT INTO deployment_targets (
+          job_id, target_kind, target_id, label, current_commit, status, updated_at
+        )
+        SELECT ?, 'benchmarker', id, label, app_commit, 'pending', ?
+        FROM benchmarkers
+        WHERE status != 'revoked'
+        ORDER BY id
+        """,
+        (job_id, now),
+    )
     return job_id
 
 
@@ -2435,11 +2447,26 @@ def set_deployment_target_commit(
     connection.execute(
         """
         UPDATE deployment_targets
-        SET target_commit = ?, repository_url = ?, status = 'waiting',
+        SET target_commit = ?, repository_url = ?,
+            status = CASE WHEN target_kind = 'benchmarker' THEN 'pending' ELSE 'waiting' END,
             detail = '', updated_at = ?
         WHERE job_id = ? AND status = 'pending'
         """,
         (target_commit, repository_url, now, job_id),
+    )
+
+
+def activate_benchmarker_deployment_targets(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets
+        SET status = 'waiting', detail = '', updated_at = ?
+        WHERE job_id = ? AND target_kind = 'benchmarker' AND status = 'pending'
+        """,
+        (utc_now(), job_id),
     )
 
 
@@ -2500,16 +2527,17 @@ def update_server_deployment_target(
     )
 
 
-def worker_deployment_target(
+def _client_deployment_target(
     connection: sqlite3.Connection,
-    worker_id: int,
+    target_kind: str,
+    target_id: int,
 ) -> DeploymentTargetRecord | None:
     row = connection.execute(
         """
         SELECT target.*
         FROM deployment_targets AS target
         JOIN deployment_jobs AS job ON job.id = target.job_id
-        WHERE target.target_kind = 'worker'
+        WHERE target.target_kind = ?
           AND target.target_id = ?
           AND target.target_commit IS NOT NULL
           AND target.status IN ('waiting', 'updating', 'restarting', 'deferred', 'failed')
@@ -2517,17 +2545,32 @@ def worker_deployment_target(
         ORDER BY target.job_id DESC
         LIMIT 1
         """,
-        (worker_id,),
+        (target_kind, target_id),
     ).fetchone()
     return None if row is None else _deployment_target_from_row(row)
 
 
-def reconcile_worker_deployment(
+def worker_deployment_target(
     connection: sqlite3.Connection,
     worker_id: int,
+) -> DeploymentTargetRecord | None:
+    return _client_deployment_target(connection, "worker", worker_id)
+
+
+def benchmarker_deployment_target(
+    connection: sqlite3.Connection,
+    benchmarker_id: int,
+) -> DeploymentTargetRecord | None:
+    return _client_deployment_target(connection, "benchmarker", benchmarker_id)
+
+
+def _reconcile_client_deployment(
+    connection: sqlite3.Connection,
+    target_kind: str,
+    target_id: int,
     app_commit: str,
 ) -> DeploymentTargetRecord | None:
-    target = worker_deployment_target(connection, worker_id)
+    target = _client_deployment_target(connection, target_kind, target_id)
     if target is None:
         return None
     if target.target_commit == app_commit:
@@ -2545,7 +2588,7 @@ def reconcile_worker_deployment(
             "waiting",
             current_commit=app_commit,
         )
-        return worker_deployment_target(connection, worker_id)
+        return _client_deployment_target(connection, target_kind, target_id)
     if target.current_commit != app_commit:
         update_deployment_target_status(
             connection,
@@ -2554,8 +2597,29 @@ def reconcile_worker_deployment(
             current_commit=app_commit,
             detail=target.detail,
         )
-        return worker_deployment_target(connection, worker_id)
+        return _client_deployment_target(connection, target_kind, target_id)
     return target
+
+
+def reconcile_worker_deployment(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    app_commit: str,
+) -> DeploymentTargetRecord | None:
+    return _reconcile_client_deployment(connection, "worker", worker_id, app_commit)
+
+
+def reconcile_benchmarker_deployment(
+    connection: sqlite3.Connection,
+    benchmarker_id: int,
+    app_commit: str,
+) -> DeploymentTargetRecord | None:
+    return _reconcile_client_deployment(
+        connection,
+        "benchmarker",
+        benchmarker_id,
+        app_commit,
+    )
 
 
 def _deployment_job_from_row(row: sqlite3.Row) -> DeploymentJobRecord:

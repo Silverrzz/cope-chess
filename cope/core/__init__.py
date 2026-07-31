@@ -43,6 +43,8 @@ from .models import (
     WorkerUpdateCommand,
     WorkerUpdateStatus,
     WorkerWelcome,
+    BenchmarkerUpdateCommand,
+    BenchmarkerUpdateStatus,
     WorkflowStep,
     game_setup_workflow,
 )
@@ -100,6 +102,8 @@ __all__ = [
     "game_setup_workflow",
     "WorkerUpdateStatus",
     "WorkerWelcome",
+    "BenchmarkerUpdateCommand",
+    "BenchmarkerUpdateStatus",
     "ProtocolError",
     "ProtocolValidationError",
     "decode_envelope",

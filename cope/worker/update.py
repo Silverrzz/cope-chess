@@ -20,17 +20,34 @@ def install_worker_release(
     target_commit: str,
     repository_url: str,
 ) -> Path:
+    return install_client_release(
+        client_name="worker",
+        target_commit=target_commit,
+        repository_url=repository_url,
+    )
+
+
+def install_client_release(
+    *,
+    client_name: str,
+    target_commit: str,
+    repository_url: str,
+) -> Path:
+    if client_name not in {"worker", "benchmarker"}:
+        raise ValueError("unsupported update client")
     if COMMIT_PATTERN.fullmatch(target_commit) is None:
-        raise ValueError("worker update target is not a full Git commit")
-    root = _update_root()
+        raise ValueError(f"{client_name} update target is not a full Git commit")
+    root = _update_root(client_name)
     repository = root / "repository"
     root.mkdir(parents=True, exist_ok=True, mode=0o755)
     if not (repository / ".git").exists():
-        clone_url = _repository_clone_url(repository_url)
+        clone_url = _repository_clone_url(repository_url, client_name)
         _run(["git", "clone", "--origin", "origin", clone_url, str(repository)])
     configured_url = _git_output(repository, "remote", "get-url", "origin")
     if _normalise_repository_url(configured_url) != _normalise_repository_url(repository_url):
-        raise RuntimeError("worker update repository does not match the server deployment source")
+        raise RuntimeError(
+            f"{client_name} update repository does not match the server deployment source"
+        )
     _run(["git", "-C", str(repository), "fetch", "--prune", "origin"])
     resolved = _git_output(repository, "rev-parse", "--verify", f"{target_commit}^{{commit}}")
     if resolved != target_commit:
@@ -77,7 +94,9 @@ def install_worker_release(
                 capture=True,
             )
             if f"version={target_commit}" not in reported:
-                raise RuntimeError("installed worker release reported the wrong version")
+                raise RuntimeError(
+                    f"installed {client_name} release reported the wrong version"
+                )
         except Exception:
             if source.exists():
                 _run(
@@ -102,20 +121,22 @@ def install_worker_release(
     return _venv_executable(release / "venv", "cope")
 
 
-def _update_root() -> Path:
+def _update_root(client_name: str) -> Path:
     configured = os.environ.get("COPE_UPDATE_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
     state_home = os.environ.get("XDG_STATE_HOME", "").strip()
     base = Path(state_home).expanduser() if state_home else Path.home() / ".local" / "state"
-    return (base / "cope-worker").resolve()
+    return (base / f"cope-{client_name}").resolve()
 
 
-def _repository_clone_url(repository_url: str) -> str:
+def _repository_clone_url(repository_url: str, client_name: str) -> str:
     configured = os.environ.get("COPE_UPDATE_REPOSITORY_URL", "").strip()
     if configured:
         if _normalise_repository_url(configured) != _normalise_repository_url(repository_url):
-            raise RuntimeError("configured worker repository does not match the deployment source")
+            raise RuntimeError(
+                f"configured {client_name} repository does not match the deployment source"
+            )
         return configured
     if "://" in repository_url or repository_url.startswith(("/", ".")):
         return repository_url

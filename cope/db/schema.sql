@@ -666,8 +666,8 @@ CREATE TABLE IF NOT EXISTS deployment_jobs (
 CREATE TABLE IF NOT EXISTS deployment_targets (
   id BIGSERIAL PRIMARY KEY,
   job_id BIGINT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
-  target_kind TEXT NOT NULL CHECK (target_kind IN ('server', 'worker')),
-  target_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('server', 'worker', 'benchmarker')),
+  target_id BIGINT,
   label TEXT NOT NULL,
   repository_url TEXT,
   target_commit TEXT CHECK (target_commit IS NULL OR target_commit ~ '^[0-9a-f]{40}$'),
@@ -680,6 +680,11 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
   detail TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_kind_check;
+ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_id_fkey;
+ALTER TABLE deployment_targets ADD CONSTRAINT deployment_targets_target_kind_check
+  CHECK (target_kind IN ('server', 'worker', 'benchmarker'));
 
 CREATE INDEX IF NOT EXISTS idx_games_tournament_status ON games(tournament_id, status);
 CREATE INDEX IF NOT EXISTS idx_games_round_pair ON games(tournament_id, round, pair_index);
@@ -720,7 +725,7 @@ SET result = NULL,
 WHERE status = 'pending'
   AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 17)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 18)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -746,3 +751,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_deployment_jobs_one_active
 CREATE INDEX IF NOT EXISTS idx_deployment_targets_job ON deployment_targets(job_id, target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_targets_worker_pending ON deployment_targets(target_id, status)
   WHERE target_kind = 'worker' AND target_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_deployment_targets_benchmarker_pending ON deployment_targets(target_id, status)
+  WHERE target_kind = 'benchmarker' AND target_id IS NOT NULL;
