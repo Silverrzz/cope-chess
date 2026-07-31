@@ -43,6 +43,7 @@ from cope.db import (
     engine_game_count,
     engine_build_is_benchmarked,
     engine_result_summary,
+    forget_engine_benchmarks,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
@@ -1522,6 +1523,29 @@ def register_api_routes(app: FastAPI) -> None:
         if count:
             return _json({"message": f"Queued {count} benchmark {'job' if count == 1 else 'jobs'}."})
         return _json({"message": "No benchmark hardware is registered yet. Connect a benchmarker, then request the benchmark again."})
+
+    @app.delete("/api/admin/engine-versions/{version_id}/benchmarks")
+    def admin_forget_engine_benchmarks(
+        version_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = next((item for item in list_engines(connection) if item.engine_id == version_id), None)
+        if engine is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        try:
+            count = forget_engine_benchmarks(connection, engine=engine)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({
+            "message": (
+                f"Forgot {count} benchmark {'job' if count == 1 else 'jobs'} and hardware assignment."
+                if count
+                else "No benchmark or hardware assignment was stored."
+            )
+        })
 
     @app.post("/api/admin/engine-versions/{version_id}/generate-dockerfile")
     def admin_generate_engine_dockerfile(

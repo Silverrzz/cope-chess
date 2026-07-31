@@ -540,6 +540,36 @@ def list_engine_benchmark_jobs(
     return tuple(result)
 
 
+def forget_engine_benchmarks(
+    connection: sqlite3.Connection,
+    *,
+    engine: EngineSpec,
+) -> int:
+    running = connection.execute(
+        """
+        SELECT 1 FROM benchmark_jobs
+        WHERE build_hash = ? AND status = 'running'
+        LIMIT 1
+        """,
+        (engine.build_hash,),
+    ).fetchone()
+    if running is not None:
+        raise ValueError("A benchmark for this build is currently running.")
+    jobs = connection.execute(
+        "SELECT id FROM benchmark_jobs WHERE build_hash = ?",
+        (engine.build_hash,),
+    ).fetchall()
+    connection.execute(
+        "DELETE FROM engine_benchmarks WHERE build_hash = ?",
+        (engine.build_hash,),
+    )
+    connection.execute(
+        "DELETE FROM benchmark_jobs WHERE build_hash = ?",
+        (engine.build_hash,),
+    )
+    return len(jobs)
+
+
 def reschedule_engine_benchmarks(
     connection: sqlite3.Connection,
     *,
@@ -591,7 +621,7 @@ def reschedule_engine_benchmarks(
     hardware_rows = connection.execute(
         """
         SELECT DISTINCT hardware_key FROM benchmarkers
-        WHERE hardware_key IS NOT NULL AND status != 'revoked'
+        WHERE hardware_key IS NOT NULL AND status IN ('connected', 'busy')
         """
     )
     scheduled = len(job_ids)

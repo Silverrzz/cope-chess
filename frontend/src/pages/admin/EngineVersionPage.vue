@@ -24,6 +24,7 @@ const generating = ref(false)
 const generationContext = ref('')
 const deleting = ref(false)
 const rescheduling = ref(false)
+const forgetting = ref(false)
 const dockerfileDirty = ref(false)
 const error = ref('')
 const benchmarks = ref<EngineBenchmarkJob[]>([])
@@ -116,6 +117,22 @@ async function reschedule(): Promise<void> {
   }
 }
 
+async function forgetBenchmark(): Promise<void> {
+  if (!version.value || !currentBenchmark.value) return
+  if (!await confirm({ title: 'Forget benchmark?', message: `Remove the benchmark and hardware assignment for ${version.value.name} ${version.value.version}? You can then benchmark it on a currently connected machine.`, confirmLabel: 'Forget benchmark', tone: 'danger' })) return
+  forgetting.value = true
+  error.value = ''
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/engine-versions/${id.value}/benchmarks`)
+    toast.success(response.message)
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    forgetting.value = false
+  }
+}
+
 function dockerfileChanged(): void {
   if (!version.value) return
   dockerfileDirty.value = true
@@ -175,7 +192,7 @@ onMounted(load)
       <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
           <div><h2 id="benchmarks-title">Benchmarking</h2><p>Build and <code>bench</code> results stream live from the benchmark service.</p></div>
-          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button class="button button--secondary button--small" type="button" :disabled="rescheduling || currentBenchmark?.status === 'running' || !version.dockerfile.trim() || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
+          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || currentBenchmark?.status === 'running' || !version.dockerfile.trim() || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
         </div>
         <div v-if="currentBenchmark" class="benchmark-current">
           <div class="benchmark-result">
