@@ -11,7 +11,11 @@ from typing import Protocol, runtime_checkable
 
 import chess
 
-from cope.core.stream import clamp_uci_info_line, parse_worker_command_elapsed
+from cope.core.stream import (
+    clamp_uci_info_line,
+    is_full_uci_info_line,
+    parse_worker_command_elapsed,
+)
 
 from .uci import position_command, setoption_command
 
@@ -71,6 +75,7 @@ class EngineInstance:
         self._search_future: Future | None = None
         self._last_search_result: EngineSearchResult | None = None
         self._current_search_info: EngineSearchInfo | None = None
+        self._current_info_line: str | None = None
         self._info_listener: Callable[[str, EngineSearchInfo], None] | None = None
 
     def get_name(self):
@@ -128,6 +133,7 @@ class EngineInstance:
     def get_search_result(self, board: chess.Board, go_command_arg: str) -> EngineSearchResult:
         self._ensure_engine_started()
         self._current_search_info = None
+        self._current_info_line = None
 
         if self._is_remote():
             lines: list[str] = []
@@ -139,6 +145,8 @@ class EngineInstance:
                 board,
                 self._name,
                 command_elapsed_ms=search_output.elapsed_ms,
+                initial_info=self._current_search_info,
+                initial_info_line=self._current_info_line,
             )
             self._last_search_result = result
             return result
@@ -162,6 +170,7 @@ class EngineInstance:
 
         self._last_search_result = None
         self._current_search_info = None
+        self._current_info_line = None
         if self._is_remote():
             begin_search = getattr(self._host, "begin_engine_search", None)
             if callable(begin_search):
@@ -207,6 +216,7 @@ class EngineInstance:
         info = _parse_info_line(line, self._current_search_info)
         if info is not None:
             self._current_search_info = info
+            self._current_info_line = line
             if self._info_listener is not None:
                 self._info_listener(line, info)
 
@@ -421,10 +431,12 @@ def _parse_search_result(
     engine_name: str,
     *,
     command_elapsed_ms: int | None = None,
+    initial_info: EngineSearchInfo | None = None,
+    initial_info_line: str | None = None,
 ) -> EngineSearchResult:
     bestmove: chess.Move | None = None
-    search_info = EngineSearchInfo()
-    info_line: str | None = None
+    search_info = initial_info or EngineSearchInfo()
+    info_line = initial_info_line
     for line in lines:
         worker_elapsed_ms = parse_worker_command_elapsed(line)
         if worker_elapsed_ms is not None:
@@ -466,15 +478,9 @@ def _parse_search_result(
 
 
 def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSearchInfo | None:
+    if not is_full_uci_info_line(line):
+        return None
     parts = line.split()
-    if not parts or parts[0] != "info":
-        return None
-    if len(parts) >= 2 and parts[1] == "string":
-        return None
-    if "multipv" in parts:
-        multipv = _int_after(parts, "multipv", 1)
-        if multipv != 1:
-            return None
 
     previous = previous or EngineSearchInfo()
     eval_cp = previous.eval_cp

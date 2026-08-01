@@ -84,6 +84,35 @@ def clamp_uci_info_line(line: str) -> str:
     return line[:MAX_UCI_INFO_LINE]
 
 
+def is_full_uci_info_line(line: str) -> bool:
+    parts = line.split()
+    if not parts or parts[0] != "info":
+        return False
+    if "depth" not in parts or "score" not in parts or "pv" not in parts:
+        return False
+    try:
+        depth_index = parts.index("depth")
+        score_index = parts.index("score")
+        pv_index = parts.index("pv")
+        int(parts[depth_index + 1])
+        int(parts[score_index + 2])
+    except (IndexError, ValueError):
+        return False
+    if parts[score_index + 1] not in {"cp", "mate"}:
+        return False
+    if "lowerbound" in parts or "upperbound" in parts:
+        return False
+    if pv_index + 1 >= len(parts):
+        return False
+    if "multipv" in parts:
+        try:
+            if int(parts[parts.index("multipv") + 1]) != 1:
+                return False
+        except (IndexError, ValueError):
+            return False
+    return True
+
+
 def worker_command_elapsed_line(elapsed_ms: int) -> str:
     return f"{WORKER_COMMAND_ELAPSED_PREFIX}{max(elapsed_ms, 0)}"
 

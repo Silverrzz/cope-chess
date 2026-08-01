@@ -550,6 +550,11 @@ def register_api_routes(app: FastAPI) -> None:
                 "clocks": clocks,
                 "clock_state": clock_state,
                 "standings": web_app._standings(connection, tournament, games, engines),
+                "rating_summaries": (
+                    web_app._tournament_rating_summaries(connection, tournament.id)
+                    if tournament.status == "finished"
+                    else []
+                ),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),
                 "engine_hardware": web_app._engine_hardware_view(connection, tournament),
                 "chat_messages": list_chat_messages(

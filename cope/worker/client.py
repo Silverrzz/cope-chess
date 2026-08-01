@@ -47,7 +47,11 @@ from cope.core.protocol import (
     encode_message,
     make_message,
 )
-from cope.core.stream import clamp_uci_info_line, worker_command_elapsed_line
+from cope.core.stream import (
+    clamp_uci_info_line,
+    is_full_uci_info_line,
+    worker_command_elapsed_line,
+)
 from cope.worker.update import install_worker_release
 
 from .uci_engine import EnginePreparationError, UciEngineProcess
@@ -1090,7 +1094,9 @@ class _EngineInfoPublisher:
         self._task = loop.create_task(self._run())
 
     def publish(self, line: str) -> None:
-        self._loop.call_soon_threadsafe(self._offer, clamp_uci_info_line(line))
+        line = clamp_uci_info_line(line)
+        if is_full_uci_info_line(line):
+            self._loop.call_soon_threadsafe(self._offer, line)
 
     def _offer(self, line: str) -> None:
         if self._finishing or self._task.done():
@@ -1100,7 +1106,6 @@ class _EngineInfoPublisher:
 
     async def finish(self) -> None:
         self._finishing = True
-        self._latest_line = None
         self._finish_requested.set()
         self._wake.set()
         await self._task
@@ -1129,8 +1134,6 @@ class _EngineInfoPublisher:
                         await asyncio.wait_for(self._finish_requested.wait(), timeout=delay)
                     except asyncio.TimeoutError:
                         pass
-                    else:
-                        return
 
             line = self._latest_line
             self._latest_line = None
@@ -1172,9 +1175,9 @@ def _compact_search_result_lines(lines: list[str], elapsed_ms: int) -> list[str]
     last_info: str | None = None
     result: list[str] = []
     for line in lines:
-        if line.startswith("info"):
+        if is_full_uci_info_line(line):
             last_info = line
-        else:
+        elif not (line == "info" or line.startswith("info ")):
             result.append(line)
     if last_info is not None:
         result.insert(max(len(result) - 1, 0), last_info)

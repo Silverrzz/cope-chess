@@ -12,6 +12,8 @@ import EnginePanel from '@/components/public/EnginePanel.vue'
 import GameTable from '@/components/public/GameTable.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import StreamIndicator from '@/components/public/StreamIndicator.vue'
+import AppIcon from '@/components/ui/AppIcon.vue'
+import { useToast } from '@/composables/useToast'
 import {
   clockLabel,
   engineName,
@@ -74,6 +76,7 @@ interface ViewportPosition {
 
 const route = useRoute()
 const router = useRouter()
+const toast = useToast()
 const data = ref<TournamentDetailResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
@@ -666,6 +669,102 @@ function sameId(left: Identifier | null | undefined, right: Identifier | null | 
 function queryValue(value: unknown): string {
   return Array.isArray(value) ? String(value[0] || '') : typeof value === 'string' ? value : ''
 }
+
+function completedRecord(engineId: Identifier): string {
+  let wins = 0
+  let draws = 0
+  let losses = 0
+  for (const game of data.value?.games || []) {
+    if (!game.result || (!sameId(game.white_engine_id, engineId) && !sameId(game.black_engine_id, engineId))) continue
+    if (game.result === '1/2-1/2') draws += 1
+    else if (
+      (game.result === '1-0' && sameId(game.white_engine_id, engineId))
+      || (game.result === '0-1' && sameId(game.black_engine_id, engineId))
+    ) wins += 1
+    else losses += 1
+  }
+  return `${wins}-${draws}-${losses}`
+}
+
+function summarySetting(label: string): string {
+  return settingsRows.value.find((row) => row.label.toLowerCase() === label.toLowerCase())?.value || ''
+}
+
+function roundedElo(value: number | null | undefined): string {
+  return value === null || value === undefined ? '-' : Math.round(value).toLocaleString('en-US')
+}
+
+function signedElo(value: number): string {
+  const rounded = Math.round(value)
+  return `${rounded >= 0 ? '+' : ''}${rounded.toLocaleString('en-US')}`
+}
+
+function tournamentSummaryText(): string {
+  if (!data.value) return ''
+  const tournament = data.value.tournament
+  const completedGames = data.value.games.filter((game) => Boolean(game.result))
+  const whiteWins = completedGames.filter((game) => game.result === '1-0').length
+  const draws = completedGames.filter((game) => game.result === '1/2-1/2').length
+  const blackWins = completedGames.filter((game) => game.result === '0-1').length
+  const details = [
+    format.value ? statusLabel(format.value) : '',
+    summarySetting('Time control'),
+    `${completedGames.length} game${completedGames.length === 1 ? '' : 's'}`,
+  ].filter(Boolean)
+  const lines = [
+    `${tournament.name} - Final results`,
+    details.join(' | '),
+    `White wins ${whiteWins} | Draws ${draws} | Black wins ${blackWins}`,
+    '',
+    'Standings',
+  ]
+  for (const [index, standing] of (data.value.standings || []).entries()) {
+    const bye = standing.bye_points ? `, ${standing.bye_points} bye` : ''
+    lines.push(
+      `${index + 1}. ${standing.name} - ${standing.points}/${standing.played} (${completedRecord(standing.engine_id)}${bye})`,
+    )
+  }
+  for (const ratingSummary of data.value.rating_summaries || []) {
+    lines.push('', `Elo - ${ratingSummary.rating_list_name}`)
+    lines.push(`Average competitor Elo: ${roundedElo(ratingSummary.average_competitor_elo)}`)
+    const rows = [...ratingSummary.rows].sort((left, right) => {
+      const leftRank = data.value?.standings?.findIndex((standing) => sameId(standing.engine_id, left.engine_id)) ?? -1
+      const rightRank = data.value?.standings?.findIndex((standing) => sameId(standing.engine_id, right.engine_id)) ?? -1
+      return leftRank - rightRank
+    })
+    for (const row of rows) {
+      const name = engineName(data.value.engines, row.engine_id)
+      lines.push(
+        `${name}: performance ${roundedElo(row.performance_elo)} | avg opponent ${roundedElo(row.average_opponent_elo)} | Elo ${roundedElo(row.elo_before)} -> ${roundedElo(row.elo_after)} (${signedElo(row.elo_change)})`,
+      )
+    }
+  }
+  lines.push('', `${window.location.origin}/tournaments/${encodeURIComponent(String(tournament.id))}`)
+  return lines.join('\n')
+}
+
+async function copyTournamentSummary(): Promise<void> {
+  const summary = tournamentSummaryText()
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(summary)
+    else fallbackCopy(summary)
+    toast.success('Tournament results copied.')
+  } catch {
+    toast.error('Could not copy the tournament results.')
+  }
+}
+
+function fallbackCopy(value: string): void {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.append(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('Copy failed')
+}
 </script>
 
 <template>
@@ -679,6 +778,16 @@ function queryValue(value: unknown): string {
           <div class="title-line">
             <h1>{{ data.tournament.name }}</h1>
             <StatusPill :status="data.tournament.status" />
+            <button
+              v-if="data.tournament.status === 'finished'"
+              class="copy-summary"
+              type="button"
+              title="Copy results summary"
+              aria-label="Copy tournament results summary"
+              @click="copyTournamentSummary"
+            >
+              <AppIcon name="copy" :size="16" />
+            </button>
           </div>
           <p>
             {{ format ? statusLabel(format) : 'Tournament' }}
@@ -881,6 +990,31 @@ function queryValue(value: unknown): string {
   display: flex;
   align-items: center;
   gap: var(--space-sm, 0.5rem);
+}
+
+.copy-summary {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--color-border, #d5dbe1);
+  border-radius: var(--radius-sm, 0.35rem);
+  background: var(--color-surface, #fff);
+  color: var(--color-text-muted, #607080);
+  cursor: pointer;
+}
+
+.copy-summary:hover {
+  border-color: var(--color-border-strong, #99a8bb);
+  background: color-mix(in srgb, var(--color-text, #17202a) 4%, transparent);
+  color: var(--color-text, #17202a);
+}
+
+.copy-summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent, #2f78c4) 45%, transparent);
+  outline-offset: 2px;
 }
 
 .tournament-heading h1,

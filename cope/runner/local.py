@@ -75,6 +75,7 @@ from cope.tournament.engine_instance import (
     EngineInstance,
     EngineCommandTransport,
     EngineSearchInfo,
+    EngineSearchResult,
 )
 from cope.tournament.game_runner import GameRunner
 from cope.version import app_version
@@ -539,6 +540,13 @@ def run_worker_assignment_game(
 
         engine = white if side_to_move == chess.WHITE else black
         search = engine.get_last_search_result()
+        if search is not None and search.info_line is not None:
+            live_reporter.publish_final_engine_info(
+                side_label.lower(),
+                engine,
+                search,
+                board_before_move.fen(),
+            )
         clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         clock_after_ms = _clock_time_ms(clock)
         record_move(
@@ -678,6 +686,30 @@ class _LiveGameReporter:
     def publish_black_engine_info(self, line: str, info: EngineSearchInfo) -> None:
         self._publish_engine_info("black", self._black, line, info)
 
+    def publish_final_engine_info(
+        self,
+        side: str,
+        engine: EngineInstance,
+        result: EngineSearchResult,
+        root_fen: str,
+    ) -> None:
+        self._publish_engine_info(
+            side,
+            engine,
+            result.info_line or "",
+            EngineSearchInfo(
+                eval_cp=result.eval_cp,
+                eval_mate=result.eval_mate,
+                depth=result.depth,
+                nodes=result.nodes,
+                nps=result.nps,
+                time_ms=result.time_ms,
+                pv=result.pv,
+            ),
+            force=True,
+            root_fen=root_fen,
+        )
+
     def publish_clock_sync(
         self,
         side_to_move: chess.Color,
@@ -702,13 +734,16 @@ class _LiveGameReporter:
         engine: EngineInstance,
         line: str,
         info: EngineSearchInfo,
+        *,
+        force: bool = False,
+        root_fen: str | None = None,
     ) -> None:
         now = time.monotonic()
-        if now - self._last_engine_info_at[side] < ENGINE_INFO_PUBLISH_INTERVAL_S:
+        if not force and now - self._last_engine_info_at[side] < ENGINE_INFO_PUBLISH_INTERVAL_S:
             return
         self._last_engine_info_at[side] = now
         engine_data = _live_engine_data(info)
-        root_fen = self._game.state.get_board().fen()
+        root_fen = root_fen or self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen
         engine_data["info"] = line
         publish_engine_info(

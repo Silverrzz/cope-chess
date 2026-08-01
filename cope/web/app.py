@@ -5,6 +5,7 @@ import contextlib
 import copy
 import hmac
 import ipaddress
+import math
 import re
 import sqlite3
 import threading
@@ -80,6 +81,7 @@ from cope.network import (
     WILDCARD_HOSTS,
     default_worker_port,
 )
+from cope.web.forms import form_value
 from cope.version import app_version
 
 
@@ -329,6 +331,19 @@ class StreamHub:
                 "observed_at": event.sent_at,
                 "sent_at": event.sent_at,
             }
+
+
+def _enqueue_internal_event(
+    queue: asyncio.Queue[StreamEnvelope | None],
+    event: StreamEnvelope,
+) -> None:
+    if queue.full():
+        while not queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+        queue.put_nowait(None)
+        return
+    queue.put_nowait(event)
 
 
 def create_app(
@@ -2250,6 +2265,114 @@ def _standings(
     else:
         rows.sort(key=lambda row: (-row["points"], row["name"]))
     return rows
+
+
+def _tournament_rating_summaries(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> list[dict[str, Any]]:
+    commits = connection.execute(
+        """
+        SELECT rating_commit.rating_list_id, rating_list.name
+        FROM tournament_rating_list_commits rating_commit
+        JOIN rating_lists rating_list ON rating_list.id = rating_commit.rating_list_id
+        WHERE rating_commit.tournament_id = ? AND rating_commit.status = 'applied'
+        ORDER BY rating_list.name, rating_commit.rating_list_id
+        """,
+        (tournament_id,),
+    ).fetchall()
+    summaries: list[dict[str, Any]] = []
+    for commit in commits:
+        history = connection.execute(
+            """
+            SELECT rating_history.id, rating_history.engine_id,
+                   rating_history.elo_before, rating_history.elo,
+                   rating_history.elo_change, rating_history.score,
+                   opponent.elo_before AS opponent_elo
+            FROM rating_list_history rating_history
+            JOIN rating_list_history opponent
+              ON opponent.game_id = rating_history.game_id
+             AND opponent.rating_list_id = rating_history.rating_list_id
+             AND opponent.engine_id = rating_history.opponent_engine_id
+            WHERE rating_history.tournament_id = ?
+              AND rating_history.rating_list_id = ?
+            ORDER BY rating_history.id
+            """,
+            (tournament_id, commit["rating_list_id"]),
+        ).fetchall()
+        by_engine: dict[int, dict[str, Any]] = {}
+        for item in history:
+            engine_id = int(item["engine_id"])
+            values = by_engine.setdefault(
+                engine_id,
+                {
+                    "engine_id": engine_id,
+                    "elo_before": float(item["elo_before"]),
+                    "elo_after": float(item["elo"]),
+                    "elo_change": 0.0,
+                    "score": 0.0,
+                    "games": 0,
+                    "wins": 0,
+                    "draws": 0,
+                    "losses": 0,
+                    "opponent_elos": [],
+                },
+            )
+            score = float(item["score"])
+            values["elo_after"] = float(item["elo"])
+            values["elo_change"] += float(item["elo_change"])
+            values["score"] += score
+            values["games"] += 1
+            values["opponent_elos"].append(float(item["opponent_elo"]))
+            if score == 1.0:
+                values["wins"] += 1
+            elif score == 0.5:
+                values["draws"] += 1
+            else:
+                values["losses"] += 1
+
+        rows: list[dict[str, Any]] = []
+        for values in by_engine.values():
+            opponent_elos = values.pop("opponent_elos")
+            average_opponent_elo = sum(opponent_elos) / len(opponent_elos)
+            score_fraction = values["score"] / values["games"]
+            if score_fraction <= 0:
+                performance_difference = -800.0
+            elif score_fraction >= 1:
+                performance_difference = 800.0
+            else:
+                performance_difference = max(
+                    -800.0,
+                    min(
+                        800.0,
+                        400.0 * math.log10(score_fraction / (1.0 - score_fraction)),
+                    ),
+                )
+            values["elo_before"] = round(values["elo_before"], 2)
+            values["elo_after"] = round(values["elo_after"], 2)
+            values["elo_change"] = round(values["elo_change"], 2)
+            values["score"] = round(values["score"], 2)
+            values["average_opponent_elo"] = round(average_opponent_elo, 2)
+            values["performance_elo"] = round(
+                average_opponent_elo + performance_difference,
+                2,
+            )
+            rows.append(values)
+
+        initial_elos = [float(row["elo_before"]) for row in rows]
+        summaries.append(
+            {
+                "rating_list_id": commit["rating_list_id"],
+                "rating_list_name": commit["name"],
+                "average_competitor_elo": (
+                    round(sum(initial_elos) / len(initial_elos), 2)
+                    if initial_elos
+                    else None
+                ),
+                "rows": rows,
+            }
+        )
+    return summaries
 
 
 def _tournament_summary(

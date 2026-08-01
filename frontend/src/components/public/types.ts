@@ -106,6 +106,27 @@ export interface StandingRecord {
   stage?: number
 }
 
+export interface TournamentRatingRow {
+  engine_id: Identifier
+  elo_before: number
+  elo_after: number
+  elo_change: number
+  score: number
+  games: number
+  wins: number
+  draws: number
+  losses: number
+  average_opponent_elo: number
+  performance_elo: number
+}
+
+export interface TournamentRatingSummary {
+  rating_list_id: Identifier
+  rating_list_name: string
+  average_competitor_elo: number | null
+  rows: TournamentRatingRow[]
+}
+
 export interface EngineAnalysis {
   depth?: string | number | null
   nodes?: string | number | null
@@ -159,6 +180,7 @@ export interface TournamentDetailResponse {
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
   standings?: StandingRecord[]
+  rating_summaries?: TournamentRatingSummary[]
   settings?: Array<{ label: string; value: string } | [string, string]>
   engine_hardware?: HardwareRecord[]
   chat_messages?: ChatMessage[]

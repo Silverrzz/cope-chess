@@ -4,7 +4,7 @@ import hashlib
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from cope.core.models import EngineSpec, HardwareInfo
 
