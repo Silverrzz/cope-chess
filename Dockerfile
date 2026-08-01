@@ -24,6 +24,7 @@ RUN apt-get update \
     && groupadd --system --gid 10001 cope \
     && useradd --system --uid 10001 --gid cope --home-dir /app cope
 COPY --from=docker-tools /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY pyproject.toml MANIFEST.in ./
 COPY cope/ ./cope/

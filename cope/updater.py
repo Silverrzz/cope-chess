@@ -189,18 +189,12 @@ def _run_deployment(
             current_commit=target_commit,
         )
         _set_job_status(config, job_id, "succeeded")
-        _run(["docker", "image", "rm", rollback_tag], check=False)
+        _run(["docker", "image", "rm", "--force", rollback_tag], check=False)
         LOG.info("deployment completed job_id=%s commit=%s", job_id, target_commit)
-        _compose(
-            config,
-            source_dir,
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "updater",
-            check=False,
-        )
+        try:
+            _schedule_updater_restart(config, source_dir, job_id)
+        except Exception:
+            LOG.exception("could not schedule updater self-restart job_id=%s", job_id)
     except Exception as error:
         detail = (str(error).strip() or error.__class__.__name__)[:4000]
         LOG.exception("deployment failed job_id=%s", job_id)
@@ -642,6 +636,41 @@ def _compose(
         check=check,
         capture=True,
         environment=environment,
+    )
+
+
+def _schedule_updater_restart(
+    config: UpdaterConfig,
+    source_dir: Path,
+    job_id: int,
+) -> None:
+    project_name = _compose_project_name(config.compose_project)
+    host_source_dir = _host_source_dir(source_dir)
+    helper_name = f"{project_name}-updater-handoff-{job_id}"
+    _run(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            helper_name,
+            "--entrypoint",
+            "/bin/sh",
+            "--volume",
+            "/var/run/docker.sock:/var/run/docker.sock",
+            "--volume",
+            f"{host_source_dir}:/workspace",
+            "--workdir",
+            "/workspace",
+            "--env",
+            f"COPE_HOST_SOURCE_DIR={host_source_dir}",
+            "--env",
+            f"COPE_COMPOSE_PROJECT={project_name}",
+            "cope-chess:local",
+            "-c",
+            "sleep 2; docker compose --project-name \"$COPE_COMPOSE_PROJECT\" --project-directory /workspace --file /workspace/compose.yaml up -d --no-deps --force-recreate updater",
+        ]
     )
 
 
