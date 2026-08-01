@@ -7,20 +7,32 @@ interface MarkdownColumn<T> {
   value: (row: T, index: number) => string
 }
 
-function markdownCell(value: string | number): string {
-  return String(value).replaceAll('|', '\\|').replaceAll('\n', ' ')
+function tableCell(value: string | number): string {
+  return String(value).replaceAll('|', '¦').replaceAll('\n', ' ')
 }
 
 function markdownTable<T>(columns: MarkdownColumn<T>[], rows: T[]): string[] {
-  const alignment = (column: MarkdownColumn<T>) => {
-    if (column.align === 'right') return '---:'
-    if (column.align === 'center') return ':---:'
-    return ':---'
+  const values = rows.map((row, index) => columns.map((column) => tableCell(column.value(row, index))))
+  const widths = columns.map((column, columnIndex) => Math.max(
+    column.heading.length,
+    ...values.map((row) => row[columnIndex]!.length),
+  ))
+  const padded = (value: string, width: number, align: MarkdownColumn<T>['align']) => {
+    if (align === 'right') return value.padStart(width)
+    if (align === 'center') {
+      const remaining = width - value.length
+      const left = Math.floor(remaining / 2)
+      return `${' '.repeat(left)}${value}${' '.repeat(remaining - left)}`
+    }
+    return value.padEnd(width)
   }
+  const line = (values: string[]) => `| ${values.map((value, index) => padded(value, widths[index]!, columns[index]!.align)).join(' | ')} |`
   return [
-    `| ${columns.map((column) => markdownCell(column.heading)).join(' | ')} |`,
-    `| ${columns.map(alignment).join(' | ')} |`,
-    ...rows.map((row, index) => `| ${columns.map((column) => markdownCell(column.value(row, index))).join(' | ')} |`),
+    '```text',
+    line(columns.map((column) => column.heading)),
+    `|-${widths.map((width) => '-'.repeat(width)).join('-|-')}-|`,
+    ...values.map(line),
+    '```',
   ]
 }
 
