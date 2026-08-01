@@ -50,9 +50,7 @@ from cope.db import (
     get_engine_record,
     get_engine_family,
     get_engine_version_record,
-    get_app_settings,
     get_git_host,
-    get_openai_api_key,
     get_game,
     get_opening_suite,
     get_rating_list,
@@ -89,19 +87,21 @@ from cope.db import (
     update_chat_settings,
     update_engine,
     update_engine_version,
-    update_app_settings,
     update_git_host,
     update_opening_suite,
     update_tournament,
     update_worker_label,
 )
 from cope.web import forms
+from cope.engine_dockerfiles import (
+    EngineDockerfileError,
+    list_engine_dockerfiles,
+    read_engine_dockerfile,
+)
 from cope.web.engine_sources import (
     SourceServiceError,
     canonical_repository_url,
-    generate_dockerfile,
     list_releases,
-    repository_context,
     search_repositories,
 )
 from cope.web.openings import format_opening, parse_opening_input
@@ -115,6 +115,20 @@ from cope.ratings import (
 
 
 LOG = logging.getLogger("cope.web.api")
+
+
+def _load_engine_dockerfile(selected_path: str) -> str:
+    try:
+        return read_engine_dockerfile(selected_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Dockerfile {selected_path!r} was not found in data/engines.",
+        ) from exc
+    except EngineDockerfileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="The engine Dockerfile could not be read.") from exc
 
 
 def _engine_version_admin_payload(version) -> dict[str, Any]:
@@ -274,37 +288,10 @@ class EnginePayload(BaseModel):
 
 class EngineVersionUpdatePayload(BaseModel):
     version: str = Field(min_length=1, max_length=80)
-    dockerfile: str = Field(default="", max_length=100_000)
+    dockerfile_path: str = Field(min_length=1, max_length=500)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
 
-    @field_validator("version")
-    @classmethod
-    def strip_version(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("version cannot be blank")
-        return value
-
-    @field_validator("dockerfile")
-    @classmethod
-    def validate_dockerfile(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            return ""
-        if not value.startswith("FROM "):
-            raise ValueError("Dockerfile must start with FROM")
-        return value + "\n"
-
-
-class EngineVersionCreatePayload(BaseModel):
-    version: str = Field(min_length=1, max_length=80)
-    git_host_id: int = Field(gt=0)
-    repository_full_name: str = Field(min_length=3, max_length=300)
-    source_ref: str = Field(min_length=1, max_length=200)
-    source_kind: str = Field(pattern=r"^(release|commit)$")
-    uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
-
-    @field_validator("version", "repository_full_name", "source_ref")
+    @field_validator("version", "dockerfile_path")
     @classmethod
     def strip_value(cls, value: str) -> str:
         value = value.strip()
@@ -313,26 +300,21 @@ class EngineVersionCreatePayload(BaseModel):
         return value
 
 
-class DockerfileGenerationPayload(BaseModel):
-    additional_context: str = Field(default="", max_length=4_000)
+class EngineVersionCreatePayload(BaseModel):
+    version: str = Field(min_length=1, max_length=80)
+    git_host_id: int = Field(gt=0)
+    repository_full_name: str = Field(min_length=3, max_length=300)
+    source_ref: str = Field(min_length=1, max_length=200)
+    source_kind: str = Field(pattern=r"^(release|commit)$")
+    dockerfile_path: str = Field(min_length=1, max_length=500)
+    uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
 
-    @field_validator("additional_context")
+    @field_validator("version", "repository_full_name", "source_ref", "dockerfile_path")
     @classmethod
-    def strip_additional_context(cls, value: str) -> str:
-        return value.strip()
-
-
-class AppSettingsPayload(BaseModel):
-    openai_model: str = Field(min_length=1, max_length=120)
-    openai_api_key: str | None = Field(default=None, max_length=500)
-    clear_openai_api_key: bool = False
-
-    @field_validator("openai_model")
-    @classmethod
-    def strip_model(cls, value: str) -> str:
+    def strip_value(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("model cannot be blank")
+            raise ValueError("value cannot be blank")
         return value
 
 
@@ -1081,11 +1063,9 @@ def register_api_routes(app: FastAPI) -> None:
 
     @app.get("/api/admin/settings")
     def admin_settings(connection: sqlite3.Connection = Depends(web_app._database)):
-        settings = get_app_settings(connection)
         hosts = list_git_hosts(connection)
         return _json(
             {
-                "settings": settings,
                 "git_hosts": [
                     {
                         "id": host.id,
@@ -1102,25 +1082,20 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
-    @app.put("/api/admin/settings")
-    def admin_update_settings(
-        payload: AppSettingsPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        update_app_settings(
-            connection,
-            openai_model=payload.openai_model,
-            openai_api_key=(
-                payload.openai_api_key.strip()
-                if payload.openai_api_key is not None and payload.openai_api_key.strip()
-                else None
-            ),
-            clear_openai_api_key=payload.clear_openai_api_key,
-        )
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        return _json({"message": "AI settings saved."})
+    @app.get("/api/admin/engine-dockerfiles")
+    def admin_engine_dockerfiles():
+        try:
+            files = list_engine_dockerfiles()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="The data/engines directory could not be read.",
+            ) from exc
+        return _json({"dockerfiles": files})
+
+    @app.get("/api/admin/engine-dockerfiles/content")
+    def admin_engine_dockerfile_content(path: str = Query(min_length=1, max_length=500)):
+        return _json({"path": path, "content": _load_engine_dockerfile(path)})
 
     @app.post("/api/admin/git-hosts")
     def admin_create_git_host(
@@ -1376,6 +1351,7 @@ def register_api_routes(app: FastAPI) -> None:
             repository_url = canonical_repository_url(host, payload.repository_full_name)
         except SourceServiceError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
         try:
             version_id = create_engine_version(
                 connection,
@@ -1386,7 +1362,8 @@ def register_api_routes(app: FastAPI) -> None:
                 repository_full_name=payload.repository_full_name,
                 source_ref=payload.source_ref,
                 source_kind=payload.source_kind,
-                dockerfile="",
+                dockerfile_path=payload.dockerfile_path,
+                dockerfile=dockerfile,
                 uci_options=payload.uci_options,
                 active=True,
             )
@@ -1428,12 +1405,14 @@ def register_api_routes(app: FastAPI) -> None:
         options = payload.uci_options
         if any(not str(name).strip() for name in options):
             raise HTTPException(status_code=422, detail="Default UCI options must be an object with non-empty names.")
+        dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
         try:
             update_engine_version(
                 connection,
                 version_id,
                 version=payload.version,
-                dockerfile=payload.dockerfile,
+                dockerfile_path=payload.dockerfile_path,
+                dockerfile=dockerfile,
                 uci_options=options,
                 active=True,
             )
@@ -1491,14 +1470,23 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        if not version.dockerfile_path:
+            raise HTTPException(
+                status_code=409,
+                detail="Select and save a Dockerfile from data/engines before requesting a benchmark.",
+            )
+        dockerfile = _load_engine_dockerfile(version.dockerfile_path)
+        if dockerfile != version.dockerfile:
+            raise HTTPException(
+                status_code=409,
+                detail="The selected Dockerfile changed in data/engines. Save the version before benchmarking.",
+            )
         engine = next((item for item in list_engines(connection) if item.engine_id == version_id), None)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
-        if not engine.dockerfile.strip():
-            raise HTTPException(
-                status_code=409,
-                detail="Add and save a Dockerfile before requesting a benchmark.",
-            )
         try:
             count = reschedule_engine_benchmarks(connection, engine=engine)
         except ValueError as exc:
@@ -1530,60 +1518,6 @@ def register_api_routes(app: FastAPI) -> None:
                 if count
                 else "No benchmark or hardware assignment was stored."
             )
-        })
-
-    @app.post("/api/admin/engine-versions/{version_id}/generate-dockerfile")
-    def admin_generate_engine_dockerfile(
-        version_id: int,
-        payload: DockerfileGenerationPayload,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        version = get_engine_version_record(connection, version_id)
-        if version is None:
-            raise HTTPException(status_code=404, detail="Engine version not found.")
-        if version.git_host_id is None:
-            raise HTTPException(status_code=409, detail="Engine version has no Git host.")
-        host = get_git_host(connection, version.git_host_id)
-        if host is None:
-            raise HTTPException(status_code=409, detail="The version's Git host no longer exists.")
-        api_key = get_openai_api_key(connection)
-        settings = get_app_settings(connection)
-        if not api_key:
-            raise HTTPException(
-                status_code=409,
-                detail="Add an OpenAI API key in Settings before generating a Dockerfile.",
-            )
-        previous_failure = ""
-        for item in list_engine_benchmark_jobs(connection, engine_version_id=version_id):
-            if item.job.build_hash != version.build_hash or item.job.status != "failed":
-                continue
-            previous_failure = "\n\n".join(
-                part for part in (item.job.error.strip(), item.job.output.strip()) if part
-            )[-16_000:]
-            break
-        try:
-            context = repository_context(
-                host,
-                version.repository_full_name,
-                version.source_ref,
-            )
-            dockerfile = generate_dockerfile(
-                api_key=api_key,
-                model=settings.openai_model,
-                repository_url=version.repository_url,
-                full_name=version.repository_full_name,
-                source_ref=version.source_ref,
-                context=context,
-                additional_context=payload.additional_context,
-                previous_failure=previous_failure,
-            )
-        except SourceServiceError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return _json({
-            "dockerfile": dockerfile,
-            "model": settings.openai_model,
-            "reviewed": True,
-            "used_failure_context": bool(previous_failure),
         })
 
     @app.delete("/api/admin/engine-versions/{version_id}")

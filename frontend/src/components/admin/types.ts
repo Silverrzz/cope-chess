@@ -11,6 +11,7 @@ export interface Engine {
   repository_full_name: string
   source_ref: string
   source_kind: 'release' | 'commit'
+  dockerfile_path: string
   dockerfile: string
   build_hash: string
   uci_options: Record<string, string | number | boolean>

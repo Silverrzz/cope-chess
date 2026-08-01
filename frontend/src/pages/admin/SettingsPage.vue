@@ -7,11 +7,6 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText } from '@/components/admin/format'
 
-interface Settings {
-  openai_api_key_configured: boolean
-  openai_model: string
-}
-
 interface GitHost {
   id: number
   name: string
@@ -27,12 +22,8 @@ interface GitHost {
 const toast = useToast()
 const { confirm } = useConfirm()
 const loading = ref(true)
-const savingAi = ref(false)
 const hostPending = ref<number | 'new' | null>(null)
 const error = ref('')
-const settings = reactive<Settings>({ openai_api_key_configured: false, openai_model: 'gpt-5.6-sol' })
-const apiKey = ref('')
-const clearApiKey = ref(false)
 const hosts = ref<GitHost[]>([])
 const showNewHost = ref(false)
 const newHost = reactive<GitHost>({
@@ -49,36 +40,12 @@ const newHost = reactive<GitHost>({
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const response = await api.get<{ settings: Settings; git_hosts: GitHost[] }>('/api/admin/settings')
-    Object.assign(settings, response.settings)
+    const response = await api.get<{ git_hosts: GitHost[] }>('/api/admin/settings')
     hosts.value = response.git_hosts.map((host) => ({ ...host, access_token: '', clear_access_token: false }))
   } catch (cause) {
     error.value = errorText(cause)
   } finally {
     loading.value = false
-  }
-}
-
-async function saveAi(): Promise<void> {
-  savingAi.value = true
-  error.value = ''
-  try {
-    const response = await api.put<{ message: string }>('/api/admin/settings', {
-      body: {
-        openai_model: settings.openai_model.trim(),
-        openai_api_key: apiKey.value.trim() || null,
-        clear_openai_api_key: clearApiKey.value,
-      },
-    })
-    toast.success(response.message)
-    apiKey.value = ''
-    clearApiKey.value = false
-    await load()
-  } catch (cause) {
-    error.value = errorText(cause)
-    toast.error(cause)
-  } finally {
-    savingAi.value = false
   }
 }
 
@@ -168,16 +135,6 @@ onMounted(load)
     <InlineFeedback :message="error" />
     <div v-if="loading" class="panel loading-card">Loading settings…</div>
     <template v-else>
-      <form class="panel settings-card" @submit.prevent="saveAi">
-        <div class="card-heading"><div><h2>OpenAI</h2><p>Used to generate engine Dockerfiles from repository context.</p></div><span :class="{ configured: settings.openai_api_key_configured }">{{ settings.openai_api_key_configured ? 'API key configured' : 'API key required' }}</span></div>
-        <div class="form-grid">
-          <label class="field"><span>Model</span><input v-model="settings.openai_model" class="input" required maxlength="120" placeholder="gpt-5.6-sol"></label>
-          <label class="field"><span>API key</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" :placeholder="settings.openai_api_key_configured ? 'Leave blank to keep the current key' : 'sk-…'"></label>
-          <label v-if="settings.openai_api_key_configured" class="switch-row"><input v-model="clearApiKey" type="checkbox"><span><strong>Remove current API key</strong></span></label>
-        </div>
-        <div class="form-actions"><button class="button button--primary" type="submit" :disabled="savingAi">{{ savingAi ? 'Saving…' : 'Save AI settings' }}</button></div>
-      </form>
-
       <section class="host-section">
         <div class="section-heading"><div><h2>Git hosts</h2><p>Add an API token to authenticate repository searches and avoid public rate limits.</p></div><button class="button button--primary button--small" type="button" @click="showNewHost = !showNewHost">{{ showNewHost ? 'Cancel' : 'Add Git host' }}</button></div>
         <form v-if="showNewHost" class="panel settings-card" @submit.prevent="addHost">

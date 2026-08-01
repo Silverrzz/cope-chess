@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
+from cope.engine_dockerfiles import engine_build_hash
 from cope.core.models import (
     AssignmentProgress,
     EngineSpec,
@@ -199,6 +199,7 @@ class EngineVersionRecord:
     repository_full_name: str
     source_ref: str
     source_kind: str
+    dockerfile_path: str
     dockerfile: str
     build_hash: str
     uci_options: dict[str, Any]
@@ -206,12 +207,6 @@ class EngineVersionRecord:
     benchmark_current: bool
     engine_active: bool
     created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class AppSettingsRecord:
-    openai_api_key_configured: bool
-    openai_model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,16 +439,18 @@ def create_engine_version(
     repository_full_name: str,
     source_ref: str,
     source_kind: str,
+    dockerfile_path: str,
     dockerfile: str,
     uci_options: dict[str, Any] | None = None,
     active: bool = True,
 ) -> int:
-    build_hash = _engine_build_hash(repository_url, source_ref, dockerfile)
+    build_hash = engine_build_hash(repository_url, source_ref, dockerfile)
     cursor = connection.execute(
         """INSERT INTO engine_versions
            (engine_id, version, git_host_id, repository_url, repository_full_name,
-            source_ref, source_kind, dockerfile, build_hash, uci_options, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            source_ref, source_kind, dockerfile_path, dockerfile, build_hash, uci_options,
+            active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             engine_id,
             version,
@@ -462,6 +459,7 @@ def create_engine_version(
             repository_full_name,
             source_ref,
             source_kind,
+            dockerfile_path,
             dockerfile,
             build_hash,
             _json_dump(uci_options or {}),
@@ -477,6 +475,7 @@ def update_engine_version(
     version_id: int,
     *,
     version: str,
+    dockerfile_path: str,
     dockerfile: str,
     uci_options: dict[str, Any],
     active: bool,
@@ -484,12 +483,21 @@ def update_engine_version(
     current = get_engine_version_record(connection, version_id)
     if current is None:
         raise ValueError("engine version not found")
-    build_hash = _engine_build_hash(current.repository_url, current.source_ref, dockerfile)
+    build_hash = engine_build_hash(current.repository_url, current.source_ref, dockerfile)
     connection.execute(
         """UPDATE engine_versions
-           SET version = ?, dockerfile = ?, build_hash = ?, uci_options = ?, active = ?
+           SET version = ?, dockerfile_path = ?, dockerfile = ?, build_hash = ?,
+               uci_options = ?, active = ?
            WHERE id = ?""",
-        (version, dockerfile, build_hash, _json_dump(uci_options), int(active), version_id),
+        (
+            version,
+            dockerfile_path,
+            dockerfile,
+            build_hash,
+            _json_dump(uci_options),
+            int(active),
+            version_id,
+        ),
     )
 
 
@@ -524,46 +532,6 @@ def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> No
         (version_id, version_id),
     )
     connection.execute("DELETE FROM engine_versions WHERE id = ?", (version_id,))
-
-
-def get_app_settings(connection: sqlite3.Connection) -> AppSettingsRecord:
-    values = {
-        str(row["key"]): str(row["value"])
-        for row in connection.execute(
-            "SELECT key, value FROM app_settings WHERE key IN ('openai_api_key', 'openai_model')"
-        )
-    }
-    return AppSettingsRecord(
-        openai_api_key_configured=bool(values.get("openai_api_key", "")),
-        openai_model=values.get("openai_model", "gpt-5.6-sol"),
-    )
-
-
-def get_openai_api_key(connection: sqlite3.Connection) -> str:
-    row = connection.execute(
-        "SELECT value FROM app_settings WHERE key = 'openai_api_key'"
-    ).fetchone()
-    return "" if row is None else str(row["value"])
-
-
-def update_app_settings(
-    connection: sqlite3.Connection,
-    *,
-    openai_model: str,
-    openai_api_key: str | None = None,
-    clear_openai_api_key: bool = False,
-) -> None:
-    connection.execute(
-        """INSERT INTO app_settings (key, value) VALUES ('openai_model', ?)
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
-        (openai_model,),
-    )
-    if clear_openai_api_key or openai_api_key is not None:
-        connection.execute(
-            """INSERT INTO app_settings (key, value) VALUES ('openai_api_key', ?)
-               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
-            ("" if clear_openai_api_key else openai_api_key,),
-        )
 
 
 def list_git_hosts(
@@ -2909,6 +2877,7 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         repository_full_name=row["repository_full_name"] or "",
         source_ref=row["source_ref"] or "",
         source_kind=row["source_kind"] or "commit",
+        dockerfile_path=row["dockerfile_path"] or "",
         dockerfile=row["dockerfile"] or "",
         build_hash=row["build_hash"] or "",
         uci_options=json.loads(row["uci_options"]),
@@ -2930,11 +2899,6 @@ def _git_host_from_row(row: sqlite3.Row) -> GitHostRecord:
         enabled=bool(row["enabled"]),
         created_at=row["created_at"],
     )
-
-
-def _engine_build_hash(repository_url: str, source_ref: str, dockerfile: str) -> str:
-    value = "\0".join((repository_url, source_ref, dockerfile)).encode("utf-8")
-    return hashlib.sha256(value).hexdigest()
 
 
 def _opening_suite_from_row(row: sqlite3.Row) -> OpeningSuiteRecord:

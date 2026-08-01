@@ -13,12 +13,18 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from cope.engine_dockerfiles import (
+    EngineDockerfileError,
+    engine_build_hash,
+    read_engine_dockerfile,
+)
+
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
 # Kept as an import alias while the rest of the application moves from the old
 # path-shaped setting to a PostgreSQL URL.
 DEFAULT_DB_PATH = DEFAULT_DATABASE_URL
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 _PLACEHOLDER = re.compile(r"\?")
 _pools: dict[tuple[str, str | None], ConnectionPool] = {}
@@ -237,6 +243,26 @@ def initialize_connection(connection: DatabaseConnection) -> None:
         connection._connection().execute(schema)
     except psycopg.Error as exc:
         raise sqlite3.DatabaseError(str(exc)) from exc
+    rows = connection.execute(
+        """SELECT id, repository_url, source_ref, dockerfile_path, dockerfile, build_hash
+           FROM engine_versions WHERE dockerfile_path <> ''"""
+    ).fetchall()
+    for row in rows:
+        try:
+            content = read_engine_dockerfile(str(row["dockerfile_path"]))
+        except (EngineDockerfileError, FileNotFoundError):
+            content = ""
+        build_hash = engine_build_hash(
+            str(row["repository_url"]),
+            str(row["source_ref"]),
+            content,
+        )
+        if content == row["dockerfile"] and build_hash == row["build_hash"]:
+            continue
+        connection.execute(
+            "UPDATE engine_versions SET dockerfile = ?, build_hash = ? WHERE id = ?",
+            (content, build_hash, row["id"]),
+        )
 
 
 def database_schema_version(connection: DatabaseConnection) -> int:

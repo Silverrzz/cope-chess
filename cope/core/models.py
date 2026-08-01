@@ -93,8 +93,6 @@ class EngineSpec(StrictModel):
     version: str = Field(min_length=1, max_length=80)
     repository_url: str = Field(min_length=1, max_length=1000)
     source_ref: str = Field(min_length=1, max_length=200)
-    # A newly-created version is intentionally unconfigured until an admin
-    # supplies a Dockerfile and explicitly requests a benchmark.
     dockerfile: str = Field(default="", max_length=100_000)
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)

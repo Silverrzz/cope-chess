@@ -22,15 +22,7 @@ CREATE TABLE IF NOT EXISTS engines (
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
-CREATE TABLE IF NOT EXISTS app_settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-INSERT INTO app_settings (key, value) VALUES
-  ('openai_api_key', ''),
-  ('openai_model', 'gpt-5.6-sol')
-ON CONFLICT (key) DO NOTHING;
+DROP TABLE IF EXISTS app_settings;
 
 CREATE TABLE IF NOT EXISTS git_hosts (
   id BIGSERIAL PRIMARY KEY,
@@ -56,6 +48,7 @@ CREATE TABLE IF NOT EXISTS engine_versions (
   repository_full_name TEXT NOT NULL,
   source_ref TEXT NOT NULL,
   source_kind TEXT NOT NULL CHECK (source_kind IN ('release', 'commit')),
+  dockerfile_path TEXT NOT NULL DEFAULT '',
   dockerfile TEXT NOT NULL,
   build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
   uci_options TEXT NOT NULL DEFAULT '{}',
@@ -69,6 +62,7 @@ ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_url TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_full_name TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_ref TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_kind TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS dockerfile_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS dockerfile TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS build_hash TEXT;
 DO $$
@@ -725,7 +719,7 @@ SET result = NULL,
 WHERE status = 'pending'
   AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 18)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 19)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

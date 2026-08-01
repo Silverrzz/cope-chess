@@ -12,6 +12,11 @@ import StreamStatus from '@/components/ui/StreamStatus.vue'
 import { errorText, formatDate, formatNumber, humanize } from '@/components/admin/format'
 import type { Engine, EngineBenchmarkJob } from '@/components/admin/types'
 
+interface DockerfileEntry {
+  path: string
+  size: number
+}
+
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
@@ -20,12 +25,14 @@ const id = computed(() => Number(route.params.versionId))
 const version = ref<Engine | null>(null)
 const loading = ref(true)
 const saving = ref(false)
-const generating = ref(false)
-const generationContext = ref('')
 const deleting = ref(false)
 const rescheduling = ref(false)
 const forgetting = ref(false)
 const dockerfileDirty = ref(false)
+const dockerfiles = ref<DockerfileEntry[]>([])
+const dockerfileContent = ref('')
+const loadingDockerfile = ref(false)
+const savedDockerfilePath = ref('')
 const error = ref('')
 const benchmarks = ref<EngineBenchmarkJob[]>([])
 const nowMs = ref(Date.now())
@@ -138,6 +145,11 @@ const { state: streamState } = useEventStream<{ benchmarks: EngineBenchmarkJob[]
     onMessage: (snapshot) => {
       benchmarks.value = snapshot.benchmarks
       if (version.value) {
+        if (dockerfileDirty.value) {
+          version.value.benchmark_current = false
+          version.value.active = false
+          return
+        }
         version.value.benchmark_current = snapshot.benchmarks.some(
           (benchmark) => benchmark.build_hash === version.value?.build_hash && benchmark.status === 'succeeded',
         )
@@ -151,10 +163,17 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const response = await api.get<{ version: Engine; benchmarks: EngineBenchmarkJob[] }>(`/api/admin/engine-versions/${id.value}`)
+    const [response, fileResponse] = await Promise.all([
+      api.get<{ version: Engine; benchmarks: EngineBenchmarkJob[] }>(`/api/admin/engine-versions/${id.value}`),
+      api.get<{ dockerfiles: DockerfileEntry[] }>('/api/admin/engine-dockerfiles'),
+    ])
     version.value = response.version
     benchmarks.value = response.benchmarks
+    dockerfiles.value = fileResponse.dockerfiles
+    savedDockerfilePath.value = response.version.dockerfile_path
+    dockerfileContent.value = response.version.dockerfile
     dockerfileDirty.value = false
+    await loadDockerfile()
   } catch (cause) {
     error.value = errorText(cause)
   } finally {
@@ -164,13 +183,17 @@ async function load(): Promise<void> {
 
 async function save(): Promise<void> {
   if (!version.value) return
+  if (!version.value.dockerfile_path) {
+    error.value = 'Choose a Dockerfile from data/engines.'
+    return
+  }
   saving.value = true
   error.value = ''
   try {
     const response = await api.put<{ message: string }>(`/api/admin/engine-versions/${id.value}`, {
       body: {
         version: version.value.version.trim(),
-        dockerfile: version.value.dockerfile,
+        dockerfile_path: version.value.dockerfile_path,
         uci_options: version.value.uci_options,
       },
     })
@@ -181,25 +204,6 @@ async function save(): Promise<void> {
     toast.error(cause)
   } finally {
     saving.value = false
-  }
-}
-
-async function generate(): Promise<void> {
-  if (!version.value) return
-  generating.value = true
-  error.value = ''
-  try {
-    const response = await api.post<{ dockerfile: string; model: string; reviewed: boolean; used_failure_context: boolean }>(`/api/admin/engine-versions/${id.value}/generate-dockerfile`, {
-      body: { additional_context: generationContext.value.trim() },
-    })
-    version.value.dockerfile = response.dockerfile
-    dockerfileChanged()
-    toast.success(response.used_failure_context ? `Dockerfile regenerated and reviewed with ${response.model} using the previous build failure.` : `Dockerfile generated and reviewed with ${response.model}. Review it, then save.`)
-  } catch (cause) {
-    error.value = errorText(cause)
-    toast.error(cause)
-  } finally {
-    generating.value = false
   }
 }
 
@@ -233,11 +237,37 @@ async function forgetBenchmark(): Promise<void> {
   }
 }
 
-function dockerfileChanged(): void {
+async function loadDockerfile(): Promise<void> {
   if (!version.value) return
-  dockerfileDirty.value = true
-  version.value.active = false
-  version.value.benchmark_current = false
+  if (!version.value.dockerfile_path) {
+    dockerfileContent.value = version.value.dockerfile
+    dockerfileDirty.value = false
+    return
+  }
+  loadingDockerfile.value = true
+  error.value = ''
+  try {
+    const response = await api.get<{ content: string }>('/api/admin/engine-dockerfiles/content', {
+      query: { path: version.value.dockerfile_path },
+    })
+    dockerfileContent.value = response.content
+    dockerfileDirty.value = version.value.dockerfile_path !== savedDockerfilePath.value || response.content !== version.value.dockerfile
+  } catch (cause) {
+    dockerfileContent.value = ''
+    dockerfileDirty.value = true
+    error.value = errorText(cause)
+  } finally {
+    loadingDockerfile.value = false
+  }
+  if (dockerfileDirty.value) {
+    version.value.active = false
+    version.value.benchmark_current = false
+  } else {
+    version.value.benchmark_current = benchmarks.value.some(
+      (benchmark) => benchmark.build_hash === version.value?.build_hash && benchmark.status === 'succeeded',
+    )
+    version.value.active = Boolean(version.value.engine_active && version.value.benchmark_current)
+  }
 }
 
 async function remove(): Promise<void> {
@@ -346,9 +376,10 @@ onBeforeUnmount(() => {
       </section>
 
       <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Dockerfile</h2><p>The image must provide an executable at <code>/opt/cope/engine</code> with <code>ENTRYPOINT ["./engine"]</code>.</p></div><button class="button button--secondary" type="button" :disabled="generating" @click="generate">{{ generating ? 'Generating and reviewing…' : currentBenchmark?.status === 'failed' ? 'Repair with AI' : 'Generate with AI' }}</button></div>
-        <label class="field generation-context"><span>Additional context for AI generation</span><textarea v-model="generationContext" class="input" rows="3" maxlength="4000" placeholder="Optional build requirements, target features, or repository-specific notes" /></label>
-        <textarea v-model="version.dockerfile" class="input dockerfile-editor" spellcheck="false" aria-label="Dockerfile" placeholder="Add a Dockerfile before benchmarking" @input="dockerfileChanged" />
+        <div class="detail-heading"><div><h2>Dockerfile</h2><p>Select a repository-managed file. Its contents are read-only in Cope Admin.</p></div></div>
+        <label class="field"><span>File in <code>data/engines</code></span><select v-model="version.dockerfile_path" class="input" required :disabled="!dockerfiles.length" @change="loadDockerfile"><option v-if="!version.dockerfile_path" value="">Choose a Dockerfile</option><option v-if="!dockerfiles.length" value="">No files found in data/engines</option><option v-for="file in dockerfiles" :key="file.path" :value="file.path">{{ file.path }}</option></select></label>
+        <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
+        <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
       </section>
 
       <section class="panel detail-card">
@@ -359,7 +390,7 @@ onBeforeUnmount(() => {
       <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
           <div><h2 id="benchmarks-title">Benchmarking</h2><p>Build and <code>bench</code> results stream live from the benchmark service.</p></div>
-          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || currentBenchmark?.status === 'running' || !version.dockerfile.trim() || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
+          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
         </div>
         <div v-if="currentBenchmark" class="benchmark-current">
           <div class="benchmark-summary">
@@ -404,7 +435,7 @@ onBeforeUnmount(() => {
             <pre ref="consoleRef" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0" @scroll.passive="handleConsoleScroll">{{ consoleOutput }}</pre>
           </section>
         </div>
-        <p v-else class="benchmark-empty">No job exists for this build. Save a Dockerfile, then request a benchmark when you are ready.</p>
+        <p v-else class="benchmark-empty">No job exists for this build. Select and save a Dockerfile, then request a benchmark when you are ready.</p>
         <details v-if="benchmarks.length > currentBenchmarks.length" class="benchmark-history"><summary>Previous build history ({{ benchmarks.length - currentBenchmarks.length }})</summary><div v-for="benchmark in benchmarks.filter((item) => item.build_hash !== version?.build_hash)" :key="benchmark.id" class="history-row"><span :class="`benchmark-state benchmark-state--${benchmark.status}`">{{ humanize(benchmark.status) }}</span><span>{{ formatDate(benchmark.finished_at ?? benchmark.scheduled_at) }}</span><strong v-if="benchmark.result">{{ formatNumber(benchmark.result.nps) }} NPS</strong><span v-else>{{ benchmark.error || 'No result' }}</span><details v-if="benchmark.output"><summary>Log</summary><pre>{{ benchmark.output }}</pre></details></div></details>
       </section>
 
@@ -417,7 +448,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.loading-card,.detail-card,.benchmark-card{padding:1rem}.detail-card,.benchmark-card{display:grid;gap:1rem}.detail-heading{align-items:start;border-bottom:1px solid var(--color-border);display:flex;gap:1rem;justify-content:space-between;padding-bottom:.8rem}.detail-heading h2{font-size:.95rem;margin:0}.detail-heading p{color:var(--color-text-muted);font-size:.7rem;margin:.2rem 0 0}.availability{display:grid;gap:.12rem;text-align:right}.availability strong{color:var(--color-text-muted);font-size:.76rem}.availability small{color:var(--color-text-muted);font-size:.67rem}.availability--active strong{color:var(--color-success,#166534)}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem;min-width:0}.field>span:first-child{font-size:.76rem;font-weight:650}.readonly-value{color:var(--color-text);font-size:.73rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dockerfile-editor{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.72rem;line-height:1.55;min-height:27rem;resize:vertical;tab-size:2;white-space:pre}.form-actions,.benchmark-actions{align-items:center;display:flex;gap:.6rem;justify-content:flex-end}.benchmark-state{border-radius:999px;font-size:.67rem;font-weight:700;padding:.32rem .55rem;text-transform:capitalize;white-space:nowrap}.benchmark-state--succeeded{background:#dcfce7;color:#166534}.benchmark-state--queued{background:#dbeafe;color:#1d4ed8}.benchmark-state--running{background:#fef3c7;color:#92400e}.benchmark-state--failed{background:#fee2e2;color:#b91c1c}.benchmark-state--missing{background:var(--color-surface-subtle);color:var(--color-text-muted)}.benchmark-current{display:grid;gap:.85rem}.benchmark-result{display:grid;gap:.2rem}.benchmark-result strong{font-size:1.1rem}.benchmark-result span,.benchmark-empty{color:var(--color-text-muted);font-size:.73rem}.benchmark-facts{display:grid;margin:0}.benchmark-facts>div{border-top:1px solid var(--color-border);display:grid;gap:.75rem;grid-template-columns:7rem 1fr;padding:.55rem 0}.benchmark-facts dt{color:var(--color-text-muted);font-size:.68rem}.benchmark-facts dd{font-size:.73rem;margin:0}.benchmark-facts small{color:var(--color-text-muted);display:block;margin-top:.15rem}.benchmark-error{background:#fef2f2;border-left:3px solid var(--color-danger);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.7rem;line-height:1.45;margin:0;padding:.65rem;white-space:pre-wrap}.benchmark-output,.benchmark-history{border-top:1px solid var(--color-border);font-size:.73rem;padding-top:.75rem}.benchmark-output summary,.benchmark-history summary{cursor:pointer;font-weight:650}.benchmark-output pre,.history-row pre{background:#0f172a;color:#e2e8f0;font-size:.67rem;line-height:1.45;margin:.65rem 0 0;max-height:22rem;overflow:auto;padding:.75rem;white-space:pre-wrap}.history-row{align-items:start;border-top:1px solid var(--color-border);display:grid;gap:.6rem;grid-template-columns:auto 10rem auto minmax(0,1fr);padding:.65rem 0}.history-row details{grid-column:1/-1}@media(max-width:42rem){.detail-heading{align-items:stretch;flex-direction:column}.availability{text-align:left}.form-grid{grid-template-columns:1fr}.dockerfile-editor{min-height:22rem}.history-row{grid-template-columns:1fr}.benchmark-facts>div{grid-template-columns:1fr}}
+.loading-card,.detail-card,.benchmark-card{padding:1rem}.detail-card,.benchmark-card{display:grid;gap:1rem}.detail-heading{align-items:start;border-bottom:1px solid var(--color-border);display:flex;gap:1rem;justify-content:space-between;padding-bottom:.8rem}.detail-heading h2{font-size:.95rem;margin:0}.detail-heading p{color:var(--color-text-muted);font-size:.7rem;margin:.2rem 0 0}.availability{display:grid;gap:.12rem;text-align:right}.availability strong{color:var(--color-text-muted);font-size:.76rem}.availability small{color:var(--color-text-muted);font-size:.67rem}.availability--active strong{color:var(--color-success,#166534)}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem;min-width:0}.field>span:first-child{font-size:.76rem;font-weight:650}.readonly-value{color:var(--color-text);font-size:.73rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dockerfile-viewer{background:#0f172a;border-radius:var(--radius-md);color:#e2e8f0;font-family:var(--font-mono);font-size:.72rem;line-height:1.55;margin:0;max-height:32rem;min-height:18rem;overflow:auto;padding:.8rem;tab-size:2;white-space:pre}.dockerfile-empty{color:var(--color-text-muted);font-size:.73rem;margin:0}.form-actions,.benchmark-actions{align-items:center;display:flex;gap:.6rem;justify-content:flex-end}.benchmark-state{border-radius:999px;font-size:.67rem;font-weight:700;padding:.32rem .55rem;text-transform:capitalize;white-space:nowrap}.benchmark-state--succeeded{background:#dcfce7;color:#166534}.benchmark-state--queued{background:#dbeafe;color:#1d4ed8}.benchmark-state--running{background:#fef3c7;color:#92400e}.benchmark-state--failed{background:#fee2e2;color:#b91c1c}.benchmark-state--missing{background:var(--color-surface-subtle);color:var(--color-text-muted)}.benchmark-current{display:grid;gap:.85rem}.benchmark-result{display:grid;gap:.2rem}.benchmark-result strong{font-size:1.1rem}.benchmark-result span,.benchmark-empty{color:var(--color-text-muted);font-size:.73rem}.benchmark-facts{display:grid;margin:0}.benchmark-facts>div{border-top:1px solid var(--color-border);display:grid;gap:.75rem;grid-template-columns:7rem 1fr;padding:.55rem 0}.benchmark-facts dt{color:var(--color-text-muted);font-size:.68rem}.benchmark-facts dd{font-size:.73rem;margin:0}.benchmark-facts small{color:var(--color-text-muted);display:block;margin-top:.15rem}.benchmark-error{background:#fef2f2;border-left:3px solid var(--color-danger);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.7rem;line-height:1.45;margin:0;padding:.65rem;white-space:pre-wrap}.benchmark-output,.benchmark-history{border-top:1px solid var(--color-border);font-size:.73rem;padding-top:.75rem}.benchmark-output summary,.benchmark-history summary{cursor:pointer;font-weight:650}.benchmark-output pre,.history-row pre{background:#0f172a;color:#e2e8f0;font-size:.67rem;line-height:1.45;margin:.65rem 0 0;max-height:22rem;overflow:auto;padding:.75rem;white-space:pre-wrap}.history-row{align-items:start;border-top:1px solid var(--color-border);display:grid;gap:.6rem;grid-template-columns:auto 10rem auto minmax(0,1fr);padding:.65rem 0}.history-row details{grid-column:1/-1}@media(max-width:42rem){.detail-heading{align-items:stretch;flex-direction:column}.availability{text-align:left}.form-grid{grid-template-columns:1fr}.history-row{grid-template-columns:1fr}.benchmark-facts>div{grid-template-columns:1fr}}
 .benchmark-progress{align-items:flex-start;background:color-mix(in srgb,var(--color-accent) 7%,transparent);border:1px solid color-mix(in srgb,var(--color-accent) 22%,transparent);border-radius:var(--radius-md,.6rem);display:flex;gap:.65rem;padding:.65rem .75rem}.benchmark-progress>span:last-child{display:grid;gap:.2rem;min-width:0}.benchmark-progress strong{font-size:.74rem}.benchmark-progress small{color:var(--color-text-muted);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.67rem;line-height:1.4;max-height:5.6rem;overflow:auto;white-space:pre-wrap}.benchmark-progress__pulse{animation:benchmark-pulse 1.2s ease-in-out infinite;background:var(--color-accent);border-radius:50%;height:.55rem;margin-top:.18rem;width:.55rem}@keyframes benchmark-pulse{50%{opacity:.35;transform:scale(.78)}}
 .benchmark-summary{align-items:start;display:flex;gap:1rem;justify-content:space-between}.benchmark-health{align-items:flex-start;background:var(--color-surface-subtle);border:1px solid var(--color-border);border-radius:var(--radius-md);display:flex;gap:.55rem;max-width:28rem;padding:.55rem .7rem}.benchmark-health>span:last-child{display:grid;gap:.12rem}.benchmark-health strong{font-size:.72rem}.benchmark-health small{color:var(--color-text-muted);font-size:.66rem;line-height:1.35}.benchmark-health__dot{background:var(--color-text-faint);border-radius:50%;box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-text-faint) 15%,transparent);flex:0 0 auto;height:.5rem;margin-top:.18rem;width:.5rem}.benchmark-health--active .benchmark-health__dot{animation:benchmark-live-pulse 1.5s ease-in-out infinite;background:var(--color-success);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-success) 15%,transparent)}.benchmark-health--success .benchmark-health__dot{background:var(--color-success);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-success) 15%,transparent)}.benchmark-health--waiting .benchmark-health__dot,.benchmark-health--warning .benchmark-health__dot{background:var(--color-warning);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-warning) 15%,transparent)}.benchmark-health--danger .benchmark-health__dot{background:var(--color-danger);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-danger) 15%,transparent)}
 .benchmark-progress-panel{background:color-mix(in srgb,var(--color-accent) 5%,var(--color-surface));border:1px solid color-mix(in srgb,var(--color-accent) 20%,var(--color-border));border-radius:var(--radius-md);display:grid;gap:.65rem;padding:.8rem}.benchmark-progress-heading{align-items:start;display:flex;gap:1rem;justify-content:space-between}.benchmark-progress-heading>span:first-child{display:grid;gap:.18rem;min-width:0}.benchmark-progress-heading strong{font-size:.78rem}.benchmark-progress-heading small{color:var(--color-text-muted);display:-webkit-box;font-family:var(--font-mono);font-size:.65rem;line-height:1.4;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:3;white-space:pre-wrap}.benchmark-progress-heading>span:last-child{color:var(--color-accent);font-family:var(--font-mono);font-size:.72rem;font-weight:700}.benchmark-progress-track{background:color-mix(in srgb,var(--color-border) 72%,transparent);border-radius:999px;height:.58rem;overflow:hidden}.benchmark-progress-fill{background:var(--color-success);border-radius:inherit;display:block;height:100%;min-width:0;transition:width .35s ease}.benchmark-progress-fill--active{animation:benchmark-stripes 1s linear infinite;background-color:var(--color-accent);background-image:linear-gradient(135deg,transparent 25%,rgb(255 255 255 / 22%) 25%,rgb(255 255 255 / 22%) 50%,transparent 50%,transparent 75%,rgb(255 255 255 / 22%) 75%);background-size:1.2rem 1.2rem}.benchmark-stage-list{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));list-style:none;margin:.05rem 0 0;padding:0}.benchmark-stage{align-items:center;color:var(--color-text-faint);display:grid;gap:.3rem;justify-items:center;position:relative;text-align:center}.benchmark-stage::before{background:var(--color-border);content:"";height:1px;left:0;position:absolute;right:0;top:.65rem}.benchmark-stage:first-child::before{left:50%}.benchmark-stage:last-child::before{right:50%}.benchmark-stage>span{align-items:center;background:var(--color-surface);border:1px solid var(--color-border-strong);border-radius:50%;display:flex;font-size:.6rem;font-weight:750;height:1.3rem;justify-content:center;position:relative;width:1.3rem;z-index:1}.benchmark-stage small{font-size:.62rem}.benchmark-stage--complete{color:var(--color-success)}.benchmark-stage--complete::before{background:color-mix(in srgb,var(--color-success) 58%,var(--color-border))}.benchmark-stage--complete>span{background:var(--color-success);border-color:var(--color-success);color:var(--color-surface)}.benchmark-stage--current{color:var(--color-accent);font-weight:700}.benchmark-stage--current>span{background:var(--color-accent);border-color:var(--color-accent);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-accent) 15%,transparent);color:var(--color-on-accent)}.benchmark-stage--failed{color:var(--color-danger);font-weight:700}.benchmark-stage--failed>span{background:var(--color-danger);border-color:var(--color-danger);color:var(--color-on-danger)}

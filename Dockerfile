@@ -28,6 +28,7 @@ COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-buildx /us
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY pyproject.toml MANIFEST.in ./
 COPY cope/ ./cope/
+COPY data/engines/ ./data/engines/
 COPY --from=frontend-build /src/cope/web/frontend_dist/ ./cope/web/frontend_dist/
 RUN printf '%s\n' "${COPE_BUILD_VERSION}" > cope/BUILD_VERSION \
     && python -m pip install --no-cache-dir ".[database,web,runner,worker]" \

@@ -96,7 +96,7 @@ onMounted(load)
               <div><dt>Games</dt><dd>{{ formatNumber(gameCounts[String(version.id)]) }}</dd></div>
               <div><dt>Created</dt><dd>{{ formatDate(version.created_at) }}</dd></div>
             </dl>
-            <span class="open-label">Edit Dockerfile and settings →</span>
+            <span class="open-label">View Dockerfile and settings →</span>
           </RouterLink>
         </div>
         <AdminEmptyState v-else title="No versions yet">
