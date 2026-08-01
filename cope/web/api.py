@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.datastructures import UploadFile
 
+from cope.chat import announce_tournament_finished
 from cope.core.models import OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
@@ -57,6 +58,7 @@ from cope.db import (
     get_rating_list,
     get_tournament,
     get_worker,
+    invalidate_game_pair,
     list_deployment_jobs,
     list_deployment_targets,
     list_benchmarkers,
@@ -81,6 +83,7 @@ from cope.db import (
     list_workers,
     mint_worker_token_for_worker,
     replace_suite_openings,
+    replay_game,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
@@ -989,6 +992,81 @@ def register_api_routes(app: FastAPI) -> None:
             ) from exc
         _publish_admin_change(web_app, request)
         return _json({"id": tournament_id, "message": "Tournament updated."})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/games/{game_id}/replay")
+    def admin_replay_tournament_game(
+        tournament_id: int,
+        game_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        _require_tournament_game(connection, tournament_id, game_id)
+        _ensure_tournament_games_mutable(connection, tournament_id)
+        try:
+            reopened = replay_game(connection, tournament_id, game_id)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception(
+                "game replay failed tournament_id=%s game_id=%s",
+                tournament_id,
+                game_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not reset the game. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "message": (
+                    f"Game reset to pending and {tournament.name} reopened."
+                    if reopened
+                    else "Game reset to pending."
+                )
+            }
+        )
+
+    @app.post("/api/admin/tournaments/{tournament_id}/games/{game_id}/invalidate")
+    def admin_invalidate_tournament_game_pair(
+        tournament_id: int,
+        game_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        _require_tournament_game(connection, tournament_id, game_id)
+        _ensure_tournament_games_mutable(connection, tournament_id)
+        try:
+            invalidated = invalidate_game_pair(connection, tournament_id, game_id)
+            if tournament.status == "finished":
+                announce_tournament_finished(connection, tournament)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception(
+                "game invalidation failed tournament_id=%s game_id=%s",
+                tournament_id,
+                game_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not invalidate the games. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        count = len(invalidated)
+        return _json(
+            {
+                "message": f"{count} game{'s' if count != 1 else ''} invalidated."
+            }
+        )
 
     @app.post("/api/admin/tournaments/{tournament_id}/status")
     def admin_tournament_status(
@@ -2070,6 +2148,36 @@ def _require_tournament(connection: sqlite3.Connection, tournament_id: int):
     if tournament is None:
         raise HTTPException(status_code=404, detail="Tournament not found.")
     return tournament
+
+
+def _require_tournament_game(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    game_id: int,
+):
+    game = get_game(connection, game_id)
+    if game is None or game.tournament_id != tournament_id:
+        raise HTTPException(status_code=404, detail="Game not found in this tournament.")
+    return game
+
+
+def _ensure_tournament_games_mutable(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> None:
+    locked = next(
+        (
+            commit
+            for commit in list_tournament_rating_commits(connection, tournament_id)
+            if commit.status in {"pending", "claimed", "applied"}
+        ),
+        None,
+    )
+    if locked is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Uncommit the tournament ratings before changing its games.",
+        )
 
 
 def _category_settings(value: dict[str, Any]) -> dict[str, Any]:

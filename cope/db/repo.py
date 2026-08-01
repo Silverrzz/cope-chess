@@ -1134,6 +1134,150 @@ def list_games(
     return tuple(_game_from_row(row) for row in rows)
 
 
+def replay_game(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    game_id: int,
+) -> bool:
+    row = connection.execute(
+        "SELECT * FROM games WHERE id = ? AND tournament_id = ? FOR UPDATE",
+        (game_id, tournament_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("game does not belong to this tournament")
+    game = _game_from_row(row)
+    if game.status != "finished" or game.result is None:
+        raise ValueError("only completed games can be replayed")
+    _ensure_games_are_not_committed(connection, (game.id,))
+    _delete_system_chat_events(
+        connection,
+        tournament_id,
+        (f"game.{game.id}.finished", "tournament.finished"),
+    )
+    connection.execute("DELETE FROM moves WHERE game_id = ?", (game.id,))
+    connection.execute("DELETE FROM game_hardware_scores WHERE game_id = ?", (game.id,))
+    connection.execute(
+        """
+        UPDATE games
+        SET status = 'pending',
+            result = NULL,
+            termination = NULL,
+            pgn = NULL,
+            white_hw = NULL,
+            black_hw = NULL,
+            started_at = NULL,
+            finished_at = NULL
+        WHERE id = ?
+        """,
+        (game.id,),
+    )
+    reopened = connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'running', finished_at = NULL
+        WHERE id = ? AND status IN ('finished', 'aborted')
+        """,
+        (tournament_id,),
+    ).rowcount > 0
+    return reopened
+
+
+def invalidate_game_pair(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    game_id: int,
+) -> tuple[int, ...]:
+    row = connection.execute(
+        "SELECT * FROM games WHERE id = ? AND tournament_id = ? FOR UPDATE",
+        (game_id, tournament_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("game does not belong to this tournament")
+    game = _game_from_row(row)
+    first_game_number = game.game_number if game.game_number % 2 else game.game_number - 1
+    game_numbers = (first_game_number, first_game_number + 1)
+    if game.match_id is not None:
+        rows = connection.execute(
+            """
+            SELECT id FROM games
+            WHERE tournament_id = ? AND match_id = ?
+              AND game_number IN (?, ?)
+            FOR UPDATE
+            """,
+            (tournament_id, game.match_id, *game_numbers),
+        )
+    else:
+        rows = connection.execute(
+            """
+            SELECT id FROM games
+            WHERE tournament_id = ? AND match_id IS NULL
+              AND game_number IN (?, ?)
+              AND (
+                (white_engine_id = ? AND black_engine_id = ?)
+                OR (white_engine_id = ? AND black_engine_id = ?)
+              )
+            FOR UPDATE
+            """,
+            (
+                tournament_id,
+                *game_numbers,
+                game.white_engine_id,
+                game.black_engine_id,
+                game.black_engine_id,
+                game.white_engine_id,
+            ),
+        )
+    game_ids = tuple(sorted(int(item["id"]) for item in rows))
+    if game.id not in game_ids:
+        game_ids = tuple(sorted((*game_ids, game.id)))
+    _ensure_games_are_not_committed(connection, game_ids)
+    _delete_system_chat_events(
+        connection,
+        tournament_id,
+        (*tuple(f"game.{item}.finished" for item in game_ids), "tournament.finished"),
+    )
+    placeholders = ", ".join("?" for _ in game_ids)
+    connection.execute(f"DELETE FROM games WHERE id IN ({placeholders})", game_ids)
+    return game_ids
+
+
+def _ensure_games_are_not_committed(
+    connection: sqlite3.Connection,
+    game_ids: tuple[int, ...],
+) -> None:
+    placeholders = ", ".join("?" for _ in game_ids)
+    for table in ("rating_list_history", "rating_history"):
+        row = connection.execute(
+            f"SELECT 1 FROM {table} WHERE game_id IN ({placeholders}) LIMIT 1",
+            game_ids,
+        ).fetchone()
+        if row is not None:
+            raise ValueError("game results are already part of a rating list")
+
+
+def _delete_system_chat_events(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    event_keys: tuple[str, ...],
+) -> None:
+    placeholders = ", ".join("?" for _ in event_keys)
+    rows = connection.execute(
+        f"""
+        SELECT message_id FROM system_chat_events
+        WHERE tournament_id = ? AND event_key IN ({placeholders})
+        """,
+        (tournament_id, *event_keys),
+    )
+    message_ids = tuple(int(row["message_id"]) for row in rows)
+    if not message_ids:
+        return
+    message_placeholders = ", ".join("?" for _ in message_ids)
+    connection.execute(
+        f"DELETE FROM chat_messages WHERE id IN ({message_placeholders})",
+        message_ids,
+    )
+
+
 def mark_game_live(connection: sqlite3.Connection, game_id: int) -> None:
     connection.execute(
         """

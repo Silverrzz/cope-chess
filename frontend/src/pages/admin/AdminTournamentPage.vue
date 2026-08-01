@@ -39,6 +39,9 @@ const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => data.value?.games.some(
   (game) => game.status === 'finished' && game.result !== null,
 ) ?? false)
+const resultsLocked = computed(() => data.value?.commits.some(
+  (item) => ['pending', 'claimed', 'applied'].includes(item.status),
+) ?? false)
 const settingsRows = computed(() => {
   if (!data.value?.settings) return []
   return Array.isArray(data.value.settings)
@@ -111,6 +114,30 @@ async function remove(): Promise<void> {
   finally { pending.value = '' }
 }
 
+async function replayGame(game: Game): Promise<void> {
+  const accepted = await confirm({ title: 'Replay game?', message: `Delete the completed result for ${engineName(game.white_engine_id)} vs ${engineName(game.black_engine_id)} and return this game to pending?`, confirmLabel: 'Replay game', tone: 'danger' })
+  if (!accepted) return
+  pending.value = `replay-${game.id}`
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/games/${game.id}/replay`)
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function invalidateGame(game: Game): Promise<void> {
+  const accepted = await confirm({ title: 'Invalidate game pair?', message: `Permanently exclude ${engineName(game.white_engine_id)} vs ${engineName(game.black_engine_id)} and its paired reverse-colour game from this tournament? They will no longer be viewable or included in ratings.`, confirmLabel: 'Invalidate pair', tone: 'danger' })
+  if (!accepted) return
+  pending.value = `invalidate-${game.id}`
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/games/${game.id}/invalidate`)
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
 onMounted(load)
 </script>
 
@@ -165,9 +192,9 @@ onMounted(load)
       <section class="panel games-panel">
         <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.games.length }} generated game{{ data.games.length === 1 ? '' : 's' }}</p></div></div>
         <div v-if="data.games.length" class="game-table-wrap">
-          <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th></tr></thead><tbody>
+          <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
             <tr v-for="game in data.games" :key="game.id">
-              <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td>
+              <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td><td><div class="game-actions"><button v-if="game.status === 'finished' && game.result" class="button button--secondary button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Replay this completed game'" @click="replayGame(game)">{{ pending === `replay-${game.id}` ? 'Resetting…' : 'Replay' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Invalidate this game pair'" @click="invalidateGame(game)">{{ pending === `invalidate-${game.id}` ? 'Invalidating…' : 'Invalidate' }}</button></div></td>
             </tr>
           </tbody></table>
         </div>
@@ -204,5 +231,6 @@ onMounted(load)
 .data-table { border-collapse: collapse; min-width: 48rem; width: 100%; }
 .data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .8rem; text-align: left; text-transform: uppercase; }
 .data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .76rem; padding: .7rem .8rem; }
+.game-actions { display: flex; gap: .4rem; }
 @media (max-width: 42rem) { .control-bar { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } }
 </style>
