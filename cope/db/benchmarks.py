@@ -390,7 +390,8 @@ def claim_benchmark_job(
         """
         UPDATE benchmark_jobs
         SET benchmarker_id = ?, status = 'running', attempt = attempt + 1,
-            started_at = ?, finished_at = NULL, next_retry_at = NULL, error = ''
+            started_at = ?, finished_at = NULL, next_retry_at = NULL, error = '',
+            output = ''
         WHERE id = ?
         """,
         (benchmarker_id, now, row["id"]),
@@ -400,6 +401,25 @@ def claim_benchmark_job(
         (row["id"],),
     ).fetchone()
     return None if current is None else _benchmark_job_from_row(current)
+
+
+def record_benchmark_progress(
+    connection: sqlite3.Connection,
+    *,
+    job: BenchmarkJobRecord,
+    benchmarker_id: int,
+    stage: str,
+    substage: str,
+    status: str,
+    detail: str,
+) -> None:
+    current = _validated_running_job(connection, job, benchmarker_id)
+    entry = f"[{_utc_now()}] {stage}/{substage} {status}\n{detail.strip()}"
+    output = "\n\n".join(part for part in (current.output.rstrip(), entry) if part)[-64_000:]
+    connection.execute(
+        "UPDATE benchmark_jobs SET output = ? WHERE id = ?",
+        (output, current.id),
+    )
 
 
 def complete_benchmark_job(
@@ -413,6 +433,9 @@ def complete_benchmark_job(
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
+    recorded_output = "\n\n".join(
+        part for part in (current.output.rstrip(), output.strip()) if part
+    )[-64_000:]
     connection.execute(
         """
         INSERT INTO engine_benchmarks (
@@ -431,7 +454,7 @@ def complete_benchmark_job(
             current.hardware_key,
             nps,
             elapsed_ms,
-            output[-64_000:],
+            recorded_output,
             now,
         ),
     )
@@ -456,6 +479,9 @@ def fail_benchmark_job(
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
+    recorded_output = "\n\n".join(
+        part for part in (current.output.rstrip(), output.strip()) if part
+    )[-64_000:]
     retry_at = (
         datetime.now(UTC) + timedelta(seconds=retry_seconds)
     ).isoformat(timespec="seconds")
@@ -465,7 +491,7 @@ def fail_benchmark_job(
         SET status = 'failed', finished_at = ?, next_retry_at = ?, error = ?, output = ?
         WHERE id = ?
         """,
-        (now, retry_at, error[-8000:], output[-64_000:], current.id),
+        (now, retry_at, error[-8000:], recorded_output, current.id),
     )
 
 

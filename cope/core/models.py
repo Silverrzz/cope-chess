@@ -620,7 +620,19 @@ class BenchmarkAssignment(StrictModel):
     job_key: str = Field(min_length=16, max_length=128)
     hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     engine: EngineSpec
+    preparation_timeout_s: int = Field(default=1800, gt=0)
     timeout_s: int = Field(gt=0)
+
+
+class BenchmarkProgress(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stage: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    substage: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    status: Literal["running", "completed"]
+    detail: str = Field(min_length=1, max_length=4000)
 
 
 class BenchmarkResult(StrictModel):

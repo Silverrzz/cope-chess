@@ -16,6 +16,7 @@ from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
 from cope.core.models import (
     BenchmarkAssignment,
     BenchmarkFailed,
+    BenchmarkProgress,
     BenchmarkerSessionHello,
     BenchmarkerTokenHello,
     BenchmarkerUpdateCommand,
@@ -162,16 +163,86 @@ async def _run_connection(
                 raise ProtocolValidationError(
                     f"expected benchmark_assignment, got {envelope.type}"
                 )
+            progress_supported = "preparation_timeout_s" in envelope.data
             assignment = BenchmarkAssignment.model_validate(envelope.data)
             if assignment.hardware_key != hardware_key:
                 raise ProtocolValidationError("benchmark assignment hardware key mismatch")
-            message_type, result = await asyncio.to_thread(
-                _run_benchmark,
+            message_type, result = await _run_benchmark_with_progress(
+                websocket,
                 assignment,
                 connection_config.server_url,
                 welcome.session_id,
+                send_progress=progress_supported,
             )
             await websocket.send(encode_message(make_message(message_type, result)))
+
+
+async def _run_benchmark_with_progress(
+    websocket,
+    assignment: BenchmarkAssignment,
+    server_url: str,
+    credential: str,
+    *,
+    send_progress: bool,
+) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
+    loop = asyncio.get_running_loop()
+    progress_queue: asyncio.Queue[BenchmarkProgress] = asyncio.Queue(maxsize=256)
+
+    def enqueue(progress: BenchmarkProgress) -> None:
+        if progress_queue.full():
+            progress_queue.get_nowait()
+        progress_queue.put_nowait(progress)
+
+    def report(stage: str, substage: str, status: str, detail: str) -> None:
+        progress = BenchmarkProgress(
+            job_id=assignment.job_id,
+            job_key=assignment.job_key,
+            hardware_key=assignment.hardware_key,
+            build_hash=assignment.engine.build_hash,
+            stage=stage,
+            substage=substage,
+            status="completed" if status == "completed" else "running",
+            detail=detail.strip()[-4000:] or "Progress updated",
+        )
+        loop.call_soon_threadsafe(enqueue, progress)
+
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _run_benchmark,
+            assignment,
+            server_url,
+            credential,
+            report,
+        )
+    )
+    while not task.done() or not progress_queue.empty():
+        try:
+            progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
+        except asyncio.TimeoutError:
+            continue
+        if send_progress:
+            await websocket.send(
+                encode_message(make_message("benchmark_progress", progress))
+            )
+    message_type, result = await task
+    if isinstance(result, BenchmarkFailed):
+        LOG.warning(
+            "benchmark job failed job_id=%s engine=%s stage=%s error=%s output=%s",
+            assignment.job_id,
+            assignment.engine.name,
+            result.stage,
+            result.error,
+            result.output,
+        )
+    else:
+        LOG.info(
+            "benchmark job completed job_id=%s engine=%s nps=%s elapsed_ms=%s",
+            assignment.job_id,
+            assignment.engine.name,
+            result.nps,
+            result.elapsed_ms,
+        )
+    return message_type, result
 
 
 async def _apply_benchmarker_update(
@@ -248,11 +319,14 @@ def _run_benchmark(
     assignment: BenchmarkAssignment,
     server_url: str,
     credential: str,
+    progress_callback,
 ) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
     engine = UciEngineProcess(
         assignment.engine,
         server_url=server_url,
         credential=credential,
+        progress_callback=progress_callback,
+        command_timeout_s=assignment.preparation_timeout_s,
     )
     output = ""
     try:
@@ -272,6 +346,12 @@ def _run_benchmark(
             )
 
         started_ns = time.monotonic_ns()
+        progress_callback(
+            "benchmark",
+            "engine_bench",
+            "running",
+            f"Running {assignment.engine.name} bench with a {assignment.timeout_s} second limit",
+        )
         try:
             completed = subprocess.run(
                 [str(engine.artifact_path.resolve()), "bench"],
@@ -341,6 +421,12 @@ def _run_benchmark(
                     output=output,
                 ),
             )
+        progress_callback(
+            "benchmark",
+            "engine_bench",
+            "completed",
+            f"Completed {assignment.engine.name} bench at {nps:,} NPS in {elapsed_ms / 1000:.1f} seconds",
+        )
         return (
             "benchmark_result",
             BenchmarkResult(

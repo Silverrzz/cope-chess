@@ -1553,6 +1553,14 @@ def register_api_routes(app: FastAPI) -> None:
                 status_code=409,
                 detail="Add an OpenAI API key in Settings before generating a Dockerfile.",
             )
+        previous_failure = ""
+        for item in list_engine_benchmark_jobs(connection, engine_version_id=version_id):
+            if item.job.build_hash != version.build_hash or item.job.status != "failed":
+                continue
+            previous_failure = "\n\n".join(
+                part for part in (item.job.error.strip(), item.job.output.strip()) if part
+            )[-16_000:]
+            break
         try:
             context = repository_context(
                 host,
@@ -1567,10 +1575,16 @@ def register_api_routes(app: FastAPI) -> None:
                 source_ref=version.source_ref,
                 context=context,
                 additional_context=payload.additional_context,
+                previous_failure=previous_failure,
             )
         except SourceServiceError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return _json({"dockerfile": dockerfile, "model": settings.openai_model})
+        return _json({
+            "dockerfile": dockerfile,
+            "model": settings.openai_model,
+            "reviewed": True,
+            "used_failure_context": bool(previous_failure),
+        })
 
     @app.delete("/api/admin/engine-versions/{version_id}")
     def admin_delete_engine_version(

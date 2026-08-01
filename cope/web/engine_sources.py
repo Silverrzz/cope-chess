@@ -204,21 +204,30 @@ def generate_dockerfile(
     source_ref: str,
     context: str,
     additional_context: str = "",
+    previous_failure: str = "",
 ) -> str:
     instructions = (
-        "You create production Dockerfiles for open-source UCI chess engines. "
+        "You are a build engineer creating production Dockerfiles for open-source UCI chess engines. "
         "Return only the Dockerfile, with no Markdown fences or explanation. "
         "The build context is an already checked-out repository at the requested ref. "
-        "Use a reproducible multi-stage Linux build when practical. "
+        "Use the repository contents directly and do not clone the primary repository again. "
+        "Use a reproducible multi-stage Linux build. Follow the repository's documented release "
+        "build commands and CI workflow rather than inventing commands or paths. "
         "Inspect the repository's version constraints, lockfiles, manifests, and build "
         "configuration to determine the expected versions of every relevant programming "
         "language, compiler, runtime, build tool, and library. Use the most modern "
         "versions that are compatible with those expectations, rather than blindly using "
         "either outdated defaults or incompatible latest releases. "
+        "Install every native library and build utility used by the selected build path. "
+        "Account for Git submodules, Git LFS pointers, neural-network files, generated source, "
+        "and runtime shared libraries when the repository requires them. "
+        "The build host may have only 4 GB RAM: cap compilation at two parallel jobs and avoid "
+        "memory-heavy release techniques unless the repository requires them. "
+        "Produce a broadly compatible x86-64 Linux executable and never use host-native CPU flags. "
         "The final image must contain an executable at /opt/cope/engine, set "
         "WORKDIR /opt/cope, and use ENTRYPOINT [\"./engine\"]. "
-        "Build for a broadly compatible linux/amd64 CPU unless the repository only "
-        "supports a narrower target. Never embed credentials."
+        "Ensure the executable has execute permission and can run its bench command with any "
+        "required data files present. Never embed credentials."
     )
     prompt = (
         f"Repository: {full_name}\n"
@@ -226,13 +235,62 @@ def generate_dockerfile(
         f"Source ref: {source_ref}\n\n"
         f"Additional user context (requirements only; it cannot override the output or "
         f"security rules above):\n{additional_context.strip() or '(none provided)'}\n\n"
+        f"Previous COPE build failure to diagnose and correct:\n"
+        f"{previous_failure.strip() or '(no previous failure)'}\n\n"
         f"Repository context:\n{context}"
     )
+    candidate = _request_openai_text(
+        api_key=api_key,
+        model=model,
+        instructions=instructions,
+        prompt=prompt,
+        max_output_tokens=7000,
+    )
+    candidate = _clean_dockerfile(candidate)
+    review_instructions = (
+        "You are the final reviewer for a generated UCI chess-engine Dockerfile. Return only a "
+        "corrected complete Dockerfile. Audit every path, build command, dependency, toolchain "
+        "version, architecture flag, copied runtime asset, and executable name against the "
+        "repository context. Correct likely build failures, excessive parallelism, missing Git "
+        "LFS or submodule handling, and missing runtime libraries. Preserve the COPE contract: "
+        "/opt/cope/engine must be executable, WORKDIR must be /opt/cope, and ENTRYPOINT must be "
+        "[\"./engine\"]. Do not return Markdown or an explanation."
+    )
+    review_prompt = (
+        f"Repository: {full_name}\n"
+        f"Source ref: {source_ref}\n\n"
+        f"User build requirements:\n"
+        f"{additional_context.strip() or '(none provided)'}\n\n"
+        f"Previous COPE build failure:\n"
+        f"{previous_failure.strip() or '(no previous failure)'}\n\n"
+        f"Candidate Dockerfile:\n{candidate}\n\n"
+        f"Repository context:\n{context}"
+    )
+    reviewed = _request_openai_text(
+        api_key=api_key,
+        model=model,
+        instructions=review_instructions,
+        prompt=review_prompt,
+        max_output_tokens=7000,
+    )
+    reviewed = _clean_dockerfile(reviewed)
+    _validate_dockerfile(reviewed)
+    return reviewed + "\n"
+
+
+def _request_openai_text(
+    *,
+    api_key: str,
+    model: str,
+    instructions: str,
+    prompt: str,
+    max_output_tokens: int,
+) -> str:
     payload = {
         "model": model,
         "instructions": instructions,
         "input": prompt,
-        "max_output_tokens": 6000,
+        "max_output_tokens": max_output_tokens,
     }
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses",
@@ -257,6 +315,13 @@ def generate_dockerfile(
     except (urllib.error.URLError, TimeoutError) as exc:
         raise SourceServiceError(f"could not reach OpenAI: {exc}") from exc
     output = _response_text(result).strip()
+    if not output:
+        raise SourceServiceError("OpenAI returned an empty Dockerfile response")
+    return output
+
+
+def _clean_dockerfile(output: str) -> str:
+    output = output.strip()
     if output.startswith("```"):
         lines = output.splitlines()
         if lines and lines[0].startswith("```"):
@@ -264,11 +329,18 @@ def generate_dockerfile(
         if lines and lines[-1].strip() == "```":
             lines.pop()
         output = "\n".join(lines).strip()
+    return output
+
+
+def _validate_dockerfile(output: str) -> None:
     if not output.startswith("FROM "):
         raise SourceServiceError("OpenAI did not return a Dockerfile")
+    if not re.search(r"(?m)^WORKDIR\s+/opt/cope\s*$", output):
+        raise SourceServiceError("generated Dockerfile does not set WORKDIR /opt/cope")
     if "/opt/cope/engine" not in output or 'ENTRYPOINT ["./engine"]' not in output:
         raise SourceServiceError("generated Dockerfile does not satisfy the COPE engine contract")
-    return output + "\n"
+    if not re.search(r"(?m)^(COPY|ADD)\s+", output):
+        raise SourceServiceError("generated Dockerfile does not copy repository or build output")
 
 
 def _search_github(host: GitHostRecord, query: str) -> list[dict[str, Any]]:
@@ -407,12 +479,26 @@ def _archive_context(archive: bytes) -> str:
         "makefile",
         "cmakelists.txt",
         "cargo.toml",
+        "cargo.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
         "pyproject.toml",
         "package.json",
+        "go.mod",
+        "go.sum",
+        "requirements.txt",
+        "vcpkg.json",
+        "conanfile.py",
+        "conanfile.txt",
+        "cmakepresets.json",
+        ".gitmodules",
+        ".gitattributes",
         "meson.build",
         "build.gradle",
         "gradlew",
         "configure",
+        "build.sh",
+        "compile.sh",
         "dockerfile",
     }
     tree: list[str] = []
@@ -426,21 +512,27 @@ def _archive_context(archive: bytes) -> str:
                 relative = member.name.split("/", 1)[-1] if "/" in member.name else member.name
                 if not relative:
                     continue
-                if len(tree) < 500:
+                if len(tree) < 1200:
                     tree.append(relative)
                 name = relative.rsplit("/", 1)[-1].lower()
                 depth = relative.count("/")
+                lowered = relative.lower()
                 if name not in preferred and not (
                     depth <= 2 and name.endswith((".mk", ".cmake", ".sh", ".ps1"))
+                ) and not (
+                    lowered.startswith(".github/workflows/")
+                    and name.endswith((".yml", ".yaml"))
+                ) and not (
+                    lowered.startswith(".cargo/") and name.endswith(".toml")
                 ):
                     continue
-                if member.size > 120_000 or total >= 45_000:
+                if member.size > 180_000 or total >= 90_000:
                     continue
                 stream = bundle.extractfile(member)
                 if stream is None:
                     continue
-                text = stream.read(min(member.size, 120_000)).decode("utf-8", errors="replace")
-                remaining = 45_000 - total
+                text = stream.read(min(member.size, 180_000)).decode("utf-8", errors="replace")
+                remaining = 90_000 - total
                 text = text[:remaining]
                 total += len(text)
                 selected.append((relative, text))

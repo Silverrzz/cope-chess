@@ -344,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.environ.get("COPE_BENCHMARK_RETRY_INTERVAL_S", "3600")),
     )
     benchmark_server_parser.add_argument(
+        "--preparation-timeout-s",
+        type=_positive_int,
+        default=int(os.environ.get("COPE_BENCHMARK_PREPARATION_TIMEOUT_S", "1800")),
+    )
+    benchmark_server_parser.add_argument(
         "--benchmark-timeout-s",
         type=_positive_int,
         default=int(os.environ.get("COPE_BENCHMARK_TIMEOUT_S", "600")),
@@ -608,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_app_version=args.app_version,
             poll_interval_s=args.poll_interval_s,
             retry_interval_s=args.retry_interval_s,
+            preparation_timeout_s=args.preparation_timeout_s,
             benchmark_timeout_s=args.benchmark_timeout_s,
             response_timeout_s=args.response_timeout_s,
         )

@@ -15,6 +15,7 @@ from cope.core.models import (
     PROTOCOL_VERSION,
     BenchmarkAssignment,
     BenchmarkFailed,
+    BenchmarkProgress,
     BenchmarkerSessionHello,
     BenchmarkerTokenHello,
     BenchmarkerUpdateCommand,
@@ -43,6 +44,7 @@ from cope.db import (
     get_benchmarker_by_session_id,
     get_benchmarker_by_token,
     reconcile_benchmarker_deployment,
+    record_benchmark_progress,
     register_benchmarker_connection,
     reset_benchmark_service_state,
     set_service_endpoint,
@@ -69,6 +71,7 @@ class BenchmarkServerConfig:
     expected_app_version: str | None = None
     poll_interval_s: float = 30.0
     retry_interval_s: int = 3600
+    preparation_timeout_s: int = 1800
     benchmark_timeout_s: int = 600
     response_timeout_s: int = 7200
 
@@ -263,17 +266,31 @@ class BenchmarkServer:
                     job_key=active_job.job_key,
                     hardware_key=active_job.hardware_key,
                     engine=active_job.engine,
+                    preparation_timeout_s=self._config.preparation_timeout_s,
                     timeout_s=self._config.benchmark_timeout_s,
                 )
+                assignment_payload = assignment.model_dump(
+                    mode="json",
+                    exclude=(
+                        set()
+                        if benchmarker.app_commit == self._config.expected_app_version
+                        else {"preparation_timeout_s"}
+                    ),
+                )
                 await websocket.send(
-                    encode_message(make_message("benchmark_assignment", assignment))
+                    encode_message(make_message("benchmark_assignment", assignment_payload))
                 )
-                envelope = decode_envelope(
-                    await asyncio.wait_for(
-                        websocket.recv(),
-                        timeout=max(self._config.response_timeout_s, 1),
+                while True:
+                    envelope = decode_envelope(
+                        await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=max(self._config.response_timeout_s, 1),
+                        )
                     )
-                )
+                    if envelope.type != "benchmark_progress":
+                        break
+                    progress = BenchmarkProgress.model_validate(envelope.data)
+                    self._record_progress(benchmarker, active_job, progress)
                 if envelope.type == "benchmark_result":
                     result = BenchmarkResult.model_validate(envelope.data)
                     self._complete_job(benchmarker, active_job, result)
@@ -524,6 +541,32 @@ class BenchmarkServer:
         finally:
             connection.close()
 
+    def _record_progress(
+        self,
+        benchmarker: BenchmarkerRecord,
+        job: BenchmarkJobRecord,
+        progress: BenchmarkProgress,
+    ) -> None:
+        self._validate_result(job, progress)
+        connection = connect_database(self._config.db_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            record_benchmark_progress(
+                connection,
+                job=job,
+                benchmarker_id=benchmarker.id,
+                stage=progress.stage,
+                substage=progress.substage,
+                status=progress.status,
+                detail=progress.detail,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def _fail_reported_job(
         self,
         benchmarker: BenchmarkerRecord,
@@ -600,7 +643,7 @@ class BenchmarkServer:
     @staticmethod
     def _validate_result(
         job: BenchmarkJobRecord,
-        result: BenchmarkResult | BenchmarkFailed,
+        result: BenchmarkResult | BenchmarkFailed | BenchmarkProgress,
     ) -> None:
         if result.job_id != job.id or result.job_key != job.job_key:
             raise ProtocolValidationError("benchmark result job mismatch")

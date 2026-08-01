@@ -40,10 +40,12 @@ class UciEngineProcess:
         server_url: str,
         credential: str,
         progress_callback: Callable[[str, str, str, str], None] | None = None,
+        command_timeout_s: int | None = None,
     ):
         del server_url, credential
         self._spec = spec
         self._progress_callback = progress_callback
+        self._command_timeout_s = command_timeout_s
         self._source_dir = _engine_source_dir(spec)
         self._binary_path = self._source_dir / "engine"
         self._process: subprocess.Popen[str] | None = None
@@ -460,12 +462,15 @@ class UciEngineProcess:
                 temporary.mkdir(parents=True)
                 stage = "download"
                 repository = temporary / "repository"
-                _run_checked(["git", "init", str(repository)], cwd=None)
-                _run_checked(
+                self._run_artifact_command(
+                    ["git", "init", str(repository)], cwd=None, substage="source_download"
+                )
+                self._run_artifact_command(
                     ["git", "-C", str(repository), "remote", "add", "origin", self._spec.repository_url],
                     cwd=None,
+                    substage="source_download",
                 )
-                _run_checked(
+                self._run_artifact_command(
                     [
                         "git",
                         "-C",
@@ -477,12 +482,14 @@ class UciEngineProcess:
                         self._spec.source_ref,
                     ],
                     cwd=None,
+                    substage="source_download",
                 )
-                _run_checked(
+                self._run_artifact_command(
                     ["git", "-C", str(repository), "checkout", "--detach", "FETCH_HEAD"],
                     cwd=None,
+                    substage="source_download",
                 )
-                _run_checked(
+                self._run_artifact_command(
                     [
                         "git",
                         "-C",
@@ -494,6 +501,7 @@ class UciEngineProcess:
                     ],
                     cwd=None,
                     env={"GIT_LFS_SKIP_SMUDGE": "1"},
+                    substage="source_download",
                 )
                 self.report_progress(
                     "engines",
@@ -518,10 +526,12 @@ class UciEngineProcess:
                 (repository / ".dockerignore").write_text("/.git\n", encoding="utf-8")
                 image_name = f"cope-engine-{artifact_key[:24]}"
                 container_name = f"{image_name}-{os.getpid()}-{threading.get_ident()}"
-                _run_checked(
+                self._run_artifact_command(
                     [
                         "docker",
                         "build",
+                        "--progress",
+                        "plain",
                         "--file",
                         "Dockerfile.cope",
                         "--tag",
@@ -529,6 +539,7 @@ class UciEngineProcess:
                         ".",
                     ],
                     cwd=repository,
+                    substage="container_build",
                 )
                 self.report_progress(
                     "engines",
@@ -542,12 +553,13 @@ class UciEngineProcess:
                     "running",
                     f"Extracting the {self._spec.name} executable",
                 )
-                _run_checked(
+                self._run_artifact_command(
                     ["docker", "create", "--name", container_name, image_name],
                     cwd=None,
+                    substage="artifact_extract",
                 )
                 try:
-                    _run_checked(
+                    self._run_artifact_command(
                         [
                             "docker",
                             "cp",
@@ -555,9 +567,14 @@ class UciEngineProcess:
                             str(temporary / "engine"),
                         ],
                         cwd=None,
+                        substage="artifact_extract",
                     )
                 finally:
-                    _run_checked(["docker", "rm", "-f", container_name], cwd=None)
+                    self._run_artifact_command(
+                        ["docker", "rm", "-f", container_name],
+                        cwd=None,
+                        substage="artifact_extract",
+                    )
                 stage = "verify"
                 temporary_binary = temporary / "engine"
                 if not temporary_binary.is_file() or temporary_binary.stat().st_size <= 0:
@@ -604,6 +621,27 @@ class UciEngineProcess:
                 self._spec.name,
                 self._binary_path,
             )
+
+    def _run_artifact_command(
+        self,
+        command,
+        *,
+        cwd: Path | None,
+        substage: str,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        _run_checked(
+            command,
+            cwd=cwd,
+            env=env,
+            timeout_s=self._command_timeout_s,
+            output_callback=lambda detail: self.report_progress(
+                "engines",
+                substage,
+                "running",
+                detail,
+            ),
+        )
 
     def _read_stdout(self, process: subprocess.Popen[str]) -> None:
         LOG.info(
@@ -784,15 +822,18 @@ def _run_checked(
     cwd: Path | None,
     shell: bool = False,
     env: Mapping[str, str] | None = None,
+    timeout_s: int | None = None,
+    output_callback: Callable[[str], None] | None = None,
 ) -> None:
+    formatted = _format_command(command)
     LOG.info(
         "worker command started cwd=%s shell=%s command=%s",
         cwd,
         shell,
-        _format_command(command),
+        formatted,
     )
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=None if cwd is None else str(cwd),
             env=None if env is None else {**os.environ, **env},
@@ -800,30 +841,91 @@ def _run_checked(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            check=False,
+            bufsize=1,
         )
     except OSError as exc:
         raise RuntimeError(f"failed to run command: {command}") from exc
 
-    output = (completed.stdout or "").strip()
-    if output:
-        LOG.debug(
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read_output() -> None:
+        if process.stdout is not None:
+            for line in process.stdout:
+                lines.put(line.rstrip("\r\n"))
+        lines.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    output = ""
+    pending: list[str] = []
+    pending_length = 0
+    last_emit = time.monotonic()
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    timed_out = False
+
+    def emit() -> None:
+        nonlocal pending, pending_length, last_emit
+        detail = "\n".join(pending).strip()
+        pending = []
+        pending_length = 0
+        last_emit = time.monotonic()
+        if not detail:
+            return
+        LOG.info(
             "worker command output cwd=%s command=%s output=%s",
             cwd,
-            _format_command(command),
-            output,
+            formatted,
+            detail,
         )
+        if output_callback is not None:
+            output_callback(detail[-4000:])
+
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            process.kill()
+            break
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
+            if pending and time.monotonic() - last_emit >= 0.5:
+                emit()
+            if process.poll() is not None and not reader.is_alive():
+                break
+            continue
+        if line is None:
+            break
+        output = f"{output}\n{line}"[-64_000:]
+        pending.append(line)
+        pending_length += len(line) + 1
+        if pending_length >= 3000 or time.monotonic() - last_emit >= 0.5:
+            emit()
+
+    reader.join(timeout=2)
+    while True:
+        try:
+            line = lines.get_nowait()
+        except queue.Empty:
+            break
+        if line is None:
+            continue
+        output = f"{output}\n{line}"[-64_000:]
+        pending.append(line)
+    emit()
+    return_code = process.wait()
     LOG.info(
         "worker command finished cwd=%s exit_code=%s command=%s",
         cwd,
-        completed.returncode,
-        _format_command(command),
+        return_code,
+        formatted,
     )
-    if completed.returncode != 0:
-        if len(output) > 8000:
-            output = output[-8000:]
+    if timed_out:
         raise RuntimeError(
-            f"command failed with exit code {completed.returncode}: {command}\n{output}"
+            f"command exceeded {timeout_s} seconds: {formatted}\n{output[-8000:].strip()}"
+        )
+    if return_code != 0:
+        raise RuntimeError(
+            f"command failed with exit code {return_code}: {formatted}\n{output[-8000:].strip()}"
         )
 
 
