@@ -5,7 +5,7 @@ import json
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from cope.core.models import EngineSpec, HardwareInfo
 
@@ -50,7 +50,6 @@ class BenchmarkJobRecord:
     scheduled_at: str
     started_at: str | None
     finished_at: str | None
-    next_retry_at: str | None
     error: str
     output: str
 
@@ -253,7 +252,7 @@ def forget_benchmarker(
         """
         UPDATE benchmark_jobs
         SET benchmarker_id = NULL, status = 'queued', scheduled_at = ?,
-            started_at = NULL, finished_at = NULL, next_retry_at = NULL,
+            started_at = NULL, finished_at = NULL,
             error = '', output = ''
         WHERE benchmarker_id = ? AND status = 'running'
         """,
@@ -304,20 +303,15 @@ def disconnect_benchmarker(
 
 def reset_benchmark_service_state(
     connection: sqlite3.Connection,
-    *,
-    retry_seconds: int,
 ) -> None:
-    retry_at = (
-        datetime.now(UTC) + timedelta(seconds=retry_seconds)
-    ).isoformat(timespec="seconds")
     connection.execute(
         """
         UPDATE benchmark_jobs
-        SET status = 'failed', finished_at = ?, next_retry_at = ?,
+        SET status = 'failed', finished_at = ?,
             error = 'benchmark server restarted'
         WHERE status = 'running'
         """,
-        (_utc_now(), retry_at),
+        (_utc_now(),),
     )
     connection.execute(
         """
@@ -368,29 +362,26 @@ def claim_benchmark_job(
     benchmarker_id: int,
     hardware_key: str,
 ) -> BenchmarkJobRecord | None:
-    now = _utc_now()
     row = connection.execute(
         """
         SELECT *
         FROM benchmark_jobs
         WHERE hardware_key = ?
-          AND (
-            status = 'queued'
-            OR (status = 'failed' AND next_retry_at <= ?)
-          )
+          AND status = 'queued'
         ORDER BY scheduled_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
         """,
-        (hardware_key, now),
+        (hardware_key,),
     ).fetchone()
     if row is None:
         return None
+    now = _utc_now()
     connection.execute(
         """
         UPDATE benchmark_jobs
         SET benchmarker_id = ?, status = 'running', attempt = attempt + 1,
-            started_at = ?, finished_at = NULL, next_retry_at = NULL, error = '',
+            started_at = ?, finished_at = NULL, error = '',
             output = ''
         WHERE id = ?
         """,
@@ -459,10 +450,17 @@ def complete_benchmark_job(
     connection.execute(
         """
         UPDATE benchmark_jobs
-        SET status = 'succeeded', finished_at = ?, next_retry_at = NULL, error = ''
+        SET status = 'succeeded', finished_at = ?, error = ''
         WHERE id = ?
         """,
         (now, current.id),
+    )
+    connection.execute(
+        """
+        DELETE FROM benchmark_jobs
+        WHERE status = 'failed' AND (engine_version_id = ? OR build_hash = ?)
+        """,
+        (current.engine_version_id, current.build_hash),
     )
 
 
@@ -473,21 +471,17 @@ def fail_benchmark_job(
     benchmarker_id: int,
     error: str,
     output: str = "",
-    retry_seconds: int,
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
     recorded_output = (current.output.rstrip() or output.strip())[-64_000:]
-    retry_at = (
-        datetime.now(UTC) + timedelta(seconds=retry_seconds)
-    ).isoformat(timespec="seconds")
     connection.execute(
         """
         UPDATE benchmark_jobs
-        SET status = 'failed', finished_at = ?, next_retry_at = ?, error = ?, output = ?
+        SET status = 'failed', finished_at = ?, error = ?, output = ?
         WHERE id = ?
         """,
-        (now, retry_at, error[-8000:], recorded_output, current.id),
+        (now, error[-8000:], recorded_output, current.id),
     )
 
 
@@ -626,6 +620,18 @@ def forget_engine_benchmarks(
     return len(jobs)
 
 
+def forget_failed_benchmark_job(
+    connection: sqlite3.Connection,
+    *,
+    job_id: int,
+) -> bool:
+    cursor = connection.execute(
+        "DELETE FROM benchmark_jobs WHERE id = ? AND status = 'failed'",
+        (job_id,),
+    )
+    return cursor.rowcount > 0
+
+
 def reschedule_engine_benchmarks(
     connection: sqlite3.Connection,
     *,
@@ -648,6 +654,13 @@ def reschedule_engine_benchmarks(
     ).fetchone()
     if running is not None:
         raise ValueError("A benchmark for this build is already running.")
+    connection.execute(
+        """
+        DELETE FROM benchmark_jobs
+        WHERE status = 'failed' AND (engine_version_id = ? OR build_hash = ?)
+        """,
+        (engine.engine_id, engine.build_hash),
+    )
     # A requested re-run invalidates the current reference immediately. The
     # version becomes available again automatically when this build succeeds.
     jobs = connection.execute(
@@ -668,7 +681,7 @@ def reschedule_engine_benchmarks(
             f"""
             UPDATE benchmark_jobs
             SET benchmarker_id = NULL, status = 'queued', scheduled_at = ?,
-                started_at = NULL, finished_at = NULL, next_retry_at = NULL,
+                started_at = NULL, finished_at = NULL,
                 error = '', output = ''
             WHERE id IN ({placeholders})
             """,
@@ -881,7 +894,6 @@ def _benchmark_job_from_row(row) -> BenchmarkJobRecord:
         scheduled_at=str(row["scheduled_at"]),
         started_at=row["started_at"],
         finished_at=row["finished_at"],
-        next_retry_at=row["next_retry_at"],
         error=str(row["error"]),
         output=str(row["output"] or ""),
     )

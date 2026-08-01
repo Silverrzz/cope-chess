@@ -30,7 +30,6 @@ export interface EngineBenchmarkJob {
   scheduled_at: string
   started_at: string | null
   finished_at: string | null
-  next_retry_at: string | null
   error: string
   output: string
   benchmarker: { id: Id | null; label: string; status: string | null } | null

@@ -376,11 +376,12 @@ CREATE TABLE IF NOT EXISTS benchmark_jobs (
   scheduled_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
-  next_retry_at TEXT,
   error TEXT NOT NULL DEFAULT '',
   UNIQUE (build_hash, hardware_key)
 );
 
+DROP INDEX IF EXISTS idx_benchmark_jobs_claim;
+ALTER TABLE benchmark_jobs DROP COLUMN IF EXISTS next_retry_at;
 ALTER TABLE benchmark_jobs ADD COLUMN IF NOT EXISTS output TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS engine_benchmarks (
@@ -719,7 +720,23 @@ SET result = NULL,
 WHERE status = 'pending'
   AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 19)
+DELETE FROM benchmark_jobs failed
+WHERE failed.status = 'failed'
+  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 21
+  AND (
+    EXISTS (
+      SELECT 1
+      FROM engine_versions version
+      JOIN engine_benchmarks benchmark ON benchmark.build_hash = version.build_hash
+      WHERE version.id = failed.engine_version_id
+    )
+    OR EXISTS (
+      SELECT 1 FROM engine_benchmarks benchmark
+      WHERE benchmark.build_hash = failed.build_hash
+    )
+  );
+
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 21)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -735,7 +752,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_session_id ON workers(session_id) 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmarkers_token_hash ON benchmarkers(token_hash) WHERE token_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmarkers_session_id ON benchmarkers(session_id) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_benchmarkers_status ON benchmarkers(status);
-CREATE INDEX IF NOT EXISTS idx_benchmark_jobs_claim ON benchmark_jobs(hardware_key, status, next_retry_at, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_benchmark_jobs_claim ON benchmark_jobs(hardware_key, status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_engine_benchmarks_engine ON engine_benchmarks(engine_version_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_game_hardware_scores_engine ON game_hardware_scores(engine_version_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_jobs_status_id ON deployment_jobs(status, id);

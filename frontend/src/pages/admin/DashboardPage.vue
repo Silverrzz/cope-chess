@@ -28,7 +28,7 @@ interface BenchmarkActivity {
   detail: string
 }
 
-interface BenchmarkQueueJob {
+interface BenchmarkManagerJob {
   id: number
   engine_version_id: number | null
   engine_name: string
@@ -39,7 +39,7 @@ interface BenchmarkQueueJob {
   attempt: number
   scheduled_at: string
   started_at: string | null
-  next_retry_at: string | null
+  finished_at: string | null
   error: string
   activity: BenchmarkActivity | null
   benchmarker: { id: number; label: string; status: string | null } | null
@@ -51,7 +51,7 @@ interface BenchmarkerManagerRow {
   status: string
   last_seen?: string | null
   hardware?: { reported: boolean; summary: string; detail: string }
-  work: BenchmarkQueueJob | null
+  work: BenchmarkManagerJob | null
 }
 
 interface EngineNeedingBenchmark {
@@ -64,7 +64,8 @@ interface EngineNeedingBenchmark {
 
 interface BenchmarkManagerData {
   benchmarkers: BenchmarkerManagerRow[]
-  queue: BenchmarkQueueJob[]
+  queue: BenchmarkManagerJob[]
+  failures: BenchmarkManagerJob[]
   engines_needing_benchmark: EngineNeedingBenchmark[]
 }
 
@@ -74,9 +75,10 @@ const managerLoading = ref(true)
 const error = ref('')
 const managerError = ref('')
 const actionMessage = ref('')
-const benchmarkManager = ref<BenchmarkManagerData>({ benchmarkers: [], queue: [], engines_needing_benchmark: [] })
+const benchmarkManager = ref<BenchmarkManagerData>({ benchmarkers: [], queue: [], failures: [], engines_needing_benchmark: [] })
 const revokingBenchmarker = ref<number | null>(null)
 const queueingEngine = ref<number | null>(null)
+const forgettingFailure = ref<number | null>(null)
 const { confirm } = useConfirm()
 let benchmarkRefreshTimer: number | undefined
 
@@ -126,10 +128,6 @@ function benchmarkerWork(benchmarker: BenchmarkerManagerRow): string {
   return `${humanize(activity.stage)} · ${humanize(activity.substage)}`
 }
 
-function engineQueueStatus(engine: EngineNeedingBenchmark): string {
-  return benchmarkManager.value.queue.find((job) => job.build_hash === engine.build_hash)?.status ?? ''
-}
-
 async function revokeBenchmarker(benchmarker: BenchmarkerManagerRow): Promise<void> {
   const accepted = await confirm({ title: 'Revoke benchmarker?', message: `Revoke “${benchmarker.label}”? Its credentials will stop working and any active benchmark will return to the queue.`, confirmLabel: 'Revoke benchmarker', tone: 'danger' })
   if (!accepted) return
@@ -155,6 +153,21 @@ async function queueBenchmark(engine: EngineNeedingBenchmark): Promise<void> {
     managerError.value = errorText(cause)
   } finally {
     queueingEngine.value = null
+  }
+}
+
+async function forgetFailure(job: BenchmarkManagerJob): Promise<void> {
+  const accepted = await confirm({ title: 'Forget failed benchmark?', message: `Forget the failed benchmark for ${job.engine_name} ${job.engine_version}?`, confirmLabel: 'Forget', tone: 'danger' })
+  if (!accepted) return
+  forgettingFailure.value = job.id
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/benchmark-jobs/${job.id}`)
+    actionMessage.value = response.message
+    await loadBenchmarkManager(true)
+  } catch (cause) {
+    managerError.value = errorText(cause)
+  } finally {
+    forgettingFailure.value = null
   }
 }
 
@@ -273,7 +286,7 @@ onBeforeUnmount(() => {
               <header><h3>Queue</h3><span>{{ benchmarkManager.queue.length }}</span></header>
               <div v-if="benchmarkManager.queue.length" class="benchmark-ops__list" tabindex="0">
                 <div v-for="job in benchmarkManager.queue" :key="job.id" class="benchmark-ops__row queue-row">
-                  <RouterLink v-if="job.engine_version_id" class="benchmark-ops__copy" :to="`/admin/engine-versions/${job.engine_version_id}`"><strong>{{ job.engine_name }} <small>{{ job.engine_version }}</small></strong><small :title="job.activity?.detail ?? job.error">{{ job.activity ? humanize(job.activity.substage) : job.status === 'queued' ? 'Waiting for a benchmarker' : job.error || 'Awaiting retry' }}</small></RouterLink>
+                  <RouterLink v-if="job.engine_version_id" class="benchmark-ops__copy" :to="`/admin/engine-versions/${job.engine_version_id}`"><strong>{{ job.engine_name }} <small>{{ job.engine_version }}</small></strong><small :title="job.activity?.detail ?? job.error">{{ job.activity ? humanize(job.activity.substage) : job.status === 'queued' ? 'Waiting for a benchmarker' : 'Benchmark in progress' }}</small></RouterLink>
                   <span v-else class="benchmark-ops__copy"><strong>{{ job.engine_name }} <small>{{ job.engine_version }}</small></strong><small>{{ job.activity ? humanize(job.activity.substage) : job.error || 'Waiting' }}</small></span>
                   <StatusBadge :status="job.status" />
                 </div>
@@ -282,14 +295,27 @@ onBeforeUnmount(() => {
             </section>
 
             <section class="benchmark-ops__column">
+              <header><h3>Failures</h3><span>{{ benchmarkManager.failures.length }}</span></header>
+              <div v-if="benchmarkManager.failures.length" class="benchmark-ops__list" tabindex="0">
+                <div v-for="job in benchmarkManager.failures" :key="job.id" class="benchmark-ops__row failure-row">
+                  <RouterLink v-if="job.engine_version_id" class="benchmark-ops__copy" :to="`/admin/engine-versions/${job.engine_version_id}`"><strong>{{ job.engine_name }} <small>{{ job.engine_version }}</small></strong><small :title="job.error">{{ job.error || `Failed ${formatDate(job.finished_at)}` }}</small></RouterLink>
+                  <span v-else class="benchmark-ops__copy"><strong>{{ job.engine_name }} <small>{{ job.engine_version }}</small></strong><small :title="job.error">{{ job.error || `Failed ${formatDate(job.finished_at)}` }}</small></span>
+                  <StatusBadge :status="job.status" />
+                  <button class="button button--danger button--small" type="button" :disabled="forgettingFailure === job.id" @click="forgetFailure(job)">{{ forgettingFailure === job.id ? 'Forgetting…' : 'Forget' }}</button>
+                </div>
+              </div>
+              <p v-else class="benchmark-ops__empty">No failed benchmarks.</p>
+            </section>
+
+            <section class="benchmark-ops__column">
               <header><h3>Needs benchmark</h3><span>{{ benchmarkManager.engines_needing_benchmark.length }}</span></header>
               <div v-if="benchmarkManager.engines_needing_benchmark.length" class="benchmark-ops__list" tabindex="0">
                 <div v-for="engine in benchmarkManager.engines_needing_benchmark" :key="engine.id" class="benchmark-ops__row needs-row">
                   <RouterLink class="benchmark-ops__copy" :to="`/admin/engine-versions/${engine.id}`"><strong>{{ engine.name }}</strong><small>{{ engine.version }} · {{ engine.build_hash.slice(0, 8) }}</small></RouterLink>
-                  <button class="button button--primary button--small" type="button" :disabled="!engine.dockerfile_ready || queueingEngine === engine.id || ['queued', 'running'].includes(engineQueueStatus(engine))" @click="queueBenchmark(engine)">{{ queueingEngine === engine.id ? 'Queueing…' : engineQueueStatus(engine) === 'running' ? 'Running' : engineQueueStatus(engine) === 'queued' ? 'Queued' : engineQueueStatus(engine) === 'failed' ? 'Retry' : 'Queue' }}</button>
+                  <button class="button button--primary button--small" type="button" :disabled="!engine.dockerfile_ready || queueingEngine === engine.id" @click="queueBenchmark(engine)">{{ queueingEngine === engine.id ? 'Queueing…' : 'Queue' }}</button>
                 </div>
               </div>
-              <p v-else class="benchmark-ops__empty">All active engines are covered.</p>
+              <p v-else class="benchmark-ops__empty">All engine versions are benchmarked or queued.</p>
             </section>
           </div>
         </section>
@@ -304,7 +330,7 @@ onBeforeUnmount(() => {
 .benchmark-ops .panel-heading { align-items: center; padding: .7rem .9rem; }
 .benchmark-ops .panel-heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .65rem; padding: .25rem .5rem; }
 .benchmark-ops__loading { color: var(--color-text-muted, #64748b); font-size: .72rem; padding: .9rem; }
-.benchmark-ops__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.benchmark-ops__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .benchmark-ops__column { min-width: 0; }
 .benchmark-ops__column + .benchmark-ops__column { border-left: 1px solid var(--color-border, #d9e0ea); }
 .benchmark-ops__column > header { align-items: center; background: var(--color-surface-subtle, #f6f8fb); border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; justify-content: space-between; padding: .5rem .65rem; }
@@ -315,6 +341,7 @@ onBeforeUnmount(() => {
 .benchmark-ops__row:last-child { border-bottom: 0; }
 .benchmarker-row { grid-template-columns: minmax(0, 1fr) auto auto; }
 .queue-row { grid-template-columns: minmax(0, 1fr) auto; }
+.failure-row { grid-template-columns: minmax(0, 1fr) auto auto; }
 .needs-row { grid-template-columns: minmax(0, 1fr) auto; }
 .benchmark-ops__copy { color: inherit; display: block; min-width: 0; text-decoration: none; }
 .benchmark-ops__copy strong { display: block; font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

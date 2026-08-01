@@ -44,6 +44,7 @@ from cope.db import (
     engine_result_summary,
     forget_benchmarker,
     forget_engine_benchmarks,
+    forget_failed_benchmark_job,
     get_benchmarker,
     get_deployment_job,
     get_chat_settings,
@@ -152,7 +153,6 @@ def _benchmark_job_admin_payload(item) -> dict[str, Any]:
         "scheduled_at": job.scheduled_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
-        "next_retry_at": job.next_retry_at,
         "error": job.error,
         "output": result.output if result is not None else job.output,
         "benchmarker": None if item.benchmarker_label is None else {
@@ -1108,17 +1108,16 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_benchmark_manager(
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        rows = connection.execute(
+        queue_rows = connection.execute(
             """
             SELECT job.*, benchmarker.label AS benchmarker_label,
                    benchmarker.status AS benchmarker_status
             FROM benchmark_jobs job
             LEFT JOIN benchmarkers benchmarker ON benchmarker.id = job.benchmarker_id
-            WHERE job.status != 'succeeded'
+            WHERE job.status IN ('running', 'queued')
             ORDER BY CASE job.status
                        WHEN 'running' THEN 0
-                       WHEN 'queued' THEN 1
-                       ELSE 2
+                       ELSE 1
                      END,
                      job.scheduled_at, job.id
             LIMIT 500
@@ -1136,7 +1135,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "attempt": int(row["attempt"]),
                 "scheduled_at": str(row["scheduled_at"]),
                 "started_at": row["started_at"],
-                "next_retry_at": row["next_retry_at"],
+                "finished_at": row["finished_at"],
                 "error": str(row["error"]),
                 "activity": _benchmark_activity(str(row["output"])),
                 "benchmarker": None if row["benchmarker_id"] is None else {
@@ -1145,7 +1144,41 @@ def register_api_routes(app: FastAPI) -> None:
                     "status": row["benchmarker_status"],
                 },
             }
-            for row in rows
+            for row in queue_rows
+        ]
+        failure_rows = connection.execute(
+            """
+            SELECT job.*, benchmarker.label AS benchmarker_label,
+                   benchmarker.status AS benchmarker_status
+            FROM benchmark_jobs job
+            LEFT JOIN benchmarkers benchmarker ON benchmarker.id = job.benchmarker_id
+            WHERE job.status = 'failed'
+            ORDER BY job.finished_at DESC, job.id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+        failures = [
+            {
+                "id": int(row["id"]),
+                "engine_version_id": row["engine_version_id"],
+                "engine_name": str(row["engine_name"]),
+                "engine_version": str(row["engine_version"]),
+                "build_hash": str(row["build_hash"]),
+                "hardware_key": str(row["hardware_key"]),
+                "status": str(row["status"]),
+                "attempt": int(row["attempt"]),
+                "scheduled_at": str(row["scheduled_at"]),
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "error": str(row["error"]),
+                "activity": _benchmark_activity(str(row["output"])),
+                "benchmarker": None if row["benchmarker_id"] is None else {
+                    "id": int(row["benchmarker_id"]),
+                    "label": row["benchmarker_label"],
+                    "status": row["benchmarker_status"],
+                },
+            }
+            for row in failure_rows
         ]
         running_by_benchmarker = {
             job["benchmarker"]["id"]: job
@@ -1157,6 +1190,12 @@ def register_api_routes(app: FastAPI) -> None:
             payload = web_app._benchmarker_admin_payload(benchmarker)
             payload["work"] = running_by_benchmarker.get(benchmarker.id)
             benchmarkers.append(payload)
+        queued_build_hashes = {
+            str(row["build_hash"])
+            for row in connection.execute(
+                "SELECT DISTINCT build_hash FROM benchmark_jobs WHERE status IN ('running', 'queued')"
+            )
+        }
         engines = [
             {
                 "id": version.id,
@@ -1166,12 +1205,15 @@ def register_api_routes(app: FastAPI) -> None:
                 "dockerfile_ready": bool(version.dockerfile_path and version.dockerfile),
             }
             for version in list_engine_records(connection)
-            if version.active and version.engine_active and not version.benchmark_current
+            if version.version.strip()
+            and not version.benchmark_current
+            and version.build_hash not in queued_build_hashes
         ]
         return _json(
             {
                 "benchmarkers": benchmarkers,
                 "queue": jobs,
+                "failures": failures,
                 "engines_needing_benchmark": engines,
             }
         )
@@ -1590,6 +1632,18 @@ def register_api_routes(app: FastAPI) -> None:
         if count:
             return _json({"message": f"Queued {count} benchmark {'job' if count == 1 else 'jobs'}."})
         return _json({"message": "No benchmark hardware is registered yet. Connect a benchmarker, then request the benchmark again."})
+
+    @app.delete("/api/admin/benchmark-jobs/{job_id}")
+    def admin_forget_failed_benchmark_job(
+        job_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if not forget_failed_benchmark_job(connection, job_id=job_id):
+            raise HTTPException(status_code=404, detail="Failed benchmark job not found.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Failed benchmark forgotten."})
 
     @app.delete("/api/admin/engine-versions/{version_id}/benchmarks")
     def admin_forget_engine_benchmarks(

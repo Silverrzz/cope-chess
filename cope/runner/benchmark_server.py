@@ -70,7 +70,6 @@ class BenchmarkServerConfig:
     db_path: str | Path = DEFAULT_DB_PATH
     expected_app_version: str | None = None
     poll_interval_s: float = 30.0
-    retry_interval_s: int = 3600
     preparation_timeout_s: int = 1800
     benchmark_timeout_s: int = 600
     response_timeout_s: int = 7200
@@ -125,10 +124,7 @@ class BenchmarkServer:
     def reset_service_state(self) -> None:
         connection = connect_database(self._config.db_path)
         try:
-            reset_benchmark_service_state(
-                connection,
-                retry_seconds=self._config.retry_interval_s,
-            )
+            reset_benchmark_service_state(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -605,7 +601,6 @@ class BenchmarkServer:
                 benchmarker_id=benchmarker.id,
                 error=error,
                 output=output,
-                retry_seconds=self._config.retry_interval_s,
             )
             connection.commit()
         except Exception:

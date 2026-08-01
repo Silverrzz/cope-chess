@@ -5,7 +5,8 @@ WORKDIR /build
 ADD --checksum=sha256:804baa11f91451189ae13c8ffe686243bf0f694b0e6046e9c1b1bc6bf6853ac4 https://github.com/aronpetko/integral-networks/releases/download/dialga-v2/dialga-v2.nnue /build/dialga-v2.nnue
 COPY . .
 
-RUN gcc -std=c11 -O3 -flto=auto -DNDEBUG \
+RUN install -d /opt/cope \
+    && gcc -std=c11 -O3 -flto=auto -DNDEBUG \
         -Ithird-party/fathom \
         -c third-party/fathom/tbprobe.c \
         -o /tmp/tbprobe.o \

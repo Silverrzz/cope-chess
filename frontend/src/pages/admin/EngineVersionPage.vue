@@ -399,7 +399,6 @@ onBeforeUnmount(() => {
               <strong v-if="currentBenchmark.result">{{ formatNumber(currentBenchmark.result.nps) }} NPS</strong>
               <strong v-else>{{ currentBenchmark.status === 'running' ? 'Benchmark in progress' : currentBenchmark.status === 'queued' ? 'Queued for benchmarking' : 'Benchmark failed' }}</strong>
               <span v-if="currentBenchmark.result">Completed {{ formatDate(currentBenchmark.result.recorded_at) }} in {{ (currentBenchmark.result.elapsed_ms / 1000).toFixed(1) }}s</span>
-              <span v-else-if="currentBenchmark.next_retry_at">Automatic retry after {{ formatDate(currentBenchmark.next_retry_at) }}</span>
               <span v-else-if="currentBenchmark.started_at">Started {{ formatDate(currentBenchmark.started_at) }} · {{ elapsedText }} elapsed</span>
               <span v-else>Scheduled {{ formatDate(currentBenchmark.scheduled_at) }} · {{ elapsedText }} elapsed</span>
             </div>
