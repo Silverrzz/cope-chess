@@ -9,7 +9,10 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import { errorText, humanize } from '@/components/admin/format'
+import { buildTournamentSummaryMarkdown } from '@/components/public/tournamentSummary'
+import AppIcon from '@/components/ui/AppIcon.vue'
 import type { Tournament } from '@/components/admin/types'
+import type { TournamentDetailResponse } from '@/components/public/types'
 
 interface TournamentListItem {
   record: Tournament
@@ -28,6 +31,7 @@ const loading = ref(true)
 const error = ref('')
 const query = ref('')
 const deleting = ref<number | null>(null)
+const copying = ref<number | null>(null)
 const status = computed(() => typeof route.query.status === 'string' ? route.query.status : '')
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
@@ -63,6 +67,33 @@ async function remove(item: TournamentListItem): Promise<void> {
     await load()
   } catch (cause) { toast.error(cause); error.value = errorText(cause) }
   finally { deleting.value = null }
+}
+
+async function copySummary(item: TournamentListItem): Promise<void> {
+  copying.value = item.record.id
+  try {
+    const detail = await api.get<TournamentDetailResponse>(`/api/tournaments/${item.record.id}`)
+    const summary = buildTournamentSummaryMarkdown(detail, window.location.origin)
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(summary)
+    else fallbackCopy(summary)
+    toast.success('Tournament results copied as Markdown.')
+  } catch (cause) {
+    toast.error(cause)
+  } finally {
+    copying.value = null
+  }
+}
+
+function fallbackCopy(value: string): void {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.append(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('Copy failed')
 }
 
 watch(status, load)
@@ -107,6 +138,9 @@ onMounted(load)
               </td>
               <td class="row-actions">
                 <RouterLink class="button button--ghost button--small" :to="`/admin/tournaments/${item.record.id}`">Open</RouterLink>
+                <button v-if="item.record.status === 'finished'" class="icon-button" type="button" :disabled="copying === item.record.id" :aria-label="`Copy ${item.record.name} results as Markdown`" title="Copy results as Markdown" @click="copySummary(item)">
+                  <AppIcon name="copy" :size="16" />
+                </button>
                 <button v-if="!['scheduled', 'running'].includes(item.record.status)" class="icon-button icon-button--danger" type="button" :disabled="deleting === item.record.id" :aria-label="`Delete ${item.record.name}`" @click="remove(item)">
                   <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" /></svg>
                 </button>
