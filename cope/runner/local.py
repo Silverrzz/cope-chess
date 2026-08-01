@@ -210,6 +210,7 @@ def next_worker_assignment(
     worker: WorkerRecord,
     *,
     used_resources: tuple[int, int] | None = None,
+    excluded_engine_ids: frozenset[int] = frozenset(),
 ) -> WorkerGameAssignment | None:
     available_resources = _worker_available_resources(
         connection,
@@ -240,7 +241,12 @@ def next_worker_assignment(
 
         if worker.hw is None:
             continue
-        game = _next_playable_game_for_worker(connection, games, worker)
+        game = _next_playable_game_for_worker(
+            connection,
+            games,
+            worker,
+            excluded_engine_ids=excluded_engine_ids,
+        )
         if game is None:
             continue
         engines = _assignment_engines(connection, game)
@@ -982,9 +988,20 @@ def _next_playable_game_for_worker(
     connection: sqlite3.Connection,
     games: tuple[GameRecord, ...],
     worker: WorkerRecord,
+    *,
+    excluded_engine_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
     del connection, worker
-    return _next_playable_game(games)
+    return next(
+        (
+            game
+            for game in games
+            if game.status == "pending"
+            and game.white_engine_id not in excluded_engine_ids
+            and game.black_engine_id not in excluded_engine_ids
+        ),
+        None,
+    )
 
 
 def _finish_tournament_if_complete(

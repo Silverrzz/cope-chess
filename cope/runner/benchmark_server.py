@@ -269,7 +269,7 @@ class BenchmarkServer:
                     mode="json",
                     exclude=(
                         set()
-                        if benchmarker.app_commit == self._config.expected_app_version
+                        if hello.supports_progress
                         else {"preparation_timeout_s"}
                     ),
                 )

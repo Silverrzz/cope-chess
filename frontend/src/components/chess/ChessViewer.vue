@@ -4,17 +4,19 @@ import { computed, ref, watch } from 'vue'
 import type { MoveRecord, OpeningRecord } from '@/components/public/types'
 
 import ChessBoard from './ChessBoard.vue'
-import type { Color } from './chess'
+import type { BoardArrow, Color } from './chess'
 
 const props = withDefaults(defineProps<{
   opening?: OpeningRecord | null
   moves?: MoveRecord[]
   modelValue?: number
   label?: string
+  arrows?: BoardArrow[]
 }>(), {
   opening: null,
   moves: () => [],
   label: 'Chess game viewer',
+  arrows: () => [],
 })
 
 const emit = defineEmits<{
@@ -87,6 +89,7 @@ function fallbackCopy(value: string): void {
       :model-value="ply"
       :orientation="orientation"
       :label="label"
+      :arrows="arrows"
       @update:model-value="selectPly"
       @position="currentFen = $event.fen; emit('position', $event)"
     />

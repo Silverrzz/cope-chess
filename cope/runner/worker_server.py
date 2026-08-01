@@ -86,6 +86,13 @@ from cope.tournament.engine_instance import EngineCommandOutput
 LOG = logging.getLogger("cope.worker_server")
 WORKER_CONNECTION_REPLACED_CLOSE_CODE = 4001
 ASSIGNABLE_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
+PREPARATION_FAILURE_INITIAL_BACKOFF_S = 60.0
+PREPARATION_FAILURE_MAX_BACKOFF_S = 3600.0
+RETIRED_ASSIGNMENT_GRACE_S = 60.0
+LATE_ASSIGNMENT_MESSAGE_TYPES = {
+    "assignment_progress",
+    "assignment_cleanup_complete",
+}
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -94,6 +101,12 @@ class AssignmentPreparationFailed(RuntimeError):
         super().__init__(
             f"{failure.engine_name} {failure.stage} failed: {failure.error}"
         )
+
+
+@dataclass(frozen=True)
+class EnginePreparationBackoff:
+    failures: int
+    retry_at: float
 
 
 @dataclass(frozen=True)
@@ -181,6 +194,9 @@ class WorkerHandshakeServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._assignment_lock = asyncio.Lock()
         self._empty_claim_generation: dict[tuple, int] = {}
+        self._engine_preparation_backoff: dict[
+            tuple[str, str, int], EnginePreparationBackoff
+        ] = {}
         self._connections: dict[
             int, tuple[str, WebSocketServerProtocol]
         ] = {}
@@ -362,11 +378,18 @@ class WorkerHandshakeServer:
     ) -> None:
         wake_generation = self._work_generation
         inboxes: dict[int, asyncio.Queue] = {}
+        assignment_identities: dict[int, tuple[str, int]] = {}
+        retired_assignments: dict[tuple[int, str], tuple[int, float]] = {}
         assignments: dict[int, asyncio.Task] = {}
         assignment_resources: dict[int, WorkerResources] = {}
         send_lock = asyncio.Lock()
         receiver = asyncio.create_task(
-            self._route_worker_messages(websocket, inboxes),
+            self._route_worker_messages(
+                websocket,
+                inboxes,
+                assignment_identities,
+                retired_assignments,
+            ),
             name=f"worker-receiver-{worker.id}",
         )
         worker_status = "connected"
@@ -396,6 +419,10 @@ class WorkerHandshakeServer:
                     assignment_id = assignment.assignment.assignment_id
                     inbox: asyncio.Queue = asyncio.Queue()
                     inboxes[assignment_id] = inbox
+                    assignment_identities[assignment_id] = (
+                        assignment.assignment.assignment_key,
+                        assignment.assignment.game_id,
+                    )
                     task = asyncio.create_task(
                         self._serve_worker_assignment(
                             websocket,
@@ -470,6 +497,19 @@ class WorkerHandshakeServer:
                     task = assignments.pop(assignment_id)
                     assignment_resources.pop(assignment_id, None)
                     inboxes.pop(assignment_id, None)
+                    identity = assignment_identities.pop(assignment_id, None)
+                    if identity is not None:
+                        assignment_key, game_id = identity
+                        retired_at = time.monotonic()
+                        for retired_key, (_retired_game_id, expires_at) in tuple(
+                            retired_assignments.items()
+                        ):
+                            if expires_at <= retired_at:
+                                retired_assignments.pop(retired_key, None)
+                        retired_assignments[(assignment_id, assignment_key)] = (
+                            game_id,
+                            retired_at + RETIRED_ASSIGNMENT_GRACE_S,
+                        )
                     task.result()
                 if completed:
                     await self._wake_workers()
@@ -498,6 +538,8 @@ class WorkerHandshakeServer:
         self,
         websocket: WebSocketServerProtocol,
         inboxes: dict[int, asyncio.Queue],
+        assignment_identities: dict[int, tuple[str, int]],
+        retired_assignments: dict[tuple[int, str], tuple[int, float]],
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
@@ -506,12 +548,50 @@ class WorkerHandshakeServer:
                 raise ProtocolValidationError(
                     f"{envelope.type} message has no assignment id"
                 )
-            inbox = inboxes.get(assignment_id)
-            if inbox is None:
+            assignment_key = envelope.data.get("assignment_key")
+            game_id = envelope.data.get("game_id")
+            if not isinstance(assignment_key, str) or not isinstance(game_id, int):
                 raise ProtocolValidationError(
-                    f"{envelope.type} references inactive assignment {assignment_id}"
+                    f"{envelope.type} message has no assignment identity"
                 )
-            await inbox.put(envelope)
+            identity = assignment_identities.get(assignment_id)
+            if identity == (assignment_key, game_id):
+                inbox = inboxes.get(assignment_id)
+                if inbox is not None:
+                    await inbox.put(envelope)
+                    continue
+            retired = retired_assignments.get((assignment_id, assignment_key))
+            if retired is not None:
+                retired_game_id, expires_at = retired
+                if expires_at <= time.monotonic():
+                    retired_assignments.pop((assignment_id, assignment_key), None)
+                elif (
+                    game_id == retired_game_id
+                    and envelope.type in LATE_ASSIGNMENT_MESSAGE_TYPES
+                ):
+                    self._validate_late_assignment_message(envelope.type, envelope.data)
+                    LOG.info(
+                        "ignoring late worker message type=%s assignment_id=%s game_id=%s",
+                        envelope.type,
+                        assignment_id,
+                        game_id,
+                    )
+                    continue
+            raise ProtocolValidationError(
+                f"{envelope.type} references inactive assignment {assignment_id}"
+            )
+
+    @staticmethod
+    def _validate_late_assignment_message(message_type: str, payload: dict) -> None:
+        model = (
+            AssignmentProgress
+            if message_type == "assignment_progress"
+            else AssignmentCleanupComplete
+        )
+        try:
+            model.model_validate(payload)
+        except ValidationError as error:
+            raise ProtocolValidationError(str(error)) from error
 
     async def _serve_worker_assignment(
         self,
@@ -570,6 +650,10 @@ class WorkerHandshakeServer:
                 lock=send_lock,
             )
             ready = await self._receive_assignment_ready(inbox, assignment)
+            self._clear_engine_preparation_backoff(
+                worker,
+                ready.prepared_engine_ids,
+            )
             self._acknowledge_assignment(worker, assignment, ready)
             self._record_assignment_progress(
                 assignment,
@@ -1021,10 +1105,16 @@ class WorkerHandshakeServer:
         try:
             connection.execute("BEGIN IMMEDIATE")
             live_worker = self._validate_assignable_worker(connection, worker)
-            assignment = next_worker_assignment(
-                connection,
-                live_worker,
-                used_resources=used_resources,
+            blocked_engine_ids = self._blocked_engine_ids(live_worker)
+            assignment = (
+                None
+                if 0 in blocked_engine_ids
+                else next_worker_assignment(
+                    connection,
+                    live_worker,
+                    used_resources=used_resources,
+                    excluded_engine_ids=blocked_engine_ids,
+                )
             )
             if assignment is not None:
                 connection.commit()
@@ -1205,6 +1295,7 @@ class WorkerHandshakeServer:
         assignment,
         failure: AssignmentFailed,
     ) -> None:
+        self._record_engine_preparation_backoff(worker, failure)
         connection = connect_database(self._config.db_path)
         try:
             fail_game_assignment(
@@ -1243,6 +1334,63 @@ class WorkerHandshakeServer:
                 "engine_id": failure.engine_id,
                 "stage": failure.stage,
             },
+        )
+
+    def _record_engine_preparation_backoff(
+        self,
+        worker: WorkerRecord,
+        failure: AssignmentFailed,
+    ) -> None:
+        blocked_engine_id = (
+            0 if _is_machine_wide_preparation_failure(failure) else failure.engine_id
+        )
+        key = _engine_preparation_backoff_key(worker, blocked_engine_id)
+        previous = self._engine_preparation_backoff.get(key)
+        failures = 1 if previous is None else previous.failures + 1
+        exponent = min(failures - 1, 6)
+        delay_s = min(
+            PREPARATION_FAILURE_INITIAL_BACKOFF_S * (2 ** exponent),
+            PREPARATION_FAILURE_MAX_BACKOFF_S,
+        )
+        self._engine_preparation_backoff[key] = EnginePreparationBackoff(
+            failures=failures,
+            retry_at=time.monotonic() + delay_s,
+        )
+        LOG.warning(
+            "suppressing engine assignments after preparation failure worker_id=%s "
+            "machine_id=%s engine_id=%s failures=%s retry_in_s=%.0f",
+            worker.id,
+            worker.machine_id,
+            blocked_engine_id,
+            failures,
+            delay_s,
+        )
+
+    def _clear_engine_preparation_backoff(
+        self,
+        worker: WorkerRecord,
+        engine_ids: list[int],
+    ) -> None:
+        self._engine_preparation_backoff.pop(
+            _engine_preparation_backoff_key(worker, 0),
+            None,
+        )
+        for engine_id in engine_ids:
+            self._engine_preparation_backoff.pop(
+                _engine_preparation_backoff_key(worker, engine_id),
+                None,
+            )
+
+    def _blocked_engine_ids(self, worker: WorkerRecord) -> frozenset[int]:
+        machine_key, app_commit, _engine_id = _engine_preparation_backoff_key(worker, 0)
+        now = time.monotonic()
+        return frozenset(
+            engine_id
+            for (candidate_machine, candidate_commit, engine_id), backoff
+            in self._engine_preparation_backoff.items()
+            if candidate_machine == machine_key
+            and candidate_commit == app_commit
+            and backoff.retry_at > now
         )
 
     def _record_runtime_failure(
@@ -1284,6 +1432,19 @@ class WorkerHandshakeServer:
 
 def _worker_capability_key(worker: WorkerRecord) -> tuple:
     return (worker.id,)
+
+
+def _engine_preparation_backoff_key(
+    worker: WorkerRecord,
+    engine_id: int,
+) -> tuple[str, str, int]:
+    machine_key = worker.machine_id or f"worker:{worker.id}"
+    return machine_key, worker.app_commit or "", engine_id
+
+
+def _is_machine_wide_preparation_failure(failure: AssignmentFailed) -> bool:
+    detail = failure.error.lower()
+    return "buildx component is missing or broken" in detail
 
 
 class WorkerEngineTransport:

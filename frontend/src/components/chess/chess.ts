@@ -3,6 +3,11 @@ export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0
 export type Color = 'white' | 'black'
 export type Piece = 'P' | 'N' | 'B' | 'R' | 'Q' | 'K' | 'p' | 'n' | 'b' | 'r' | 'q' | 'k'
 
+export interface BoardArrow {
+  move: string
+  color: Color
+}
+
 export interface Position {
   squares: Array<Piece | null>
   turn: 'w' | 'b'

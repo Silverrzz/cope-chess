@@ -123,6 +123,7 @@ async def _run_connection(
             hw=hw,
             app_version=connection_config.app_version,
             supports_updates=True,
+            supports_progress=True,
         )
     else:
         hello = BenchmarkerSessionHello(
@@ -132,6 +133,7 @@ async def _run_connection(
             hw=hw,
             app_version=connection_config.app_version,
             supports_updates=True,
+            supports_progress=True,
         )
 
     LOG.info(

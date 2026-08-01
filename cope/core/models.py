@@ -587,6 +587,7 @@ class BenchmarkerTokenHello(StrictModel):
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
     supports_updates: bool = False
+    supports_progress: bool = False
 
 
 class BenchmarkerSessionHello(StrictModel):
@@ -596,6 +597,7 @@ class BenchmarkerSessionHello(StrictModel):
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
     supports_updates: bool = False
+    supports_progress: bool = False
 
 
 class BenchmarkerUpdateCommand(WorkerUpdateCommand):

@@ -2,6 +2,7 @@
 import { Chessground } from 'chessground'
 import type { Api as ChessgroundApi } from 'chessground/api'
 import type { Config as ChessgroundConfig } from 'chessground/config'
+import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import type { Key } from 'chessground/types'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
@@ -9,8 +10,18 @@ import {
   buildPositions,
   materialSummary,
   positionFen,
+  type BoardArrow,
   type Color,
 } from './chess'
+
+const arrowBrushes: DrawBrushes = {
+  green: { key: 'g', color: '#15781b', opacity: 1, lineWidth: 10 },
+  red: { key: 'r', color: '#882020', opacity: 1, lineWidth: 10 },
+  blue: { key: 'b', color: '#003088', opacity: 1, lineWidth: 10 },
+  yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
+  engineBlack: { key: 'engine-black', color: '#000000', opacity: 0.56, lineWidth: 14 },
+  engineWhite: { key: 'engine-white', color: '#ffffff', opacity: 0.72, lineWidth: 8 },
+}
 
 const props = withDefaults(defineProps<{
   fen?: string | null
@@ -22,6 +33,7 @@ const props = withDefaults(defineProps<{
   coordinates?: boolean
   compact?: boolean
   label?: string
+  arrows?: BoardArrow[]
 }>(), {
   fen: 'startpos',
   moves: () => [],
@@ -31,6 +43,7 @@ const props = withDefaults(defineProps<{
   coordinates: true,
   compact: false,
   label: 'Chess game viewer',
+  arrows: () => [],
 })
 
 const emit = defineEmits<{
@@ -78,7 +91,13 @@ watch([selectedPly, currentFen], () => {
   emit('position', { ply: selectedPly.value, fen: currentFen.value })
 }, { immediate: true })
 
-watch([currentFen, lastMove, () => props.orientation, () => props.coordinates], renderBoard)
+watch([
+  currentFen,
+  lastMove,
+  () => props.orientation,
+  () => props.coordinates,
+  () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}`).join('|'),
+], renderBoard)
 
 onMounted(() => {
   if (board.value) {
@@ -86,7 +105,7 @@ onMounted(() => {
       viewOnly: true,
       coordinates: props.coordinates,
       animation: { enabled: !props.compact, duration: 150 },
-      drawable: { enabled: false },
+      drawable: { enabled: false, brushes: arrowBrushes },
     })
     renderBoard()
   }
@@ -114,13 +133,23 @@ function selectPly(ply: number): void {
 function renderBoard(): void {
   if (!ground) return
   const move = lastMove.value
+  const lastMoveSquares = /^[a-h][1-8][a-h][1-8]/.test(move)
+    ? [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
+    : []
+  const autoShapes = props.arrows
+    .filter((arrow) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(arrow.move.toLowerCase()))
+    .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
+    .map<DrawShape>((arrow) => ({
+      orig: arrow.move.slice(0, 2).toLowerCase() as Key,
+      dest: arrow.move.slice(2, 4).toLowerCase() as Key,
+      brush: arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
+    }))
   const config: ChessgroundConfig = {
     fen: currentFen.value,
     orientation: props.orientation,
     coordinates: props.coordinates,
-  }
-  if (/^[a-h][1-8][a-h][1-8]/.test(move)) {
-    config.lastMove = [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
+    lastMove: lastMoveSquares,
+    drawable: { autoShapes },
   }
   ground.set(config)
 }

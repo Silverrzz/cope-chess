@@ -5,7 +5,7 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { api } from '@/api/client'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
-import { buildPositions, parseFen, positionFen } from '@/components/chess/chess'
+import { buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
 import ChatPanel from '@/components/public/ChatPanel.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EnginePanel from '@/components/public/EnginePanel.vue'
@@ -131,6 +131,33 @@ const whiteAnalysis = computed(() => analysisForSide('white'))
 const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
 const blackClock = computed(() => clockForSide('black'))
+const suggestedMoves = computed<BoardArrow[]>(() => {
+  if (!isLatestPly.value || viewerGame.value?.status !== 'live') return []
+
+  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci))
+  const latestFen = positionFen(positions.at(-1)!)
+  const sideToMove = parseFen(latestFen).turn === 'w' ? 'white' : 'black'
+  const arrows: BoardArrow[] = []
+  const previousMove = moves.value.at(-1)
+
+  if (previousMove) {
+    const previousPv = pvMoves(previousMove.info_line)
+    const fallbackPv = previousPv.length ? previousPv : pvMoves(previousMove.pv)
+    const playedMove = normalizedUci(previousMove.uci)
+    if (fallbackPv[0] === playedMove && fallbackPv[1]) {
+      arrows.push({ move: fallbackPv[1], color: moveSide(moves.value.length - 1) })
+    }
+  }
+
+  const currentAnalysis = data.value?.engine_data?.[sideToMove]
+  if (samePosition(currentAnalysis?.root_fen, latestFen)) {
+    const currentPv = pvMoves(currentAnalysis?.info)
+    const fallbackPv = currentPv.length ? currentPv : pvMoves(currentAnalysis?.pv)
+    if (fallbackPv[0]) arrows.push({ move: fallbackPv[0], color: sideToMove })
+  }
+
+  return arrows
+})
 const activeSide = computed<'white' | 'black' | null>(() => {
   if (isLatestPly.value && clockRuntime.value?.running) return clockRuntime.value.activeSide
   if (!viewerGame.value) return null
@@ -553,6 +580,26 @@ function moveSide(index: number): 'white' | 'black' {
   return index % 2 === 0 ? first : first === 'white' ? 'black' : 'white'
 }
 
+function pvMoves(value: string | null | undefined): string[] {
+  if (!value) return []
+  const parts = value.trim().split(/\s+/)
+  const pvIndex = parts.indexOf('pv')
+  if (parts[0] === 'info' && pvIndex < 0) return []
+  return parts
+    .slice(pvIndex >= 0 ? pvIndex + 1 : 0)
+    .map(normalizedUci)
+    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move))
+}
+
+function normalizedUci(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function samePosition(left: string | null | undefined, right: string): boolean {
+  if (!left) return false
+  return left.trim().split(/\s+/).slice(0, 3).join(' ') === right.trim().split(/\s+/).slice(0, 3).join(' ')
+}
+
 function selectGame(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (!value || value === selectedGameId.value) return
@@ -706,6 +753,7 @@ function queryValue(value: unknown): string {
               :opening="isAssigned ? assignedOpening : opening"
               :moves="isAssigned ? [] : moves"
               :model-value="isAssigned ? 0 : selectedPly"
+              :arrows="isAssigned ? [] : suggestedMoves"
               :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
               @update:model-value="selectedPly = $event"
               @position="currentPositionFen = $event.fen"

@@ -13,7 +13,15 @@ if [ ! -f "$repo_dir/pyproject.toml" ]; then
 fi
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates docker.io git python3 python3-pip python3-venv
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  ca-certificates \
+  docker.io \
+  docker-buildx \
+  git \
+  python3 \
+  python3-pip \
+  python3-venv
+docker buildx version
 
 repo_dir="$(cd "$repo_dir" && pwd)"
 repository_url="$(git -C "$repo_dir" remote get-url origin)"

@@ -345,6 +345,8 @@ def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
 def _prepare_native_client(key: str) -> None:
     if key != "worker":
         raise SystemExit("Only the game worker supports native installation.")
+    _require_command("docker")
+    _run(["docker", "buildx", "version"])
     venv = RUNTIME / "native-venv"
     python = _venv_executable(venv, "python")
     if not python.is_file():
