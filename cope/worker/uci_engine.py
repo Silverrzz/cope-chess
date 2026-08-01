@@ -537,6 +537,7 @@ class UciEngineProcess:
                         ".",
                     ],
                     cwd=repository,
+                    env={"DOCKER_BUILDKIT": "1"},
                     substage="container_build",
                 )
                 self.report_progress(
@@ -551,28 +552,38 @@ class UciEngineProcess:
                     "running",
                     f"Extracting the {self._spec.name} executable",
                 )
-                self._run_artifact_command(
-                    ["docker", "create", "--name", container_name, image_name],
-                    cwd=None,
-                    substage="artifact_extract",
-                )
                 try:
                     self._run_artifact_command(
-                        [
-                            "docker",
-                            "cp",
-                            f"{container_name}:/opt/cope/engine",
-                            str(temporary / "engine"),
-                        ],
+                        ["docker", "create", "--name", container_name, image_name],
                         cwd=None,
                         substage="artifact_extract",
                     )
+                    try:
+                        self._run_artifact_command(
+                            [
+                                "docker",
+                                "cp",
+                                f"{container_name}:/opt/cope/engine",
+                                str(temporary / "engine"),
+                            ],
+                            cwd=None,
+                            substage="artifact_extract",
+                        )
+                    finally:
+                        self._run_artifact_command(
+                            ["docker", "rm", "-f", container_name],
+                            cwd=None,
+                            substage="artifact_extract",
+                        )
                 finally:
-                    self._run_artifact_command(
-                        ["docker", "rm", "-f", container_name],
-                        cwd=None,
-                        substage="artifact_extract",
-                    )
+                    try:
+                        self._run_artifact_command(
+                            ["docker", "image", "rm", "--force", image_name],
+                            cwd=None,
+                            substage="artifact_cleanup",
+                        )
+                    except Exception:
+                        LOG.exception("could not remove temporary engine image %s", image_name)
                 stage = "verify"
                 temporary_binary = temporary / "engine"
                 if not temporary_binary.is_file() or temporary_binary.stat().st_size <= 0:
