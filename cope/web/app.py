@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -477,7 +478,12 @@ def create_app(
                     )
 
         if _is_spa_request(request) and FRONTEND_INDEX.is_file():
-            response = FileResponse(FRONTEND_INDEX, media_type="text/html")
+            preview_html = _social_preview_html(request)
+            response = (
+                HTMLResponse(preview_html)
+                if preview_html is not None
+                else FileResponse(FRONTEND_INDEX, media_type="text/html")
+            )
             response.headers["Cache-Control"] = "no-cache"
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Referrer-Policy"] = "same-origin"
@@ -732,6 +738,110 @@ def _is_spa_request(request: Request) -> bool:
     if re.fullmatch(r"/admin/workers/\d+/token", path) is not None:
         return False
     return True
+
+
+def _social_preview_html(request: Request) -> str | None:
+    match = re.fullmatch(r"/tournaments/(\d+)/?", request.url.path)
+    if match is None:
+        return None
+
+    connection = None
+    try:
+        connection = connect_database(request.app.state.db_path)
+        tournament = get_tournament(connection, int(match.group(1)))
+        if tournament is None or tournament.status == "draft":
+            return None
+
+        games = list_games(connection, tournament.id)
+        engines = _engine_names(connection)
+        game = None
+        raw_game_id = request.query_params.get("game_id")
+        if raw_game_id is not None:
+            game_id = _positive_int(raw_game_id)
+            game = next((item for item in games if item.id == game_id), None)
+
+        format_label = tournament.config.format.value.replace("_", " ").title()
+        time_control = _time_control_label(tournament.config.time_control)
+        if game is not None:
+            white = engines.get(game.white_engine_id, f"Engine {game.white_engine_id}")
+            black = engines.get(game.black_engine_id, f"Engine {game.black_engine_id}")
+            title = f"{white} vs {black} | {tournament.name} | COPE Chess"
+            if game.result:
+                state = game.result
+                if game.termination:
+                    state += f" · {game.termination.replace('_', ' ').title()}"
+            elif game.status == "live":
+                state = "Live now"
+            elif game.status == "assigned":
+                state = "Starting soon"
+            elif game.status == "pending":
+                state = "Scheduled"
+            else:
+                state = game.status.replace("_", " ").title()
+            description = (
+                f"Game #{game.id} · Round {game.round} · {state} · "
+                f"{format_label}, {time_control}."
+            )
+        else:
+            summary = _summarize_games(games)
+            participant_count = len(tournament.config.participants)
+            status = tournament.status.replace("_", " ").title()
+            title = f"{tournament.name} | COPE Chess"
+            description = (
+                f"{format_label} tournament · {time_control} · "
+                f"{participant_count} engines · {summary['finished']} of "
+                f"{summary['total']} games complete · {status}."
+            )
+
+        template = FRONTEND_INDEX.read_text(encoding="utf-8")
+        return _social_preview_document(
+            template,
+            title=title,
+            description=description,
+            url=str(request.url),
+        )
+    except Exception:
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _social_preview_document(
+    template: str,
+    *,
+    title: str,
+    description: str,
+    url: str,
+) -> str:
+    safe_title = escape(title, quote=True)
+    safe_description = escape(description, quote=True)
+    safe_url = escape(url, quote=True)
+    document = re.sub(
+        r"<title>.*?</title>",
+        lambda _: f"<title>{safe_title}</title>",
+        template,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    document = re.sub(
+        r"<meta\s+name=[\"']description[\"'][^>]*>",
+        lambda _: f'<meta name="description" content="{safe_description}" />',
+        document,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    tags = "\n    ".join(
+        (
+            '<meta property="og:site_name" content="COPE Chess" />',
+            '<meta property="og:type" content="website" />',
+            f'<meta property="og:title" content="{safe_title}" />',
+            f'<meta property="og:description" content="{safe_description}" />',
+            f'<meta property="og:url" content="{safe_url}" />',
+            f'<link rel="canonical" href="{safe_url}" />',
+        )
+    )
+    return document.replace("</head>", f"    {tags}\n  </head>", 1)
 
 
 def _is_opening_import_request(request: Request) -> bool:
