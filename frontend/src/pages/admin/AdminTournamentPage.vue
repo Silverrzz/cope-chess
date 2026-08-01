@@ -33,6 +33,7 @@ const data = ref<Response | null>(null)
 const loading = ref(true)
 const error = ref('')
 const pending = ref('')
+const concurrency = ref(1)
 const showCommit = ref(false)
 const selectedLists = ref<number[]>([])
 const id = computed(() => Number(route.params.id))
@@ -59,7 +60,10 @@ function engineName(engineId: number): string {
 async function load(): Promise<void> {
   loading.value = true
   error.value = ''
-  try { data.value = await api.get<Response>(`/api/admin/tournaments/${id.value}`) }
+  try {
+    data.value = await api.get<Response>(`/api/admin/tournaments/${id.value}`)
+    concurrency.value = data.value.tournament.config.concurrency
+  }
   catch (cause) { error.value = errorText(cause) }
   finally { loading.value = false }
 }
@@ -82,6 +86,27 @@ async function saveDraft(payload: { name: string; config: TournamentConfig }): P
   pending.value = 'save'
   try {
     const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}`, { body: payload })
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function saveConcurrency(): Promise<void> {
+  if (!data.value || data.value.tournament.status !== 'running') return
+  if (!Number.isInteger(concurrency.value) || concurrency.value < 1) {
+    error.value = 'Concurrent games must be a whole number of at least 1.'
+    return
+  }
+  pending.value = 'concurrency'
+  try {
+    const tournament = data.value.tournament
+    const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}`, {
+      body: {
+        name: tournament.name,
+        config: { ...tournament.config, concurrency: concurrency.value },
+      },
+    })
     toast.success(response.message)
     await load()
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
@@ -174,7 +199,13 @@ onMounted(load)
       <TournamentConfigForm v-if="data.tournament.status === 'draft' && data.form" :seed="data.form" :pending="pending === 'save'" submit-label="Save draft" @submit="saveDraft" @cancel="router.push('/admin/tournaments')" />
 
       <section v-else class="panel settings-panel">
-        <div class="settings-panel__heading"><div><h2>Settings</h2></div></div>
+        <div class="settings-panel__heading">
+          <div><h2>Settings</h2><p v-if="data.tournament.status === 'running'">Concurrency changes apply to future game assignments.</p></div>
+          <form v-if="data.tournament.status === 'running'" class="concurrency-form" @submit.prevent="saveConcurrency">
+            <label><span>Concurrent games</span><input v-model.number="concurrency" class="input" type="number" min="1" step="1" required></label>
+            <button class="button button--primary button--small" type="submit" :disabled="!!pending || concurrency === data.tournament.config.concurrency">{{ pending === 'concurrency' ? 'Saving…' : 'Save' }}</button>
+          </form>
+        </div>
         <dl v-if="settingsRows.length" class="definition-list">
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
         </dl>
@@ -223,6 +254,10 @@ onMounted(load)
 .settings-panel, .games-panel { overflow: hidden; padding: 0; }
 .settings-panel__heading, .games-panel__heading { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; justify-content: space-between; padding: .85rem 1rem; }
 .settings-panel__heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; color: var(--color-text-muted, #64748b); font-size: .68rem; font-weight: 650; padding: .3rem .5rem; }
+.concurrency-form { align-items: end; display: flex; gap: .5rem; }
+.concurrency-form label { display: grid; gap: .25rem; }
+.concurrency-form label span { color: var(--color-text-muted, #64748b); font-size: .68rem; }
+.concurrency-form .input { min-width: 0; width: 7rem; }
 .definition-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); margin: 0; padding: .35rem 1rem 1rem; }
 .definition-list div { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .7rem 0; }
 .definition-list dt { color: var(--color-text-muted, #64748b); font-size: .68rem; }
@@ -232,5 +267,5 @@ onMounted(load)
 .data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .8rem; text-align: left; text-transform: uppercase; }
 .data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .76rem; padding: .7rem .8rem; }
 .game-actions { display: flex; gap: .4rem; }
-@media (max-width: 42rem) { .control-bar { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } }
+@media (max-width: 42rem) { .control-bar, .settings-panel__heading { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } }
 </style>

@@ -86,6 +86,7 @@ from cope.db import (
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
+    set_tournament_concurrency,
     set_tournament_status,
     suite_opening_count,
     update_chat_settings,
@@ -984,6 +985,7 @@ def register_api_routes(app: FastAPI) -> None:
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
             "capabilities": {
                 "editable": tournament.status == "draft",
+                "concurrency_editable": tournament.status == "running",
                 "deletable": tournament.status not in {"scheduled", "running"},
                 "can_commit_ratings": (
                     tournament.status in {"finished", "aborted"}
@@ -1008,14 +1010,34 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        if tournament.status != "draft":
+        if tournament.status not in {"draft", "running"}:
             raise HTTPException(
                 status_code=409,
-                detail="Only draft tournaments can be edited.",
+                detail="Only draft tournaments and the concurrency of running tournaments can be edited.",
             )
         try:
-            config = _validated_tournament_config(connection, payload.config)
-            update_tournament(connection, tournament_id, name=payload.name, config=config)
+            if tournament.status == "running":
+                unchanged_config = payload.config.model_dump(
+                    mode="json",
+                    exclude={"concurrency"},
+                )
+                current_config = tournament.config.model_dump(
+                    mode="json",
+                    exclude={"concurrency"},
+                )
+                if payload.name != tournament.name or unchanged_config != current_config:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Only game concurrency can be changed while a tournament is running.",
+                    )
+                set_tournament_concurrency(
+                    connection,
+                    tournament_id,
+                    payload.config.concurrency,
+                )
+            else:
+                config = _validated_tournament_config(connection, payload.config)
+                update_tournament(connection, tournament_id, name=payload.name, config=config)
             connection.commit()
         except HTTPException:
             connection.rollback()
@@ -1043,7 +1065,12 @@ def register_api_routes(app: FastAPI) -> None:
                 detail="The database could not save the tournament. Try again.",
             ) from exc
         _publish_admin_change(web_app, request)
-        return _json({"id": tournament_id, "message": "Tournament updated."})
+        message = (
+            "Tournament concurrency updated."
+            if tournament.status == "running"
+            else "Tournament updated."
+        )
+        return _json({"id": tournament_id, "message": message})
 
     @app.post("/api/admin/tournaments/{tournament_id}/games/{game_id}/replay")
     def admin_replay_tournament_game(

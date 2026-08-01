@@ -772,6 +772,26 @@ def set_tournament_current_round_at_least(
     )
 
 
+def set_tournament_concurrency(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    concurrency: int,
+) -> None:
+    tournament = get_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    config = TournamentConfig.model_validate(
+        {
+            **tournament.config.model_dump(mode="json"),
+            "concurrency": concurrency,
+        }
+    )
+    connection.execute(
+        "UPDATE tournaments SET config = ? WHERE id = ?",
+        (config.model_dump_json(), tournament_id),
+    )
+
+
 def claim_tournament_worker_profile(
     connection: sqlite3.Connection,
     tournament_id: int,
