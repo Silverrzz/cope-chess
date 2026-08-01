@@ -19,6 +19,7 @@ from cope.core.models import (
 )
 
 
+@dataclass(frozen=True, slots=True)
 class RatingListRecord:
     id: int
     name: str
