@@ -93,6 +93,7 @@ from cope.db import (
     update_engine_version,
     update_git_host,
     update_opening_suite,
+    update_rating_list_anchor,
     update_tournament,
     update_worker_label,
 )
@@ -322,6 +323,11 @@ class EngineVersionUpdatePayload(BaseModel):
         if not value:
             raise ValueError("value cannot be blank")
         return value
+
+
+class RatingCalculationPayload(BaseModel):
+    anchor_engine_id: int = Field(gt=0)
+    anchor_elo: float = Field(ge=-10000, le=10000)
 
 
 class EngineVersionCreatePayload(BaseModel):
@@ -712,6 +718,10 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({
             "rating_list": rating_list,
             "ratings": list_rating_rows(connection, rating_list_id),
+            "engine_versions": [
+                {"id": version.id, "name": version.name, "version": version.version}
+                for version in list_engine_records(connection)
+            ],
             "tournaments": [
                 item for item in payload["tournaments"]
                 if item["rating_list_id"] == rating_list_id
@@ -730,6 +740,38 @@ def register_api_routes(app: FastAPI) -> None:
         connection.commit()
         _publish_admin_change(web_app, request)
         return _json({"message": "Rating list deleted."})
+
+    @app.post("/api/admin/rating-lists/{rating_list_id}/calculate")
+    def admin_calculate_rating_list(
+        rating_list_id: int,
+        payload: RatingCalculationPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_rating_list(connection, rating_list_id) is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        try:
+            update_rating_list_anchor(
+                connection,
+                rating_list_id,
+                payload.anchor_engine_id,
+                payload.anchor_elo,
+            )
+            result = recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
+            connection.commit()
+        except (RatingCommitError, ValueError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "result": jsonable_encoder(result),
+                "message": (
+                    f"Calculated {result.engines_updated} engine ratings from "
+                    f"{result.games_applied} games in {result.tournaments_applied} tournaments."
+                ),
+            }
+        )
 
     @app.post("/api/admin/ratings/recalculate")
     def admin_recalculate_ratings(
@@ -761,7 +803,7 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         try:
-            result = uncommit_tournament_ratings(connection, tournament_id, rating_list_id)
+            uncommit_tournament_ratings(connection, tournament_id, rating_list_id)
             connection.commit()
         except RatingCommitError as exc:
             connection.rollback()
@@ -769,8 +811,7 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json(
             {
-                "result": jsonable_encoder(result),
-                "message": "Tournament uncommitted and affected ratings recalculated.",
+                "message": "Tournament uncommitted. Press Calculate to update the ratings.",
             }
         )
 

@@ -21,7 +21,7 @@ from cope.engine_dockerfiles import (
 
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 _PLACEHOLDER = re.compile(r"\?")
 _pools: dict[tuple[str, str | None], ConnectionPool] = {}

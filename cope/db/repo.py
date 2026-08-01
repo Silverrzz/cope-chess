@@ -23,6 +23,8 @@ from cope.core.models import (
 class RatingListRecord:
     id: int
     name: str
+    anchor_engine_id: int | None
+    anchor_elo: float
     created_at: str
 
 
@@ -2835,18 +2837,44 @@ def create_rating_list(connection: sqlite3.Connection, name: str) -> int:
 
 def get_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> RatingListRecord | None:
     row = connection.execute("SELECT * FROM rating_lists WHERE id = ?", (rating_list_id,)).fetchone()
-    return None if row is None else RatingListRecord(row["id"], row["name"], row["created_at"])
+    return None if row is None else _rating_list_from_row(row)
 
 
 def list_rating_lists(connection: sqlite3.Connection) -> tuple[RatingListRecord, ...]:
     return tuple(
-        RatingListRecord(row["id"], row["name"], row["created_at"])
+        _rating_list_from_row(row)
         for row in connection.execute("SELECT * FROM rating_lists ORDER BY name, id")
     )
 
 
+def update_rating_list_anchor(
+    connection: sqlite3.Connection,
+    rating_list_id: int,
+    engine_version_id: int,
+    elo: float,
+) -> None:
+    if get_engine_version_record(connection, engine_version_id) is None:
+        raise ValueError("engine version not found")
+    cursor = connection.execute(
+        "UPDATE rating_lists SET anchor_engine_id = ?, anchor_elo = ? WHERE id = ?",
+        (engine_version_id, elo, rating_list_id),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("rating list not found")
+
+
 def delete_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> None:
     connection.execute("DELETE FROM rating_lists WHERE id = ?", (rating_list_id,))
+
+
+def _rating_list_from_row(row: sqlite3.Row) -> RatingListRecord:
+    return RatingListRecord(
+        id=row["id"],
+        name=row["name"],
+        anchor_engine_id=row["anchor_engine_id"],
+        anchor_elo=float(row["anchor_elo"]),
+        created_at=row["created_at"],
+    )
 
 
 def _engine_from_row(row: sqlite3.Row) -> EngineSpec:

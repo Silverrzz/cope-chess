@@ -116,7 +116,6 @@ def apply_tournament_rating_commit(
     if cursor.rowcount != 1:
         raise RatingCommitError("rating commit request changed while it was being applied")
 
-    recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
     engines = {
         engine_id
         for game in games
@@ -151,6 +150,19 @@ def recalculate_ratings(
         raise RatingCommitError("rating list ids must be positive")
 
     placeholders = ", ".join("?" for _ in selected)
+    anchor_rows = connection.execute(
+        f"SELECT id, anchor_engine_id, anchor_elo FROM rating_lists WHERE id IN ({placeholders})",
+        selected,
+    ).fetchall()
+    if len(anchor_rows) != len(selected):
+        raise RatingCommitError("one or more rating lists do not exist")
+    anchors = {
+        int(row["id"]): (
+            int(row["anchor_engine_id"]) if row["anchor_engine_id"] is not None else None,
+            float(row["anchor_elo"]),
+        )
+        for row in anchor_rows
+    }
     connection.execute(
         f"DELETE FROM rating_list_history WHERE rating_list_id IN ({placeholders})",
         selected,
@@ -170,6 +182,10 @@ def recalculate_ratings(
 
     ratings: dict[int, dict[int, float]] = {list_id: {} for list_id in selected}
     games_played: dict[int, dict[int, int]] = {list_id: {} for list_id in selected}
+    for rating_list_id, (anchor_engine_id, _) in anchors.items():
+        if anchor_engine_id is not None:
+            ratings[rating_list_id][anchor_engine_id] = DEFAULT_ELO
+            games_played[rating_list_id][anchor_engine_id] = 0
     games_applied = 0
     games_without_hardware = 0
     applied_at = utc_now()
@@ -247,6 +263,22 @@ def recalculate_ratings(
             category_games[black_id] += 1
             games_applied += 1
 
+    for rating_list_id, category_ratings in ratings.items():
+        anchor_engine_id, anchor_elo = anchors[rating_list_id]
+        if anchor_engine_id is None:
+            continue
+        offset = anchor_elo - category_ratings[anchor_engine_id]
+        for engine_id in category_ratings:
+            category_ratings[engine_id] = round(category_ratings[engine_id] + offset, 6)
+        connection.execute(
+            """
+            UPDATE rating_list_history
+            SET elo_before = elo_before + ?, elo = elo + ?
+            WHERE rating_list_id = ?
+            """,
+            (offset, offset, rating_list_id),
+        )
+
     engines_updated = 0
     for rating_list_id, category_ratings in ratings.items():
         for engine_id, elo in category_ratings.items():
@@ -272,7 +304,7 @@ def uncommit_tournament_ratings(
     connection: sqlite3.Connection,
     tournament_id: int,
     rating_list_id: int | None = None,
-) -> RatingRecalculationResult:
+) -> None:
     if rating_list_id is None:
         row = connection.execute(
             "SELECT rating_list_id FROM tournament_rating_list_commits WHERE tournament_id = ? ORDER BY rating_list_id LIMIT 1",
@@ -291,7 +323,10 @@ def uncommit_tournament_ratings(
         "DELETE FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
         (tournament_id, rating_list_id),
     )
-    return recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
+    connection.execute(
+        "DELETE FROM rating_list_history WHERE tournament_id = ? AND rating_list_id = ?",
+        (tournament_id, rating_list_id),
+    )
 
 
 def _committable_games(tournament, games: tuple) -> tuple:

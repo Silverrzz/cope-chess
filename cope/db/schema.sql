@@ -383,8 +383,13 @@ CREATE TABLE IF NOT EXISTS moves (
 CREATE TABLE IF NOT EXISTS rating_lists (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
+  anchor_engine_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
+  anchor_elo REAL NOT NULL DEFAULT 1500,
   created_at TEXT NOT NULL
 );
+
+ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_engine_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL;
+ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_elo REAL NOT NULL DEFAULT 1500;
 
 INSERT INTO rating_lists (name, created_at)
 VALUES ('Default', '1970-01-01T00:00:00+00:00')
@@ -551,7 +556,7 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 21)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 22)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
