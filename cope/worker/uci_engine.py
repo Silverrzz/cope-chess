@@ -188,6 +188,7 @@ class UciEngineProcess:
                 return self._read_until(
                     lambda line: line.startswith("bestmove"),
                     line_callback=line_callback,
+                    timeout_s=None,
                 )
             if command == "stop":
                 return self._drain_available()
@@ -693,17 +694,18 @@ class UciEngineProcess:
         self,
         predicate,
         line_callback: Callable[[str], None] | None = None,
+        timeout_s: float | None = 60.0,
     ) -> list[str]:
         LOG.debug(
             "engine output wait started engine_id=%s engine=%s",
             self._spec.engine_id,
             self._spec.name,
         )
-        deadline = time.monotonic() + 60.0
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
         lines: list[str] = []
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 raise RuntimeError(f"{self._spec.name} timed out waiting for UCI output")
             try:
                 line = self._stdout.get(timeout=remaining)
