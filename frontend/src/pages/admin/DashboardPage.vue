@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
+import { useConfirm } from '@/composables/useConfirm'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
@@ -19,10 +20,65 @@ interface DashboardData {
   system: { version: string; schema_version: number; services: Array<{ service: string; app_version: string; last_seen: string }> }
 }
 
+interface BenchmarkActivity {
+  updated_at: string
+  stage: string
+  substage: string
+  status: string
+  detail: string
+}
+
+interface BenchmarkQueueJob {
+  id: number
+  engine_version_id: number | null
+  engine_name: string
+  engine_version: string
+  build_hash: string
+  hardware_key: string
+  status: 'queued' | 'running' | 'failed'
+  attempt: number
+  scheduled_at: string
+  started_at: string | null
+  next_retry_at: string | null
+  error: string
+  activity: BenchmarkActivity | null
+  benchmarker: { id: number; label: string; status: string | null } | null
+}
+
+interface BenchmarkerManagerRow {
+  id: number
+  label: string
+  status: string
+  last_seen?: string | null
+  hardware?: { reported: boolean; summary: string; detail: string }
+  work: BenchmarkQueueJob | null
+}
+
+interface EngineNeedingBenchmark {
+  id: number
+  name: string
+  version: string
+  build_hash: string
+  dockerfile_ready: boolean
+}
+
+interface BenchmarkManagerData {
+  benchmarkers: BenchmarkerManagerRow[]
+  queue: BenchmarkQueueJob[]
+  engines_needing_benchmark: EngineNeedingBenchmark[]
+}
+
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
+const managerLoading = ref(true)
 const error = ref('')
+const managerError = ref('')
 const actionMessage = ref('')
+const benchmarkManager = ref<BenchmarkManagerData>({ benchmarkers: [], queue: [], engines_needing_benchmark: [] })
+const revokingBenchmarker = ref<number | null>(null)
+const queueingEngine = ref<number | null>(null)
+const { confirm } = useConfirm()
+let benchmarkRefreshTimer: number | undefined
 
 const metrics = computed(() => [
   { label: 'Tournaments', value: data.value?.db_stats.tournaments, to: '/admin/tournaments', icon: 'tournament' },
@@ -51,7 +107,64 @@ async function load(): Promise<void> {
   }
 }
 
-onMounted(load)
+async function loadBenchmarkManager(silent = false): Promise<void> {
+  if (!silent) managerLoading.value = true
+  try {
+    benchmarkManager.value = await api.get<BenchmarkManagerData>('/api/admin/benchmarks/manager')
+    managerError.value = ''
+  } catch (cause) {
+    managerError.value = errorText(cause)
+  } finally {
+    if (!silent) managerLoading.value = false
+  }
+}
+
+function benchmarkerWork(benchmarker: BenchmarkerManagerRow): string {
+  if (!benchmarker.work) return benchmarker.status === 'connected' ? 'Ready for work' : 'No active benchmark'
+  const activity = benchmarker.work.activity
+  if (!activity) return `Preparing ${benchmarker.work.engine_name}`
+  return `${humanize(activity.stage)} · ${humanize(activity.substage)}`
+}
+
+function engineQueueStatus(engine: EngineNeedingBenchmark): string {
+  return benchmarkManager.value.queue.find((job) => job.build_hash === engine.build_hash)?.status ?? ''
+}
+
+async function revokeBenchmarker(benchmarker: BenchmarkerManagerRow): Promise<void> {
+  const accepted = await confirm({ title: 'Revoke benchmarker?', message: `Revoke “${benchmarker.label}”? Its credentials will stop working and any active benchmark will return to the queue.`, confirmLabel: 'Revoke benchmarker', tone: 'danger' })
+  if (!accepted) return
+  revokingBenchmarker.value = benchmarker.id
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/benchmarkers/${benchmarker.id}`)
+    actionMessage.value = response.message
+    await loadBenchmarkManager(true)
+  } catch (cause) {
+    managerError.value = errorText(cause)
+  } finally {
+    revokingBenchmarker.value = null
+  }
+}
+
+async function queueBenchmark(engine: EngineNeedingBenchmark): Promise<void> {
+  queueingEngine.value = engine.id
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/engine-versions/${engine.id}/benchmarks/reschedule`)
+    actionMessage.value = response.message
+    await loadBenchmarkManager(true)
+  } catch (cause) {
+    managerError.value = errorText(cause)
+  } finally {
+    queueingEngine.value = null
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([load(), loadBenchmarkManager()])
+  benchmarkRefreshTimer = window.setInterval(() => { void loadBenchmarkManager(true) }, 3_000)
+})
+onBeforeUnmount(() => {
+  if (benchmarkRefreshTimer !== undefined) window.clearInterval(benchmarkRefreshTimer)
+})
 </script>
 
 <template>
@@ -60,10 +173,65 @@ onMounted(load)
       <template #actions><RouterLink class="button button--secondary" to="/admin/updates">Update platform</RouterLink><RouterLink class="button button--primary" to="/admin/tournaments/new">New tournament</RouterLink></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
+    <InlineFeedback :message="managerError" />
     <InlineFeedback :message="actionMessage" tone="info" />
 
     <div v-if="loading" class="panel loading-panel" role="status">Loading dashboard…</div>
     <template v-else-if="data">
+      <section class="panel benchmark-manager">
+        <header class="benchmark-manager__heading">
+          <div><h2>Benchmark manager</h2><p>Monitor benchmark clients, control the queue, and schedule missing engine measurements.</p></div>
+          <span>{{ benchmarkManager.benchmarkers.filter((item) => item.status === 'connected' || item.status === 'busy').length }} online</span>
+        </header>
+
+        <div class="benchmark-manager__section">
+          <div class="benchmark-manager__title"><div><h3>Registered benchmarkers</h3><p>Live activity and build progress for every benchmark client.</p></div><strong>{{ benchmarkManager.benchmarkers.length }}</strong></div>
+          <div v-if="managerLoading" class="benchmark-manager__loading" role="status">Loading benchmarkers…</div>
+          <div v-else-if="benchmarkManager.benchmarkers.length" class="benchmark-table-scroll">
+            <table class="benchmark-table">
+              <thead><tr><th>Benchmarker</th><th>Status</th><th>Current activity</th><th>Hardware</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>
+                <tr v-for="benchmarker in benchmarkManager.benchmarkers" :key="benchmarker.id">
+                  <td><strong>{{ benchmarker.label }}</strong><small>#{{ benchmarker.id }}</small></td>
+                  <td><StatusBadge :status="benchmarker.status" /></td>
+                  <td class="benchmark-work"><strong>{{ benchmarkerWork(benchmarker) }}</strong><small v-if="benchmarker.work">{{ benchmarker.work.engine_name }} {{ benchmarker.work.engine_version }}<template v-if="benchmarker.work.activity"> · {{ benchmarker.work.activity.detail }}</template></small></td>
+                  <td><span>{{ benchmarker.hardware?.summary ?? 'Not reported' }}</span><small>{{ benchmarker.hardware?.detail }}</small></td>
+                  <td>{{ formatDate(benchmarker.last_seen) }}</td>
+                  <td><button class="button button--danger button--small" type="button" :disabled="revokingBenchmarker === benchmarker.id" @click="revokeBenchmarker(benchmarker)">{{ revokingBenchmarker === benchmarker.id ? 'Revoking…' : 'Revoke' }}</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <AdminEmptyState v-else title="No benchmarkers registered" description="Connect a benchmarker to start processing engine measurements." />
+        </div>
+
+        <div class="benchmark-manager__section">
+          <div class="benchmark-manager__title"><div><h3>Engine benchmark queue</h3><p>Running, waiting, and retryable benchmark jobs.</p></div><strong>{{ benchmarkManager.queue.length }}</strong></div>
+          <div v-if="benchmarkManager.queue.length" class="benchmark-queue" tabindex="0">
+            <div v-for="job in benchmarkManager.queue" :key="job.id" class="benchmark-queue__row">
+              <RouterLink v-if="job.engine_version_id" :to="`/admin/engine-versions/${job.engine_version_id}`"><strong>{{ job.engine_name }}</strong><small>{{ job.engine_version }} · Job #{{ job.id }}</small></RouterLink>
+              <span v-else><strong>{{ job.engine_name }}</strong><small>{{ job.engine_version }} · Job #{{ job.id }}</small></span>
+              <StatusBadge :status="job.status" />
+              <span class="benchmark-queue__activity"><strong>{{ job.activity ? `${humanize(job.activity.stage)} · ${humanize(job.activity.substage)}` : job.status === 'queued' ? 'Waiting for a benchmarker' : job.error || 'Awaiting retry' }}</strong><small>{{ job.activity?.detail ?? (job.benchmarker ? `Assigned to ${job.benchmarker.label}` : `Attempt ${job.attempt}`) }}</small></span>
+              <time :datetime="job.started_at ?? job.scheduled_at">{{ formatDate(job.started_at ?? job.scheduled_at) }}</time>
+            </div>
+          </div>
+          <AdminEmptyState v-else title="Benchmark queue is empty" description="There are no running, queued, or failed benchmark jobs." />
+        </div>
+
+        <div class="benchmark-manager__section">
+          <div class="benchmark-manager__title"><div><h3>Engines needing a benchmark</h3><p>Active engine builds without a current benchmark result.</p></div><strong>{{ benchmarkManager.engines_needing_benchmark.length }}</strong></div>
+          <div v-if="benchmarkManager.engines_needing_benchmark.length" class="benchmark-needs-list">
+            <div v-for="engine in benchmarkManager.engines_needing_benchmark" :key="engine.id">
+              <RouterLink :to="`/admin/engine-versions/${engine.id}`"><strong>{{ engine.name }}</strong><small>{{ engine.version }} · {{ engine.build_hash.slice(0, 12) }}</small></RouterLink>
+              <StatusBadge v-if="engineQueueStatus(engine)" :status="engineQueueStatus(engine)" />
+              <button class="button button--primary button--small" type="button" :disabled="!engine.dockerfile_ready || queueingEngine === engine.id || ['queued', 'running'].includes(engineQueueStatus(engine))" @click="queueBenchmark(engine)">{{ queueingEngine === engine.id ? 'Queueing…' : engineQueueStatus(engine) === 'running' ? 'Running' : engineQueueStatus(engine) === 'queued' ? 'Queued' : engineQueueStatus(engine) === 'failed' ? 'Queue again' : 'Queue benchmark' }}</button>
+            </div>
+          </div>
+          <AdminEmptyState v-else title="All active engines are benchmarked" description="Every active engine build has a current result." />
+        </div>
+      </section>
+
       <section class="metric-grid" aria-label="Database totals">
         <RouterLink v-for="metric in metrics" :key="metric.label" class="metric-card" :to="metric.to">
           <span class="metric-card__icon" aria-hidden="true">
@@ -146,6 +314,37 @@ onMounted(load)
 <style scoped>
 .dashboard-page { display: grid; gap: 1rem; }
 .loading-panel { color: var(--color-text-muted, #64748b); min-height: 12rem; padding: 2rem; }
+.benchmark-manager { overflow: hidden; padding: 0; }
+.benchmark-manager__heading { align-items: center; background: var(--color-surface-subtle, #f6f8fb); border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; gap: 1rem; justify-content: space-between; padding: 1rem; }
+.benchmark-manager__heading h2, .benchmark-manager__title h3 { margin: 0; }
+.benchmark-manager__heading h2 { font-size: 1rem; }
+.benchmark-manager__heading p, .benchmark-manager__title p { color: var(--color-text-muted, #64748b); font-size: .7rem; margin: .2rem 0 0; }
+.benchmark-manager__heading > span, .benchmark-manager__title > strong { background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: 999px; font-size: .68rem; padding: .28rem .55rem; white-space: nowrap; }
+.benchmark-manager__section + .benchmark-manager__section { border-top: 1px solid var(--color-border, #d9e0ea); }
+.benchmark-manager__title { align-items: center; display: flex; gap: 1rem; justify-content: space-between; padding: .8rem 1rem; }
+.benchmark-manager__title h3 { font-size: .84rem; }
+.benchmark-manager__loading { color: var(--color-text-muted, #64748b); font-size: .75rem; padding: 1rem; }
+.benchmark-table-scroll { overflow-x: auto; }
+.benchmark-table { border-collapse: collapse; min-width: 68rem; width: 100%; }
+.benchmark-table th { color: var(--color-text-muted, #64748b); font-size: .63rem; letter-spacing: .04em; padding: .55rem .75rem; text-align: left; text-transform: uppercase; }
+.benchmark-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .72rem; padding: .65rem .75rem; vertical-align: middle; }
+.benchmark-table td:first-child, .benchmark-table td:nth-child(4), .benchmark-work { display: grid; min-width: 0; }
+.benchmark-table small, .benchmark-queue small, .benchmark-needs-list small { color: var(--color-text-muted, #64748b); display: block; font-size: .64rem; margin-top: .15rem; }
+.benchmark-work { max-width: 24rem; }
+.benchmark-work strong, .benchmark-work small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.benchmark-table td:last-child { text-align: right; }
+.benchmark-queue { border-top: 1px solid var(--color-border, #d9e0ea); max-height: 22rem; overflow: auto; }
+.benchmark-queue__row { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: grid; gap: .75rem; grid-template-columns: minmax(11rem, 1fr) auto minmax(15rem, 2fr) auto; padding: .65rem 1rem; }
+.benchmark-queue__row:last-child { border-bottom: 0; }
+.benchmark-queue__row > a, .benchmark-queue__row > span:first-child, .benchmark-queue__activity { color: inherit; display: grid; min-width: 0; text-decoration: none; }
+.benchmark-queue__row > a:hover strong { color: var(--color-accent, #315fcc); }
+.benchmark-queue__activity strong, .benchmark-queue__activity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.benchmark-queue time { color: var(--color-text-muted, #64748b); font-size: .66rem; white-space: nowrap; }
+.benchmark-needs-list { border-top: 1px solid var(--color-border, #d9e0ea); display: grid; }
+.benchmark-needs-list > div { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: grid; gap: .75rem; grid-template-columns: minmax(0, 1fr) auto auto; padding: .65rem 1rem; }
+.benchmark-needs-list > div:last-child { border-bottom: 0; }
+.benchmark-needs-list a { color: inherit; display: grid; min-width: 0; text-decoration: none; }
+.benchmark-needs-list a:hover strong { color: var(--color-accent, #315fcc); }
 .metric-grid { display: grid; gap: .75rem; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .system-strip { display: flex; flex-wrap: wrap; gap: 1.2rem; padding: .75rem 1rem; }.system-strip > div { display: grid; gap: .15rem; }.system-strip span { color: var(--color-text-muted, #64748b); font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }.system-strip strong, .system-strip code { font-size: .72rem; }
 .metric-card { align-items: center; background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: var(--radius-lg, .8rem); color: inherit; display: flex; gap: .7rem; min-width: 0; padding: .8rem; text-decoration: none; transition: border-color 120ms ease, transform 120ms ease; }
@@ -189,6 +388,6 @@ onMounted(load)
 .results-list strong { background: var(--color-surface-subtle, #f1f5f9); border-radius: .3rem; padding: .25rem .4rem; }
 .results-list small { color: var(--color-text-muted, #64748b); font-size: .68rem; }
 @media (max-width: 68rem) { .metric-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 48rem) { .dashboard-grid { grid-template-columns: 1fr; } .dashboard-panel--wide { grid-column: auto; } .metric-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 32rem) { .metric-grid { grid-template-columns: 1fr; } .results-list a { grid-template-columns: 1fr auto 1fr; } .results-list small { display: none; } }
+@media (max-width: 48rem) { .dashboard-grid { grid-template-columns: 1fr; } .dashboard-panel--wide { grid-column: auto; } .metric-grid { grid-template-columns: repeat(2, 1fr); } .benchmark-queue__row { grid-template-columns: minmax(0, 1fr) auto; } .benchmark-queue__activity { grid-column: 1 / -1; } .benchmark-queue time { display: none; } }
+@media (max-width: 32rem) { .metric-grid { grid-template-columns: 1fr; } .results-list a { grid-template-columns: 1fr auto 1fr; } .results-list small { display: none; } .benchmark-manager__heading { align-items: flex-start; } .benchmark-manager__heading > span { display: none; } .benchmark-needs-list > div { grid-template-columns: minmax(0, 1fr) auto; } .benchmark-needs-list .status-badge { grid-column: 1 / -1; grid-row: 2; width: fit-content; } }
 </style>

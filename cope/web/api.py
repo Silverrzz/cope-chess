@@ -58,6 +58,7 @@ from cope.db import (
     get_worker,
     list_deployment_jobs,
     list_deployment_targets,
+    list_benchmarkers,
     list_chat_messages,
     list_engine_games,
     list_engine_records,
@@ -165,6 +166,27 @@ def _benchmark_job_admin_payload(item) -> dict[str, Any]:
             "elapsed_ms": result.elapsed_ms,
             "recorded_at": result.recorded_at,
         },
+    }
+
+
+def _benchmark_activity(output: str) -> dict[str, str] | None:
+    matches = list(
+        re.finditer(
+            r"(?m)^\[([^\]]+)\] ([^/\s]+)/([^\s]+) ([^\s]+)\n",
+            output,
+        )
+    )
+    if not matches:
+        return None
+    match = matches[-1]
+    detail = output[match.end():].strip()
+    lines = [line.strip() for line in detail.splitlines() if line.strip()]
+    return {
+        "updated_at": match.group(1),
+        "stage": match.group(2),
+        "substage": match.group(3),
+        "status": match.group(4),
+        "detail": (lines[-1] if lines else "Working")[-500:],
     }
 
 
@@ -1082,6 +1104,78 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
+    @app.get("/api/admin/benchmarks/manager")
+    def admin_benchmark_manager(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        rows = connection.execute(
+            """
+            SELECT job.*, benchmarker.label AS benchmarker_label,
+                   benchmarker.status AS benchmarker_status
+            FROM benchmark_jobs job
+            LEFT JOIN benchmarkers benchmarker ON benchmarker.id = job.benchmarker_id
+            WHERE job.status != 'succeeded'
+            ORDER BY CASE job.status
+                       WHEN 'running' THEN 0
+                       WHEN 'queued' THEN 1
+                       ELSE 2
+                     END,
+                     job.scheduled_at, job.id
+            LIMIT 500
+            """
+        ).fetchall()
+        jobs = [
+            {
+                "id": int(row["id"]),
+                "engine_version_id": row["engine_version_id"],
+                "engine_name": str(row["engine_name"]),
+                "engine_version": str(row["engine_version"]),
+                "build_hash": str(row["build_hash"]),
+                "hardware_key": str(row["hardware_key"]),
+                "status": str(row["status"]),
+                "attempt": int(row["attempt"]),
+                "scheduled_at": str(row["scheduled_at"]),
+                "started_at": row["started_at"],
+                "next_retry_at": row["next_retry_at"],
+                "error": str(row["error"]),
+                "activity": _benchmark_activity(str(row["output"])),
+                "benchmarker": None if row["benchmarker_id"] is None else {
+                    "id": int(row["benchmarker_id"]),
+                    "label": row["benchmarker_label"],
+                    "status": row["benchmarker_status"],
+                },
+            }
+            for row in rows
+        ]
+        running_by_benchmarker = {
+            job["benchmarker"]["id"]: job
+            for job in jobs
+            if job["status"] == "running" and job["benchmarker"] is not None
+        }
+        benchmarkers = []
+        for benchmarker in list_benchmarkers(connection):
+            payload = web_app._benchmarker_admin_payload(benchmarker)
+            payload["work"] = running_by_benchmarker.get(benchmarker.id)
+            benchmarkers.append(payload)
+        engines = [
+            {
+                "id": version.id,
+                "name": version.name,
+                "version": version.version,
+                "build_hash": version.build_hash,
+                "dockerfile_ready": bool(version.dockerfile_path and version.dockerfile),
+            }
+            for version in list_engine_records(connection)
+            if version.active and version.engine_active and not version.benchmark_current
+        ]
+        return _json(
+            {
+                "benchmarkers": benchmarkers,
+                "queue": jobs,
+                "engines_needing_benchmark": engines,
+            }
+        )
+
     @app.get("/api/admin/engine-dockerfiles")
     def admin_engine_dockerfiles():
         try:
@@ -1844,7 +1938,7 @@ def register_api_routes(app: FastAPI) -> None:
         forget_benchmarker(connection, benchmarker_id)
         connection.commit()
         _publish_admin_change(web_app, request)
-        return _json({"message": "Benchmarker forgotten."})
+        return _json({"message": "Benchmarker revoked."})
 
     # Chat moderation
 

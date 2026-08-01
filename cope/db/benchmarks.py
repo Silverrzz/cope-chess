@@ -677,7 +677,7 @@ def reschedule_engine_benchmarks(
     hardware_rows = connection.execute(
         """
         SELECT DISTINCT hardware_key FROM benchmarkers
-        WHERE hardware_key IS NOT NULL AND status IN ('connected', 'busy')
+        WHERE hardware_key IS NOT NULL AND status != 'revoked'
         """
     )
     scheduled = len(job_ids)
