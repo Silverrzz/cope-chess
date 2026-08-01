@@ -547,9 +547,16 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "tournament": tournament,
-                "games": games,
+                "games": [
+                    web_app._game_payload(game, engines, live=True)
+                    for game in games
+                ],
                 "engines": engines,
-                "viewer_game": viewer_game,
+                "viewer_game": (
+                    web_app._game_payload(viewer_game, engines, live=True)
+                    if viewer_game
+                    else None
+                ),
                 "viewer_moves": [web_app._move_payload(move) for move in viewer_moves],
                 "viewer_locked": viewer_locked,
                 "engine_data": engine_data,
@@ -1176,7 +1183,11 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        pgns = [game.pgn.strip() for game in list_games(connection, tournament_id) if game.pgn]
+        pgns = [
+            game.pgn.strip()
+            for game in list_games(connection, tournament_id, include_pgn=True)
+            if game.pgn
+        ]
         if not pgns:
             raise HTTPException(status_code=409, detail="No completed game PGNs are available.")
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", tournament.name).strip("-") or f"tournament-{tournament_id}"

@@ -52,6 +52,13 @@ interface EngineInfoEvent {
   [key: string]: unknown
 }
 
+interface GameMoveEvent {
+  game_id?: Identifier
+  ply?: number
+  move?: MoveRecord
+  clocks_ms?: Partial<Record<'white' | 'black', number | null>>
+}
+
 interface ChatEvent {
   tournament_id?: Identifier
   message?: ChatMessage
@@ -380,11 +387,47 @@ function handleSnapshot(event: Event): void {
 }
 
 function handleGameMove(event: Event): void {
-  const envelope = parseEnvelope<{ game_id?: Identifier }>(event)
-  if (envelope?.data.game_id !== undefined && sameId(envelope.data.game_id, selectedGameId.value)) {
-    if (clockRuntime.value) clockRuntime.value = { ...clockRuntime.value, running: false }
-    stopClock()
+  const envelope = parseEnvelope<GameMoveEvent>(event)
+  const payload = envelope?.data
+  if (!payload || !sameId(payload.game_id, selectedGameId.value)) return
+  if (clockRuntime.value) clockRuntime.value = { ...clockRuntime.value, running: false }
+  stopClock()
+  if (!data.value || !payload.move || payload.move.ply !== payload.ply) {
     scheduleSnapshotRefresh()
+    return
+  }
+
+  const records = data.value.viewer_moves
+  const existingIndex = records.findIndex((move) => move.ply === payload.move!.ply)
+  const followedLatest = selectedPly.value >= records.length
+  if (existingIndex >= 0) {
+    const updated = [...records]
+    updated[existingIndex] = payload.move
+    data.value.viewer_moves = updated
+  } else {
+    const latestPly = records.at(-1)?.ply
+    if (latestPly !== undefined && payload.move.ply !== latestPly + 1) {
+      scheduleSnapshotRefresh()
+      return
+    }
+    data.value.viewer_moves = [...records, payload.move]
+    if (followedLatest) selectedPly.value = data.value.viewer_moves.length
+  }
+
+  if (payload.clocks_ms) {
+    const nextLabels = { ...clockLabels.value }
+    for (const side of ['white', 'black'] as const) {
+      const value = payload.clocks_ms[side]
+      if (value !== null && value !== undefined) nextLabels[side] = clockLabel(value)
+    }
+    clockLabels.value = nextLabels
+    data.value.clocks = nextLabels
+    clockRuntime.value = {
+      activeSide: null,
+      running: false,
+      clocksMs: payload.clocks_ms,
+      startedAt: Date.now(),
+    }
   }
 }
 

@@ -24,6 +24,9 @@ class GameState():
         self._winner = None
         self._termination = None
         self._details = ""
+        self._position_counts: dict[tuple[str, ...], int] = {}
+        self._recorded_stack_size = 0
+        self._reset_position_counts()
         self.update_from_board()
 
     def get_board(self) -> chess.Board:
@@ -31,6 +34,7 @@ class GameState():
 
     def set_board(self, board: chess.Board):
         self._board = board
+        self._reset_position_counts()
 
     def get_result(self) -> str:
         return self._result
@@ -48,7 +52,8 @@ class GameState():
         return self._result != "*"
 
     def update_from_board(self):
-        outcome = self._board.outcome(claim_draw=True)
+        self._record_position()
+        outcome = self._current_outcome()
 
         if outcome is None:
             return
@@ -57,6 +62,69 @@ class GameState():
         self._winner = outcome.winner
         self._termination = self._get_board_termination(outcome.termination)
         self._details = self._termination.value
+
+    def _current_outcome(self) -> chess.Outcome | None:
+        board = self._board
+        if board.is_variant_loss():
+            return chess.Outcome(chess.Termination.VARIANT_LOSS, not board.turn)
+        if board.is_variant_win():
+            return chess.Outcome(chess.Termination.VARIANT_WIN, board.turn)
+        if board.is_variant_draw():
+            return chess.Outcome(chess.Termination.VARIANT_DRAW, None)
+        if board.is_checkmate():
+            return chess.Outcome(chess.Termination.CHECKMATE, not board.turn)
+        if board.is_insufficient_material():
+            return chess.Outcome(chess.Termination.INSUFFICIENT_MATERIAL, None)
+        if board.is_stalemate():
+            return chess.Outcome(chess.Termination.STALEMATE, None)
+        if board.is_seventyfive_moves():
+            return chess.Outcome(chess.Termination.SEVENTYFIVE_MOVES, None)
+        if self._position_counts.get(self._position_key(board), 0) >= 5:
+            return chess.Outcome(chess.Termination.FIVEFOLD_REPETITION, None)
+        if board.halfmove_clock >= 99 and board.can_claim_fifty_moves():
+            return chess.Outcome(chess.Termination.FIFTY_MOVES, None)
+        if self._can_claim_threefold_repetition():
+            return chess.Outcome(chess.Termination.THREEFOLD_REPETITION, None)
+        return None
+
+    def _can_claim_threefold_repetition(self) -> bool:
+        board = self._board
+        if self._position_counts.get(self._position_key(board), 0) >= 3:
+            return True
+        if not self._position_counts or max(self._position_counts.values()) < 2:
+            return False
+        for move in board.generate_legal_moves():
+            board.push(move)
+            try:
+                if self._position_counts.get(self._position_key(board), 0) >= 2:
+                    return True
+            finally:
+                board.pop()
+        return False
+
+    def _reset_position_counts(self) -> None:
+        replay = self._board.root()
+        self._position_counts = {self._position_key(replay): 1}
+        for move in self._board.move_stack:
+            replay.push(move)
+            key = self._position_key(replay)
+            self._position_counts[key] = self._position_counts.get(key, 0) + 1
+        self._recorded_stack_size = len(self._board.move_stack)
+
+    def _record_position(self) -> None:
+        stack_size = len(self._board.move_stack)
+        if stack_size == self._recorded_stack_size:
+            return
+        if stack_size != self._recorded_stack_size + 1:
+            self._reset_position_counts()
+            return
+        key = self._position_key(self._board)
+        self._position_counts[key] = self._position_counts.get(key, 0) + 1
+        self._recorded_stack_size = stack_size
+
+    @staticmethod
+    def _position_key(board: chess.Board) -> tuple[str, ...]:
+        return tuple(board.fen(en_passant="legal").split()[:4])
 
     def record_timeout(self, loser: chess.Color):
         winner = not loser

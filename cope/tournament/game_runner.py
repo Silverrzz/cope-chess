@@ -1,5 +1,4 @@
 import chess
-import time
 from collections.abc import Callable
 
 from .engine_instance import EngineInstance
@@ -13,7 +12,7 @@ class GameRunner:
     def __init__(
         self,
         game: Game,
-        clock_probe_interval: float = 0.001,
+        clock_probe_interval: float = 0.01,
         on_tick: Callable[[chess.Color, int | None], None] | None = None,
         on_clock_sync: Callable[[chess.Color, bool, int | None], None] | None = None,
     ):
@@ -77,7 +76,7 @@ class GameRunner:
                     worker_clock_synced = True
                 if self._on_tick is not None:
                     self._on_tick(side_to_move, remaining)
-                time.sleep(self._clock_probe_interval)
+                engine.wait_for_search(self._clock_probe_interval)
 
             move = engine.get_search_move()
         except TimeOutError:

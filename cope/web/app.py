@@ -554,11 +554,12 @@ def create_app(
             topic = f"tournament.{tournament_id}"
             subscription = hub.subscribe(topic)
             try:
+                initial_snapshot = await asyncio.to_thread(snapshot)
                 yield sse_stream_event(
                     hub.make_private_event(
                         topic,
                         "tournament.snapshot",
-                        snapshot(),
+                        initial_snapshot,
                         source="web",
                     )
                 )
@@ -573,6 +574,12 @@ def create_app(
                         continue
                     if event is None:
                         break
+                    if (
+                        selected_game_id is not None
+                        and event.type in {"game.move", "engine.info", "clock.sync"}
+                        and _event_game_id(event) != selected_game_id
+                    ):
+                        continue
                     yield sse_stream_event(event)
             finally:
                 hub.unsubscribe(subscription)

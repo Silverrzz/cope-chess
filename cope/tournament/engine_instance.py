@@ -1,4 +1,4 @@
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import shlex
 import subprocess
@@ -177,7 +177,7 @@ class EngineInstance:
                 begin_search(int(self._name))
         self._search_future = self._search_executor.submit(
             self.get_search_result,
-            board.copy(),
+            board,
             go_command_arg,
         )
 
@@ -315,6 +315,18 @@ class EngineInstance:
 
     def is_searching(self) -> bool:
         return self._search_future is not None and not self._search_future.done()
+
+    def wait_for_search(self, timeout: float) -> bool:
+        search_future = self._search_future
+        if search_future is None:
+            return True
+        try:
+            search_future.result(timeout=timeout)
+        except FutureTimeoutError:
+            return False
+        except Exception:
+            return True
+        return True
 
     def get_search_move(self) -> chess.Move:
         if self._search_future is None:

@@ -6,8 +6,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import chess
@@ -345,6 +345,7 @@ def run_worker_assignment_game(
     if assignment.opening_moves != opening_moves:
         raise RuntimeError("assignment opening moves do not match the game")
     _validate_new_game_attempt(recorded_moves)
+    connection.commit()
     LOG.info(
         "starting game assignment_id=%s game_id=%s tournament=%s round=%s opening=%s",
         assignment.assignment.assignment_id,
@@ -431,8 +432,8 @@ def run_worker_assignment_game(
         total=max(len(opening_moves), 1),
         metadata={"fen": board.fen()},
     )
+    moves = list(recorded_moves)
     for book_index, uci in enumerate(opening_moves, start=1):
-        _validated_assignment_record(connection, assignment)
         progress(
             "opening",
             "opening_move",
@@ -447,7 +448,7 @@ def run_worker_assignment_game(
             raise RuntimeError(
                 f"opening move {uci} is illegal at book ply {book_index}"
             )
-        board_before_move = board.copy()
+        board_before_move = board.copy(stack=False)
         side_to_move = board.turn
         board.push(move)
         game.state.update_from_board()
@@ -455,9 +456,11 @@ def run_worker_assignment_game(
         black.prepare_position(board)
         clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         clock_after_ms = _clock_time_ms(clock)
-        record_move(
+        move_record = record_move(
             connection,
             game_id=game_record.id,
+            assignment_id=assignment.assignment.assignment_id,
+            assignment_key=assignment.assignment.assignment_key,
             ply=board.ply(),
             uci=uci,
             san=board_before_move.san(move),
@@ -465,8 +468,19 @@ def run_worker_assignment_game(
             time_ms=0,
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
         )
+        moves.append(move_record)
         connection.commit()
-        publish_game_move(tournament.id, game_record.id, board.ply())
+        publish_game_move(
+            tournament.id,
+            game_record.id,
+            board.ply(),
+            move=asdict(move_record),
+            clocks_ms=_live_clock_payload(
+                game,
+                "white" if side_to_move == chess.WHITE else "black",
+                clock_after_ms,
+            ),
+        )
         progress(
             "opening",
             "opening_move",
@@ -509,7 +523,6 @@ def run_worker_assignment_game(
         total=max(assignment.max_plies, board.ply(), 1),
     )
 
-    moves = list_moves(connection, game_record.id)
     adjudicated = (
         None
         if game.state.is_finished()
@@ -520,24 +533,12 @@ def run_worker_assignment_game(
         and adjudicated is None
         and board.ply() < assignment.max_plies
     ):
-        _validated_assignment_record(connection, assignment)
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
-        progress(
-            "play",
-            "move_turn",
-            "running",
-            f"{side_label} is preparing move at ply {board.ply() + 1}",
-            current=board.ply(),
-            total=max(assignment.max_plies, board.ply(), 1),
-            metadata={"side": side_label.lower(), "next_ply": board.ply() + 1},
-        )
-        board_before_move = board.copy()
+        board_before_move = board.copy(stack=False)
         move = runner.run_next_move()
         if move is None:
             break
-        _validated_assignment_record(connection, assignment)
-
         engine = white if side_to_move == chess.WHITE else black
         search = engine.get_last_search_result()
         if search is not None and search.info_line is not None:
@@ -549,9 +550,11 @@ def run_worker_assignment_game(
             )
         clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         clock_after_ms = _clock_time_ms(clock)
-        record_move(
+        move_record = record_move(
             connection,
             game_id=game_record.id,
+            assignment_id=assignment.assignment.assignment_id,
+            assignment_key=assignment.assignment.assignment_key,
             ply=board.ply(),
             uci=move.uci(),
             san=board_before_move.san(move),
@@ -565,20 +568,21 @@ def run_worker_assignment_game(
             time_ms=0 if search is None else search.time_ms,
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
         )
+        moves.append(move_record)
         connection.commit()
-        moves = list_moves(connection, game_record.id)
         if not game.state.is_finished():
             adjudicated = _adjudication_result(tournament.config.adjudication, moves)
-        progress(
-            "play",
-            "move_recorded",
-            "running",
-            f"Recorded ply {board.ply()}: {move.uci()}",
-            current=board.ply(),
-            total=max(assignment.max_plies, board.ply(), 1),
-            metadata={"move": move.uci(), "ply": board.ply()},
+        publish_game_move(
+            tournament.id,
+            game_record.id,
+            board.ply(),
+            move=asdict(move_record),
+            clocks_ms=_live_clock_payload(
+                game,
+                side_label.lower(),
+                clock_after_ms,
+            ),
         )
-        publish_game_move(tournament.id, game_record.id, board.ply())
         if board.ply() <= 10 or board.ply() % 10 == 0:
             LOG.info(
                 "recorded move game_id=%s ply=%s move=%s",
@@ -604,7 +608,6 @@ def run_worker_assignment_game(
         current=board.ply(),
         total=max(assignment.max_plies, board.ply(), 1),
     )
-    moves = list_moves(connection, game_record.id)
     if adjudicated is not None:
         result, termination = adjudicated
     elif not game.state.is_finished():
@@ -1084,7 +1087,7 @@ def _max_plies(tournament: TournamentRecord) -> int:
 
 def _adjudication_result(
     config: AdjudicationConfig,
-    moves: tuple[MoveRecord, ...],
+    moves: Sequence[MoveRecord],
 ) -> tuple[str, str] | None:
     draw = config.draw
     if draw is not None:
@@ -1135,9 +1138,9 @@ def _adjudication_result(
 
 
 def _adjudication_window(
-    moves: tuple[MoveRecord, ...],
+    moves: Sequence[MoveRecord],
     consecutive_plies: int,
-) -> tuple[MoveRecord, ...]:
+) -> Sequence[MoveRecord]:
     if len(moves) < consecutive_plies:
         return ()
     window = moves[-consecutive_plies:]
@@ -1161,7 +1164,7 @@ def _white_relative_move_score(
 
 def _max_moves_result(
     tournament: TournamentRecord,
-    moves: tuple[MoveRecord, ...],
+    moves: Sequence[MoveRecord],
 ) -> tuple[str, str]:
     score = _latest_white_relative_score(moves)
     if score is None:
@@ -1187,7 +1190,7 @@ def _max_moves_result(
 
 
 def _latest_white_relative_score(
-    moves: tuple[MoveRecord, ...],
+    moves: Sequence[MoveRecord],
 ) -> tuple[int | None, int | None] | None:
     for move in reversed(moves):
         mover_sign = 1 if move.ply % 2 == 1 else -1
@@ -1210,7 +1213,7 @@ def _build_pgn(
     tournament: TournamentRecord,
     game: GameRecord,
     opening: OpeningPositionRecord | None,
-    moves: tuple[MoveRecord, ...],
+    moves: Sequence[MoveRecord],
     result: str,
     termination: str,
 ) -> str:

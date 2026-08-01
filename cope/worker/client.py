@@ -602,15 +602,17 @@ async def _serve_assignment(
                 assignment.engines[command.engine_id].name,
                 play_started=play_started,
             )
+            track_command_progress = command_stage != "play"
             if command.command.startswith("go"):
                 play_started = True
-            await progress.publish(
-                command_stage,
-                command_substage,
-                "running",
-                command_detail,
-                engine=assignment.engines[command.engine_id],
-            )
+            if track_command_progress:
+                await progress.publish(
+                    command_stage,
+                    command_substage,
+                    "running",
+                    command_detail,
+                    engine=assignment.engines[command.engine_id],
+                )
             await _send_message(
                 websocket,
                 "engine_command_started",
@@ -665,14 +667,15 @@ async def _serve_assignment(
                             clock_task.cancel()
                             with contextlib.suppress(asyncio.CancelledError):
                                 await clock_task
-                        await progress.publish(
-                            command_stage,
-                            command_substage,
-                            "completed",
-                            f"{assignment.engines[command.engine_id].name} search was stopped",
-                            engine=assignment.engines[command.engine_id],
-                            metadata={"stopped": True},
-                        )
+                        if track_command_progress:
+                            await progress.publish(
+                                command_stage,
+                                command_substage,
+                                "completed",
+                                f"{assignment.engines[command.engine_id].name} search was stopped",
+                                engine=assignment.engines[command.engine_id],
+                                metadata={"stopped": True},
+                            )
                         continue
                     result_lines, command_elapsed_ms = command_result
                 else:
@@ -683,17 +686,18 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
-                await progress.publish(
-                    command_stage,
-                    command_substage,
-                    "completed",
-                    _command_completed_detail(
-                        command.command,
-                        assignment.engines[command.engine_id].name,
-                        command_elapsed_ms,
-                    ),
-                    engine=assignment.engines[command.engine_id],
-                )
+                if track_command_progress:
+                    await progress.publish(
+                        command_stage,
+                        command_substage,
+                        "completed",
+                        _command_completed_detail(
+                            command.command,
+                            assignment.engines[command.engine_id].name,
+                            command_elapsed_ms,
+                        ),
+                        engine=assignment.engines[command.engine_id],
+                    )
             except Exception as error:
                 if info_publisher is not None:
                     await info_publisher.cancel()

@@ -994,11 +994,21 @@ def list_games(
     tournament_id: int,
     *,
     status: str | None = None,
+    include_pgn: bool = False,
 ) -> tuple[GameRecord, ...]:
+    columns = (
+        "*"
+        if include_pgn
+        else """
+        id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
+        match_id, game_number, tiebreak_kind, opening_id, status, result,
+        termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
+        """
+    )
     if status is None:
         rows = connection.execute(
-            """
-            SELECT * FROM games
+            f"""
+            SELECT {columns} FROM games
             WHERE tournament_id = ?
             ORDER BY round, pair_index, id
             """,
@@ -1006,8 +1016,8 @@ def list_games(
         )
     else:
         rows = connection.execute(
-            """
-            SELECT * FROM games
+            f"""
+            SELECT {columns} FROM games
             WHERE tournament_id = ? AND status = ?
             ORDER BY round, pair_index, id
             """,
@@ -1208,6 +1218,8 @@ def record_move(
     connection: sqlite3.Connection,
     *,
     game_id: int,
+    assignment_id: int | None = None,
+    assignment_key: str | None = None,
     ply: int,
     uci: str,
     san: str,
@@ -1221,31 +1233,69 @@ def record_move(
     info_line: str | None = None,
     time_ms: int = 0,
     clock_after_ms: int = 0,
-) -> None:
-    connection.execute(
-        """
-        INSERT INTO moves (
-          game_id, ply, uci, san, is_book, eval_cp, eval_mate, depth,
-          nodes, nps, pv, info_line, time_ms, clock_after_ms
+) -> MoveRecord:
+    if (assignment_id is None) != (assignment_key is None):
+        raise ValueError("assignment id and key must be provided together")
+    values = (
+        game_id,
+        ply,
+        uci,
+        san,
+        int(is_book),
+        eval_cp,
+        eval_mate,
+        depth,
+        nodes,
+        nps,
+        pv,
+        info_line,
+        time_ms,
+        clock_after_ms,
+    )
+    if assignment_id is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO moves (
+              game_id, ply, uci, san, is_book, eval_cp, eval_mate, depth,
+              nodes, nps, pv, info_line, time_ms, clock_after_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            game_id,
-            ply,
-            uci,
-            san,
-            int(is_book),
-            eval_cp,
-            eval_mate,
-            depth,
-            nodes,
-            nps,
-            pv,
-            info_line,
-            time_ms,
-            clock_after_ms,
-        ),
+    else:
+        cursor = connection.execute(
+            """
+            INSERT INTO moves (
+              game_id, ply, uci, san, is_book, eval_cp, eval_mate, depth,
+              nodes, nps, pv, info_line, time_ms, clock_after_ms
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+              SELECT 1 FROM game_assignments
+              WHERE id = ? AND assignment_key = ? AND game_id = ?
+                AND status IN ('assigned', 'acked', 'live')
+            )
+            """,
+            (*values, assignment_id, assignment_key, game_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"assignment {assignment_id} is no longer active")
+    return MoveRecord(
+        game_id=game_id,
+        ply=ply,
+        uci=uci,
+        san=san,
+        is_book=is_book,
+        eval_cp=eval_cp,
+        eval_mate=eval_mate,
+        depth=depth,
+        nodes=nodes,
+        nps=nps,
+        pv=pv,
+        info_line=info_line,
+        time_ms=time_ms,
+        clock_after_ms=clock_after_ms,
     )
 
 

@@ -85,11 +85,27 @@ def publish_tournament_event(tournament_id: int, live: dict | None = None) -> No
     publish_stream_event(f"tournament.{tournament_id}", event_type, data)
 
 
-def publish_game_move(tournament_id: int, game_id: int, ply: int) -> None:
+def publish_game_move(
+    tournament_id: int,
+    game_id: int,
+    ply: int,
+    *,
+    move: dict[str, Any] | None = None,
+    clocks_ms: dict[str, int | None] | None = None,
+) -> None:
+    data: dict[str, Any] = {
+        "tournament_id": tournament_id,
+        "game_id": game_id,
+        "ply": ply,
+    }
+    if move is not None:
+        data["move"] = move
+    if clocks_ms is not None:
+        data["clocks_ms"] = clocks_ms
     publish_stream_event(
         f"tournament.{tournament_id}",
         "game.move",
-        {"tournament_id": tournament_id, "game_id": game_id, "ply": ply},
+        data,
     )
 
 

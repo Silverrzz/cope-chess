@@ -93,6 +93,13 @@ LATE_ASSIGNMENT_MESSAGE_TYPES = {
     "assignment_progress",
     "assignment_cleanup_complete",
 }
+TRANSIENT_PLAY_PROGRESS = {
+    "engine_command",
+    "engine_search",
+    "move_recorded",
+    "move_turn",
+    "position_sync",
+}
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -793,6 +800,8 @@ class WorkerHandshakeServer:
             raise ProtocolValidationError(f"worker cannot update server workflow stage {stage!r}")
         if source == "server" and step.owner == "worker" and status != "pending":
             raise ProtocolValidationError(f"server cannot update worker workflow stage {stage!r}")
+        if stage == "play" and substage in TRANSIENT_PLAY_PROGRESS and status != "failed":
+            return
         progress = AssignmentProgress(
             **assignment.assignment.message_fields(),
             stage=stage,
@@ -810,12 +819,9 @@ class WorkerHandshakeServer:
         connection = connect_database(self._config.db_path)
         try:
             record_game_assignment_progress(connection, progress, source=source)
-            game = get_game(connection, progress.game_id)
             connection.commit()
         finally:
             connection.close()
-        if game is not None:
-            publish_tournament_event(game.tournament_id)
 
     def _record_worker_progress(self, assignment, progress: AssignmentProgress) -> None:
         if not progress.matches_assignment(assignment.assignment):
