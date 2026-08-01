@@ -122,7 +122,7 @@ export function clockLabel(milliseconds?: number | null): string {
   const total = Math.max(0, Math.floor(milliseconds))
   const seconds = Math.floor(total / 1000)
   const minutes = Math.floor(seconds / 60)
-  return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(total % 1000).padStart(3, '0')}`
+  return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${Math.floor((total % 1000) / 100)}`
 }
 
 export function errorMessage(error: unknown, fallback = 'Something went wrong.'): string {

@@ -28,6 +28,16 @@ const props = withDefaults(defineProps<{
 
 const title = computed(() => props.name || (props.side === 'white' ? 'White' : 'Black'))
 const info = computed(() => props.analysis?.info || props.analysis?.pv || 'No analysis recorded')
+const evaluation = computed(() => {
+  const value = props.analysis?.eval
+  if (value === null || value === undefined || props.side === 'white') return value ?? '-'
+  if (typeof value === 'number') return -value
+  const match = value.match(/^(#?)([+-]?)(\d+(?:\.\d+)?)$/)
+  if (!match) return value
+  const [, mate, sign, magnitude] = match
+  const reversedSign = sign === '-' ? (mate ? '' : '+') : '-'
+  return `${mate}${reversedSign}${magnitude}`
+})
 const pvMoves = computed(() => (props.analysis?.pv || '')
   .split(/\s+/)
   .map((move) => move.toLowerCase())
@@ -47,23 +57,27 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
     <template v-else>
       <header>
-        <div>
+        <div class="engine-panel__identity">
           <span>{{ side }}</span>
           <strong>
             <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
             <template v-else>{{ title }}</template>
           </strong>
         </div>
-        <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
+        <div class="engine-panel__headline">
+          <div class="evaluation">
+            <span>Evaluation</span>
+            <strong>{{ evaluation }}</strong>
+          </div>
+          <div class="engine-panel__time">
+            <span>Time</span>
+            <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
+          </div>
+        </div>
       </header>
 
       <div class="engine-panel__body">
         <div class="engine-panel__details">
-          <div class="evaluation">
-            <span>Evaluation</span>
-            <strong>{{ analysis?.eval ?? '-' }}</strong>
-          </div>
-
           <dl class="engine-stats">
             <div><dt>Depth</dt><dd>{{ analysis?.depth ?? '-' }}</dd></div>
             <div><dt>Nodes</dt><dd>{{ formatNodes(analysis?.nodes) }}</dd></div>
@@ -168,7 +182,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   gap: 0.75rem;
 }
 
-.engine-panel header > div {
+.engine-panel__identity {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -205,11 +219,31 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   text-underline-offset: 0.16em;
 }
 
+.engine-panel__headline {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+}
+
+.engine-panel__time {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+}
+
+.engine-panel__time span {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
 .engine-panel time {
-  font-size: clamp(1.2rem, 2vw, 1.65rem);
-  font-weight: 760;
+  color: var(--color-text-muted, #607080);
+  font-size: 0.9rem;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.015em;
   white-space: nowrap;
 }
 
@@ -223,7 +257,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .engine-panel__details {
   display: grid;
-  grid-template-rows: auto auto minmax(3.3rem, 1fr);
+  grid-template-rows: auto minmax(3.3rem, 1fr);
   align-self: stretch;
   gap: 0.75rem;
   min-width: 0;
@@ -232,16 +266,14 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .evaluation {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.62rem 0.7rem;
-  border-radius: var(--radius-sm, 0.35rem);
-  background: color-mix(in srgb, var(--color-text, #17202a) 4.5%, transparent);
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 0.05rem;
 }
 
 .evaluation strong {
-  font-size: 1.35rem;
+  font-size: clamp(1.45rem, 2.5vw, 2rem);
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 

@@ -2104,7 +2104,7 @@ def _clock_label(value: Any) -> str:
         return "--:--"
     total_seconds, remainder = divmod(milliseconds, 1000)
     minutes, seconds = divmod(total_seconds, 60)
-    return f"{minutes:02d}:{seconds:02d}.{remainder:03d}"
+    return f"{minutes:02d}:{seconds:02d}.{remainder // 100}"
 
 
 def _engine_data(
