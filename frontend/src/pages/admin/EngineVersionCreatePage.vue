@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import DockerfilePicker from '@/components/admin/DockerfilePicker.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText, formatNumber } from '@/components/admin/format'
 
@@ -254,7 +255,7 @@ async function create(): Promise<void> {
           <label v-if="sourceKind === 'release'" class="field"><span>Release</span><select v-model="sourceRef" class="input" required @change="chooseRelease"><option v-for="release in releases" :key="release.tag" :value="release.tag">{{ release.name }} ({{ release.tag }})</option></select></label>
           <label v-else class="field"><span>Commit hash</span><input v-model="sourceRef" class="input" required maxlength="64" placeholder="e7f92b8…"></label>
           <label class="field"><span>Version label</span><input v-model="version" class="input" required maxlength="80" placeholder="17.1"></label>
-          <label class="field form-span-full"><span>Dockerfile</span><select v-model="dockerfilePath" class="input" required :disabled="!dockerfiles.length" @change="loadDockerfile"><option v-if="!dockerfiles.length" value="">No files found in data/engines</option><option v-for="file in dockerfiles" :key="file.path" :value="file.path">{{ file.path }}</option></select><small>Managed in the repository under <code>data/engines</code>.</small></label>
+          <div class="field form-span-full"><span>Dockerfile</span><DockerfilePicker v-model="dockerfilePath" :files="dockerfiles" @change="loadDockerfile" /><small>Managed in the repository under <code>data/engines</code>.</small></div>
           <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer form-span-full" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
           <p class="activation-note">The version becomes active automatically after its current build completes a benchmark.</p>
         </div>

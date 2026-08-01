@@ -128,8 +128,8 @@ onBeforeUnmount(() => source?.close())
             <dl>
               <div><dt>Worker</dt><dd>{{ failure.worker_label }} (#{{ failure.worker_id ?? data.worker.id }})</dd></div>
               <div><dt>Machine</dt><dd>{{ failure.machine_id ?? 'Unknown' }}</dd></div>
-              <div><dt>Game / assignment</dt><dd>#{{ failure.game_id ?? '—' }} / #{{ failure.assignment_id ?? '—' }}</dd></div>
-              <div><dt>Engine</dt><dd>{{ failure.engine_name }} (#{{ failure.engine_id ?? '—' }})</dd></div>
+              <div><dt>Game / assignment</dt><dd>#{{ failure.game_id ?? '-' }} / #{{ failure.assignment_id ?? '-' }}</dd></div>
+              <div><dt>Engine</dt><dd>{{ failure.engine_name }} (#{{ failure.engine_id ?? '-' }})</dd></div>
               <div><dt>Stage</dt><dd>{{ failure.stage }}</dd></div>
             </dl>
             <pre>{{ failure.error }}</pre>

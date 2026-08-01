@@ -171,7 +171,7 @@ async function forgetBenchmarker(benchmarker: BenchmarkerListItem): Promise<void
 }
 
 function shortVersion(value?: string | null): string {
-  if (!value) return '—'
+  if (!value) return '-'
   return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value
 }
 
@@ -244,7 +244,7 @@ onBeforeUnmount(() => {
               <td class="identity-cell"><strong>{{ benchmarker.label }}</strong><small>#{{ benchmarker.id }}</small></td>
               <td><StatusBadge :status="benchmarker.status" /></td>
               <td><span>{{ benchmarker.hardware?.summary ?? 'Not reported' }}</span><small>{{ benchmarker.hardware?.detail }}</small></td>
-              <td><code>{{ benchmarker.machine_id?.slice(0, 12) ?? '—' }}</code></td>
+              <td><code>{{ benchmarker.machine_id?.slice(0, 12) ?? '-' }}</code></td>
               <td><code>{{ shortVersion(benchmarker.app_commit) }}</code></td>
               <td>{{ formatDate(benchmarker.last_seen) }}</td>
               <td class="row-actions"><button class="button button--danger button--small" type="button" :disabled="forgettingBenchmarker === benchmarker.id" @click="forgetBenchmarker(benchmarker)">{{ forgettingBenchmarker === benchmarker.id ? 'Forgetting…' : 'Forget' }}</button></td>

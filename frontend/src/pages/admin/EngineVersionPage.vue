@@ -6,6 +6,7 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useEventStream } from '@/composables/useEventStream'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import DockerfilePicker from '@/components/admin/DockerfilePicker.vue'
 import EngineOptionsEditor from '@/components/admin/EngineOptionsEditor.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StreamStatus from '@/components/ui/StreamStatus.vue'
@@ -377,7 +378,7 @@ onBeforeUnmount(() => {
 
       <section class="panel detail-card">
         <div class="detail-heading"><div><h2>Dockerfile</h2><p>Select a repository-managed file. Its contents are read-only in Cope Admin.</p></div></div>
-        <label class="field"><span>File in <code>data/engines</code></span><select v-model="version.dockerfile_path" class="input" required :disabled="!dockerfiles.length" @change="loadDockerfile"><option v-if="!version.dockerfile_path" value="">Choose a Dockerfile</option><option v-if="!dockerfiles.length" value="">No files found in data/engines</option><option v-for="file in dockerfiles" :key="file.path" :value="file.path">{{ file.path }}</option></select></label>
+        <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
         <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
         <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
       </section>
