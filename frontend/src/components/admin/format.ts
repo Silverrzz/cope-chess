@@ -1,6 +1,5 @@
 import type {
   FormSeed,
-  CategorySettings,
   TimeControl,
   TournamentConfig,
   TournamentFormat,
@@ -61,101 +60,14 @@ export function defaultSettings(): TournamentSettings {
   }
 }
 
-export function defaultCategorySettings(): CategorySettings {
-  return {
-    ...defaultSettings(),
-    engine_threads: 1,
-    engine_hash_mb: 16,
-  }
-}
-
 function positiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
-function nonNegativeNumber(value: unknown, fallback: number): number {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
-}
-
 function nonNegativeInt(value: unknown, fallback: number): number {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
-}
-
-function bool(value: unknown, fallback: boolean): boolean {
-  if (typeof value === 'boolean') return value
-  if (value === 'true' || value === 'on' || value === '1') return true
-  if (value === 'false' || value === '0' || value === '') return false
-  return fallback
-}
-
-export function settingsFromFlat(values: Record<string, unknown> = {}): TournamentSettings {
-  const settings = defaultSettings()
-  const format = (values.format as TournamentFormat | undefined) ?? settings.format
-  settings.format = format
-
-  if (format === 'swiss') {
-    settings.format_options = { rounds: positiveInt(values.swiss_rounds, 7) }
-  } else if (format === 'knockout') {
-    settings.format_options = {
-      tiebreak: 'extra_pair',
-    }
-  } else if (format === 'gauntlet') {
-    settings.format_options = {
-      hero_engine_id: positiveInt(values.gauntlet_hero_engine_id, 0),
-    }
-  } else {
-    settings.format_options = { cycles: positiveInt(values.round_robin_cycles, 1) }
-  }
-
-  const category = values.tc_type ?? values.time_control_category ?? 'increment'
-  if (category === 'movetime') {
-    settings.time_control = {
-      category: 'movetime',
-      move_time_ms: Math.round(nonNegativeNumber(values.tc_move_time_s, 1) * 1000),
-    }
-  } else if (category === 'movestogo') {
-    settings.time_control = {
-      category: 'movestogo',
-      initial_ms: Math.round(nonNegativeNumber(values.tc_initial_s, 60) * 1000),
-      moves_to_go: positiveInt(values.tc_moves_to_go, 40),
-    }
-  } else if (category === 'movenodes') {
-    settings.time_control = {
-      category: 'movenodes',
-      nodes: positiveInt(values.tc_nodes, 100_000),
-    }
-  } else {
-    settings.time_control = {
-      category: 'increment',
-      initial_ms: Math.round(nonNegativeNumber(values.tc_initial_s, 60) * 1000),
-      increment_ms: Math.round(nonNegativeNumber(values.tc_increment_s, 1) * 1000),
-    }
-  }
-
-  settings.opening_suite_id = positiveInt(values.opening_suite_id, 0) || null
-  settings.concurrency = positiveInt(values.concurrency, 1)
-  settings.rated = bool(values.rated, true)
-  settings.lag_compensation_ms = nonNegativeNumber(values.lag_compensation_ms, 50)
-  settings.adjudication = {
-    draw: bool(values.adjudication_draw, false)
-      ? {
-          min_fullmove: positiveInt(values.draw_min_fullmove, 40),
-          max_abs_cp: nonNegativeInt(values.draw_max_abs_cp, 10),
-          consecutive_plies: positiveInt(values.draw_plies, 8),
-        }
-      : null,
-    resign: bool(values.adjudication_resign, false)
-      ? {
-          min_abs_cp: positiveInt(values.resign_min_abs_cp, 800),
-          consecutive_plies: positiveInt(values.resign_plies, 6),
-        }
-      : null,
-    max_moves: positiveInt(values.adjudication_max_moves, 0) || null,
-  }
-  return settings
 }
 
 export function normalizeSettings(value: Partial<TournamentSettings> | undefined): TournamentSettings {
@@ -164,10 +76,7 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
   const rawOptions = (value.format_options || {}) as unknown as Record<string, unknown>
   const format_options: TournamentSettings['format_options'] = value.format === 'round_robin'
     ? {
-        cycles: positiveInt(
-          rawOptions.cycles,
-          Math.max(1, Math.ceil(positiveInt(rawOptions.games_per_pairing, 2) / 2)),
-        ),
+        cycles: positiveInt(rawOptions.cycles, 1),
       }
     : value.format === 'swiss'
       ? { rounds: positiveInt(rawOptions.rounds, 7) }
@@ -198,27 +107,8 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
   } as TournamentSettings
 }
 
-export function normalizeCategorySettings(value: Partial<CategorySettings> | undefined): CategorySettings {
-  const settings = normalizeSettings(value)
-  return {
-    ...settings,
-    engine_threads: positiveInt(value?.engine_threads, 1),
-    engine_hash_mb: positiveInt(value?.engine_hash_mb, 16),
-  }
-}
-
 export function configFromSeed(seed: FormSeed): TournamentConfig {
-  if (seed.config) return normalizeConfig(seed.config)
-  const editing = typeof seed.editing === 'object' && seed.editing ? seed.editing : null
-  if (editing?.config) return normalizeConfig(editing.config)
-
-  return {
-    ...settingsFromFlat(seed.form_values),
-    participants: [...(seed.form_participants ?? [])],
-    engine_threads: 1,
-    engine_hash_mb: 16,
-    uci_options: {},
-  }
+  return normalizeConfig(seed.config)
 }
 
 function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {

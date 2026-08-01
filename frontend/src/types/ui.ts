@@ -21,16 +21,3 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   tone?: "default" | "danger";
 }
-
-export interface SelectOption {
-  label: string;
-  value: string | number;
-  disabled?: boolean;
-}
-
-export interface TabItem {
-  value: string;
-  label: string;
-  count?: number;
-  disabled?: boolean;
-}

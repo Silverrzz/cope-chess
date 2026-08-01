@@ -78,28 +78,9 @@ UPDATE engine_versions
 SET active = 0
 WHERE repository_url IS NULL OR source_ref IS NULL OR dockerfile IS NULL OR build_hash IS NULL;
 
-CREATE TABLE IF NOT EXISTS categories (
-  id BIGSERIAL PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
-  description TEXT NOT NULL DEFAULT '',
-  default_config TEXT NOT NULL DEFAULT '{}',
-  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-  created_at TEXT NOT NULL
-);
-
-INSERT INTO categories (name, description, default_config, created_at)
-VALUES (
-  'Default',
-  'General rating list and tournament defaults.',
-  '{}',
-  '1970-01-01T00:00:00+00:00'
-) ON CONFLICT (name) DO NOTHING;
-
 CREATE TABLE IF NOT EXISTS tournaments (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
-  category_id BIGINT REFERENCES categories(id),
-  settings_unlinked INTEGER NOT NULL DEFAULT 0 CHECK (settings_unlinked IN (0, 1)),
   config TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'scheduled', 'running', 'paused', 'finished', 'aborted')),
@@ -225,40 +206,6 @@ CREATE INDEX IF NOT EXISTS idx_worker_failures_machine_time
 
 DO $$
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = 'workers'
-      AND column_name = 'pool_id'
-  ) THEN
-    UPDATE games
-    SET status = 'pending'
-    WHERE status IN ('assigned', 'live')
-      AND id IN (
-        SELECT assignment.game_id
-        FROM game_assignments assignment
-        JOIN workers worker ON worker.id = assignment.worker_id
-        WHERE worker.pool_id IS NOT NULL
-          AND assignment.status IN ('assigned', 'acked', 'live')
-      );
-    UPDATE game_assignments assignment
-    SET status = 'abandoned',
-        finished_at = CURRENT_TIMESTAMP::text,
-        last_error = 'legacy machine pool retired',
-        worker_id = NULL
-    FROM workers worker
-    WHERE worker.id = assignment.worker_id
-      AND worker.pool_id IS NOT NULL
-      AND assignment.status IN ('assigned', 'acked', 'live');
-    DELETE FROM workers WHERE pool_id IS NOT NULL;
-    ALTER TABLE worker_failures DROP COLUMN IF EXISTS pool_id;
-    ALTER TABLE workers DROP COLUMN IF EXISTS pool_id;
-    ALTER TABLE workers DROP COLUMN IF EXISTS pool_slot_token_hash;
-    ALTER TABLE workers DROP COLUMN IF EXISTS assigned_threads;
-    ALTER TABLE workers DROP COLUMN IF EXISTS assigned_hash_mb;
-    DROP TABLE IF EXISTS worker_pools;
-  END IF;
   UPDATE games
   SET status = 'pending'
   WHERE status IN ('assigned', 'live')
@@ -433,66 +380,15 @@ CREATE TABLE IF NOT EXISTS moves (
   PRIMARY KEY (game_id, ply)
 );
 
-CREATE TABLE IF NOT EXISTS ratings (
-  engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
-  category_id BIGINT NOT NULL REFERENCES categories(id),
-  elo REAL NOT NULL DEFAULT 1500,
-  games_played INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (engine_id, category_id)
-);
-
-CREATE TABLE IF NOT EXISTS rating_history (
-  id BIGSERIAL PRIMARY KEY,
-  engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
-  category_id BIGINT NOT NULL REFERENCES categories(id),
-  tournament_id BIGINT NOT NULL REFERENCES tournaments(id),
-  opponent_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
-  elo_before REAL NOT NULL,
-  elo REAL NOT NULL,
-  elo_change REAL NOT NULL,
-  score REAL NOT NULL CHECK (score IN (0, 0.5, 1)),
-  expected_score REAL NOT NULL CHECK (expected_score >= 0 AND expected_score <= 1),
-  hardware_score REAL NOT NULL CHECK (hardware_score > 0),
-  opponent_hardware_score REAL NOT NULL CHECK (opponent_hardware_score > 0),
-  game_id BIGINT NOT NULL REFERENCES games(id),
-  at TEXT NOT NULL
-);
-
-ALTER TABLE rating_history ADD COLUMN IF NOT EXISTS expected_score REAL NOT NULL DEFAULT 0.5;
-ALTER TABLE rating_history ADD COLUMN IF NOT EXISTS hardware_score REAL NOT NULL DEFAULT 1.0;
-ALTER TABLE rating_history ADD COLUMN IF NOT EXISTS opponent_hardware_score REAL NOT NULL DEFAULT 1.0;
-
-CREATE TABLE IF NOT EXISTS tournament_rating_commits (
-  tournament_id BIGINT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
-  category_id BIGINT NOT NULL REFERENCES categories(id),
-  command_id BIGINT,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'claimed', 'applied', 'failed')),
-  requested_at TEXT NOT NULL,
-  applied_at TEXT,
-  error TEXT
-);
-
--- Rating lists are intentionally independent from tournament configuration.
--- The legacy category tables remain readable during rolling upgrades, while
--- all new rating work uses these list-scoped tables.
 CREATE TABLE IF NOT EXISTS rating_lists (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL
 );
 
-INSERT INTO rating_lists (id, name, created_at)
-SELECT id, name, created_at FROM categories
-WHERE COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 15
-ON CONFLICT (id) DO NOTHING;
-
-SELECT setval(
-  pg_get_serial_sequence('rating_lists', 'id'),
-  GREATEST(COALESCE((SELECT MAX(id) FROM rating_lists), 1), 1),
-  true
-);
+INSERT INTO rating_lists (name, created_at)
+VALUES ('Default', '1970-01-01T00:00:00+00:00')
+ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS rating_list_ratings (
   engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
@@ -530,38 +426,6 @@ CREATE TABLE IF NOT EXISTS tournament_rating_list_commits (
   applied_at TEXT,
   error TEXT,
   PRIMARY KEY (tournament_id, rating_list_id)
-);
-
-INSERT INTO tournament_rating_list_commits (
-  tournament_id, rating_list_id, command_id, status, requested_at, applied_at, error
-)
-SELECT tournament_id, category_id, command_id, status, requested_at, applied_at, error
-FROM tournament_rating_commits
-WHERE COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 15
-ON CONFLICT (tournament_id, rating_list_id) DO NOTHING;
-
-INSERT INTO rating_list_ratings (
-  engine_id, rating_list_id, elo, games_played, updated_at
-)
-SELECT engine_id, category_id, elo, games_played, updated_at FROM ratings
-WHERE COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 15
-ON CONFLICT (engine_id, rating_list_id) DO NOTHING;
-
-INSERT INTO rating_list_history (
-  engine_id, rating_list_id, tournament_id, opponent_engine_id,
-  elo_before, elo, elo_change, score, expected_score,
-  hardware_score, opponent_hardware_score, game_id, at
-)
-SELECT engine_id, category_id, tournament_id, opponent_engine_id,
-       elo_before, elo, elo_change, score, expected_score,
-       hardware_score, opponent_hardware_score, game_id, at
-FROM rating_history legacy
-WHERE COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 15
-  AND NOT EXISTS (
-  SELECT 1 FROM rating_list_history current
-  WHERE current.engine_id = legacy.engine_id
-    AND current.rating_list_id = legacy.category_id
-    AND current.game_id = legacy.game_id
 );
 
 CREATE TABLE IF NOT EXISTS service_endpoints (
@@ -684,57 +548,8 @@ ALTER TABLE deployment_targets ADD CONSTRAINT deployment_targets_target_kind_che
 CREATE INDEX IF NOT EXISTS idx_games_tournament_status ON games(tournament_id, status);
 CREATE INDEX IF NOT EXISTS idx_games_round_pair ON games(tournament_id, round, pair_index);
 CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(tournament_id, round, match_index);
-CREATE INDEX IF NOT EXISTS idx_rating_history_engine_category_at ON rating_history(engine_id, category_id, at);
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
-
--- Versions created before benchmark-gated activation may be marked active
--- without a result for their current build. Make those rows safe on upgrade.
-UPDATE engine_versions version
-SET active = 0
-WHERE version.active = 1
-  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 16
-  AND NOT EXISTS (
-    SELECT 1 FROM engine_benchmarks benchmark
-    WHERE benchmark.engine_version_id = version.id
-      AND benchmark.build_hash = version.build_hash
-  );
-
--- A pending game is a fresh replay, never a resumable partial game. Repair
--- attempts left pending by an older worker-server before enforcing that rule
--- in the runner and repository code.
-DELETE FROM moves
-WHERE game_id IN (SELECT id FROM games WHERE status = 'pending')
-  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
-DELETE FROM game_hardware_scores
-WHERE game_id IN (SELECT id FROM games WHERE status = 'pending')
-  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
-UPDATE games
-SET result = NULL,
-    termination = NULL,
-    pgn = NULL,
-    white_hw = NULL,
-    black_hw = NULL,
-    started_at = NULL,
-    finished_at = NULL
-WHERE status = 'pending'
-  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 17;
-
-DELETE FROM benchmark_jobs failed
-WHERE failed.status = 'failed'
-  AND COALESCE((SELECT value FROM schema_metadata WHERE key = 'schema_version'), 0) < 21
-  AND (
-    EXISTS (
-      SELECT 1
-      FROM engine_versions version
-      JOIN engine_benchmarks benchmark ON benchmark.build_hash = version.build_hash
-      WHERE version.id = failed.engine_version_id
-    )
-    OR EXISTS (
-      SELECT 1 FROM engine_benchmarks benchmark
-      WHERE benchmark.build_hash = failed.build_hash
-    )
-  );
 
 INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 21)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;

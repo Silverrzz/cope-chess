@@ -32,7 +32,7 @@ from cope.core.protocol import (
     make_message,
 )
 from cope.db import (
-    DEFAULT_DB_PATH,
+    DEFAULT_DATABASE_URL,
     BenchmarkerRecord,
     BenchmarkJobRecord,
     benchmarker_token_is_valid,
@@ -67,7 +67,7 @@ CONNECTION_REPLACED_CLOSE_CODE = 4001
 class BenchmarkServerConfig:
     host: str = field(default_factory=default_benchmark_server_host)
     port: int = field(default_factory=default_benchmark_server_port)
-    db_path: str | Path = DEFAULT_DB_PATH
+    db_path: str | Path = DEFAULT_DATABASE_URL
     expected_app_version: str | None = None
     poll_interval_s: float = 30.0
     preparation_timeout_s: int = 1800

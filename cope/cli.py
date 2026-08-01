@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     init_db_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
     )
 
@@ -53,34 +53,22 @@ def main(argv: list[str] | None = None) -> int:
     for command in ("migrate", "check"):
         command_parser = db_subparsers.add_parser(command)
         command_parser.add_argument(
-            "--database-url", dest="db_path", default=_default_db_path()
+            "--database-url", dest="db_path", default=_default_database_url()
         )
     backup_parser = db_subparsers.add_parser("backup")
     backup_parser.add_argument(
-        "--database-url", dest="db_path", default=_default_db_path()
+        "--database-url", dest="db_path", default=_default_database_url()
     )
     backup_parser.add_argument("--output", type=Path)
     backup_parser.add_argument("--keep", type=_positive_int, default=7)
     restore_parser = db_subparsers.add_parser("restore")
     restore_parser.add_argument("source", type=Path)
     restore_parser.add_argument(
-        "--database-url", dest="db_path", default=_default_db_path()
+        "--database-url", dest="db_path", default=_default_database_url()
     )
 
     subparsers.add_parser("doctor", help="check database and production configuration")
     subparsers.add_parser("version", help="print the COPE release and protocol version")
-
-    build_css_parser = subparsers.add_parser("build-css", help="compile web SCSS")
-    build_css_parser.add_argument(
-        "--source",
-        default="cope/web/static/scss/style.scss",
-        help="SCSS source file",
-    )
-    build_css_parser.add_argument(
-        "--output",
-        default="cope/web/static/style.css",
-        help="CSS output file",
-    )
 
     mint_worker_parser = subparsers.add_parser(
         "mint-worker-token",
@@ -96,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     mint_worker_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
     )
 
@@ -114,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     mint_benchmarker_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
     )
 
@@ -142,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     web_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
     )
 
@@ -170,13 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     scheduler_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
-    )
-    scheduler_parser.add_argument(
-        "--prototype",
-        action="store_true",
-        help="run the in-memory prototype tournament",
     )
     scheduler_parser.add_argument(
         "--poll-interval-s",
@@ -226,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     worker_server_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
         help="PostgreSQL connection URL",
     )
     worker_server_parser.add_argument(
@@ -255,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     updater_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
     )
     updater_parser.add_argument(
         "--source-dir",
@@ -331,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_server_parser.add_argument(
         "--database-url",
         dest="db_path",
-        default=_default_db_path(),
+        default=_default_database_url(),
     )
     benchmark_server_parser.add_argument(
         "--poll-interval-s",
@@ -413,10 +396,6 @@ def main(argv: list[str] | None = None) -> int:
         db_path = args.db_path
         initialize_database(db_path)
         print("initialized PostgreSQL database")
-        return 0
-
-    if args.role == "build-css":
-        _build_css(Path(args.source), Path(args.output))
         return 0
 
     if args.role == "mint-worker-token":
@@ -508,12 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.role == "scheduler":
-        if args.prototype:
-            from .prototype import run_prototype_tournament
-
-            run_prototype_tournament()
-            return 0
-
         from .db import connect_database
         from .runner import (
             RunnerServiceConfig,
@@ -669,23 +642,8 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-def _default_db_path() -> str:
+def _default_database_url() -> str:
     return os.environ.get("COPE_DATABASE_URL", "postgresql://cope@127.0.0.1:5432/cope")
-
-
-def _build_css(source: Path, output: Path) -> None:
-    try:
-        import sass
-    except ImportError as exc:
-        raise SystemExit(
-            "Missing SCSS compiler. Install web dependencies with: "
-            'py -m pip install -e ".[web]"'
-        ) from exc
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    css = sass.compile(filename=str(source), output_style="expanded")
-    output.write_text(css, encoding="utf-8")
-    print(f"compiled {source} -> {output}")
 
 
 def _database_command(args) -> int:
@@ -765,7 +723,7 @@ def _doctor() -> int:
     from .db import SCHEMA_VERSION, connect_database, database_schema_version
 
     failures: list[str] = []
-    database_url = _default_db_path()
+    database_url = _default_database_url()
     try:
         connection = connect_database(database_url)
         try:

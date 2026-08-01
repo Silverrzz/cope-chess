@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import secrets
 import sqlite3
 import threading
@@ -978,10 +977,6 @@ def _validated_tournament(
     if tournament is None:
         raise RuntimeError(f"unknown tournament {tournament_id}")
     return tournament
-
-
-def _next_playable_game(games: tuple[GameRecord, ...]) -> GameRecord | None:
-    return next((game for game in games if game.status == "pending"), None)
 
 
 def _next_playable_game_for_worker(

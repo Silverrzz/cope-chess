@@ -19,8 +19,6 @@ database = [
 ]
 web = [
     "fastapi>=0.111",
-    "jinja2>=3.1",
-    "libsass>=0.23",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",
 ]
@@ -45,9 +43,4 @@ include = ["cope*"]
 "cope.web" = [
     "frontend_dist/*",
     "frontend_dist/assets/*",
-    "templates/*.html",
-    "templates/admin/*.html",
-    "static/*.css",
-    "static/*.js",
-    "static/scss/*.scss",
 ]

@@ -10,7 +10,6 @@ export interface TournamentConfig {
 export interface TournamentRecord {
   id: Identifier
   name: string
-  category_id?: Identifier | null
   status: string
   current_round?: number
   created_at?: string

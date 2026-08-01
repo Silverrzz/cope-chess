@@ -122,17 +122,6 @@ class KnockoutTiebreak(StrEnum):
 class RoundRobinFormatOptions(StrictModel):
     cycles: int = Field(default=1, gt=0)
 
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_games_per_pairing(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "games_per_pairing" not in data:
-            return data
-        migrated = dict(data)
-        legacy_games = migrated.pop("games_per_pairing")
-        if "cycles" not in migrated and isinstance(legacy_games, int):
-            migrated["cycles"] = max(1, (legacy_games + 1) // 2)
-        return migrated
-
 
 class SwissFormatOptions(StrictModel):
     rounds: int = Field(gt=0)
@@ -141,28 +130,9 @@ class SwissFormatOptions(StrictModel):
 class KnockoutFormatOptions(StrictModel):
     tiebreak: Literal["extra_pair"] = "extra_pair"
 
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_game_count(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        normalized = dict(data)
-        normalized.pop("games_per_match", None)
-        normalized["tiebreak"] = "extra_pair"
-        return normalized
-
 
 class GauntletFormatOptions(StrictModel):
     hero_engine_id: int = Field(gt=0)
-
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_game_count(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        normalized = dict(data)
-        normalized.pop("games_per_opponent", None)
-        return normalized
 
 
 FormatOptions = (
@@ -183,42 +153,6 @@ class TournamentConfig(StrictModel):
     engine_threads: int = Field(default=1, gt=0)
     engine_hash_mb: int = Field(default=16, gt=0)
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
-
-    @property
-    def category_id(self) -> None:
-        """Legacy view compatibility; rating lists no longer configure tournaments."""
-        return None
-
-    @property
-    def category_settings_linked(self) -> bool:
-        return False
-
-    @model_validator(mode="before")
-    @classmethod
-    def remove_legacy_category_fields(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            data = dict(data)
-            data.pop("rating_category", None)
-            data.pop("hardware_mode", None)
-            data.pop("category_id", None)
-            data.pop("category_settings_linked", None)
-            legacy_options = data.get("uci_options")
-            if isinstance(legacy_options, dict) and legacy_options and all(
-                isinstance(options, dict) for options in legacy_options.values()
-            ):
-                # Older tournaments stored overrides per participant. Only options
-                # shared by every participant can be represented by the new,
-                # tournament-wide UCI option model.
-                option_sets = list(legacy_options.values())
-                shared = dict(option_sets[0])
-                for options in option_sets[1:]:
-                    shared = {
-                        name: value
-                        for name, value in shared.items()
-                        if options.get(name) == value
-                    }
-                data["uci_options"] = shared
-        return data
 
     @field_validator("participants")
     @classmethod

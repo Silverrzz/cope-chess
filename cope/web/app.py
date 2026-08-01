@@ -5,9 +5,7 @@ import contextlib
 import copy
 import hmac
 import ipaddress
-import json
 import re
-import secrets
 import sqlite3
 import threading
 import time
@@ -18,12 +16,10 @@ from typing import Any
 from urllib.parse import quote
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.encoders import jsonable_encoder
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from cope.chat import (
@@ -33,7 +29,7 @@ from cope.chat import (
     parse_chat_command,
 )
 from cope.db import (
-    DEFAULT_DB_PATH,
+    DEFAULT_DATABASE_URL,
     SCHEMA_VERSION,
     ChatSettingsRecord,
     ChatMessageRecord,
@@ -41,72 +37,31 @@ from cope.db import (
     MoveRecord,
     TournamentRecord,
     active_engine_hardware_profiles,
-    category_tournament_count,
     connect_database,
-    create_category,
     create_chat_message,
-    create_engine,
-    create_opening_suite,
-    create_tournament,
-    create_worker,
-    database_stats,
     database_schema_version,
-    delete_category,
-    delete_chat_message,
-    delete_engine,
-    delete_opening_suite,
-    delete_tournament,
-    delete_worker,
-    engine_game_count,
-    engine_result_summary,
-    get_category,
     get_chat_settings,
     get_chat_message,
-    get_engine,
-    get_engine_record,
-    get_engine_family,
     get_opening_position,
     get_opening_suite,
     get_tournament,
-    get_tournament_rating_commit,
     get_worker,
     get_worker_activity,
     get_service_endpoint,
-    list_categories,
     list_benchmarkers,
-    list_chat_messages,
-    list_engine_games,
     list_engine_records,
     list_engines,
-    list_games_by_status,
     list_games,
     list_moves,
-    list_opening_suites,
-    list_rating_rows,
-    list_service_heartbeats,
-    list_suite_openings,
     list_tournaments,
     list_tournament_matches,
-    list_uncommitted_finished_tournaments,
     list_upcoming_games,
     list_workers,
     list_worker_failures,
     list_worker_activities,
     touch_service_heartbeat,
-    mint_worker_token_for_worker,
-    replace_suite_openings,
-    request_tournament_rating_commit,
-    revoke_worker,
-    set_tournament_status,
-    suite_opening_count,
-    update_category,
-    update_chat_settings,
-    update_engine,
-    update_opening_suite,
-    update_tournament,
-    update_worker_label,
 )
-from cope.core.models import HardwareInfo, OpeningLine, TournamentFormat
+from cope.core.models import HardwareInfo, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
     StreamProtocolError,
@@ -124,10 +79,6 @@ from cope.network import (
     WILDCARD_HOSTS,
     default_worker_port,
 )
-from cope.web import forms
-from cope.web.forms import FormError, form_flag, form_value
-from cope.web.openings import format_opening, parse_opening_input
-from cope.web.requests import read_form, read_form_with_files
 from cope.version import app_version
 
 
@@ -137,7 +88,6 @@ FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 ADMIN_SESSION_MAX_AGE_SECONDS = 43_200
 MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 MAX_BROADCAST_SNAPSHOT_GAMES = 1000
-templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 
 # Valid admin actions on a tournament, per current status.
 TOURNAMENT_ACTIONS: dict[str, dict[str, str]] = {
@@ -380,21 +330,8 @@ class StreamHub:
             }
 
 
-def _enqueue_internal_event(
-    queue: asyncio.Queue[StreamEnvelope | None],
-    event: StreamEnvelope,
-) -> None:
-    if queue.full():
-        while not queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-        queue.put_nowait(None)
-        return
-    queue.put_nowait(event)
-
-
 def create_app(
-    db_path: str | Path = DEFAULT_DB_PATH,
+    db_path: str | Path = DEFAULT_DATABASE_URL,
     *,
     worker_server_url: str | None = None,
     event_token: str | None = None,
@@ -411,11 +348,6 @@ def create_app(
     app.state.worker_snapshot_task = None
     app.state.tournament_snapshot_tasks = {}
     app.add_middleware(GZipMiddleware, minimum_size=1_000)
-    app.mount(
-        "/static",
-        StaticFiles(directory=str(PACKAGE_DIR / "static")),
-        name="static",
-    )
     frontend_assets = FRONTEND_DIST_DIR / "assets"
     if frontend_assets.is_dir():
         app.mount(
@@ -567,181 +499,6 @@ def create_app(
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
-    @app.get("/admin/login")
-    def admin_login(request: Request):
-        token = _admin_token(request)
-        if not token:
-            return HTMLResponse(
-                f"Admin access requires {ADMIN_TOKEN_ENV}.",
-                status_code=503,
-            )
-        if not _request_is_secure_or_local(request):
-            return HTMLResponse("Admin access requires HTTPS.", status_code=403)
-        if _admin_session_valid(request, token):
-            return RedirectResponse(url="/admin", status_code=303)
-        return templates.TemplateResponse(
-            request,
-            "admin/login.html",
-            {"error": None},
-        )
-
-    @app.post("/admin/login")
-    async def admin_login_submit(request: Request):
-        token = _admin_token(request)
-        if not token:
-            return HTMLResponse(
-                f"Admin access requires {ADMIN_TOKEN_ENV}.",
-                status_code=503,
-            )
-        if not _request_is_secure_or_local(request):
-            return HTMLResponse("Admin access requires HTTPS.", status_code=403)
-        form = await read_form(request)
-        if not hmac.compare_digest(form_value(form, "token"), token):
-            return templates.TemplateResponse(
-                request,
-                "admin/login.html",
-                {"error": "Invalid admin token."},
-                status_code=401,
-            )
-        response = RedirectResponse(url="/admin", status_code=303)
-        nonce = secrets.token_urlsafe(32)
-        response.set_cookie(
-            "cope_admin_session",
-            _signed_value(token, nonce),
-            httponly=True,
-            secure=_request_is_secure(request),
-            samesite="lax",
-            max_age=ADMIN_SESSION_MAX_AGE_SECONDS,
-        )
-        return response
-
-    @app.post("/admin/logout")
-    def admin_logout():
-        response = RedirectResponse(url="/admin/login", status_code=303)
-        response.delete_cookie("cope_admin_session")
-        return response
-
-    # ------------------------------------------------------------------
-    # Public site
-    # ------------------------------------------------------------------
-
-    @app.post("/tournaments/{tournament_id}/chat")
-    async def post_tournament_chat_message(
-        tournament_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        _require_public_chat_tournament(connection, tournament_id)
-
-        form = await read_form(request)
-        message = _create_chat_message_from_form(
-            connection,
-            form,
-            tournament_id=tournament_id,
-        )
-        if message is not None:
-            _publish_chat_message(request, tournament_id, message)
-        if _wants_json(request):
-            return JSONResponse({"ok": True, "message": message})
-        return RedirectResponse(url=f"/tournaments/{tournament_id}#chat", status_code=303)
-
-    @app.get("/tournaments")
-    def tournaments(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return templates.TemplateResponse(
-            request,
-            "tournaments.html",
-            _tournament_index_context(request, connection),
-        )
-
-    @app.get("/")
-    def home(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engines = _engine_names(connection)
-        return templates.TemplateResponse(
-            request,
-            "live.html",
-            {
-                "active_nav": None,
-                "running_tournaments": _home_tournament_cards(connection, engines),
-                "upcoming_rows": _upcoming_rows(connection, engines, limit=16),
-                "recent_games": list_games_by_status(connection, "finished", limit=16),
-                "engines": engines,
-                "tournament_names": _tournament_names(connection),
-            },
-        )
-
-    @app.get("/tournaments/{tournament_id}")
-    def tournament_detail(
-        tournament_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None or tournament.status == "draft":
-            raise HTTPException(status_code=404, detail="tournament not found")
-
-        engines = _engine_names(connection)
-        games = list_games(connection, tournament.id)
-        viewer_game = _selected_viewer_game(request, games)
-        viewer_moves = list_moves(connection, viewer_game.id) if viewer_game else ()
-        viewer_locked = (
-            request.query_params.get("game_id") is not None
-            and viewer_game is not None
-            and viewer_game.status not in {"assigned", "live"}
-        )
-        chat_messages = list_chat_messages(
-            connection,
-            limit=30,
-            tournament_id=tournament_id,
-        )
-        return templates.TemplateResponse(
-            request,
-            "tournament_detail.html",
-            {
-                "active_nav": "tournaments",
-                "tournament": tournament,
-                "games": games,
-                "engines": engines,
-                "viewer_game": viewer_game,
-                "viewer_moves": viewer_moves,
-                "viewer_move_payloads": [_move_payload(move) for move in viewer_moves],
-                "viewer_locked": viewer_locked,
-                "engine_data": _engine_data(viewer_game, viewer_moves),
-                "clocks": _clock_data(viewer_moves),
-                "standings": _standings(connection, tournament, games, engines),
-                "settings": _settings_view(connection, tournament),
-                "engine_hardware": _engine_hardware_view(connection, tournament),
-                "chat_messages": chat_messages,
-                "opening": _opening_view(connection, viewer_game.opening_id) if viewer_game else None,
-            },
-        )
-
-    @app.get("/tournaments/{tournament_id}/live.json")
-    def tournament_live_snapshot(
-        tournament_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None or tournament.status == "draft":
-            raise HTTPException(status_code=404, detail="tournament not found")
-
-        hub: StreamHub = request.app.state.stream_hub
-        selected_game_id = _positive_int(request.query_params.get("game_id"))
-        return JSONResponse(
-            _tournament_live_payload(
-                connection,
-                tournament,
-                hub.tournament_live(tournament_id),
-                selected_game_id=selected_game_id,
-            )
-        )
-
     @app.get("/tournaments/{tournament_id}/events")
     async def tournament_events(tournament_id: int, request: Request):
         hub: StreamHub = request.app.state.stream_hub
@@ -845,790 +602,6 @@ def create_app(
             if queue is not None:
                 hub.unregister_internal_client(queue)
 
-    @app.get("/ratings")
-    def ratings(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        categories = list_categories(connection, active_only=True)
-        category_id = _selected_category_id(request, categories)
-        category = get_category(connection, category_id) if category_id is not None else None
-        return templates.TemplateResponse(
-            request,
-            "ratings.html",
-            {
-                "active_nav": "ratings",
-                "category": category,
-                "categories": categories,
-                "ratings": list_rating_rows(connection, category.id) if category else [],
-            },
-        )
-
-    @app.get("/engines/{engine_id}")
-    def engine_detail(
-        engine_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engine = get_engine(connection, engine_id)
-        if engine is None:
-            raise HTTPException(status_code=404, detail="engine not found")
-
-        games = list_engine_games(connection, engine_id)
-        return templates.TemplateResponse(
-            request,
-            "engine_detail.html",
-            {
-                "active_nav": "ratings",
-                "engine": engine,
-                "games": games,
-                "engines": _engine_names(connection),
-                "record": engine_result_summary(connection, engine_id),
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: dashboard
-    # ------------------------------------------------------------------
-
-    @app.get("/admin")
-    def admin_dashboard(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournaments = list_tournaments(connection)
-        return templates.TemplateResponse(
-            request,
-            "admin/dashboard.html",
-            _admin_context(
-                request,
-                "dashboard",
-                workers=_worker_admin_rows(connection, limit=20),
-                live_games=list_games_by_status(connection, "live", limit=8),
-                engines=_engine_names(connection),
-                db_stats=database_stats(connection),
-                running_tournaments=[t for t in tournaments if t.status in {"scheduled", "running", "paused"}],
-                complete_tournaments=list_uncommitted_finished_tournaments(connection),
-                recent_games=list_games_by_status(connection, "finished", limit=6),
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: tournaments
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/tournaments")
-    def admin_tournaments(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engines = _engine_names(connection)
-        status_filter = request.query_params.get("status", "")
-        tournaments = [
-            _tournament_summary(connection, tournament, engines)
-            for tournament in list_tournaments(connection)
-            if not status_filter or tournament.status == status_filter
-        ]
-        return templates.TemplateResponse(
-            request,
-            "admin/tournaments.html",
-            _admin_context(
-                request,
-                "tournaments",
-                tournaments=tournaments,
-                status_filter=status_filter,
-                statuses=("draft", "scheduled", "running", "paused", "finished", "aborted"),
-            ),
-        )
-
-    @app.get("/admin/tournaments/new")
-    def admin_new_tournament(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return templates.TemplateResponse(
-            request,
-            "admin/tournament_form.html",
-            _tournament_form_context(request, connection),
-        )
-
-    @app.post("/admin/tournaments")
-    async def admin_create_tournament(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form = await read_form(request)
-        name = form_value(form, "name")
-        errors = [] if name else ["Tournament name is required."]
-        try:
-            config = forms.build_tournament_config(form)
-        except FormError as exc:
-            errors.extend(exc.errors)
-            config = None
-
-        if errors or config is None:
-            return templates.TemplateResponse(
-                request,
-                "admin/tournament_form.html",
-                _tournament_form_context(request, connection, form=form, errors=errors),
-                status_code=400,
-            )
-
-        tournament_id = create_tournament(connection, name, config)
-        connection.commit()
-        return RedirectResponse(
-            url=f"/admin/tournaments/{tournament_id}",
-            status_code=303,
-        )
-
-    @app.get("/admin/tournaments/{tournament_id}")
-    def admin_tournament_detail(
-        tournament_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-
-        context = _admin_context(
-            request,
-            "tournaments",
-            tournament=tournament,
-            games=list_games(connection, tournament.id),
-            engines=_engine_names(connection),
-            category=get_category(connection, tournament.category_id),
-            settings=_settings_view(connection, tournament),
-            commit=get_tournament_rating_commit(connection, tournament.id),
-            actions=TOURNAMENT_ACTIONS.get(tournament.status, {}),
-        )
-        if tournament.status == "draft":
-            context.update(
-                _tournament_form_context(request, connection, tournament=tournament, wrap=False)
-            )
-        return templates.TemplateResponse(request, "admin/tournament_detail.html", context)
-
-    @app.post("/admin/tournaments/{tournament_id}")
-    async def admin_update_tournament(
-        tournament_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-        if tournament.status != "draft":
-            raise HTTPException(status_code=409, detail="only draft tournaments can be edited")
-
-        form = await read_form(request)
-        name = form_value(form, "name")
-        errors = [] if name else ["Tournament name is required."]
-        try:
-            config = forms.build_tournament_config(form)
-        except FormError as exc:
-            errors.extend(exc.errors)
-            config = None
-
-        if errors or config is None:
-            context = _admin_context(
-                request,
-                "tournaments",
-                tournament=tournament,
-                games=(),
-                engines=_engine_names(connection),
-                category=get_category(connection, tournament.category_id),
-                settings=_settings_view(connection, tournament),
-                commit=None,
-                actions=TOURNAMENT_ACTIONS.get(tournament.status, {}),
-                errors=errors,
-            )
-            context.update(
-                _tournament_form_context(request, connection, form=form, wrap=False)
-            )
-            return templates.TemplateResponse(
-                request, "admin/tournament_detail.html", context, status_code=400
-            )
-
-        update_tournament(connection, tournament_id, name=name, config=config)
-        connection.commit()
-        return RedirectResponse(
-            url=f"/admin/tournaments/{tournament_id}",
-            status_code=303,
-        )
-
-    @app.post("/admin/tournaments/{tournament_id}/status")
-    async def admin_tournament_status(
-        tournament_id: int,
-        request: Request,
-    ):
-        form = await read_form(request)
-        action = form_value(form, "action")
-        await asyncio.to_thread(
-            _change_tournament_status,
-            request.app.state.db_path,
-            tournament_id,
-            action,
-        )
-        return RedirectResponse(
-            url=f"/admin/tournaments/{tournament_id}",
-            status_code=303,
-        )
-
-    @app.post("/admin/tournaments/{tournament_id}/delete")
-    def admin_delete_tournament(
-        tournament_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-        if tournament.status in {"scheduled", "running"}:
-            raise HTTPException(
-                status_code=409,
-                detail="abort the tournament before deleting it",
-            )
-
-        try:
-            delete_tournament(connection, tournament_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        return RedirectResponse(
-            url="/admin/tournaments",
-            status_code=303,
-        )
-
-    @app.post("/admin/tournaments/{tournament_id}/commit-results")
-    def admin_commit_tournament_results(
-        tournament_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-        if tournament.status not in {"finished", "aborted"}:
-            raise HTTPException(
-                status_code=409,
-                detail="tournament is not finished or aborted",
-            )
-
-        try:
-            requested = request_tournament_rating_commit(connection, tournament)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        return RedirectResponse(
-            url=f"/admin/tournaments/{tournament_id}",
-            status_code=303,
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: engines
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/engines")
-    def admin_engines(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engines = list_engine_records(connection)
-        return templates.TemplateResponse(
-            request,
-            "admin/engines.html",
-            _admin_context(
-                request,
-                "engines",
-                engines=engines,
-                game_counts={
-                    engine.id: engine_game_count(connection, engine.id) for engine in engines
-                },
-            ),
-        )
-
-    @app.get("/admin/engines/new")
-    def admin_new_engine(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return templates.TemplateResponse(
-            request,
-            "admin/engine_form.html",
-            _admin_context(request, "engines", engine=None, values={}, uci_options_text=""),
-        )
-
-    @app.post("/admin/engines")
-    async def admin_create_engine(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form = await read_form(request)
-        values, _uci_options, errors = _engine_form_values(form)
-        if not errors:
-            try:
-                create_engine(
-                    connection,
-                    name=values["name"],
-                    author=values["author"],
-                    active=values["active"],
-                )
-                connection.commit()
-            except (ValidationError, sqlite3.IntegrityError, ValueError) as exc:
-                errors.append(_friendly_error(exc))
-
-        if errors:
-            return templates.TemplateResponse(
-                request,
-                "admin/engine_form.html",
-                _admin_context(
-                    request,
-                    "engines",
-                    engine=None,
-                    values=values,
-                    uci_options_text=form_value(form, "uci_options"),
-                    errors=errors,
-                ),
-                status_code=400,
-            )
-        return RedirectResponse(
-            url="/admin/engines",
-            status_code=303,
-        )
-
-    @app.get("/admin/engines/{engine_id}/edit")
-    def admin_edit_engine(
-        engine_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engine = get_engine_family(connection, engine_id)
-        if engine is None:
-            raise HTTPException(status_code=404, detail="engine not found")
-        return templates.TemplateResponse(
-            request,
-            "admin/engine_form.html",
-            _admin_context(
-                request,
-                "engines",
-                engine=engine,
-                values={
-                    "name": engine.name,
-                    "author": engine.author,
-                    "active": engine.active,
-                },
-                uci_options_text="",
-            ),
-        )
-
-    @app.post("/admin/engines/{engine_id}")
-    async def admin_update_engine(
-        engine_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        engine = get_engine_family(connection, engine_id)
-        if engine is None:
-            raise HTTPException(status_code=404, detail="engine not found")
-
-        form = await read_form(request)
-        values, _uci_options, errors = _engine_form_values(form)
-        if not errors:
-            try:
-                update_engine(
-                    connection,
-                    engine_id,
-                    name=values["name"],
-                    author=values["author"],
-                    active=values["active"],
-                )
-                connection.commit()
-            except (ValidationError, sqlite3.IntegrityError, ValueError) as exc:
-                errors.append(_friendly_error(exc))
-
-        if errors:
-            return templates.TemplateResponse(
-                request,
-                "admin/engine_form.html",
-                _admin_context(
-                    request,
-                    "engines",
-                    engine=engine,
-                    values=values,
-                    uci_options_text=form_value(form, "uci_options"),
-                    errors=errors,
-                ),
-                status_code=400,
-            )
-        return RedirectResponse(
-            url="/admin/engines",
-            status_code=303,
-        )
-
-    @app.post("/admin/engines/{engine_id}/delete")
-    def admin_delete_engine(
-        engine_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_engine_family(connection, engine_id) is None:
-            raise HTTPException(status_code=404, detail="engine not found")
-        try:
-            delete_engine(connection, engine_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        return RedirectResponse(
-            url="/admin/engines",
-            status_code=303,
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: categories
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/categories")
-    def admin_categories(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        categories = list_categories(connection)
-        return templates.TemplateResponse(
-            request,
-            "admin/categories.html",
-            _admin_context(
-                request,
-                "categories",
-                categories=categories,
-                tournament_counts={
-                    category.id: category_tournament_count(connection, category.id)
-                    for category in categories
-                },
-            ),
-        )
-
-    @app.get("/admin/categories/new")
-    def admin_new_category(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return templates.TemplateResponse(
-            request,
-            "admin/category_form.html",
-            _category_form_context(request, connection),
-        )
-
-    @app.post("/admin/categories")
-    async def admin_create_category(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form = await read_form(request)
-        name = form_value(form, "name")
-        errors = [] if name else ["Category name is required."]
-        default_config: dict[str, Any] = {}
-        try:
-            default_config = forms.settings_as_dict(forms.build_settings(form))
-            default_config.update(engine_threads=1, engine_hash_mb=16)
-        except FormError as exc:
-            errors.extend(exc.errors)
-
-        if not errors:
-            try:
-                create_category(
-                    connection,
-                    name=name,
-                    description=form_value(form, "description"),
-                    default_config=default_config,
-                    active=form_flag(form, "active"),
-                )
-                connection.commit()
-            except sqlite3.IntegrityError as exc:
-                errors.append(_friendly_error(exc))
-
-        if errors:
-            return templates.TemplateResponse(
-                request,
-                "admin/category_form.html",
-                _category_form_context(request, connection, form=form, errors=errors),
-                status_code=400,
-            )
-        return RedirectResponse(
-            url="/admin/categories",
-            status_code=303,
-        )
-
-    @app.get("/admin/categories/{category_id}")
-    def admin_category_detail(
-        category_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        category = get_category(connection, category_id)
-        if category is None:
-            raise HTTPException(status_code=404, detail="category not found")
-        return templates.TemplateResponse(
-            request,
-            "admin/category_form.html",
-            _category_form_context(request, connection, category=category),
-        )
-
-    @app.post("/admin/categories/{category_id}")
-    async def admin_update_category(
-        category_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        category = get_category(connection, category_id)
-        if category is None:
-            raise HTTPException(status_code=404, detail="category not found")
-
-        form = await read_form(request)
-        name = form_value(form, "name")
-        errors = [] if name else ["Category name is required."]
-        default_config: dict[str, Any] = {}
-        try:
-            default_config = forms.settings_as_dict(forms.build_settings(form))
-            default_config.update(
-                engine_threads=int(category.default_config.get("engine_threads", 1)),
-                engine_hash_mb=int(category.default_config.get("engine_hash_mb", 16)),
-            )
-        except FormError as exc:
-            errors.extend(exc.errors)
-
-        if not errors:
-            try:
-                update_category(
-                    connection,
-                    category_id,
-                    name=name,
-                    description=form_value(form, "description"),
-                    default_config=default_config,
-                    active=form_flag(form, "active"),
-                )
-                connection.commit()
-            except sqlite3.IntegrityError as exc:
-                errors.append(_friendly_error(exc))
-
-        if errors:
-            return templates.TemplateResponse(
-                request,
-                "admin/category_form.html",
-                _category_form_context(
-                    request, connection, category=category, form=form, errors=errors
-                ),
-                status_code=400,
-            )
-        return RedirectResponse(
-            url=f"/admin/categories/{category_id}",
-            status_code=303,
-        )
-
-    @app.post("/admin/categories/{category_id}/delete")
-    def admin_delete_category(
-        category_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_category(connection, category_id) is None:
-            raise HTTPException(status_code=404, detail="category not found")
-        try:
-            delete_category(connection, category_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        return RedirectResponse(
-            url="/admin/categories",
-            status_code=303,
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: openings
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/openings")
-    def admin_openings(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        suites = list_opening_suites(connection)
-        return templates.TemplateResponse(
-            request,
-            "admin/openings.html",
-            _admin_context(
-                request,
-                "openings",
-                suites=suites,
-                opening_counts={
-                    suite.id: suite_opening_count(connection, suite.id) for suite in suites
-                },
-            ),
-        )
-
-    @app.get("/admin/openings/new")
-    def admin_new_opening_suite(request: Request):
-        return templates.TemplateResponse(
-            request,
-            "admin/opening_form.html",
-            _admin_context(
-                request,
-                "openings",
-                suite=None,
-                positions_text="",
-            ),
-        )
-
-    @app.post("/admin/openings")
-    async def admin_create_opening_suite(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form, files = await read_form_with_files(request)
-        name = form_value(form, "name")
-        if not name:
-            raise HTTPException(status_code=422, detail="Suite name is required.")
-        try:
-            openings = await asyncio.to_thread(
-                parse_opening_input,
-                form_value(form, "positions"),
-                files,
-            )
-            await asyncio.to_thread(
-                _create_opening_import,
-                connection,
-                name=name,
-                description=form_value(form, "description"),
-                openings=openings,
-            )
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            raise HTTPException(status_code=409, detail=_friendly_error(exc)) from exc
-        return RedirectResponse(
-            url="/admin/openings",
-            status_code=303,
-        )
-
-    @app.get("/admin/openings/{suite_id:int}")
-    def admin_opening_suite_detail(
-        suite_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        suite = get_opening_suite(connection, suite_id)
-        if suite is None:
-            raise HTTPException(status_code=404, detail="opening suite not found")
-        openings = list_suite_openings(connection, suite_id)
-        return templates.TemplateResponse(
-            request,
-            "admin/opening_detail.html",
-            _admin_context(
-                request,
-                "openings",
-                suite=suite,
-                openings=openings,
-                positions_text="\n".join(
-                    format_opening(
-                        OpeningLine(
-                            name=opening.name,
-                            start_fen=opening.start_fen,
-                            moves=opening.moves,
-                            fen=opening.fen,
-                        )
-                    )
-                    for opening in openings
-                ),
-            ),
-        )
-
-    @app.post("/admin/openings/{suite_id:int}")
-    async def admin_update_opening_suite(
-        suite_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_opening_suite(connection, suite_id) is None:
-            raise HTTPException(status_code=404, detail="opening suite not found")
-        form, files = await read_form_with_files(request)
-        name = form_value(form, "name")
-        if not name:
-            raise HTTPException(status_code=422, detail="Suite name is required.")
-        try:
-            openings = await asyncio.to_thread(
-                parse_opening_input,
-                form_value(form, "positions"),
-                files,
-            )
-            await asyncio.to_thread(
-                _replace_opening_import,
-                connection,
-                suite_id,
-                name=name,
-                description=form_value(form, "description"),
-                openings=openings,
-            )
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            raise HTTPException(status_code=409, detail=_friendly_error(exc)) from exc
-        return RedirectResponse(
-            url="/admin/openings",
-            status_code=303,
-        )
-
-    @app.post("/admin/openings/{suite_id:int}/delete")
-    def admin_delete_opening_suite(
-        suite_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_opening_suite(connection, suite_id) is None:
-            raise HTTPException(status_code=404, detail="opening suite not found")
-        delete_opening_suite(connection, suite_id)
-        connection.commit()
-        return RedirectResponse(
-            url="/admin/openings",
-            status_code=303,
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: workers
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/workers")
-    def admin_workers(
-        request: Request,
-        page: int = 1,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        per_page = 100
-        page = max(page, 1)
-        workers = list(list_workers(connection))
-        total_pages = max((len(workers) + per_page - 1) // per_page, 1)
-        page = min(page, total_pages)
-        offset = (page - 1) * per_page
-        page_rows = _worker_admin_rows(
-            connection,
-            workers=workers[offset : offset + per_page],
-        )
-        return templates.TemplateResponse(
-            request,
-            "admin/workers.html",
-            _admin_context(
-                request,
-                "workers",
-                worker_rows=page_rows,
-                worker_page=page,
-                worker_total_pages=total_pages,
-                minted=None,
-                minted_start_command=None,
-            ),
-        )
-
-    @app.get("/admin/workers.json")
-    def admin_workers_json(
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return JSONResponse(
-            {
-                "workers": [
-                    _worker_admin_payload(row)
-                    for row in _worker_admin_rows(connection)
-                ]
-            }
-        )
-
     @app.get("/admin/workers/events")
     async def admin_workers_events(request: Request, page: int = 1):
         hub: StreamHub = request.app.state.stream_hub
@@ -1722,204 +695,6 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.get("/admin/workers/{worker_id:int}")
-    def admin_worker_detail(
-        worker_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        row = _worker_admin_row(connection, worker_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        return templates.TemplateResponse(
-            request,
-            "admin/worker_detail.html",
-            _admin_context(
-                request,
-                "workers",
-                row=row,
-                worker=row["worker"],
-                minted=None,
-                minted_start_command=None,
-                worker_launch_command=_worker_launch_command(
-                    row["worker"],
-                    _request_worker_server_url(request, connection),
-                ),
-            ),
-        )
-
-    @app.post("/admin/workers")
-    async def admin_create_worker(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form = await read_form(request)
-        label = form_value(form, "label") or "worker"
-        worker_id = create_worker(
-            connection,
-            label=label,
-        )
-        connection.commit()
-        return RedirectResponse(
-            url=f"/admin/workers/{worker_id}",
-            status_code=303,
-        )
-
-    @app.get("/admin/workers/{worker_id:int}/token")
-    def admin_worker_token_get(worker_id: int):
-        return RedirectResponse(
-            url=f"/admin/workers/{worker_id}",
-            status_code=303,
-        )
-
-    @app.post("/admin/workers/{worker_id:int}/token")
-    async def admin_generate_worker_token(
-        worker_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        worker = get_worker(connection, worker_id)
-        if worker is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        form = await read_form(request)
-        raw_ttl = form_value(form, "ttl_seconds")
-        ttl_seconds = int(raw_ttl) if raw_ttl.isdigit() and int(raw_ttl) > 0 else 7200
-        try:
-            minted = mint_worker_token_for_worker(
-                connection,
-                worker_id=worker_id,
-                ttl_seconds=ttl_seconds,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        row = _worker_admin_row(connection, worker_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        response = templates.TemplateResponse(
-            request,
-            "admin/worker_detail.html",
-            _admin_context(
-                request,
-                "workers",
-                row=row,
-                worker=row["worker"],
-                minted=minted,
-                minted_start_command=(
-                    f"cope worker --server-url "
-                    f"{_command_arg(_request_worker_server_url(request, connection))} "
-                    f"--token {_command_arg(minted.token)}"
-                ),
-                worker_launch_command=None,
-            ),
-        )
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.post("/admin/workers/{worker_id}/label")
-    async def admin_update_worker_label(
-        worker_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_worker(connection, worker_id) is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        form = await read_form(request)
-        label = form_value(form, "label")
-        if label:
-            update_worker_label(connection, worker_id, label)
-            connection.commit()
-        next_url = _safe_redirect_target(form_value(form, "next"), "/admin/workers")
-        return RedirectResponse(url=next_url, status_code=303)
-
-    @app.post("/admin/workers/{worker_id}/revoke")
-    async def admin_revoke_worker(
-        worker_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_worker(connection, worker_id) is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        form = await read_form(request)
-        revoke_worker(connection, worker_id)
-        connection.commit()
-        next_url = _safe_redirect_target(form_value(form, "next"), "/admin/workers")
-        return RedirectResponse(url=next_url, status_code=303)
-
-    @app.post("/admin/workers/{worker_id}/delete")
-    def admin_delete_worker(
-        worker_id: int,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        if get_worker(connection, worker_id) is None:
-            raise HTTPException(status_code=404, detail="worker not found")
-        try:
-            delete_worker(connection, worker_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        connection.commit()
-        return RedirectResponse(
-            url="/admin/workers",
-            status_code=303,
-        )
-
-    # ------------------------------------------------------------------
-    # Admin: chat moderation
-    # ------------------------------------------------------------------
-
-    @app.get("/admin/chat")
-    def admin_chat(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        return templates.TemplateResponse(
-            request,
-            "admin/chat.html",
-            _admin_context(
-                request,
-                "chat",
-                messages=list_chat_messages(connection, limit=100),
-                settings=get_chat_settings(connection),
-            ),
-        )
-
-    @app.post("/admin/chat/settings")
-    async def admin_update_chat_settings(
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        form = await read_form(request)
-        settings = ChatSettingsRecord(
-            enabled=form_flag(form, "enabled"),
-            slowmode_seconds=max(0, _int_form_value(form, "slowmode_seconds", 0)),
-            max_message_length=max(1, _int_form_value(form, "max_message_length", 300)),
-            allow_anonymous_names=form_flag(form, "allow_anonymous_names"),
-            retention_days=max(1, _int_form_value(form, "retention_days", 30)),
-        )
-        update_chat_settings(connection, settings)
-        connection.commit()
-        _publish_chat_settings_change(request, connection, settings)
-        return RedirectResponse(
-            url="/admin/chat",
-            status_code=303,
-        )
-
-    @app.post("/admin/chat/{message_id}/delete")
-    def admin_delete_chat_message(
-        message_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(_database),
-    ):
-        deleted = delete_chat_message(connection, message_id)
-        if deleted is None:
-            raise HTTPException(status_code=404, detail="Message not found.")
-        connection.commit()
-        _publish_chat_deletion(request, deleted.tournament_id, deleted.id)
-        return RedirectResponse(
-            url="/admin/chat",
-            status_code=303,
-        )
-
     from cope.web.api import register_api_routes
 
     register_api_routes(app)
@@ -1946,11 +721,10 @@ def _is_spa_request(request: Request) -> bool:
         "/internal",
         "/openapi.json",
         "/redoc",
-        "/static",
     }:
         return False
     if path.startswith(
-        ("/api/", "/assets/", "/docs/", "/internal/", "/redoc/", "/static/")
+        ("/api/", "/assets/", "/docs/", "/internal/", "/redoc/")
     ):
         return False
     if path.endswith(".json") or path.endswith("/events"):
@@ -1987,77 +761,6 @@ def _database(request: Request) -> Iterator[sqlite3.Connection]:
     connection = connect_database(request.app.state.db_path, check_same_thread=False)
     try:
         yield connection
-    finally:
-        connection.close()
-
-
-def _create_opening_import(
-    connection: sqlite3.Connection,
-    *,
-    name: str,
-    description: str,
-    openings: list[OpeningLine],
-) -> int:
-    try:
-        suite_id = create_opening_suite(
-            connection,
-            name=name,
-            description=description,
-        )
-        replace_suite_openings(connection, suite_id, openings)
-        connection.commit()
-        return suite_id
-    except Exception:
-        connection.rollback()
-        raise
-
-
-def _replace_opening_import(
-    connection: sqlite3.Connection,
-    suite_id: int,
-    *,
-    name: str,
-    description: str,
-    openings: list[OpeningLine],
-) -> None:
-    try:
-        update_opening_suite(
-            connection,
-            suite_id,
-            name=name,
-            description=description,
-        )
-        replace_suite_openings(connection, suite_id, openings)
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-
-
-def _change_tournament_status(
-    db_path: str | Path,
-    tournament_id: int,
-    action: str,
-) -> str:
-    """Apply a lifecycle change outside the web event loop."""
-    connection = connect_database(db_path)
-    try:
-        tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
-            raise HTTPException(status_code=404, detail="tournament not found")
-        allowed = TOURNAMENT_ACTIONS.get(tournament.status, {})
-        if action not in allowed:
-            raise HTTPException(
-                status_code=409,
-                detail=f"cannot {action} a {tournament.status} tournament",
-            )
-        target = allowed[action]
-        set_tournament_status(connection, tournament_id, target)
-        connection.commit()
-        return target
-    except Exception:
-        connection.rollback()
-        raise
     finally:
         connection.close()
 
@@ -2297,20 +1000,6 @@ def _admin_tournament_path_id(path: str) -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
-
-
-def _admin_context(request: Request, section: str, **extra: Any) -> dict[str, Any]:
-    token = _admin_token(request)
-    context: dict[str, Any] = {
-        "active_nav": "admin",
-        "admin_section": section,
-        "notice": None,
-        "error": None,
-        "errors": [],
-        "csrf_token": _csrf_token(request, token) if token else "",
-    }
-    context.update(extra)
-    return context
 
 
 def _admin_token(request: Request) -> str | None:
@@ -2781,15 +1470,6 @@ def _worker_machine_view(worker, effective_status: str) -> dict[str, str]:
     return _state_view(effective_status, label, detail)
 
 
-def _worker_activity(
-    connection: sqlite3.Connection,
-    worker_id: int,
-    engines: dict[int, str],
-) -> dict[str, Any] | None:
-    activity = get_worker_activity(connection, worker_id)
-    return _worker_activity_view(activity, engines)
-
-
 def _worker_activity_view(
     activity,
     engines: dict[int, str],
@@ -2887,142 +1567,11 @@ def _short_secret(value: str) -> str:
     return f"{value[:6]}...{value[-6:]}"
 
 
-def _tournament_form_context(
-    request: Request,
-    connection: sqlite3.Connection,
-    *,
-    tournament: TournamentRecord | None = None,
-    form: dict[str, list[str]] | None = None,
-    errors: list[str] | None = None,
-    wrap: bool = True,
-) -> dict[str, Any]:
-    categories = list_categories(connection, active_only=True)
-    if form is not None:
-        values = forms.submitted_form_values(form)
-        name = form_value(form, "name")
-        participants = [int(v) for v in form.get("participants", []) if v.strip().isdigit()]
-        category_id = int(form_value(form, "category_id") or 0) or (
-            categories[0].id if categories else 1
-        )
-        linked = form_flag(form, "category_settings_linked")
-    elif tournament is not None:
-        values = forms.settings_form_values(tournament.config.model_dump(mode="json"))
-        name = tournament.name
-        participants = list(tournament.config.participants)
-        category_id = tournament.category_id
-        linked = tournament.config.category_settings_linked
-    else:
-        default_category = categories[0] if categories else None
-        values = forms.settings_form_values(
-            default_category.default_config if default_category else {}
-        )
-        name = ""
-        participants = []
-        category_id = default_category.id if default_category else 1
-        linked = True
-
-    form_fields = {
-        "form_values": values,
-        "form_name": name,
-        "form_participants": participants,
-        "form_category_id": category_id,
-        "form_linked": linked,
-        "categories": categories,
-        "category_defaults": {
-            category.id: forms.settings_form_values(category.default_config)
-            for category in categories
-        },
-        "engine_options": [engine for engine in list_engine_records(connection) if engine.active],
-        "opening_suites": list_opening_suites(connection),
-        "editing": tournament is not None,
-        "errors": errors or [],
-    }
-    if not wrap:
-        return form_fields
-    context = _admin_context(request, "tournaments", **form_fields)
-    return context
-
-
-def _category_form_context(
-    request: Request,
-    connection: sqlite3.Connection,
-    *,
-    category: Any = None,
-    form: dict[str, list[str]] | None = None,
-    errors: list[str] | None = None,
-) -> dict[str, Any]:
-    if form is not None:
-        values = forms.submitted_form_values(form)
-        name = form_value(form, "name")
-        description = form_value(form, "description")
-        active = form_flag(form, "active")
-    elif category is not None:
-        values = forms.settings_form_values(category.default_config)
-        name = category.name
-        description = category.description
-        active = category.active
-    else:
-        values = forms.settings_form_values({})
-        name = ""
-        description = ""
-        active = True
-
-    return _admin_context(
-        request,
-        "categories",
-        category=category,
-        form_values=values,
-        form_name=name,
-        form_description=description,
-        form_active=active,
-        engine_options=[engine for engine in list_engine_records(connection) if engine.active],
-        opening_suites=list_opening_suites(connection),
-        tournaments=(
-            _tournaments_for_category(connection, category.id) if category is not None else ()
-        ),
-        errors=errors or [],
-    )
-
-
-def _engine_form_values(
-    form: dict[str, list[str]],
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    values = {
-        "name": form_value(form, "name"),
-        "author": form_value(form, "author"),
-        "active": form_flag(form, "active"),
-    }
-    errors = []
-    if not values["name"]:
-        errors.append("Engine name is required.")
-    return values, {}, errors
-
-
-def _int_form_value(form: dict[str, list[str]], key: str, default: int) -> int:
-    raw = form_value(form, key)
-    if raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 def _friendly_error(exc: Exception) -> str:
     message = str(exc)
     if "UNIQUE constraint failed" in message:
         return "That name is already in use."
     return message
-
-
-def _safe_redirect_target(value: str, fallback: str) -> str:
-    if value.startswith("/") and not value.startswith("//"):
-        return value
-    return fallback
-
-
-def _wants_json(request: Request) -> bool:
-    return "application/json" in request.headers.get("accept", "")
 
 
 def _create_chat_message_from_form(
@@ -3173,23 +1722,6 @@ def _engine_display_name(name: str, version: str | None) -> str:
 
 def _tournament_names(connection: sqlite3.Connection) -> dict[int, str]:
     return {tournament.id: tournament.name for tournament in list_tournaments(connection)}
-
-
-def _selected_category_id(request: Request, categories: tuple[Any, ...]) -> int | None:
-    if not categories:
-        return None
-
-    raw_category_id = request.query_params.get("category_id")
-    if raw_category_id is not None:
-        try:
-            category_id = int(raw_category_id)
-        except ValueError:
-            category_id = categories[0].id
-        else:
-            if any(category.id == category_id for category in categories):
-                return category_id
-
-    return categories[0].id
 
 
 def _selected_viewer_game(request: Request, games: tuple[GameRecord, ...]) -> GameRecord | None:
@@ -3519,24 +2051,6 @@ def _opening_view(connection: sqlite3.Connection, opening_id: int | None) -> dic
     }
 
 
-def _tournament_index_context(
-    request: Request,
-    connection: sqlite3.Connection,
-) -> dict[str, Any]:
-    engines = _engine_names(connection)
-    tournaments = [
-        _tournament_summary(connection, tournament, engines)
-        for tournament in list_tournaments(connection)
-        if tournament.status != "draft"
-    ]
-    return {
-        "request": request,
-        "active_nav": None,
-        "tournaments": tournaments,
-        "tournament_stats": _tournament_index_stats(tournaments),
-    }
-
-
 def _tournament_index_stats(tournaments: list[dict[str, Any]]) -> dict[str, int]:
     total_games = sum(item["summary"]["total"] for item in tournaments)
     finished_games = sum(item["summary"]["finished"] for item in tournaments)
@@ -3626,17 +2140,6 @@ def _standings(
     else:
         rows.sort(key=lambda row: (-row["points"], row["name"]))
     return rows
-
-
-def _tournaments_for_category(
-    connection: sqlite3.Connection,
-    category_id: int,
-) -> tuple[TournamentRecord, ...]:
-    return tuple(
-        tournament
-        for tournament in list_tournaments(connection)
-        if tournament.category_id == category_id
-    )
 
 
 def _tournament_summary(
@@ -3794,31 +2297,6 @@ def _hardware_profile_label(profile: HardwareInfo) -> str:
         f"{profile.physical_cores}P/{profile.logical_cores}T, "
         f"{profile.ram_gb}GB RAM"
     )
-
-
-def _uci_option_label(
-    options: dict[str, Any],
-    name: str,
-    *,
-    suffix: str = "",
-) -> str:
-    value = _case_insensitive_option(options, name)
-    if value is None or value == "":
-        return "Not configured"
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    label = str(value)
-    if suffix and label[-len(suffix) :].lower() != suffix.lower():
-        label = f"{label} {suffix}"
-    return label
-
-
-def _case_insensitive_option(options: dict[str, Any], name: str) -> Any:
-    target = name.casefold()
-    for option_name, value in options.items():
-        if option_name.casefold() == target:
-            return value
-    return None
 
 
 def _time_control_label(time_control: Any) -> str:

@@ -80,7 +80,6 @@ from cope.db import (
     list_tournaments,
     list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
-    list_workers,
     mint_worker_token_for_worker,
     replace_suite_openings,
     replay_game,
@@ -97,7 +96,6 @@ from cope.db import (
     update_tournament,
     update_worker_label,
 )
-from cope.web import forms
 from cope.engine_dockerfiles import (
     EngineDockerfileError,
     list_engine_dockerfiles,
@@ -110,6 +108,7 @@ from cope.web.engine_sources import (
     search_repositories,
 )
 from cope.web.openings import format_opening, parse_opening_input
+from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
 from cope.ratings import (
@@ -440,7 +439,7 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=403, detail="Admin access requires HTTPS.")
 
         form = await read_form(request)
-        supplied = forms.form_value(form, "token")
+        supplied = form_value(form, "token")
         if not hmac.compare_digest(supplied, token):
             raise HTTPException(status_code=401, detail="Invalid admin token.")
 
@@ -2135,14 +2134,6 @@ def _settings_rows(rows: list[tuple[str, str]]) -> list[dict[str, str]]:
     return [{"label": label, "value": value} for label, value in rows]
 
 
-def _positive_form_int(value: str) -> int | None:
-    try:
-        parsed = int(value)
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
-
-
 def _require_tournament(connection: sqlite3.Connection, tournament_id: int):
     tournament = get_tournament(connection, tournament_id)
     if tournament is None:
@@ -2300,12 +2291,6 @@ def _tournament_form_payload(
         "participants": participants,
         "engine_options": engines,
         "opening_suites": list_opening_suites(connection),
-        "editing": tournament is not None,
-        # Compatibility aliases for feature components that still consume
-        # the old flattened form context while migrating.
-        "form_name": name,
-        "form_participants": participants,
-        "form_values": forms.settings_form_values(config),
     }
 
 

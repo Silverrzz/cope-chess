@@ -58,13 +58,10 @@ def apply_tournament_rating_commit(
     command: RunnerCommandRecord,
 ) -> RatingCommitResult:
     tournament_id = _payload_id(command.payload, "tournament_id")
-    legacy = _legacy_rating_schema(connection)
-    id_field = "category_id" if legacy else "rating_list_id"
-    commit_table = "tournament_rating_commits" if legacy else "tournament_rating_list_commits"
-    rating_list_id = _payload_id(command.payload, id_field)
+    rating_list_id = _payload_id(command.payload, "rating_list_id")
 
     commit = connection.execute(
-        f"SELECT * FROM {commit_table} WHERE tournament_id = ? AND {id_field} = ?",
+        "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
         (tournament_id, rating_list_id),
     ).fetchone()
     if commit is None:
@@ -72,28 +69,28 @@ def apply_tournament_rating_commit(
     if commit["command_id"] is None:
         connection.execute(
             f"""
-            UPDATE {commit_table}
+            UPDATE tournament_rating_list_commits
             SET command_id = ?
-            WHERE tournament_id = ? AND {id_field} = ? AND command_id IS NULL AND status = 'pending'
+            WHERE tournament_id = ? AND rating_list_id = ? AND command_id IS NULL AND status = 'pending'
             """,
             (command.id, tournament_id, rating_list_id),
         )
         commit = connection.execute(
-            f"SELECT * FROM {commit_table} WHERE tournament_id = ? AND {id_field} = ?",
+            "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
             (tournament_id, rating_list_id),
         ).fetchone()
     if commit is None or commit["command_id"] != command.id:
         raise RatingCommitError("rating commit command has been superseded")
-    if commit[id_field] != rating_list_id:
+    if commit["rating_list_id"] != rating_list_id:
         raise RatingCommitError("rating commit list does not match its request")
     if commit["status"] not in {"pending", "claimed"}:
         raise RatingCommitError(f"rating commit is already {commit['status']}")
 
     connection.execute(
         f"""
-        UPDATE {commit_table}
+        UPDATE tournament_rating_list_commits
         SET status = 'claimed', error = NULL
-        WHERE tournament_id = ? AND {id_field} = ? AND command_id = ?
+        WHERE tournament_id = ? AND rating_list_id = ? AND command_id = ?
         """,
         (tournament_id, rating_list_id, command.id),
     )
@@ -110,9 +107,9 @@ def apply_tournament_rating_commit(
     applied_at = utc_now()
     cursor = connection.execute(
         f"""
-        UPDATE {commit_table}
+        UPDATE tournament_rating_list_commits
         SET status = 'applied', applied_at = ?, error = NULL
-        WHERE tournament_id = ? AND {id_field} = ? AND command_id = ? AND status = 'claimed'
+        WHERE tournament_id = ? AND rating_list_id = ? AND command_id = ? AND status = 'claimed'
         """,
         (applied_at, tournament_id, rating_list_id, command.id),
     )
@@ -139,17 +136,11 @@ def recalculate_ratings(
     rating_list_ids: Iterable[int] | None = None,
 ) -> RatingRecalculationResult:
     """Rebuild ratings and history deterministically from applied tournaments."""
-    legacy = _legacy_rating_schema(connection)
-    list_table = "categories" if legacy else "rating_lists"
-    rating_table = "ratings" if legacy else "rating_list_ratings"
-    history_table = "rating_history" if legacy else "rating_list_history"
-    commit_table = "tournament_rating_commits" if legacy else "tournament_rating_list_commits"
-    id_field = "category_id" if legacy else "rating_list_id"
     if rating_list_ids is None:
         selected = tuple(
             int(row["id"])
             for row in connection.execute(
-                f"SELECT id FROM {list_table} ORDER BY id"
+                "SELECT id FROM rating_lists ORDER BY id"
             )
         )
     else:
@@ -161,18 +152,18 @@ def recalculate_ratings(
 
     placeholders = ", ".join("?" for _ in selected)
     connection.execute(
-        f"DELETE FROM {history_table} WHERE {id_field} IN ({placeholders})",
+        f"DELETE FROM rating_list_history WHERE rating_list_id IN ({placeholders})",
         selected,
     )
     connection.execute(
-        f"DELETE FROM {rating_table} WHERE {id_field} IN ({placeholders})",
+        f"DELETE FROM rating_list_ratings WHERE rating_list_id IN ({placeholders})",
         selected,
     )
     commits = connection.execute(
         f"""
-        SELECT * FROM {commit_table}
-        WHERE status = 'applied' AND {id_field} IN ({placeholders})
-        ORDER BY {id_field}, COALESCE(applied_at, requested_at), tournament_id
+        SELECT * FROM tournament_rating_list_commits
+        WHERE status = 'applied' AND rating_list_id IN ({placeholders})
+        ORDER BY rating_list_id, COALESCE(applied_at, requested_at), tournament_id
         """,
         selected,
     ).fetchall()
@@ -185,7 +176,7 @@ def recalculate_ratings(
 
     for commit in commits:
         tournament_id = int(commit["tournament_id"])
-        rating_list_id = int(commit[id_field])
+        rating_list_id = int(commit["rating_list_id"])
         tournament = get_tournament(connection, tournament_id)
         if tournament is None:
             raise RatingCommitError(f"committed tournament {tournament_id} no longer exists")
@@ -225,8 +216,6 @@ def recalculate_ratings(
                 engine_id=white_id,
                 opponent_engine_id=black_id,
                 rating_list_id=rating_list_id,
-                history_table=history_table,
-                id_field=id_field,
                 tournament_id=tournament_id,
                 game_id=game.id,
                 elo_before=white_before,
@@ -242,8 +231,6 @@ def recalculate_ratings(
                 engine_id=black_id,
                 opponent_engine_id=white_id,
                 rating_list_id=rating_list_id,
-                history_table=history_table,
-                id_field=id_field,
                 tournament_id=tournament_id,
                 game_id=game.id,
                 elo_before=black_before,
@@ -265,7 +252,7 @@ def recalculate_ratings(
         for engine_id, elo in category_ratings.items():
             connection.execute(
                 f"""
-                INSERT INTO {rating_table} (engine_id, {id_field}, elo, games_played, updated_at)
+                INSERT INTO rating_list_ratings (engine_id, rating_list_id, elo, games_played, updated_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (engine_id, rating_list_id, elo, games_played[rating_list_id][engine_id], applied_at),
@@ -286,62 +273,25 @@ def uncommit_tournament_ratings(
     tournament_id: int,
     rating_list_id: int | None = None,
 ) -> RatingRecalculationResult:
-    legacy = _legacy_rating_schema(connection)
-    commit_table = "tournament_rating_commits" if legacy else "tournament_rating_list_commits"
-    id_field = "category_id" if legacy else "rating_list_id"
     if rating_list_id is None:
         row = connection.execute(
-            f"SELECT {id_field} FROM {commit_table} WHERE tournament_id = ? ORDER BY {id_field} LIMIT 1",
+            "SELECT rating_list_id FROM tournament_rating_list_commits WHERE tournament_id = ? ORDER BY rating_list_id LIMIT 1",
             (tournament_id,),
         ).fetchone()
         if row is None:
             raise RatingCommitError("tournament ratings are not committed")
-        rating_list_id = int(row[id_field])
+        rating_list_id = int(row["rating_list_id"])
     commit = connection.execute(
-        f"SELECT * FROM {commit_table} WHERE tournament_id = ? AND {id_field} = ?",
+        "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
         (tournament_id, rating_list_id),
     ).fetchone()
     if commit is None or commit["status"] != "applied":
         raise RatingCommitError("tournament ratings are not committed")
     connection.execute(
-        f"DELETE FROM {commit_table} WHERE tournament_id = ? AND {id_field} = ?",
+        "DELETE FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
         (tournament_id, rating_list_id),
     )
     return recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
-
-
-def move_tournament_ratings(
-    connection: sqlite3.Connection,
-    tournament_id: int,
-    rating_list_id: int,
-) -> RatingRecalculationResult:
-    legacy = _legacy_rating_schema(connection)
-    commit_table = "tournament_rating_commits" if legacy else "tournament_rating_list_commits"
-    list_table = "categories" if legacy else "rating_lists"
-    id_field = "category_id" if legacy else "rating_list_id"
-    commit = connection.execute(
-        f"SELECT * FROM {commit_table} WHERE tournament_id = ? ORDER BY {id_field} LIMIT 1",
-        (tournament_id,),
-    ).fetchone()
-    if commit is None or commit["status"] != "applied":
-        raise RatingCommitError("tournament ratings are not committed")
-    category = connection.execute(
-        f"SELECT 1 FROM {list_table} WHERE id = ?",
-        (rating_list_id,),
-    ).fetchone()
-    if category is None:
-        raise RatingCommitError("rating list does not exist")
-    previous_category_id = int(commit[id_field])
-    if previous_category_id == rating_list_id:
-        return recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
-    connection.execute(
-        f"UPDATE {commit_table} SET {id_field} = ? WHERE tournament_id = ? AND {id_field} = ?",
-        (rating_list_id, tournament_id, previous_category_id),
-    )
-    return recalculate_ratings(
-        connection,
-        rating_list_ids=(previous_category_id, rating_list_id),
-    )
 
 
 def _committable_games(tournament, games: tuple) -> tuple:
@@ -386,8 +336,6 @@ def _record_history(
     engine_id: int,
     opponent_engine_id: int,
     rating_list_id: int,
-    history_table: str,
-    id_field: str,
     tournament_id: int,
     game_id: int,
     elo_before: float,
@@ -400,8 +348,8 @@ def _record_history(
 ) -> None:
     connection.execute(
         f"""
-        INSERT INTO {history_table} (
-          engine_id, {id_field}, tournament_id, opponent_engine_id,
+        INSERT INTO rating_list_history (
+          engine_id, rating_list_id, tournament_id, opponent_engine_id,
           elo_before, elo, elo_change, score, expected_score,
           hardware_score, opponent_hardware_score, game_id, at
         )
@@ -432,24 +380,9 @@ def _payload_id(payload: dict, field: str) -> int:
     return value
 
 
-def _legacy_rating_schema(connection: sqlite3.Connection) -> bool:
-    """Support pre-v15 in-memory SQLite fixtures during the rolling migration."""
-    if not isinstance(connection, sqlite3.Connection):
-        return False
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rating_list_ratings'"
-    ).fetchone()
-    return row is None
-
-
 def _white_score(result: str) -> float:
     if result == "1-0":
         return 1.0
     if result == "0-1":
         return 0.0
     return 0.5
-
-
-def _expected_score(rating: float, opponent_rating: float) -> float:
-    """Backward-compatible neutral-hardware Elo expectation."""
-    return hardware_adjusted_expected_score(rating, opponent_rating, 1.0, 1.0)

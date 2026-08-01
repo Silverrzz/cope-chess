@@ -19,17 +19,6 @@ from cope.core.models import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class CategoryRecord:
-    id: int
-    name: str
-    description: str
-    default_config: dict[str, Any]
-    active: bool
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
 class RatingListRecord:
     id: int
     name: str
@@ -47,16 +36,6 @@ class TournamentRecord:
     created_at: str
     started_at: str | None
     finished_at: str | None
-
-    @property
-    def category_id(self) -> None:
-        """Compatibility for legacy server-rendered views; tournaments are list-agnostic."""
-        return None
-
-    @property
-    def settings_unlinked(self) -> bool:
-        return True
-
 
 @dataclass(frozen=True, slots=True)
 class GameRecord:
@@ -526,7 +505,6 @@ def delete_engine_version(connection: sqlite3.Connection, version_id: int) -> No
     record = get_engine_version_record(connection, version_id)
     if record is None:
         raise ValueError("engine version not found")
-    connection.execute("DELETE FROM ratings WHERE engine_id = ?", (version_id,))
     connection.execute("DELETE FROM rating_list_ratings WHERE engine_id = ?", (version_id,))
     connection.execute(
         "DELETE FROM rating_list_history WHERE engine_id = ? OR opponent_engine_id = ?",
@@ -671,99 +649,6 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
     return tuple(record for record in list_engine_records(connection) if record.engine_id == engine_id)
 
 
-def create_category(
-    connection: sqlite3.Connection,
-    *,
-    name: str,
-    description: str = "",
-    default_config: dict[str, Any] | None = None,
-    active: bool = True,
-) -> int:
-    cursor = connection.execute(
-        """
-        INSERT INTO categories (name, description, default_config, active, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (name, description, _json_dump(default_config or {}), int(active), utc_now()),
-    )
-    return int(cursor.lastrowid)
-
-
-def update_category(
-    connection: sqlite3.Connection,
-    category_id: int,
-    *,
-    name: str,
-    description: str = "",
-    default_config: dict[str, Any] | None = None,
-    active: bool = True,
-) -> None:
-    connection.execute(
-        """
-        UPDATE categories
-        SET name = ?, description = ?, default_config = ?, active = ?
-        WHERE id = ?
-        """,
-        (
-            name,
-            description,
-            _json_dump(default_config or {}),
-            int(active),
-            category_id,
-        ),
-    )
-
-
-def get_category(
-    connection: sqlite3.Connection,
-    category_id: int,
-) -> CategoryRecord | None:
-    row = connection.execute(
-        "SELECT * FROM categories WHERE id = ?",
-        (category_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return _category_from_row(row)
-
-
-def list_categories(
-    connection: sqlite3.Connection,
-    *,
-    active_only: bool = False,
-) -> tuple[CategoryRecord, ...]:
-    sql = "SELECT * FROM categories"
-    params: tuple[Any, ...] = ()
-    if active_only:
-        sql = f"{sql} WHERE active = ?"
-        params = (1,)
-    sql = f"{sql} ORDER BY active DESC, name"
-    return tuple(_category_from_row(row) for row in connection.execute(sql, params))
-
-
-def category_tournament_count(connection: sqlite3.Connection, category_id: int) -> int:
-    row = connection.execute(
-        "SELECT COUNT(*) AS count FROM tournaments WHERE category_id = ?",
-        (category_id,),
-    ).fetchone()
-    return int(row["count"])
-
-
-def delete_category(connection: sqlite3.Connection, category_id: int) -> None:
-    """Delete a category. Raises ValueError if tournaments or ratings reference it."""
-    if category_id == 1:
-        raise ValueError("the default category cannot be deleted")
-    if category_tournament_count(connection, category_id) > 0:
-        raise ValueError("category has tournaments; deactivate it instead of deleting")
-    row = connection.execute(
-        "SELECT COUNT(*) AS count FROM ratings WHERE category_id = ?",
-        (category_id,),
-    ).fetchone()
-    if int(row["count"]) > 0:
-        raise ValueError("category has ratings; deactivate it instead of deleting")
-    connection.execute("DELETE FROM categories WHERE id = ?", (category_id,))
-
-
 def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | None:
     row = connection.execute(
         """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
@@ -801,15 +686,11 @@ def create_tournament(
     created_at = utc_now()
     cursor = connection.execute(
         """
-        INSERT INTO tournaments (
-          name, category_id, settings_unlinked, config, status, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO tournaments (name, config, status, created_at)
+        VALUES (?, ?, ?, ?)
         """,
         (
             name,
-            None,
-            1,
             config.model_dump_json(),
             status,
             created_at,
@@ -949,13 +830,11 @@ def update_tournament(
     connection.execute(
         """
         UPDATE tournaments
-        SET name = ?, category_id = ?, settings_unlinked = ?, config = ?
+        SET name = ?, config = ?
         WHERE id = ?
         """,
         (
             name,
-            None,
-            1,
             config.model_dump_json(),
             tournament_id,
         ),
@@ -1246,13 +1125,12 @@ def _ensure_games_are_not_committed(
     game_ids: tuple[int, ...],
 ) -> None:
     placeholders = ", ".join("?" for _ in game_ids)
-    for table in ("rating_list_history", "rating_history"):
-        row = connection.execute(
-            f"SELECT 1 FROM {table} WHERE game_id IN ({placeholders}) LIMIT 1",
-            game_ids,
-        ).fetchone()
-        if row is not None:
-            raise ValueError("game results are already part of a rating list")
+    row = connection.execute(
+        f"SELECT 1 FROM rating_list_history WHERE game_id IN ({placeholders}) LIMIT 1",
+        game_ids,
+    ).fetchone()
+    if row is not None:
+        raise ValueError("game results are already part of a rating list")
 
 
 def _delete_system_chat_events(
@@ -2968,25 +2846,6 @@ def list_rating_lists(connection: sqlite3.Connection) -> tuple[RatingListRecord,
 
 def delete_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> None:
     connection.execute("DELETE FROM rating_lists WHERE id = ?", (rating_list_id,))
-
-
-def _category_from_row(row: sqlite3.Row) -> CategoryRecord:
-    default_config = json.loads(row["default_config"])
-    adjudication = default_config.get("adjudication")
-    if isinstance(adjudication, dict):
-        default_config["adjudication"] = {
-            key: adjudication[key]
-            for key in ("draw", "resign", "max_moves")
-            if key in adjudication
-        }
-    return CategoryRecord(
-        id=row["id"],
-        name=row["name"],
-        description=row["description"],
-        default_config=default_config,
-        active=bool(row["active"]),
-        created_at=row["created_at"],
-    )
 
 
 def _engine_from_row(row: sqlite3.Row) -> EngineSpec:

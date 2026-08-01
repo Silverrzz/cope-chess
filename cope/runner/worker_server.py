@@ -45,7 +45,7 @@ from cope.core.protocol import (
     make_message,
 )
 from cope.db import (
-    DEFAULT_DB_PATH,
+    DEFAULT_DATABASE_URL,
     WorkerRecord,
     connect_database,
     disconnect_worker,
@@ -113,7 +113,7 @@ class EnginePreparationBackoff:
 class WorkerServerConfig:
     host: str = field(default_factory=default_worker_host)
     port: int = field(default_factory=default_worker_port)
-    db_path: str | Path = DEFAULT_DB_PATH
+    db_path: str | Path = DEFAULT_DATABASE_URL
     expected_app_version: str | None = None
     heartbeat_interval_ms: int = 5000
     assignment_poll_interval_s: float = 10.0

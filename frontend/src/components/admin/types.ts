@@ -45,15 +45,6 @@ export interface EngineFamily {
   versions: Engine[]
 }
 
-export interface Category {
-  id: Id
-  name: string
-  description?: string
-  active?: boolean
-  default_config?: Partial<CategorySettings>
-  created_at?: string
-}
-
 export interface OpeningSuite {
   id: Id
   name: string
@@ -96,11 +87,6 @@ export interface TournamentSettings {
   }
   rated: boolean
   lag_compensation_ms: number
-}
-
-export interface CategorySettings extends TournamentSettings {
-  engine_threads: number
-  engine_hash_mb: number
 }
 
 export interface TournamentConfig extends TournamentSettings {
@@ -167,11 +153,8 @@ export interface WorkerRow {
 }
 
 export interface FormSeed {
-  config?: TournamentConfig
-  form_values?: Record<string, unknown>
-  form_name?: string
-  form_participants?: number[]
+  name: string
+  config: TournamentConfig
   engine_options: Engine[]
   opening_suites: OpeningSuite[]
-  editing?: Tournament | boolean | null
 }

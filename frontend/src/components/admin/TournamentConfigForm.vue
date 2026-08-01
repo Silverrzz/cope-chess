@@ -22,7 +22,7 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
-const name = ref(props.seed.form_name ?? (typeof props.seed.editing === 'object' && props.seed.editing ? props.seed.editing.name : ''))
+const name = ref(props.seed.name)
 const config = ref<TournamentConfig>(configFromSeed(props.seed))
 const error = ref('')
 
@@ -39,7 +39,7 @@ const gameEstimate = computed(() => estimateGames(config.value.format, config.va
 const waves = computed(() => gameEstimate.value ? Math.ceil(gameEstimate.value / Math.max(config.value.concurrency, 1)) : 0)
 
 watch(() => props.seed, (seed) => {
-  name.value = seed.form_name ?? (typeof seed.editing === 'object' && seed.editing ? seed.editing.name : '')
+  name.value = seed.name
   config.value = configFromSeed(seed)
 }, { deep: true })
 

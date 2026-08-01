@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from cope.db import (
-    DEFAULT_DB_PATH,
+    DEFAULT_DATABASE_URL,
     activate_benchmarker_deployment_targets,
     claim_deployment_job,
     connect_database,
@@ -38,7 +38,7 @@ REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}$")
 
 @dataclass(frozen=True, slots=True)
 class UpdaterConfig:
-    db_path: str | Path = DEFAULT_DB_PATH
+    db_path: str | Path = DEFAULT_DATABASE_URL
     source_dir: Path = Path("/workspace")
     repository_url: str = ""
     default_ref: str = "main"
