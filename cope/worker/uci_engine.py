@@ -530,8 +530,6 @@ class UciEngineProcess:
                     [
                         "docker",
                         "build",
-                        "--progress",
-                        "plain",
                         "--file",
                         "Dockerfile.cope",
                         "--tag",
