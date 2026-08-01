@@ -73,6 +73,7 @@ class WorkerClientConfig:
     label_hint: str = ""
     machine_id: str | None = None
     state_file: Path | None = None
+    cpu_capacity: int | None = None
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
@@ -186,7 +187,7 @@ def _build_hello(
             "worker client needs exactly one of token or session_id"
         )
 
-    hw = _detect_hardware()
+    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
     machine_id = config.machine_id or _detect_machine_id()
 
     if config.token is not None:
@@ -1316,22 +1317,61 @@ def _redact_secret(value: Any) -> str:
     return f"{text[:4]}...{text[-4:]}"
 
 
-def _detect_hardware() -> HardwareInfo:
-    logical_cores = os.cpu_count() or 1
-    physical_cores = logical_cores
+def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
+    system_logical_cores = os.cpu_count() or 1
+    reported_physical_cores = system_logical_cores
+    cpu_ids = _process_cpu_ids()
+    logical_cores = len(cpu_ids) if cpu_ids else system_logical_cores
     ram_gb = 1
     ram_mb = 1024
 
     try:
         import psutil
 
-        physical_cores = psutil.cpu_count(logical=False) or logical_cores
-        logical_cores = psutil.cpu_count(logical=True) or logical_cores
+        reported_physical_cores = (
+            psutil.cpu_count(logical=False) or reported_physical_cores
+        )
+        system_logical_cores = psutil.cpu_count(logical=True) or system_logical_cores
+        if cpu_ids is None:
+            with contextlib.suppress(Exception):
+                affinity = psutil.Process().cpu_affinity()
+                if affinity:
+                    cpu_ids = {int(cpu_id) for cpu_id in affinity}
+                    logical_cores = len(cpu_ids)
         total_ram = psutil.virtual_memory().total
         ram_mb = max(1, total_ram // (1024**2))
         ram_gb = max(1, round(total_ram / (1024**3)))
     except ImportError:
         pass
+
+    detected_physical_cores = _linux_physical_core_count(cpu_ids)
+    if detected_physical_cores is None:
+        detected_physical_cores = max(
+            1,
+            min(
+                logical_cores,
+                (
+                    logical_cores * reported_physical_cores
+                    + system_logical_cores
+                    - 1
+                )
+                // system_logical_cores,
+            ),
+        )
+    cpu_quota = _linux_cpu_quota()
+    usable_cores = (
+        detected_physical_cores
+        if cpu_quota is None
+        else min(detected_physical_cores, cpu_quota)
+    )
+    physical_cores = usable_cores
+    if cpu_capacity is not None:
+        if cpu_capacity > usable_cores:
+            raise ValueError(
+                "worker CPU capacity cannot exceed the detected usable "
+                f"physical-core count ({usable_cores})"
+            )
+        physical_cores = cpu_capacity
 
     hw = HardwareInfo(
         cpu_model=_detect_cpu_model(),
@@ -1345,13 +1385,76 @@ def _detect_hardware() -> HardwareInfo:
         bench=BenchInfo(),
     )
     LOG.info(
-        "detected hardware cpu=%s cores=%s ram=%s os=%s",
+        "detected hardware cpu=%s topology=%s quota=%s capacity=%s ram=%s os=%s",
         hw.cpu_model,
-        f"{hw.physical_cores}P/{hw.logical_cores}T",
+        f"{detected_physical_cores}P/{hw.logical_cores}T",
+        cpu_quota if cpu_quota is not None else "unlimited",
+        hw.physical_cores,
         f"{hw.ram_gb}GB",
         hw.os,
     )
     return hw
+
+
+def _process_cpu_ids() -> set[int] | None:
+    get_affinity = getattr(os, "sched_getaffinity", None)
+    if get_affinity is None:
+        return None
+    try:
+        cpu_ids = {int(cpu_id) for cpu_id in get_affinity(0)}
+    except OSError:
+        return None
+    return cpu_ids or None
+
+
+def _linux_physical_core_count(cpu_ids: set[int] | None) -> int | None:
+    if platform.system() != "Linux" or not cpu_ids:
+        return None
+    sibling_groups: set[str] = set()
+    for cpu_id in cpu_ids:
+        path = Path(
+            f"/sys/devices/system/cpu/cpu{cpu_id}/topology/thread_siblings_list"
+        )
+        try:
+            sibling_group = path.read_text(encoding="ascii").strip()
+        except OSError:
+            return None
+        if not sibling_group:
+            return None
+        sibling_groups.add(sibling_group)
+    return len(sibling_groups) or None
+
+
+def _linux_cpu_quota() -> int | None:
+    if platform.system() != "Linux":
+        return None
+    try:
+        quota_text, period_text = Path("/sys/fs/cgroup/cpu.max").read_text(
+            encoding="ascii"
+        ).split()
+        if quota_text != "max":
+            quota = int(quota_text)
+            period = int(period_text)
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    try:
+        quota = int(
+            Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+            .read_text(encoding="ascii")
+            .strip()
+        )
+        period = int(
+            Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+            .read_text(encoding="ascii")
+            .strip()
+        )
+    except (OSError, ValueError):
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, quota // period)
 
 
 def _detect_machine_id() -> str:

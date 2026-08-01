@@ -1331,8 +1331,8 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
             "reported": True,
             "summary": _worker_resource_summary(worker.hw.physical_cores),
             "detail": (
-                f"{worker.hw.physical_cores} physical / "
-                f"{worker.hw.logical_cores} logical cores · {worker.hw.ram_gb}GB RAM"
+                f"{worker.hw.physical_cores} usable physical-core slots / "
+                f"{worker.hw.logical_cores} accessible threads · {worker.hw.ram_gb}GB RAM"
             ),
             "cores": str(worker.hw.physical_cores),
             "memory": f"{worker.hw.ram_gb}GB",

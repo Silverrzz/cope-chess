@@ -296,6 +296,12 @@ def main(argv: list[str] | None = None) -> int:
         "--machine-id",
         help="stable machine identity override for containers or isolated environments",
     )
+    worker_parser.add_argument(
+        "--cpu-capacity",
+        type=_positive_int,
+        default=os.environ.get("COPE_WORKER_CPU_CAPACITY") or None,
+        help="upper limit for usable physical-core scheduling capacity",
+    )
 
     benchmark_server_parser = subparsers.add_parser(
         "benchmark-server",
@@ -560,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
             label_hint=args.label_hint,
             machine_id=args.machine_id,
             state_file=args.state_file,
+            cpu_capacity=args.cpu_capacity,
         )
         try:
             asyncio.run(run_worker_client(config))
