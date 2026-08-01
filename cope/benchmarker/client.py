@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,6 +41,7 @@ LOG = logging.getLogger("cope.benchmarker")
 RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
 OUTPUT_LIMIT = 64_000
+PROGRESS_HEARTBEAT_INTERVAL_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,9 @@ async def _run_benchmark_with_progress(
 ) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
     loop = asyncio.get_running_loop()
     progress_queue: asyncio.Queue[BenchmarkProgress] = asyncio.Queue(maxsize=256)
+    last_progress: BenchmarkProgress | None = None
+    stage_started_at = time.monotonic()
+    last_sent_at = stage_started_at
 
     def enqueue(progress: BenchmarkProgress) -> None:
         if progress_queue.full():
@@ -194,6 +200,13 @@ async def _run_benchmark_with_progress(
         progress_queue.put_nowait(progress)
 
     def report(stage: str, substage: str, status: str, detail: str) -> None:
+        nonlocal last_progress, stage_started_at
+        if (
+            last_progress is None
+            or last_progress.stage != stage
+            or last_progress.substage != substage
+        ):
+            stage_started_at = time.monotonic()
         progress = BenchmarkProgress(
             job_id=assignment.job_id,
             job_key=assignment.job_key,
@@ -204,6 +217,7 @@ async def _run_benchmark_with_progress(
             status="completed" if status == "completed" else "running",
             detail=detail.strip()[-4000:] or "Progress updated",
         )
+        last_progress = progress
         loop.call_soon_threadsafe(enqueue, progress)
 
     task = asyncio.create_task(
@@ -219,11 +233,33 @@ async def _run_benchmark_with_progress(
         try:
             progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
         except asyncio.TimeoutError:
+            now = time.monotonic()
+            if (
+                send_progress
+                and not task.done()
+                and last_progress is not None
+                and last_progress.status == "running"
+                and now - last_sent_at >= PROGRESS_HEARTBEAT_INTERVAL_S
+            ):
+                elapsed = _duration_text(now - stage_started_at)
+                heartbeat = last_progress.model_copy(
+                    update={
+                        "detail": (
+                            f"Heartbeat: {last_progress.substage.replace('_', ' ')} "
+                            f"has been active for {elapsed}"
+                        )
+                    }
+                )
+                await websocket.send(
+                    encode_message(make_message("benchmark_progress", heartbeat))
+                )
+                last_sent_at = now
             continue
         if send_progress:
             await websocket.send(
                 encode_message(make_message("benchmark_progress", progress))
             )
+            last_sent_at = time.monotonic()
     message_type, result = await task
     if isinstance(result, BenchmarkFailed):
         LOG.warning(
@@ -321,6 +357,12 @@ def _run_benchmark(
     credential: str,
     progress_callback,
 ) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
+    progress_callback(
+        "setup",
+        "assignment",
+        "completed",
+        f"Accepted benchmark job {assignment.job_id} for {assignment.engine.name}",
+    )
     engine = UciEngineProcess(
         assignment.engine,
         server_url=server_url,
@@ -345,7 +387,6 @@ def _run_benchmark(
                 ),
             )
 
-        started_ns = time.monotonic_ns()
         progress_callback(
             "benchmark",
             "engine_bench",
@@ -353,27 +394,15 @@ def _run_benchmark(
             f"Running {assignment.engine.name} bench with a {assignment.timeout_s} second limit",
         )
         try:
-            completed = subprocess.run(
-                [str(engine.artifact_path.resolve()), "bench"],
+            return_code, output, elapsed_ms, timed_out = _run_bench_command(
+                engine.artifact_path.resolve(),
                 cwd=engine.artifact_directory,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=assignment.timeout_s,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            output = _trim_output(_timeout_output(error))
-            return (
-                "benchmark_failed",
-                BenchmarkFailed(
-                    job_id=assignment.job_id,
-                    job_key=assignment.job_key,
-                    hardware_key=assignment.hardware_key,
-                    build_hash=assignment.engine.build_hash,
-                    stage="bench",
-                    error=f"engine bench exceeded {assignment.timeout_s} seconds",
-                    output=output,
+                timeout_s=assignment.timeout_s,
+                output_callback=lambda detail: progress_callback(
+                    "benchmark",
+                    "engine_bench",
+                    "running",
+                    detail,
                 ),
             )
         except OSError as error:
@@ -388,13 +417,7 @@ def _run_benchmark(
                     error=str(error)[-8000:],
                 ),
             )
-
-        elapsed_ms = max(
-            0,
-            round((time.monotonic_ns() - started_ns) / 1_000_000),
-        )
-        output = _trim_output(completed.stdout or "")
-        if completed.returncode != 0:
+        if timed_out:
             return (
                 "benchmark_failed",
                 BenchmarkFailed(
@@ -403,7 +426,20 @@ def _run_benchmark(
                     hardware_key=assignment.hardware_key,
                     build_hash=assignment.engine.build_hash,
                     stage="bench",
-                    error=f"engine bench exited with code {completed.returncode}",
+                    error=f"engine bench exceeded {assignment.timeout_s} seconds",
+                    output=output,
+                ),
+            )
+        if return_code != 0:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="bench",
+                    error=f"engine bench exited with code {return_code}",
                     output=output,
                 ),
             )
@@ -447,11 +483,93 @@ def _trim_output(output: str) -> str:
     return output[-OUTPUT_LIMIT:]
 
 
-def _timeout_output(error: subprocess.TimeoutExpired) -> str:
-    value = error.stdout or ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
+def _run_bench_command(
+    executable: Path,
+    *,
+    cwd: Path,
+    timeout_s: int,
+    output_callback,
+) -> tuple[int, str, int, bool]:
+    started = time.monotonic()
+    process = subprocess.Popen(
+        [str(executable), "bench"],
+        cwd=cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def read_output() -> None:
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    lines.put(line.rstrip("\r\n"))
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    output = ""
+    pending: list[str] = []
+    pending_length = 0
+    last_emit = time.monotonic()
+    timed_out = False
+
+    def emit() -> None:
+        nonlocal pending, pending_length, last_emit
+        detail = "\n".join(pending).strip()
+        pending = []
+        pending_length = 0
+        last_emit = time.monotonic()
+        if detail:
+            output_callback(detail[-4000:])
+
+    while True:
+        if not timed_out and time.monotonic() - started >= timeout_s:
+            timed_out = True
+            process.kill()
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
+            if pending and time.monotonic() - last_emit >= 0.5:
+                emit()
+            if process.poll() is not None and not reader.is_alive():
+                break
+            continue
+        if line is None:
+            break
+        output = _trim_output(f"{output}\n{line}")
+        pending.append(line)
+        pending_length += len(line) + 1
+        if pending_length >= 3000 or time.monotonic() - last_emit >= 0.5:
+            emit()
+
+    reader.join(timeout=2)
+    while True:
+        try:
+            line = lines.get_nowait()
+        except queue.Empty:
+            break
+        if line is None:
+            continue
+        output = _trim_output(f"{output}\n{line}")
+        pending.append(line)
+    emit()
+    return_code = process.wait()
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    return return_code, output.strip(), elapsed_ms, timed_out
+
+
+def _duration_text(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, remaining = divmod(total, 60)
+    if minutes:
+        return f"{minutes}m {remaining:02d}s"
+    return f"{remaining}s"
 
 
 def _load_session(path: Path | None) -> str | None:

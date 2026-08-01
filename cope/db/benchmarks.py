@@ -433,9 +433,7 @@ def complete_benchmark_job(
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
-    recorded_output = "\n\n".join(
-        part for part in (current.output.rstrip(), output.strip()) if part
-    )[-64_000:]
+    recorded_output = (current.output.rstrip() or output.strip())[-64_000:]
     connection.execute(
         """
         INSERT INTO engine_benchmarks (
@@ -479,9 +477,7 @@ def fail_benchmark_job(
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
-    recorded_output = "\n\n".join(
-        part for part in (current.output.rstrip(), output.strip()) if part
-    )[-64_000:]
+    recorded_output = (current.output.rstrip() or output.strip())[-64_000:]
     retry_at = (
         datetime.now(UTC) + timedelta(seconds=retry_seconds)
     ).isoformat(timespec="seconds")
