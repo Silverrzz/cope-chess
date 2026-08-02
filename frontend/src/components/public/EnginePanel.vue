@@ -265,12 +265,12 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   gap: 0.25rem;
   min-width: 0;
   min-height: 0;
-  border-radius: var(--radius-sm, 0.35rem);
-  background: color-mix(in srgb, var(--color-text, #17202a) 4.5%, transparent);
+  text-align: center;
 }
 
 .evaluation strong {
-  font-size: clamp(3rem, 6vw, 4.5rem);
+  width: 100%;
+  font-size: clamp(2.5rem, 4.5vw, 3.5rem);
   font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
