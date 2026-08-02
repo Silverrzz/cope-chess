@@ -126,6 +126,10 @@ from cope.ratings import (
     recalculate_ratings,
     uncommit_tournament_ratings,
 )
+from cope.runner.scheduler import (
+    add_running_tournament_participant,
+    remove_running_tournament_participant,
+)
 
 
 LOG = logging.getLogger("cope.web.api")
@@ -280,6 +284,10 @@ class TournamentPayload(BaseModel):
         if not value:
             raise ValueError("tournament name cannot be blank")
         return value
+
+
+class TournamentParticipantPayload(BaseModel):
+    engine_id: int = Field(gt=0)
 
 
 class RatingCommitPayload(BaseModel):
@@ -1113,6 +1121,7 @@ def register_api_routes(app: FastAPI) -> None:
             "commits": list_tournament_rating_commits(connection, tournament.id),
             "rating_lists": list_rating_lists(connection),
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
+            "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
                 "editable": tournament.status == "draft",
                 "concurrency_editable": tournament.status == "running",
@@ -1201,6 +1210,109 @@ def register_api_routes(app: FastAPI) -> None:
             else "Tournament updated."
         )
         return _json({"id": tournament_id, "message": message})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/participants")
+    def admin_add_tournament_participant(
+        tournament_id: int,
+        payload: TournamentParticipantPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        _ensure_tournament_games_mutable(connection, tournament_id)
+        _validate_live_participant_engine(connection, payload.engine_id)
+        try:
+            result = add_running_tournament_participant(
+                connection,
+                tournament_id,
+                payload.engine_id,
+            )
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="The tournament roster changed. Reload the page and try again.",
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception(
+                "live tournament participant addition failed tournament_id=%s engine_id=%s",
+                tournament_id,
+                payload.engine_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not add the participant. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        count = result.scheduled_games
+        return _json(
+            {
+                "message": (
+                    f"Participant added and {count} game{'s' if count != 1 else ''} scheduled."
+                ),
+                "scheduled_games": count,
+                "participant_count": len(result.tournament.config.participants),
+            }
+        )
+
+    @app.delete("/api/admin/tournaments/{tournament_id}/participants/{engine_id}")
+    def admin_remove_tournament_participant(
+        tournament_id: int,
+        engine_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        _ensure_tournament_games_mutable(connection, tournament_id)
+        try:
+            result = remove_running_tournament_participant(
+                connection,
+                tournament_id,
+                engine_id,
+            )
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="The tournament roster changed. Reload the page and try again.",
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception(
+                "live tournament participant removal failed tournament_id=%s engine_id=%s",
+                tournament_id,
+                engine_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not remove the participant. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        invalidated = result.invalidated
+        active = invalidated.assigned + invalidated.live
+        total = len(invalidated.game_ids)
+        return _json(
+            {
+                "message": (
+                    f"Participant removed and {total} game{'s' if total != 1 else ''} invalidated."
+                ),
+                "invalidated_games": total,
+                "finished_games": invalidated.finished,
+                "pending_games": invalidated.pending,
+                "active_games": active,
+                "scheduled_games": result.scheduled_games,
+                "participant_count": len(result.tournament.config.participants),
+            }
+        )
 
     @app.post("/api/admin/tournaments/{tournament_id}/games/{game_id}/replay")
     def admin_replay_tournament_game(

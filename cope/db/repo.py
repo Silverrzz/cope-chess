@@ -40,6 +40,17 @@ class TournamentRecord:
     started_at: str | None
     finished_at: str | None
 
+
+@dataclass(frozen=True, slots=True)
+class TournamentParticipantGameRemoval:
+    game_ids: tuple[int, ...]
+    pending: int
+    assigned: int
+    live: int
+    finished: int
+    abandoned: int
+
+
 @dataclass(frozen=True, slots=True)
 class GameRecord:
     id: int
@@ -742,6 +753,19 @@ def get_tournament(
     return _tournament_from_row(row)
 
 
+def lock_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> TournamentRecord | None:
+    row = connection.execute(
+        "SELECT * FROM tournaments WHERE id = ? FOR UPDATE",
+        (tournament_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _tournament_from_row(row)
+
+
 def list_tournaments(connection: sqlite3.Connection) -> tuple[TournamentRecord, ...]:
     return tuple(
         _tournament_from_row(row)
@@ -888,6 +912,45 @@ def update_tournament(
             for seed, engine_id in enumerate(config.participants, start=1)
         ),
     )
+
+
+def set_tournament_participants(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+    participants: list[int],
+    *,
+    gauntlet_hero_engine_id: int | None = None,
+) -> TournamentRecord:
+    config_data = tournament.config.model_dump(mode="json")
+    config_data["participants"] = participants
+    if gauntlet_hero_engine_id is not None:
+        config_data["format_options"] = {
+            **config_data["format_options"],
+            "hero_engine_id": gauntlet_hero_engine_id,
+        }
+    config = TournamentConfig.model_validate(config_data)
+    connection.execute(
+        "UPDATE tournaments SET config = ? WHERE id = ?",
+        (config.model_dump_json(), tournament.id),
+    )
+    connection.execute(
+        "DELETE FROM participants WHERE tournament_id = ?",
+        (tournament.id,),
+    )
+    connection.executemany(
+        """
+        INSERT INTO participants (tournament_id, engine_id, seed)
+        VALUES (?, ?, ?)
+        """,
+        (
+            (tournament.id, engine_id, seed)
+            for seed, engine_id in enumerate(participants, start=1)
+        ),
+    )
+    updated = get_tournament(connection, tournament.id)
+    if updated is None:
+        raise ValueError("tournament does not exist")
+    return updated
 
 
 def delete_tournament(connection: sqlite3.Connection, tournament_id: int) -> None:
@@ -1222,6 +1285,49 @@ def invalidate_game_pair(
     placeholders = ", ".join("?" for _ in game_ids)
     connection.execute(f"DELETE FROM games WHERE id IN ({placeholders})", game_ids)
     return game_ids
+
+
+def invalidate_tournament_participant_games(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    engine_id: int,
+) -> TournamentParticipantGameRemoval:
+    rows = connection.execute(
+        """
+        SELECT id, status FROM games
+        WHERE tournament_id = ?
+          AND (white_engine_id = ? OR black_engine_id = ?)
+        FOR UPDATE
+        """,
+        (tournament_id, engine_id, engine_id),
+    ).fetchall()
+    game_ids = tuple(sorted(int(row["id"]) for row in rows))
+    counts = {
+        "pending": 0,
+        "assigned": 0,
+        "live": 0,
+        "finished": 0,
+        "abandoned": 0,
+    }
+    for row in rows:
+        counts[str(row["status"])] += 1
+    if game_ids:
+        _ensure_games_are_not_committed(connection, game_ids)
+        _delete_system_chat_events(
+            connection,
+            tournament_id,
+            (*tuple(f"game.{item}.finished" for item in game_ids), "tournament.finished"),
+        )
+        placeholders = ", ".join("?" for _ in game_ids)
+        connection.execute(f"DELETE FROM games WHERE id IN ({placeholders})", game_ids)
+    return TournamentParticipantGameRemoval(
+        game_ids=game_ids,
+        pending=counts["pending"],
+        assigned=counts["assigned"],
+        live=counts["live"],
+        finished=counts["finished"],
+        abandoned=counts["abandoned"],
+    )
 
 
 def _ensure_games_are_not_committed(

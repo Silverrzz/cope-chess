@@ -14,15 +14,19 @@ from cope.core.models import (
 from cope.chat import announce_tournament_started
 from cope.db import (
     GameRecord,
+    TournamentParticipantGameRemoval,
     TournamentMatchRecord,
     TournamentRecord,
     create_game,
     create_tournament_match,
     finish_tournament_match,
+    invalidate_tournament_participant_games,
     list_games,
     list_suite_opening_ids,
     list_tournament_matches,
     list_tournaments,
+    lock_tournament,
+    set_tournament_participants,
     set_tournament_status,
 )
 
@@ -39,6 +43,106 @@ class TournamentPreparation:
 class TournamentAdvance:
     created_games: int = 0
     complete: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LiveParticipantAddition:
+    tournament: TournamentRecord
+    scheduled_games: int
+
+
+@dataclass(frozen=True, slots=True)
+class LiveParticipantRemoval:
+    tournament: TournamentRecord
+    invalidated: TournamentParticipantGameRemoval
+    scheduled_games: int
+
+
+def add_running_tournament_participant(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    engine_id: int,
+) -> LiveParticipantAddition:
+    tournament = _lock_live_roster_tournament(connection, tournament_id)
+    if engine_id in tournament.config.participants:
+        raise ValueError("engine is already participating in this tournament")
+    participants = [*tournament.config.participants, engine_id]
+    updated = set_tournament_participants(connection, tournament, participants)
+    if updated.config.format == TournamentFormat.ROUND_ROBIN:
+        scheduled_games = _generate_round_robin_participant_games(
+            connection,
+            updated,
+            engine_id,
+        )
+    else:
+        scheduled_games = _generate_gauntlet_participant_games(
+            connection,
+            updated,
+            engine_id,
+        )
+    return LiveParticipantAddition(
+        tournament=updated,
+        scheduled_games=scheduled_games,
+    )
+
+
+def remove_running_tournament_participant(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    engine_id: int,
+) -> LiveParticipantRemoval:
+    tournament = _lock_live_roster_tournament(connection, tournament_id)
+    if engine_id not in tournament.config.participants:
+        raise ValueError("engine is not participating in this tournament")
+    if len(tournament.config.participants) <= 2:
+        raise ValueError("a running tournament must keep at least two participants")
+    participants = [
+        participant
+        for participant in tournament.config.participants
+        if participant != engine_id
+    ]
+    invalidated = invalidate_tournament_participant_games(
+        connection,
+        tournament.id,
+        engine_id,
+    )
+    hero_engine_id: int | None = None
+    scheduled_games = 0
+    options = tournament.config.format_options
+    if isinstance(options, GauntletFormatOptions) and options.hero_engine_id == engine_id:
+        hero_engine_id = participants[0]
+    updated = set_tournament_participants(
+        connection,
+        tournament,
+        participants,
+        gauntlet_hero_engine_id=hero_engine_id,
+    )
+    if hero_engine_id is not None:
+        scheduled_games = generate_gauntlet_games(connection, updated)
+    return LiveParticipantRemoval(
+        tournament=updated,
+        invalidated=invalidated,
+        scheduled_games=scheduled_games,
+    )
+
+
+def _lock_live_roster_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> TournamentRecord:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    if tournament.status != "running":
+        raise ValueError("participants can only be changed while the tournament is running")
+    if tournament.config.format not in {
+        TournamentFormat.ROUND_ROBIN,
+        TournamentFormat.GAUNTLET,
+    }:
+        raise ValueError(
+            "live participant changes are only available for round-robin and gauntlet tournaments"
+        )
+    return tournament
 
 
 def prepare_scheduled_tournaments(
@@ -161,6 +265,57 @@ def generate_round_robin_games(
     return created_games
 
 
+def _generate_round_robin_participant_games(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+    engine_id: int,
+) -> int:
+    options = tournament.config.format_options
+    if not isinstance(options, RoundRobinFormatOptions):
+        raise ValueError("round robin tournament has invalid format options")
+    round_pairings = _round_robin_pairings(tournament.config.participants)
+    rounds_per_cycle = len(round_pairings)
+    opponent_count = len(tournament.config.participants) - 1
+    opening_ids = _opening_ids(connection, tournament, options.cycles * opponent_count)
+    next_pair_index: dict[int, int] = {}
+    for game in list_games(connection, tournament.id):
+        next_pair_index[game.round] = max(
+            next_pair_index.get(game.round, 1),
+            game.pair_index + 1,
+        )
+    created_games = 0
+    opening_offset = 0
+    for cycle_index in range(options.cycles):
+        for base_round, pairings in enumerate(round_pairings, start=1):
+            pairing = next(
+                (item for item in pairings if engine_id in item),
+                None,
+            )
+            if pairing is None:
+                continue
+            round_number = base_round + cycle_index * rounds_per_cycle
+            pair_index = next_pair_index.get(round_number, 1)
+            next_pair_index[round_number] = pair_index + 1
+            for leg_index in range(2):
+                white_engine_id, black_engine_id = pairing
+                if leg_index == 1:
+                    white_engine_id, black_engine_id = black_engine_id, white_engine_id
+                _create_scheduled_game(
+                    connection,
+                    tournament,
+                    round_number=round_number,
+                    pair_index=pair_index,
+                    white_engine_id=white_engine_id,
+                    black_engine_id=black_engine_id,
+                    game_number=cycle_index * 2 + leg_index + 1,
+                    opening_offset=opening_offset,
+                    opening_ids=opening_ids,
+                )
+                created_games += 1
+            opening_offset += 1
+    return created_games
+
+
 def generate_gauntlet_games(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
@@ -191,6 +346,50 @@ def generate_gauntlet_games(
             )
             created_games += 1
     return created_games
+
+
+def _generate_gauntlet_participant_games(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+    engine_id: int,
+) -> int:
+    options = tournament.config.format_options
+    if not isinstance(options, GauntletFormatOptions):
+        raise ValueError("gauntlet tournament has invalid format options")
+    hero = options.hero_engine_id
+    if engine_id == hero:
+        raise ValueError("the gauntlet hero cannot be added as an opponent")
+    opponents = [
+        participant
+        for participant in tournament.config.participants
+        if participant != hero
+    ]
+    opponent_index = opponents.index(engine_id) + 1
+    opening_ids = _opening_ids(connection, tournament, 1)
+    next_pair_index: dict[int, int] = {}
+    for game in list_games(connection, tournament.id):
+        next_pair_index[game.round] = max(
+            next_pair_index.get(game.round, 1),
+            game.pair_index + 1,
+        )
+    for game_number in range(1, 3):
+        round_number = (game_number - 1) * len(opponents) + opponent_index
+        pair_index = next_pair_index.get(round_number, 1)
+        next_pair_index[round_number] = pair_index + 1
+        hero_is_white = (game_number + opponent_index) % 2 == 0
+        white, black = (hero, engine_id) if hero_is_white else (engine_id, hero)
+        _create_scheduled_game(
+            connection,
+            tournament,
+            round_number=round_number,
+            pair_index=pair_index,
+            white_engine_id=white,
+            black_engine_id=black,
+            game_number=game_number,
+            opening_offset=0,
+            opening_ids=opening_ids,
+        )
+    return 2
 
 
 def generate_swiss_round(
