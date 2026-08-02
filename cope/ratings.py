@@ -30,27 +30,14 @@ class RatingRecalculationResult:
     tournaments_applied: int
     games_applied: int
     engines_updated: int
-    games_without_hardware: int
 
 
-def hardware_adjusted_expected_score(
+def expected_score(
     rating: float,
     opponent_rating: float,
-    hardware_score: float,
-    opponent_hardware_score: float,
 ) -> float:
-    """Combine Elo and measured hardware advantages in odds space.
-
-    At equal Elo this reduces to hardware_score / (hardware_score +
-    opponent_hardware_score). Thus scores of 0.5 and 1.0 imply expected
-    results of one third and two thirds respectively.
-    """
-    if hardware_score <= 0 or opponent_hardware_score <= 0:
-        raise ValueError("hardware scores must be positive")
     rating_difference = max(-4000.0, min(4000.0, rating - opponent_rating))
-    elo_odds = 10.0 ** (rating_difference / ELO_SCALE)
-    adjusted_odds = elo_odds * (hardware_score / opponent_hardware_score)
-    return adjusted_odds / (1.0 + adjusted_odds)
+    return 1.0 / (1.0 + 10.0 ** (-rating_difference / ELO_SCALE))
 
 
 def apply_tournament_rating_commit(
@@ -145,7 +132,7 @@ def recalculate_ratings(
     else:
         selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
     if not selected:
-        return RatingRecalculationResult(0, 0, 0, 0, 0)
+        return RatingRecalculationResult(0, 0, 0, 0)
     if any(rating_list_id <= 0 for rating_list_id in selected):
         raise RatingCommitError("rating list ids must be positive")
 
@@ -187,7 +174,6 @@ def recalculate_ratings(
             ratings[rating_list_id][anchor_engine_id] = DEFAULT_ELO
             games_played[rating_list_id][anchor_engine_id] = 0
     games_applied = 0
-    games_without_hardware = 0
     applied_at = utc_now()
 
     for commit in commits:
@@ -198,7 +184,6 @@ def recalculate_ratings(
             raise RatingCommitError(f"committed tournament {tournament_id} no longer exists")
         games = _committable_games(tournament, list_games(connection, tournament_id))
         _validate_games(tournament, games)
-        hardware = _tournament_hardware_scores(connection, tournament_id)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at
         category_ratings = ratings[rating_list_id]
         category_games = games_played[rating_list_id]
@@ -210,18 +195,11 @@ def recalculate_ratings(
             black_before = category_ratings.setdefault(black_id, DEFAULT_ELO)
             category_games.setdefault(white_id, 0)
             category_games.setdefault(black_id, 0)
-            white_hardware = hardware.get((game.id, white_id), 1.0)
-            black_hardware = hardware.get((game.id, black_id), 1.0)
-            if (game.id, white_id) not in hardware or (game.id, black_id) not in hardware:
-                games_without_hardware += 1
-
             white_score = _white_score(game.result)
             black_score = 1.0 - white_score
-            white_expected = hardware_adjusted_expected_score(
+            white_expected = expected_score(
                 white_before,
                 black_before,
-                white_hardware,
-                black_hardware,
             )
             white_change = ELO_K_FACTOR * (white_score - white_expected)
             white_after = round(white_before + white_change, 6)
@@ -238,8 +216,6 @@ def recalculate_ratings(
                 elo=white_after,
                 score=white_score,
                 expected_score=white_expected,
-                hardware_score=white_hardware,
-                opponent_hardware_score=black_hardware,
                 at=history_at,
             )
             _record_history(
@@ -253,8 +229,6 @@ def recalculate_ratings(
                 elo=black_after,
                 score=black_score,
                 expected_score=1.0 - white_expected,
-                hardware_score=black_hardware,
-                opponent_hardware_score=white_hardware,
                 at=history_at,
             )
             category_ratings[white_id] = white_after
@@ -296,7 +270,6 @@ def recalculate_ratings(
         tournaments_applied=len(commits),
         games_applied=games_applied,
         engines_updated=engines_updated,
-        games_without_hardware=games_without_hardware,
     )
 
 
@@ -346,25 +319,6 @@ def _validate_games(tournament, games: tuple) -> None:
             raise RatingCommitError(f"game {game.id} contains a non-participant engine")
 
 
-def _tournament_hardware_scores(
-    connection: sqlite3.Connection,
-    tournament_id: int,
-) -> dict[tuple[int, int], float]:
-    rows = connection.execute(
-        """
-        SELECT score.game_id, score.engine_version_id, score.hardware_score
-        FROM game_hardware_scores score
-        JOIN games game ON game.id = score.game_id
-        WHERE game.tournament_id = ?
-        """,
-        (tournament_id,),
-    )
-    return {
-        (int(row["game_id"]), int(row["engine_version_id"])): float(row["hardware_score"])
-        for row in rows
-    }
-
-
 def _record_history(
     connection: sqlite3.Connection,
     *,
@@ -377,8 +331,6 @@ def _record_history(
     elo: float,
     score: float,
     expected_score: float,
-    hardware_score: float,
-    opponent_hardware_score: float,
     at: str,
 ) -> None:
     connection.execute(
@@ -400,8 +352,8 @@ def _record_history(
             round(elo - elo_before, 6),
             score,
             expected_score,
-            hardware_score,
-            opponent_hardware_score,
+            1.0,
+            1.0,
             game_id,
             at,
         ),

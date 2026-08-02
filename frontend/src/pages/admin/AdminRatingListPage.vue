@@ -39,7 +39,7 @@ onMounted(load)
 <template><div class="admin-page page-stack">
   <div v-if="loading" class="panel loading">Loading rating list…</div>
   <template v-else-if="data">
-    <AdminPageHeader :title="data.rating_list.name" description="Hardware-adjusted Elo for individual engine versions."><template #actions><RouterLink class="button button--ghost" to="/admin/ratings">All lists</RouterLink><RouterLink class="button button--secondary" :to="`/ratings?rating_list_id=${id}`">Public list</RouterLink><button class="button button--danger" :disabled="!!pending" @click="remove">Delete</button></template></AdminPageHeader>
+    <AdminPageHeader :title="data.rating_list.name" description="Result-based Elo for individual engine versions."><template #actions><RouterLink class="button button--ghost" to="/admin/ratings">All lists</RouterLink><RouterLink class="button button--secondary" :to="`/ratings?rating_list_id=${id}`">Public list</RouterLink><button class="button button--danger" :disabled="!!pending" @click="remove">Delete</button></template></AdminPageHeader>
     <InlineFeedback :message="error" />
     <form class="panel anchor-panel" @submit.prevent="calculate">
       <div class="anchor-heading"><h2>Elo anchor</h2><p>Choose the engine version that defines the rating scale. Its calculated rating will be fixed to the Elo entered here.</p></div>
