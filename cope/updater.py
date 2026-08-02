@@ -788,6 +788,8 @@ def _schedule_updater_restart(
             "--rm",
             "--name",
             helper_name,
+            "--user",
+            "0:0",
             "--entrypoint",
             "/bin/sh",
             "--volume",

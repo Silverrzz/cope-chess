@@ -82,6 +82,9 @@ const updaterOnline = computed(() => {
   const timestamp = Date.parse(lastSeen);
   return Number.isFinite(timestamp) && Date.now() - timestamp < 30_000;
 });
+const updaterOutdated = computed(() => Boolean(
+  data.value?.updater && data.value.updater.app_version !== data.value.current_version,
+));
 
 function shortVersion(value: string | null): string {
   if (!value) return "-";
@@ -205,7 +208,7 @@ onBeforeUnmount(() => {
       <section class="panel update-panel">
         <div class="version-grid">
           <div><span>Running release</span><code>{{ shortVersion(data.current_version) }}</code></div>
-          <div><span>Updater</span><StatusBadge :status="updaterOnline ? 'connected' : 'offline'" /></div>
+          <div><span>Updater</span><StatusBadge :status="!updaterOnline ? 'offline' : updaterOutdated ? 'outdated' : 'connected'" /></div>
           <div><span>Last heartbeat</span><strong>{{ data.updater ? formatDate(data.updater.last_seen) : "Unavailable" }}</strong></div>
         </div>
         <form class="update-form" @submit.prevent="deploy">
@@ -222,7 +225,7 @@ onBeforeUnmount(() => {
               type="button"
               variant="secondary"
               :loading="pullingDockerfiles"
-              :disabled="updateBusy"
+              :disabled="updateBusy || updaterOutdated"
               @click="pullDockerfiles"
             >
               Pull Dockerfiles
@@ -240,11 +243,14 @@ onBeforeUnmount(() => {
         <p v-if="activeJob" class="active-note">
           Deployment #{{ activeJob.id }} is {{ humanize(activeJob.status).toLowerCase() }}. The control panel may reconnect while the web service restarts.
         </p>
+        <p v-else-if="updaterOutdated" class="active-note">
+          The updater is running an older release and must be restarted before it can pull Dockerfiles.
+        </p>
         <p v-else-if="!updaterOnline" class="active-note">
           The updater is offline. You can queue an update now and it will start when the updater reconnects.
         </p>
         <div v-if="data.dockerfile_pull" class="dockerfile-pull-status">
-          <span>
+          <span class="dockerfile-pull-status__copy">
             <strong>Dockerfile pull #{{ data.dockerfile_pull.id }}</strong>
             <small>
               {{ data.dockerfile_pull.requested_ref }}
@@ -306,9 +312,9 @@ onBeforeUnmount(() => {
 .update-actions { display: flex; gap: .5rem; }
 .active-note { color: var(--color-text-muted); font-size: .75rem; margin: 0; }
 .dockerfile-pull-status { align-items: center; border-top: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding-top: .8rem; }
-.dockerfile-pull-status > span { display: grid; gap: .15rem; }
-.dockerfile-pull-status strong { font-size: .78rem; }
-.dockerfile-pull-status small { color: var(--color-text-muted); font-size: .68rem; }
+.dockerfile-pull-status__copy { display: grid; gap: .15rem; min-width: 0; }
+.dockerfile-pull-status__copy strong { font-size: .78rem; }
+.dockerfile-pull-status__copy small { color: var(--color-text-muted); font-size: .68rem; }
 .deployment-list { display: grid; gap: .9rem; }
 .deployment-card { overflow: hidden; padding: 0; }
 .deployment-card > header { align-items: flex-start; border-bottom: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding: .9rem 1rem; }

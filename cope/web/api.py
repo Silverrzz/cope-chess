@@ -939,6 +939,15 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        updater = next(
+            (item for item in list_service_heartbeats(connection) if item["service"] == "updater"),
+            None,
+        )
+        if updater is not None and updater["app_version"] != app_version():
+            raise HTTPException(
+                status_code=409,
+                detail="The updater is running an older release and must be restarted first.",
+            )
         try:
             job_id = create_dockerfile_pull_job(
                 connection,
