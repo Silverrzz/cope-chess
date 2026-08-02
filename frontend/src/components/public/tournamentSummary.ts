@@ -7,6 +7,29 @@ interface MarkdownColumn<T> {
   value: (row: T, index: number) => string
 }
 
+export interface TournamentDetailsMarkdownInput {
+  tournament: {
+    id: number | string
+    name: string
+    status: string
+    current_round?: number
+    created_at?: string
+    started_at?: string | null
+    finished_at?: string | null
+  }
+  settings: Array<[string, string]>
+  engines: string[]
+  gameSummary: {
+    total: number
+    pending?: number
+    assigned?: number
+    live?: number
+    finished?: number
+    abandoned?: number
+  }
+  publicUrl?: string
+}
+
 function tableCell(value: string | number): string {
   return String(value).replaceAll('|', '¦').replaceAll('\n', ' ')
 }
@@ -58,6 +81,63 @@ function setting(data: TournamentDetailResponse, label: string): string {
   })
   if (!row) return ''
   return String(Array.isArray(row) ? row[1] : row.value)
+}
+
+export function buildTournamentDetailsMarkdown(data: TournamentDetailsMarkdownInput): string {
+  const tournament = data.tournament
+  const summary = data.gameSummary
+  const gameBreakdown = [
+    ['finished', summary.finished],
+    ['live', summary.live],
+    ['assigned', summary.assigned],
+    ['pending', summary.pending],
+    ['abandoned', summary.abandoned],
+  ].filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
+    .map(([label, count]) => `${count} ${label}`)
+    .join(', ')
+  const lines = [
+    `# ${tournament.name}`,
+    '',
+    `- **Status:** ${statusLabel(tournament.status)}`,
+    `- **Games:** ${summary.total}${gameBreakdown ? ` (${gameBreakdown})` : ''}`,
+  ]
+  if (tournament.current_round) lines.push(`- **Current round:** ${tournament.current_round}`)
+  if (tournament.created_at) lines.push(`- **Created:** ${tournament.created_at.slice(0, 10)}`)
+  if (tournament.started_at) lines.push(`- **Started:** ${tournament.started_at.slice(0, 10)}`)
+  if (tournament.finished_at) lines.push(`- **Finished:** ${tournament.finished_at.slice(0, 10)}`)
+
+  if (data.settings.length) {
+    lines.push(
+      '',
+      '## Details',
+      '',
+      ...markdownTable(
+        [
+          { heading: 'Setting', value: (row) => row[0] },
+          { heading: 'Value', value: (row) => row[1] },
+        ],
+        data.settings,
+      ),
+    )
+  }
+
+  if (data.engines.length) {
+    lines.push(
+      '',
+      '## Engines',
+      '',
+      ...markdownTable(
+        [
+          { heading: '#', align: 'right', value: (_engine, index) => String(index + 1) },
+          { heading: 'Engine', value: (engine) => engine },
+        ],
+        data.engines,
+      ),
+    )
+  }
+
+  if (data.publicUrl) lines.push('', `[View tournament](${data.publicUrl})`)
+  return lines.join('\n')
 }
 
 export function buildTournamentSummaryMarkdown(data: TournamentDetailResponse, origin: string): string {

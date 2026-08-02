@@ -10,6 +10,8 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import TournamentConfigForm from '@/components/admin/TournamentConfigForm.vue'
 import { errorText, formatDate, formatTimeControl, humanize } from '@/components/admin/format'
+import { buildTournamentDetailsMarkdown } from '@/components/public/tournamentSummary'
+import AppIcon from '@/components/ui/AppIcon.vue'
 import type { Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/components/admin/types'
 
 interface Commit { rating_list_id: number; status: string; requested_at: string; applied_at?: string | null; error?: string | null }
@@ -37,6 +39,8 @@ const data = ref<Response | null>(null)
 const loading = ref(true)
 const error = ref('')
 const pending = ref('')
+const copyingDetails = ref(false)
+const detailsCopied = ref(false)
 const concurrency = ref(1)
 const showCommit = ref(false)
 const selectedLists = ref<number[]>([])
@@ -154,6 +158,44 @@ async function remove(): Promise<void> {
   finally { pending.value = '' }
 }
 
+async function copyDetails(): Promise<void> {
+  if (!data.value) return
+  copyingDetails.value = true
+  try {
+    const tournament = data.value.tournament
+    const details = buildTournamentDetailsMarkdown({
+      tournament,
+      settings: settingsRows.value,
+      engines: tournament.config.participants.map(engineName),
+      gameSummary: data.value.game_summary,
+      ...(tournament.status === 'draft' ? {} : {
+        publicUrl: `${window.location.origin}/tournaments/${encodeURIComponent(String(tournament.id))}`,
+      }),
+    })
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(details)
+    else fallbackCopy(details)
+    detailsCopied.value = true
+    window.setTimeout(() => { detailsCopied.value = false }, 2000)
+    toast.success('Tournament details copied as Markdown.')
+  } catch (cause) {
+    toast.error(cause)
+  } finally {
+    copyingDetails.value = false
+  }
+}
+
+function fallbackCopy(value: string): void {
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.append(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied) throw new Error('Copy failed')
+}
+
 async function replayGame(game: Game): Promise<void> {
   const accepted = await confirm({ title: 'Replay game?', message: `Delete the completed result for ${engineName(game.white_engine_id)} vs ${engineName(game.black_engine_id)} and return this game to pending?`, confirmLabel: 'Replay game', tone: 'danger' })
   if (!accepted) return
@@ -193,6 +235,7 @@ onMounted(load)
       <section class="panel control-bar">
         <div class="control-bar__status"><span>Current state</span><StatusBadge :status="data.tournament.status" /></div>
         <div class="control-bar__actions">
+          <button class="button button--secondary" type="button" :disabled="copyingDetails" @click="copyDetails"><AppIcon name="copy" :size="16" />{{ copyingDetails ? 'Copying…' : detailsCopied ? 'Copied' : 'Copy Details' }}</button>
           <button v-for="(_, action) in data.actions" :key="action" class="button" :class="action === 'abort' ? 'button--danger' : 'button--primary'" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? 'Working…' : humanize(String(action)) }}</button>
           <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit">Commit ratings</button>
           <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
@@ -267,6 +310,7 @@ onMounted(load)
 .control-bar__status { align-items: center; display: flex; gap: .65rem; }
 .control-bar__status > span { color: var(--color-text-muted, #64748b); font-size: .72rem; font-weight: 650; }
 .control-bar__actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }
+.control-bar__actions .button { align-items: center; display: inline-flex; gap: .4rem; }
 .concurrency-panel { align-items: end; display: flex; gap: 1.5rem; justify-content: space-between; padding: 1rem; }
 .concurrency-panel h2 { font-size: .92rem; margin: 0; }
 .concurrency-panel p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
