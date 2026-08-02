@@ -22,12 +22,46 @@ from cope.engine_dockerfiles import (
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
 SCHEMA_VERSION = 25
+DEFAULT_DATABASE_LOCK_TIMEOUT_MS = 5_000
+DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS = 120_000
+DEFAULT_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS = 30_000
 
 _PLACEHOLDER = re.compile(r"\?")
 _pools: dict[tuple[str, str | None], ConnectionPool] = {}
 _pools_lock = threading.Lock()
 _password_unset = object()
 _password_cache: str | None | object = _password_unset
+
+
+def _database_timeout_ms(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _database_options() -> str:
+    lock_timeout_ms = _database_timeout_ms(
+        "COPE_DATABASE_LOCK_TIMEOUT_MS",
+        DEFAULT_DATABASE_LOCK_TIMEOUT_MS,
+    )
+    statement_timeout_ms = _database_timeout_ms(
+        "COPE_DATABASE_STATEMENT_TIMEOUT_MS",
+        DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+    )
+    idle_transaction_timeout_ms = _database_timeout_ms(
+        "COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS",
+        DEFAULT_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS,
+    )
+    return (
+        f"-c lock_timeout={lock_timeout_ms} "
+        f"-c statement_timeout={statement_timeout_ms} "
+        f"-c idle_in_transaction_session_timeout={idle_transaction_timeout_ms}"
+    )
 
 
 def default_database_url() -> str:
@@ -69,7 +103,8 @@ def _pool(database_url: str) -> ConnectionPool:
             kwargs: dict[str, Any] = {
                 "row_factory": dict_row,
                 "connect_timeout": 10,
-                "application_name": "cope-chess",
+                "application_name": os.environ.get("COPE_SERVICE_NAME", "cope-chess"),
+                "options": _database_options(),
             }
             if password is not None:
                 kwargs["password"] = password

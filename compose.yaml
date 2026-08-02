@@ -8,6 +8,9 @@ x-cope-service: &cope-service
     COPE_DATABASE_PASSWORD_FILE: /run/secrets/cope_db_password
     COPE_DATABASE_POOL_MIN: "2"
     COPE_DATABASE_POOL_MAX: "50"
+    COPE_DATABASE_LOCK_TIMEOUT_MS: ${COPE_DATABASE_LOCK_TIMEOUT_MS:-5000}
+    COPE_DATABASE_STATEMENT_TIMEOUT_MS: ${COPE_DATABASE_STATEMENT_TIMEOUT_MS:-120000}
+    COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: ${COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS:-30000}
     COPE_ADMIN_TOKEN_FILE: /run/secrets/cope_admin_token
     COPE_WEB_EVENT_TOKEN_FILE: /run/secrets/cope_event_token
     COPE_WEB_STREAM_URL: ws://web:8701/internal/stream
@@ -53,6 +56,10 @@ services:
       - checkpoint_completion_target=0.9
       - -c
       - max_wal_size=${COPE_POSTGRES_MAX_WAL_SIZE:-4GB}
+      - -c
+      - idle_in_transaction_session_timeout=${COPE_POSTGRES_IDLE_TRANSACTION_TIMEOUT_MS:-60000}
+      - -c
+      - log_lock_waits=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cope -d cope"]
       interval: 5s
@@ -68,6 +75,9 @@ services:
   migrate:
     <<: *cope-service
     restart: "no"
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: migrate
     command: ["db", "migrate"]
     depends_on:
       db:
@@ -75,6 +85,9 @@ services:
 
   web:
     <<: *cope-service
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: web
     command: ["web", "--host", "0.0.0.0", "--port", "8701"]
     depends_on:
       migrate:
@@ -87,6 +100,9 @@ services:
 
   scheduler:
     <<: *cope-service
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: scheduler
     command: ["scheduler"]
     depends_on:
       migrate:
@@ -99,6 +115,7 @@ services:
     environment:
       <<: *cope-environment
       COPE_DATABASE_POOL_MAX: "150"
+      COPE_SERVICE_NAME: worker-server
     command:
       - worker-server
       - --worker-host
@@ -126,6 +143,7 @@ services:
       - /workspace
     environment:
       <<: *cope-environment
+      COPE_SERVICE_NAME: updater
       COPE_UPDATE_REPOSITORY_URL: ${COPE_UPDATE_REPOSITORY_URL:-}
       COPE_UPDATE_REF: ${COPE_UPDATE_REF:-main}
       COPE_UPDATE_WORKER_WAIT_S: ${COPE_UPDATE_WORKER_WAIT_S:-1800}
@@ -144,6 +162,9 @@ services:
 
   benchmark-server:
     <<: *cope-service
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: benchmark-server
     command:
       - benchmark-server
       - --host
@@ -184,6 +205,9 @@ services:
     <<: *cope-service
     profiles: ["operations"]
     restart: "no"
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: backup
     working_dir: /backups
     command: ["db", "backup", "--keep", "7"]
     volumes:
