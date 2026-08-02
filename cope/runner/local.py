@@ -54,6 +54,7 @@ from cope.db import (
     list_moves,
     list_tournaments,
     list_worker_tournament_ids,
+    lock_tournament,
     mark_game_assignment_live,
     mark_game_live,
     record_move,
@@ -1066,9 +1067,21 @@ def _paired_game_queue(games: tuple[GameRecord, ...]) -> tuple[GameRecord, ...]:
             game.tiebreak_kind,
         )
         groups.setdefault(key, []).append(game)
+    paired_groups = sorted(
+        groups.values(),
+        key=lambda paired_games: min(
+            (
+                (game.game_number - 1) // 2,
+                game.round,
+                game.pair_index,
+                game.id,
+            )
+            for game in paired_games
+        ),
+    )
     return tuple(
         game
-        for paired_games in groups.values()
+        for paired_games in paired_groups
         for game in sorted(paired_games, key=lambda item: (item.game_number, item.id))
     )
 
@@ -1077,7 +1090,7 @@ def _finish_tournament_if_complete(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> bool:
-    current = get_tournament(connection, tournament.id)
+    current = lock_tournament(connection, tournament.id)
     if current is None or current.status != "running":
         return False
 

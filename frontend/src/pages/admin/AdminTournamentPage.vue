@@ -7,6 +7,7 @@ import { useToast } from '@/composables/useToast'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import LiveParticipantManager from '@/components/admin/LiveParticipantManager.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import TournamentConfigForm from '@/components/admin/TournamentConfigForm.vue'
 import { errorText, formatDate, formatTimeControl, humanize } from '@/components/admin/format'
@@ -18,6 +19,8 @@ interface Commit { rating_list_id: number; status: string; requested_at: string;
 interface RatingList { id: number; name: string }
 interface GamePagination { page: number; page_size: number; total: number; pages: number }
 interface GameSummary { total: number; pairs: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
+interface LiveParticipantSummary { engine_id: number; total: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
+interface LiveTournamentRoster { editable: boolean; reason: string; available_engines: Engine[]; participants: LiveParticipantSummary[]; hero_engine_id: number | null }
 interface Response {
   tournament: Tournament
   games: Game[]
@@ -28,6 +31,7 @@ interface Response {
   actions: Record<string, string>
   game_pagination: GamePagination
   game_summary: GameSummary
+  roster: LiveTournamentRoster
   form?: FormSeed
 }
 
@@ -59,6 +63,15 @@ const settingsRows = computed(() => {
     ? data.value.settings.map((row) => Array.isArray(row) ? row : [row.label, row.value] as [string, string])
     : Object.entries(data.value.settings)
 })
+const engineLabels = computed<Record<number, string>>(() => {
+  if (!data.value) return {}
+  const labels: Record<number, string> = {}
+  for (const engineId of data.value.tournament.config.participants) labels[engineId] = engineName(engineId)
+  for (const engine of data.value.roster.available_engines) {
+    labels[engine.id] = [engine.name, engine.version].filter(Boolean).join(' ')
+  }
+  return labels
+})
 
 function engineName(engineId: number): string {
   const engines = data.value?.engines
@@ -71,10 +84,17 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    data.value = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
+    let response = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
       query: { page: gamePage.value },
     })
-    concurrency.value = data.value.tournament.config.concurrency
+    if (gamePage.value > response.game_pagination.pages) {
+      gamePage.value = response.game_pagination.pages
+      response = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
+        query: { page: gamePage.value },
+      })
+    }
+    data.value = response
+    concurrency.value = response.tournament.config.concurrency
   }
   catch (cause) { error.value = errorText(cause) }
   finally { loading.value = false }
@@ -126,6 +146,46 @@ async function saveConcurrency(): Promise<void> {
         config: { ...tournament.config, concurrency: concurrency.value },
       },
     })
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function addParticipant(engineId: number): Promise<void> {
+  pending.value = 'participant-add'
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/participants`, {
+      body: { engine_id: engineId },
+    })
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function removeParticipant(participant: LiveParticipantSummary): Promise<void> {
+  if (!data.value) return
+  const engineId = participant.engine_id
+  const label = engineName(engineId)
+  const active = participant.assigned + participant.live
+  const queued = participant.pending
+  const finished = participant.finished
+  const isHero = data.value.roster.hero_engine_id === engineId
+  const replacementId = data.value.tournament.config.participants.find((item) => item !== engineId)
+  const heroImpact = isHero && replacementId
+    ? ` ${engineName(replacementId)} will become the gauntlet hero and receive a new schedule against every remaining opponent.`
+    : ''
+  const accepted = await confirm({
+    title: `Remove ${label}?`,
+    message: `Remove this engine from the live field? ${finished} completed result${finished === 1 ? '' : 's'} will be invalidated, ${queued} queued game${queued === 1 ? '' : 's'} canceled, and ${active} active game${active === 1 ? '' : 's'} stopped.${heroImpact}`,
+    confirmLabel: 'Remove participant',
+    tone: 'danger',
+  })
+  if (!accepted) return
+  pending.value = `participant-remove-${engineId}`
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/tournaments/${id.value}/participants/${engineId}`)
     toast.success(response.message)
     await load()
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
@@ -253,6 +313,16 @@ onMounted(load)
           <button class="button button--primary" type="submit" :disabled="!!pending || concurrency === data.tournament.config.concurrency">{{ pending === 'concurrency' ? 'Saving…' : 'Update concurrency' }}</button>
         </form>
       </section>
+
+      <LiveParticipantManager
+        v-if="data.tournament.status === 'running'"
+        :roster="data.roster"
+        :config="data.tournament.config"
+        :engine-labels="engineLabels"
+        :pending="pending"
+        @add="addParticipant"
+        @remove="removeParticipant"
+      />
 
       <section v-if="showCommit" class="panel commit-picker">
         <div><h2>Commit results to rating lists</h2><p>Select one or more independent lists.</p></div>

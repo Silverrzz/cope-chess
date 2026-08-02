@@ -2584,6 +2584,95 @@ def _ensure_tournament_games_mutable(
         )
 
 
+def _validate_live_participant_engine(
+    connection: sqlite3.Connection,
+    engine_id: int,
+) -> None:
+    record = get_engine_record(connection, engine_id)
+    if record is None:
+        raise HTTPException(status_code=422, detail="Choose an existing engine version.")
+    if (
+        not record.active
+        or not record.engine_active
+        or not record.benchmark_current
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Choose an active engine version with a current benchmark.",
+        )
+
+
+def _live_tournament_roster_payload(
+    connection: sqlite3.Connection,
+    tournament,
+) -> dict[str, Any]:
+    supported = tournament.config.format.value in {"round_robin", "gauntlet"}
+    editable = tournament.status == "running" and supported
+    if tournament.status != "running":
+        reason = "Live roster changes are available while the tournament is running."
+    elif not supported:
+        reason = "Swiss pairings and knockout brackets are fixed after the tournament starts."
+    else:
+        reason = ""
+    participant_ids = set(tournament.config.participants)
+    available_engines = (
+        [
+            engine
+            for engine in list_engine_records(connection)
+            if engine.id not in participant_ids
+            and engine.active
+            and engine.engine_active
+            and engine.benchmark_current
+        ]
+        if editable
+        else []
+    )
+    summaries = {
+        engine_id: {
+            "engine_id": engine_id,
+            "total": 0,
+            "pending": 0,
+            "assigned": 0,
+            "live": 0,
+            "finished": 0,
+            "abandoned": 0,
+        }
+        for engine_id in tournament.config.participants
+    }
+    rows = connection.execute(
+        """
+        SELECT engine_id, status, COUNT(*) AS count
+        FROM (
+          SELECT white_engine_id AS engine_id, status
+          FROM games WHERE tournament_id = ?
+          UNION ALL
+          SELECT black_engine_id AS engine_id, status
+          FROM games WHERE tournament_id = ?
+        ) participant_games
+        GROUP BY engine_id, status
+        """,
+        (tournament.id, tournament.id),
+    )
+    for row in rows:
+        engine_id = int(row["engine_id"])
+        if engine_id not in summaries:
+            continue
+        count = int(row["count"])
+        summaries[engine_id][str(row["status"])] = count
+        summaries[engine_id]["total"] += count
+    format_options = tournament.config.format_options.model_dump(mode="json")
+    return {
+        "editable": editable,
+        "reason": reason,
+        "available_engines": available_engines,
+        "participants": [
+            summaries[engine_id]
+            for engine_id in tournament.config.participants
+        ],
+        "hero_engine_id": format_options.get("hero_engine_id"),
+    }
+
+
 def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "format": "round_robin",

@@ -110,6 +110,10 @@ class AssignmentPreparationFailed(RuntimeError):
         )
 
 
+class AssignmentWithdrawn(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class EnginePreparationBackoff:
     failures: int
@@ -389,6 +393,7 @@ class WorkerHandshakeServer:
         retired_assignments: dict[tuple[int, str], tuple[int, float]] = {}
         assignments: dict[int, asyncio.Task] = {}
         assignment_resources: dict[int, WorkerResources] = {}
+        assignment_cancellations: dict[int, asyncio.Event] = {}
         send_lock = asyncio.Lock()
         receiver = asyncio.create_task(
             self._route_worker_messages(
@@ -430,6 +435,7 @@ class WorkerHandshakeServer:
                         assignment.assignment.assignment_key,
                         assignment.assignment.game_id,
                     )
+                    cancellation = asyncio.Event()
                     task = asyncio.create_task(
                         self._serve_worker_assignment(
                             websocket,
@@ -437,11 +443,13 @@ class WorkerHandshakeServer:
                             assignment,
                             inbox=inbox,
                             send_lock=send_lock,
+                            cancellation=cancellation,
                         ),
                         name=f"server-assignment-{assignment_id}",
                     )
                     assignments[assignment_id] = task
                     assignment_resources[assignment_id] = assignment.required_resources
+                    assignment_cancellations[assignment_id] = cancellation
                     if worker_status != "busy":
                         if not self._record_worker_status(
                             worker.id,
@@ -490,6 +498,21 @@ class WorkerHandshakeServer:
                     return
                 if work in done:
                     wake_generation = work.result()
+                    try:
+                        inactive_assignment_ids = await asyncio.to_thread(
+                            self._inactive_assignment_ids,
+                            assignment_identities,
+                        )
+                    except Exception:
+                        inactive_assignment_ids = ()
+                        LOG.exception(
+                            "active assignment reconciliation failed worker_id=%s",
+                            worker.id,
+                        )
+                    for assignment_id in inactive_assignment_ids:
+                        cancellation = assignment_cancellations.get(assignment_id)
+                        if cancellation is not None:
+                            cancellation.set()
                 else:
                     work.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -503,6 +526,7 @@ class WorkerHandshakeServer:
                 for assignment_id in completed:
                     task = assignments.pop(assignment_id)
                     assignment_resources.pop(assignment_id, None)
+                    assignment_cancellations.pop(assignment_id, None)
                     inboxes.pop(assignment_id, None)
                     identity = assignment_identities.pop(assignment_id, None)
                     if identity is not None:
@@ -608,6 +632,7 @@ class WorkerHandshakeServer:
         *,
         inbox: asyncio.Queue,
         send_lock: asyncio.Lock,
+        cancellation: asyncio.Event,
     ) -> None:
         payload = assignment.assignment
         LOG.info(
@@ -634,6 +659,7 @@ class WorkerHandshakeServer:
             ),
         )
         game_completed = False
+        withdrawn = False
         try:
             for step in assignment.workflow:
                 self._record_assignment_progress(
@@ -656,7 +682,11 @@ class WorkerHandshakeServer:
                 assignment,
                 lock=send_lock,
             )
-            ready = await self._receive_assignment_ready(inbox, assignment)
+            ready = await self._receive_assignment_ready_or_withdrawn(
+                inbox,
+                assignment,
+                cancellation,
+            )
             self._clear_engine_preparation_backoff(
                 worker,
                 ready.prepared_engine_ids,
@@ -678,10 +708,10 @@ class WorkerHandshakeServer:
                     "benchmark_hardware_key": assignment.benchmark_reference.hardware_key,
                 },
             )
-            await asyncio.to_thread(
-                self._run_assignment_game,
+            await self._run_assignment_game_or_withdrawn(
                 assignment,
                 transport,
+                cancellation,
                 lambda stage, substage, status, detail, current=None, total=None, metadata=None:
                     self._record_assignment_progress(
                         assignment,
@@ -695,6 +725,14 @@ class WorkerHandshakeServer:
                     ),
             )
             game_completed = True
+        except AssignmentWithdrawn:
+            withdrawn = True
+            LOG.info(
+                "assignment withdrawn worker_id=%s assignment_id=%s game_id=%s",
+                worker.id,
+                payload.assignment_id,
+                payload.game_id,
+            )
         except AssignmentPreparationFailed as error:
             self._fail_preparation_assignment(worker, assignment, error.failure)
             LOG.error(
@@ -742,7 +780,7 @@ class WorkerHandshakeServer:
             if websocket.closed:
                 raise
         finally:
-            transport.close()
+            await transport.withdraw()
 
         if not websocket.closed:
             await _send_message(
@@ -751,7 +789,11 @@ class WorkerHandshakeServer:
                 AssignmentComplete(**payload.message_fields()),
                 lock=send_lock,
             )
-            await self._receive_assignment_cleanup(inbox, assignment)
+            await self._receive_assignment_cleanup(
+                inbox,
+                assignment,
+                record_progress=not withdrawn,
+            )
             if game_completed:
                 self._finish_assignment(assignment)
             LOG.info(
@@ -760,6 +802,93 @@ class WorkerHandshakeServer:
                 payload.assignment_id,
                 payload.game_id,
             )
+
+    async def _receive_assignment_ready_or_withdrawn(
+        self,
+        inbox: asyncio.Queue,
+        assignment,
+        cancellation: asyncio.Event,
+    ) -> AssignmentReady:
+        ready_task = asyncio.create_task(
+            self._receive_assignment_ready(inbox, assignment)
+        )
+        cancellation_task = asyncio.create_task(cancellation.wait())
+        done, _pending = await asyncio.wait(
+            {ready_task, cancellation_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancellation_task not in done:
+            cancellation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancellation_task
+            return ready_task.result()
+        ready_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ready_task
+        raise AssignmentWithdrawn("assignment was removed")
+
+    async def _run_assignment_game_or_withdrawn(
+        self,
+        assignment,
+        transport,
+        cancellation: asyncio.Event,
+        progress_handler,
+    ) -> None:
+        game_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._run_assignment_game,
+                assignment,
+                transport,
+                progress_handler,
+            )
+        )
+        cancellation_task = asyncio.create_task(cancellation.wait())
+        done, _pending = await asyncio.wait(
+            {game_task, cancellation_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if game_task in done:
+            cancellation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancellation_task
+            game_task.result()
+            return
+        await transport.withdraw()
+        game_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await game_task
+        raise AssignmentWithdrawn("assignment was removed")
+
+    def _inactive_assignment_ids(
+        self,
+        assignment_identities: dict[int, tuple[str, int]],
+    ) -> tuple[int, ...]:
+        assignment_ids = tuple(assignment_identities)
+        if not assignment_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in assignment_ids)
+        connection = connect_database(self._config.db_path)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT id, assignment_key, game_id
+                FROM game_assignments
+                WHERE id IN ({placeholders})
+                  AND status IN ('assigned', 'acked', 'live')
+                """,
+                assignment_ids,
+            )
+            active = {
+                int(row["id"]): (str(row["assignment_key"]), int(row["game_id"]))
+                for row in rows
+            }
+        finally:
+            connection.close()
+        return tuple(
+            assignment_id
+            for assignment_id, identity in assignment_identities.items()
+            if active.get(assignment_id) != identity
+        )
 
     def _finish_assignment(self, assignment) -> None:
         payload = assignment.assignment
@@ -1217,12 +1346,15 @@ class WorkerHandshakeServer:
         self,
         inbox: asyncio.Queue,
         assignment,
+        *,
+        record_progress: bool = True,
     ) -> None:
         while True:
             envelope = await inbox.get()
             if envelope.type == "assignment_progress":
                 progress = AssignmentProgress.model_validate(envelope.data)
-                self._record_worker_progress(assignment, progress)
+                if record_progress:
+                    self._record_worker_progress(assignment, progress)
                 continue
             if envelope.type != "assignment_cleanup_complete":
                 raise ProtocolValidationError(
@@ -1477,6 +1609,7 @@ class WorkerEngineTransport:
         self._progress_handler = progress_handler
         self._failure_reported = False
         self._clock_samples: dict[int, tuple[int, bool]] = {}
+        self._active_searches: set[int] = set()
         self._clock_lock = threading.Lock()
 
     def close(self) -> None:
@@ -1485,6 +1618,18 @@ class WorkerEngineTransport:
             pending = tuple(self._pending)
         for future in pending:
             future.cancel()
+
+    async def withdraw(self) -> None:
+        if self._closed.is_set():
+            return
+        with self._clock_lock:
+            active_searches = tuple(self._active_searches)
+        try:
+            for engine_id in active_searches:
+                with contextlib.suppress(Exception):
+                    await self._send_engine_stop(engine_id)
+        finally:
+            self.close()
 
     def execute_engine_command(
         self,
@@ -1516,8 +1661,11 @@ class WorkerEngineTransport:
     def begin_engine_search(self, engine_id: int) -> None:
         with self._clock_lock:
             self._clock_samples.pop(engine_id, None)
+            self._active_searches.add(engine_id)
 
     def stop_engine_search(self, engine_id: int) -> None:
+        with self._clock_lock:
+            self._active_searches.discard(engine_id)
         if self._closed.is_set():
             return
         future = asyncio.run_coroutine_threadsafe(
@@ -1545,7 +1693,12 @@ class WorkerEngineTransport:
         info_handler: Callable[[str], None] | None,
     ) -> EngineCommandOutput:
         async with self._command_lock:
-            return await self._execute_engine_command_locked(engine_id, command, info_handler)
+            try:
+                return await self._execute_engine_command_locked(engine_id, command, info_handler)
+            finally:
+                if command.startswith("go"):
+                    with self._clock_lock:
+                        self._active_searches.discard(engine_id)
 
     async def _execute_engine_command_locked(
         self,
