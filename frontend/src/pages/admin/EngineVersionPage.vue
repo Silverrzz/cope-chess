@@ -18,6 +18,18 @@ interface DockerfileEntry {
   size: number
 }
 
+interface BenchmarkHardwareProfile {
+  hardware_key: string
+  machine_id: string
+  hardware: {
+    cpu_model: string
+    physical_cores: number
+    logical_cores: number
+    ram_gb: number
+    gpu: string | null
+  }
+}
+
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
@@ -28,6 +40,7 @@ const loading = ref(true)
 const saving = ref(false)
 const deleting = ref(false)
 const rescheduling = ref(false)
+const recordingManual = ref(false)
 const forgetting = ref(false)
 const dockerfileDirty = ref(false)
 const dockerfiles = ref<DockerfileEntry[]>([])
@@ -40,6 +53,17 @@ const nowMs = ref(Date.now())
 const lastActivityMs = ref<number | null>(null)
 const consoleRef = ref<HTMLElement | null>(null)
 const followConsole = ref(true)
+const manualOpen = ref(false)
+const hardwareProfiles = ref<BenchmarkHardwareProfile[]>([])
+const manualHardwareKey = ref('new')
+const manualNps = ref<number | null>(null)
+const manualElapsedMs = ref(0)
+const manualMachineId = ref('')
+const manualCpuModel = ref('')
+const manualPhysicalCores = ref<number | null>(null)
+const manualLogicalCores = ref<number | null>(null)
+const manualRamGb = ref<number | null>(null)
+const manualGpu = ref('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 let activitySignature = ''
 
@@ -222,6 +246,57 @@ async function reschedule(): Promise<void> {
   }
 }
 
+async function openManualBenchmark(): Promise<void> {
+  error.value = ''
+  try {
+    const response = await api.get<{ hardware: BenchmarkHardwareProfile[] }>('/api/admin/benchmark-hardware')
+    hardwareProfiles.value = response.hardware
+    manualHardwareKey.value = response.hardware[0]?.hardware_key ?? 'new'
+    manualOpen.value = true
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  }
+}
+
+async function recordManualBenchmark(): Promise<void> {
+  if (manualNps.value === null) return
+  recordingManual.value = true
+  error.value = ''
+  try {
+    const body = manualHardwareKey.value !== 'new'
+      ? {
+          nps: manualNps.value,
+          elapsed_ms: manualElapsedMs.value,
+          hardware_key: manualHardwareKey.value,
+        }
+      : {
+          nps: manualNps.value,
+          elapsed_ms: manualElapsedMs.value,
+          machine_id: manualMachineId.value.trim(),
+          hardware: {
+            cpu_model: manualCpuModel.value.trim(),
+            physical_cores: manualPhysicalCores.value,
+            logical_cores: manualLogicalCores.value,
+            ram_gb: manualRamGb.value,
+            gpu: manualGpu.value.trim() || null,
+            os: 'Manual entry',
+            python: 'Manual entry',
+            bench: {},
+          },
+        }
+    const response = await api.post<{ message: string }>(`/api/admin/engine-versions/${id.value}/benchmarks/manual`, { body })
+    manualOpen.value = false
+    toast.success(response.message)
+    await load()
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    recordingManual.value = false
+  }
+}
+
 async function forgetBenchmark(): Promise<void> {
   if (!version.value || !currentBenchmark.value) return
   if (!await confirm({ title: 'Forget benchmark?', message: `Remove the benchmark and hardware assignment for ${version.value.name} ${version.value.version}? You can then benchmark it on a currently connected machine.`, confirmLabel: 'Forget benchmark', tone: 'danger' })) return
@@ -391,7 +466,7 @@ onBeforeUnmount(() => {
       <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
           <div><h2 id="benchmarks-title">Benchmarking</h2><p>Build and <code>bench</code> results stream live from the benchmark service.</p></div>
-          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
+          <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || recordingManual || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || recordingManual || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="openManualBenchmark">Add manual result</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || recordingManual || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>
         </div>
         <div v-if="currentBenchmark" class="benchmark-current">
           <div class="benchmark-summary">
@@ -424,9 +499,9 @@ onBeforeUnmount(() => {
             </ol>
           </section>
 
-          <dl class="benchmark-facts"><div><dt>Benchmarker</dt><dd>{{ currentBenchmark.benchmarker?.label ?? 'Awaiting assignment' }}<small v-if="currentBenchmark.benchmarker">{{ humanize(currentBenchmark.benchmarker.status) }}</small></dd></div><div><dt>Hardware</dt><dd>{{ currentBenchmark.hardware ? `${currentBenchmark.hardware.cpu_model} · ${currentBenchmark.hardware.physical_cores} cores · ${currentBenchmark.hardware.ram_gb} GB` : 'Not reported' }}</dd></div><div><dt>Elapsed</dt><dd>{{ elapsedText }}<small>{{ lastActivityText }}</small></dd></div><div><dt>Attempts</dt><dd>{{ currentBenchmark.attempt }}</dd></div></dl>
+          <dl class="benchmark-facts"><div><dt>Benchmarker</dt><dd>{{ currentBenchmark.benchmarker?.label ?? (currentBenchmark.status === 'succeeded' ? 'Manual entry' : 'Awaiting assignment') }}<small v-if="currentBenchmark.benchmarker">{{ humanize(currentBenchmark.benchmarker.status) }}</small></dd></div><div><dt>Hardware</dt><dd>{{ currentBenchmark.hardware ? `${currentBenchmark.hardware.cpu_model} · ${currentBenchmark.hardware.physical_cores} cores · ${currentBenchmark.hardware.ram_gb} GB` : 'Not reported' }}</dd></div><div><dt>Elapsed</dt><dd>{{ elapsedText }}<small>{{ lastActivityText }}</small></dd></div><div><dt>Attempts</dt><dd>{{ currentBenchmark.attempt }}</dd></div></dl>
           <p v-if="currentBenchmark.error" class="benchmark-error">{{ currentBenchmark.error }}</p>
-          <section class="benchmark-console" aria-labelledby="benchmark-console-title">
+          <section v-if="currentBenchmark.output || currentBenchmark.status !== 'succeeded'" class="benchmark-console" aria-labelledby="benchmark-console-title">
             <header>
               <span class="benchmark-console__title"><span class="benchmark-console__light" :class="`benchmark-console__light--${activityHealth.tone}`" aria-hidden="true" /><strong id="benchmark-console-title">{{ currentBenchmark.status === 'running' ? 'Live benchmark console' : 'Benchmark console' }}</strong></span>
               <span class="benchmark-console__meta">{{ consoleLineCount }} lines · {{ lastActivityText }}</span>
@@ -444,6 +519,28 @@ onBeforeUnmount(() => {
         <button class="button button--primary" type="submit" :disabled="saving || deleting">{{ saving ? 'Saving…' : 'Save version' }}</button>
       </div>
     </form>
+    <Teleport to="body">
+      <div v-if="manualOpen" class="manual-benchmark-backdrop" @mousedown.self="manualOpen = false" @keydown.esc="manualOpen = false">
+        <form class="manual-benchmark-dialog" role="dialog" aria-modal="true" aria-labelledby="manual-benchmark-title" @submit.stop.prevent="recordManualBenchmark">
+          <div><h2 id="manual-benchmark-title">Add manual benchmark result</h2><p>Record an externally run engine bench against a hardware profile.</p></div>
+          <div class="manual-benchmark-grid">
+            <label class="field"><span>NPS</span><input v-model.number="manualNps" class="input" type="number" min="1" step="1" required autofocus></label>
+            <label class="field"><span>Elapsed time (ms)</span><input v-model.number="manualElapsedMs" class="input" type="number" min="0" step="1" required></label>
+            <label class="field manual-benchmark-wide"><span>Hardware profile</span><select v-model="manualHardwareKey" class="input"><option v-for="profile in hardwareProfiles" :key="profile.hardware_key" :value="profile.hardware_key">{{ profile.hardware.cpu_model }} · {{ profile.hardware.physical_cores }} cores · {{ profile.hardware.ram_gb }} GB · {{ profile.machine_id }}</option><option value="new">Add a new hardware profile</option></select></label>
+            <template v-if="manualHardwareKey === 'new'">
+              <label class="field manual-benchmark-wide"><span>Machine identifier</span><input v-model="manualMachineId" class="input" maxlength="128" required placeholder="A stable name for this machine"></label>
+              <label class="field manual-benchmark-wide"><span>CPU model</span><input v-model="manualCpuModel" class="input" required></label>
+              <label class="field"><span>Physical cores</span><input v-model.number="manualPhysicalCores" class="input" type="number" min="1" step="1" required></label>
+              <label class="field"><span>Logical cores</span><input v-model.number="manualLogicalCores" class="input" type="number" min="1" step="1" required></label>
+              <label class="field"><span>Memory (GB)</span><input v-model.number="manualRamGb" class="input" type="number" min="1" step="1" required></label>
+              <label class="field"><span>GPU (optional)</span><input v-model="manualGpu" class="input"></label>
+            </template>
+          </div>
+          <InlineFeedback :message="error" />
+          <div class="manual-benchmark-actions"><button class="button button--ghost" type="button" :disabled="recordingManual" @click="manualOpen = false">Cancel</button><button class="button button--primary" type="submit" :disabled="recordingManual">{{ recordingManual ? 'Recording…' : 'Record result' }}</button></div>
+        </form>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -454,4 +551,5 @@ onBeforeUnmount(() => {
 .benchmark-progress-panel{background:color-mix(in srgb,var(--color-accent) 5%,var(--color-surface));border:1px solid color-mix(in srgb,var(--color-accent) 20%,var(--color-border));border-radius:var(--radius-md);display:grid;gap:.65rem;padding:.8rem}.benchmark-progress-heading{align-items:start;display:flex;gap:1rem;justify-content:space-between}.benchmark-progress-heading>span:first-child{display:grid;gap:.18rem;min-width:0}.benchmark-progress-heading strong{font-size:.78rem}.benchmark-progress-heading small{color:var(--color-text-muted);display:-webkit-box;font-family:var(--font-mono);font-size:.65rem;line-height:1.4;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:3;white-space:pre-wrap}.benchmark-progress-heading>span:last-child{color:var(--color-accent);font-family:var(--font-mono);font-size:.72rem;font-weight:700}.benchmark-progress-track{background:color-mix(in srgb,var(--color-border) 72%,transparent);border-radius:999px;height:.58rem;overflow:hidden}.benchmark-progress-fill{background:var(--color-success);border-radius:inherit;display:block;height:100%;min-width:0;transition:width .35s ease}.benchmark-progress-fill--active{animation:benchmark-stripes 1s linear infinite;background-color:var(--color-accent);background-image:linear-gradient(135deg,transparent 25%,rgb(255 255 255 / 22%) 25%,rgb(255 255 255 / 22%) 50%,transparent 50%,transparent 75%,rgb(255 255 255 / 22%) 75%);background-size:1.2rem 1.2rem}.benchmark-stage-list{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));list-style:none;margin:.05rem 0 0;padding:0}.benchmark-stage{align-items:center;color:var(--color-text-faint);display:grid;gap:.3rem;justify-items:center;position:relative;text-align:center}.benchmark-stage::before{background:var(--color-border);content:"";height:1px;left:0;position:absolute;right:0;top:.65rem}.benchmark-stage:first-child::before{left:50%}.benchmark-stage:last-child::before{right:50%}.benchmark-stage>span{align-items:center;background:var(--color-surface);border:1px solid var(--color-border-strong);border-radius:50%;display:flex;font-size:.6rem;font-weight:750;height:1.3rem;justify-content:center;position:relative;width:1.3rem;z-index:1}.benchmark-stage small{font-size:.62rem}.benchmark-stage--complete{color:var(--color-success)}.benchmark-stage--complete::before{background:color-mix(in srgb,var(--color-success) 58%,var(--color-border))}.benchmark-stage--complete>span{background:var(--color-success);border-color:var(--color-success);color:var(--color-surface)}.benchmark-stage--current{color:var(--color-accent);font-weight:700}.benchmark-stage--current>span{background:var(--color-accent);border-color:var(--color-accent);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--color-accent) 15%,transparent);color:var(--color-on-accent)}.benchmark-stage--failed{color:var(--color-danger);font-weight:700}.benchmark-stage--failed>span{background:var(--color-danger);border-color:var(--color-danger);color:var(--color-on-danger)}
 .benchmark-console{background:#0b111b;border:1px solid #263346;border-radius:var(--radius-md);box-shadow:inset 0 1px 0 rgb(255 255 255 / 4%);min-width:0;overflow:hidden}.benchmark-console header{align-items:center;background:#121b28;border-bottom:1px solid #263346;color:#aebbd0;display:flex;font-size:.65rem;gap:.8rem;min-height:2.35rem;padding:.45rem .7rem}.benchmark-console__title{align-items:center;color:#edf4ff;display:flex;gap:.45rem}.benchmark-console__light{background:#718096;border-radius:50%;height:.5rem;width:.5rem}.benchmark-console__light--active,.benchmark-console__light--success{background:#45d483;box-shadow:0 0 .45rem rgb(69 212 131 / 65%)}.benchmark-console__light--waiting,.benchmark-console__light--warning{background:#f4c95d}.benchmark-console__light--danger{background:#ff6b78}.benchmark-console__meta{margin-left:auto}.benchmark-console label{align-items:center;cursor:pointer;display:flex;gap:.35rem;white-space:nowrap}.benchmark-console input{accent-color:#78a7ff}.benchmark-console pre{background:#0b111b;color:#d9e5f5;font-family:var(--font-mono);font-size:.68rem;line-height:1.55;margin:0;max-height:27rem;min-height:12rem;overflow:auto;padding:.85rem;scrollbar-color:#42536b #0b111b;tab-size:2;white-space:pre-wrap;word-break:break-word}.benchmark-console pre:focus{outline:2px solid var(--color-focus);outline-offset:-2px}
 @keyframes benchmark-live-pulse{50%{opacity:.45;transform:scale(.8)}}@keyframes benchmark-stripes{to{background-position:1.2rem 0}}@media(max-width:42rem){.benchmark-summary{align-items:stretch;flex-direction:column}.benchmark-health{max-width:none}.benchmark-actions{align-items:flex-end;flex-wrap:wrap}.benchmark-stage small{font-size:.56rem}.benchmark-console header{align-items:flex-start;flex-wrap:wrap}.benchmark-console__meta{margin-left:0;order:3;width:100%}.benchmark-console label{margin-left:auto}}@media(prefers-reduced-motion:reduce){.benchmark-health--active .benchmark-health__dot,.benchmark-progress-fill--active{animation:none}.benchmark-progress-fill{transition:none}}
+.manual-benchmark-backdrop{background:var(--color-overlay);display:grid;inset:0;overflow-y:auto;padding:1rem;place-items:center;position:fixed;z-index:1100}.manual-benchmark-dialog{background:var(--color-surface-raised);border:1px solid var(--color-border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-md);display:grid;gap:1rem;padding:1.25rem;width:min(100%,38rem)}.manual-benchmark-dialog h2{font-size:1rem;margin:0}.manual-benchmark-dialog p{color:var(--color-text-muted);font-size:.72rem;margin:.25rem 0 0}.manual-benchmark-grid{display:grid;gap:.8rem;grid-template-columns:repeat(2,minmax(0,1fr))}.manual-benchmark-wide{grid-column:1/-1}.manual-benchmark-actions{display:flex;gap:.6rem;justify-content:flex-end}@media(max-width:32rem){.manual-benchmark-grid{grid-template-columns:1fr}.manual-benchmark-wide{grid-column:auto}}
 </style>

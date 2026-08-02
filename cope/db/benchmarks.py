@@ -54,6 +54,14 @@ class BenchmarkJobRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkHardwareRecord:
+    hardware_key: str
+    machine_id: str
+    hw: HardwareInfo
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class EngineBenchmarkRecord:
     id: int
     job_id: int
@@ -587,6 +595,134 @@ def list_engine_benchmark_jobs(
             result=benchmark,
         ))
     return tuple(result)
+
+
+def list_benchmark_hardware(
+    connection: sqlite3.Connection,
+) -> tuple[BenchmarkHardwareRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT hardware_key, machine_id, hw, created_at
+        FROM benchmark_hardware
+        ORDER BY created_at, hardware_key
+        """
+    )
+    return tuple(
+        BenchmarkHardwareRecord(
+            hardware_key=str(row["hardware_key"]),
+            machine_id=str(row["machine_id"]),
+            hw=HardwareInfo.model_validate_json(row["hw"]),
+            created_at=str(row["created_at"]),
+        )
+        for row in rows
+    )
+
+
+def record_manual_benchmark(
+    connection: sqlite3.Connection,
+    *,
+    engine: EngineSpec,
+    nps: int,
+    elapsed_ms: int,
+    hardware_key: str | None = None,
+    machine_id: str | None = None,
+    hw: HardwareInfo | None = None,
+) -> int:
+    from cope.core.benchmark import benchmark_hardware_key
+
+    if nps <= 0:
+        raise ValueError("Benchmark NPS must be positive.")
+    if elapsed_ms < 0:
+        raise ValueError("Benchmark elapsed time cannot be negative.")
+    if hardware_key is None:
+        if machine_id is None or hw is None:
+            raise ValueError("Manual benchmark hardware details are required.")
+        hardware_key = benchmark_hardware_key(machine_id, hw)
+        connection.execute(
+            """
+            INSERT INTO benchmark_hardware (hardware_key, machine_id, hw, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(hardware_key) DO NOTHING
+            """,
+            (hardware_key, machine_id, hw.model_dump_json(), _utc_now()),
+        )
+    elif connection.execute(
+        "SELECT 1 FROM benchmark_hardware WHERE hardware_key = ?",
+        (hardware_key,),
+    ).fetchone() is None:
+        raise ValueError("The selected benchmark hardware profile no longer exists.")
+    if connection.execute(
+        """
+        SELECT 1 FROM benchmark_jobs
+        WHERE build_hash = ? AND status = 'running'
+        LIMIT 1
+        """,
+        (engine.build_hash,),
+    ).fetchone() is not None:
+        raise ValueError("A benchmark for this build is already running.")
+    now = _utc_now()
+    row = connection.execute(
+        "SELECT id FROM benchmark_jobs WHERE build_hash = ? AND hardware_key = ?",
+        (engine.build_hash, hardware_key),
+    ).fetchone()
+    if row is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO benchmark_jobs (
+              job_key, engine_version_id, engine_spec, engine_name,
+              engine_version, build_hash, hardware_key, status, attempt,
+              scheduled_at, started_at, finished_at, error, output
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 1, ?, ?, ?, '', '')
+            """,
+            (
+                secrets.token_urlsafe(24), engine.engine_id, engine.model_dump_json(),
+                engine.name, engine.version, engine.build_hash, hardware_key,
+                now, now, now,
+            ),
+        )
+        job_id = int(cursor.lastrowid)
+    else:
+        job_id = int(row["id"])
+        connection.execute(
+            "DELETE FROM engine_benchmarks WHERE build_hash = ? AND hardware_key = ?",
+            (engine.build_hash, hardware_key),
+        )
+        connection.execute(
+            """
+            UPDATE benchmark_jobs
+            SET benchmarker_id = NULL, engine_version_id = ?, engine_spec = ?,
+                engine_name = ?, engine_version = ?, status = 'succeeded',
+                attempt = attempt + 1, scheduled_at = ?, started_at = ?,
+                finished_at = ?, error = '', output = ''
+            WHERE id = ?
+            """,
+            (
+                engine.engine_id, engine.model_dump_json(), engine.name,
+                engine.version, now, now, now, job_id,
+            ),
+        )
+    connection.execute(
+        """
+        INSERT INTO engine_benchmarks (
+          job_id, engine_version_id, engine_name, engine_version, build_hash,
+          hardware_key, nps, elapsed_ms, output, recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+        """,
+        (
+            job_id, engine.engine_id, engine.name, engine.version,
+            engine.build_hash, hardware_key, nps, elapsed_ms, now,
+        ),
+    )
+    connection.execute(
+        """
+        DELETE FROM benchmark_jobs
+        WHERE status = 'failed' AND (engine_version_id = ? OR build_hash = ?)
+        """,
+        (engine.engine_id, engine.build_hash),
+    )
+    return job_id
 
 
 def forget_engine_benchmarks(

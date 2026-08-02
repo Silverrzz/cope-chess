@@ -13,11 +13,11 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
 from cope.chat import announce_tournament_finished
-from cope.core.models import OpeningLine, TournamentConfig
+from cope.core.models import HardwareInfo, OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
     append_suite_openings,
@@ -65,6 +65,7 @@ from cope.db import (
     list_deployment_targets,
     latest_dockerfile_pull_job,
     list_benchmarkers,
+    list_benchmark_hardware,
     list_chat_messages,
     list_engine_games,
     list_engine_records,
@@ -88,6 +89,7 @@ from cope.db import (
     mint_worker_token_for_worker,
     replace_suite_openings,
     replay_game,
+    record_manual_benchmark,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
@@ -331,6 +333,20 @@ class EngineVersionUpdatePayload(BaseModel):
         if not value:
             raise ValueError("value cannot be blank")
         return value
+
+
+class ManualBenchmarkPayload(BaseModel):
+    nps: int = Field(gt=0)
+    elapsed_ms: int = Field(default=0, ge=0)
+    hardware_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    machine_id: str | None = Field(default=None, min_length=1, max_length=128)
+    hardware: HardwareInfo | None = None
+
+    @model_validator(mode="after")
+    def validate_hardware(self):
+        if self.hardware_key is None and (self.machine_id is None or self.hardware is None):
+            raise ValueError("Select a hardware profile or enter new hardware details.")
+        return self
 
 
 class RatingCalculationPayload(BaseModel):
@@ -1910,6 +1926,62 @@ def register_api_routes(app: FastAPI) -> None:
         if count:
             return _json({"message": f"Queued {count} benchmark {'job' if count == 1 else 'jobs'}."})
         return _json({"message": "No benchmark hardware is registered yet. Connect a benchmarker, then request the benchmark again."})
+
+    @app.get("/api/admin/benchmark-hardware")
+    def admin_benchmark_hardware(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        return _json({
+            "hardware": [
+                {
+                    "hardware_key": item.hardware_key,
+                    "machine_id": item.machine_id,
+                    "hardware": jsonable_encoder(item.hw),
+                    "created_at": item.created_at,
+                }
+                for item in list_benchmark_hardware(connection)
+            ]
+        })
+
+    @app.post("/api/admin/engine-versions/{version_id}/benchmarks/manual")
+    def admin_record_manual_benchmark(
+        version_id: int,
+        payload: ManualBenchmarkPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        if not version.dockerfile_path:
+            raise HTTPException(
+                status_code=409,
+                detail="Select and save a Dockerfile from data/engines before recording a benchmark.",
+            )
+        dockerfile = _load_engine_dockerfile(version.dockerfile_path)
+        if dockerfile != version.dockerfile:
+            raise HTTPException(
+                status_code=409,
+                detail="The selected Dockerfile changed in data/engines. Save the version before recording a benchmark.",
+            )
+        engine = next((item for item in list_engines(connection) if item.engine_id == version_id), None)
+        if engine is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        try:
+            record_manual_benchmark(
+                connection,
+                engine=engine,
+                nps=payload.nps,
+                elapsed_ms=payload.elapsed_ms,
+                hardware_key=payload.hardware_key,
+                machine_id=payload.machine_id,
+                hw=payload.hardware,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Manual benchmark recorded."}, status_code=201)
 
     @app.delete("/api/admin/benchmark-jobs/{job_id}")
     def admin_forget_failed_benchmark_job(
