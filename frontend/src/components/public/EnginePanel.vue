@@ -341,7 +341,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 }
 
 .pv-preview :deep(.chess-viewer) {
-  width: min(100%, 6rem);
+  width: min(100%, 8rem);
 }
 
 @media (max-width: 40rem) {
