@@ -418,17 +418,8 @@ def create_app(
         path = request.url.path
         if time.monotonic() - app.state.last_service_heartbeat >= 10:
             try:
-                heartbeat_connection = connect_database(app.state.db_path)
-                try:
-                    touch_service_heartbeat(
-                        heartbeat_connection,
-                        "web",
-                        app_version(),
-                    )
-                    heartbeat_connection.commit()
-                    app.state.last_service_heartbeat = time.monotonic()
-                finally:
-                    heartbeat_connection.close()
+                await asyncio.to_thread(_touch_web_heartbeat, app)
+                app.state.last_service_heartbeat = time.monotonic()
             except sqlite3.Error:
                 pass
         content_length = request.headers.get("content-length")
@@ -496,7 +487,7 @@ def create_app(
                     )
 
         if _is_spa_request(request) and FRONTEND_INDEX.is_file():
-            preview_html = _social_preview_html(request)
+            preview_html = await asyncio.to_thread(_social_preview_html, request)
             response = (
                 HTMLResponse(preview_html)
                 if preview_html is not None
@@ -529,13 +520,12 @@ def create_app(
         hub.bind_loop()
         selected_game_id = _positive_int(request.query_params.get("game_id"))
 
-        connection = connect_database(request.app.state.db_path)
-        try:
-            tournament = get_tournament(connection, tournament_id)
-            if tournament is None or tournament.status == "draft":
-                raise HTTPException(status_code=404, detail="tournament not found")
-        finally:
-            connection.close()
+        if not await asyncio.to_thread(
+            _public_tournament_exists,
+            request.app,
+            tournament_id,
+        ):
+            raise HTTPException(status_code=404, detail="tournament not found")
 
         def snapshot() -> dict[str, Any]:
             connection = connect_database(request.app.state.db_path)
@@ -655,8 +645,14 @@ def create_app(
         async def stream():
             subscription = hub.subscribe("workers")
             try:
+                initial_snapshot = await asyncio.to_thread(snapshot)
                 yield sse_stream_event(
-                    hub.make_private_event("workers", "workers.snapshot", snapshot(), source="web")
+                    hub.make_private_event(
+                        "workers",
+                        "workers.snapshot",
+                        initial_snapshot,
+                        source="web",
+                    )
                 )
                 while True:
                     try:
@@ -704,8 +700,14 @@ def create_app(
         async def stream():
             subscription = hub.subscribe("workers")
             try:
+                initial_snapshot = await asyncio.to_thread(snapshot)
                 yield sse_stream_event(
-                    hub.make_private_event("workers", "worker.snapshot", snapshot(), source="web")
+                    hub.make_private_event(
+                        "workers",
+                        "worker.snapshot",
+                        initial_snapshot,
+                        source="web",
+                    )
                 )
                 while True:
                     try:
@@ -715,8 +717,14 @@ def create_app(
                         continue
                     if event is None:
                         break
+                    current_snapshot = await asyncio.to_thread(snapshot)
                     yield sse_stream_event(
-                        hub.make_private_event("workers", "worker.snapshot", snapshot(), source="web")
+                        hub.make_private_event(
+                            "workers",
+                            "worker.snapshot",
+                            current_snapshot,
+                            source="web",
+                        )
                     )
             finally:
                 hub.unsubscribe(subscription)
@@ -764,6 +772,24 @@ def _is_spa_request(request: Request) -> bool:
     if re.fullmatch(r"/admin/workers/\d+/token", path) is not None:
         return False
     return True
+
+
+def _touch_web_heartbeat(app: FastAPI) -> None:
+    connection = connect_database(app.state.db_path)
+    try:
+        touch_service_heartbeat(connection, "web", app_version())
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _public_tournament_exists(app: FastAPI, tournament_id: int) -> bool:
+    connection = connect_database(app.state.db_path)
+    try:
+        tournament = get_tournament(connection, tournament_id)
+        return tournament is not None and tournament.status != "draft"
+    finally:
+        connection.close()
 
 
 def _social_preview_html(request: Request) -> str | None:

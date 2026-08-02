@@ -690,12 +690,16 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         form = await read_form(request)
-        web_app._require_public_chat_tournament(connection, tournament_id)
-        message = web_app._create_chat_message_from_form(
-            connection,
-            form,
-            tournament_id=tournament_id,
-        )
+
+        def create_message():
+            web_app._require_public_chat_tournament(connection, tournament_id)
+            return web_app._create_chat_message_from_form(
+                connection,
+                form,
+                tournament_id=tournament_id,
+            )
+
+        message = await asyncio.to_thread(create_message)
         if message is not None:
             web_app._publish_chat_message(request, tournament_id, message)
         return _json(
@@ -1832,12 +1836,15 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/admin/engine-versions/{version_id}/events")
     async def admin_engine_version_events(version_id: int, request: Request):
         """Stream benchmark state without replacing or reloading the edit form."""
-        connection = connect_database(request.app.state.db_path)
-        try:
-            if get_engine_version_record(connection, version_id) is None:
-                raise HTTPException(status_code=404, detail="Engine version not found.")
-        finally:
-            connection.close()
+        def version_exists() -> bool:
+            connection = connect_database(request.app.state.db_path)
+            try:
+                return get_engine_version_record(connection, version_id) is not None
+            finally:
+                connection.close()
+
+        if not await asyncio.to_thread(version_exists):
+            raise HTTPException(status_code=404, detail="Engine version not found.")
 
         def snapshot() -> dict[str, Any]:
             current = connect_database(request.app.state.db_path)
@@ -1856,7 +1863,7 @@ def register_api_routes(app: FastAPI) -> None:
         async def stream():
             previous = ""
             while not await request.is_disconnected():
-                payload = snapshot()
+                payload = await asyncio.to_thread(snapshot)
                 encoded = json.dumps(payload, separators=(",", ":"))
                 if encoded != previous:
                     previous = encoded
@@ -2064,7 +2071,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        if get_opening_suite(connection, suite_id) is None:
+        if await asyncio.to_thread(get_opening_suite, connection, suite_id) is None:
             raise HTTPException(status_code=404, detail="Opening suite not found.")
         values, files = await _read_opening_form(request)
         name = values.get("name", "").strip()
