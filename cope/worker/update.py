@@ -51,7 +51,19 @@ def install_client_release(
     _run(["git", "-C", str(repository), "fetch", "--prune", "origin"])
     resolved = _git_output(repository, "rev-parse", "--verify", f"{target_commit}^{{commit}}")
     if resolved != target_commit:
-        raise RuntimeError(f"worker repository resolved {resolved}, expected {target_commit}")
+        raise RuntimeError(
+            f"{client_name} repository resolved {resolved}, expected {target_commit}"
+        )
+    _run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "merge",
+            "--ff-only",
+            target_commit,
+        ]
+    )
     releases = root / "releases"
     releases.mkdir(parents=True, exist_ok=True, mode=0o755)
     release = releases / target_commit
