@@ -309,6 +309,19 @@ class DeploymentTargetRecord:
     updated_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class DockerfilePullJobRecord:
+    id: int
+    requested_ref: str
+    target_commit: str | None
+    status: str
+    files_updated: int
+    requested_at: str
+    started_at: str | None
+    finished_at: str | None
+    error: str | None
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -1048,11 +1061,22 @@ def list_games(
     return tuple(_game_from_row(row) for row in rows)
 
 
-def count_games(connection: sqlite3.Connection, tournament_id: int) -> int:
-    row = connection.execute(
-        "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
-        (tournament_id,),
-    ).fetchone()
+def count_games(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    *,
+    status: str | None = None,
+) -> int:
+    if status is None:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
+            (tournament_id,),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ? AND status = ?",
+            (tournament_id, status),
+        ).fetchone()
     return int(row["count"])
 
 
@@ -1062,20 +1086,34 @@ def list_games_page(
     *,
     page: int,
     page_size: int,
+    status: str | None = None,
 ) -> tuple[GameRecord, ...]:
-    rows = connection.execute(
-        """
-        SELECT
-          id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
-          match_id, game_number, tiebreak_kind, opening_id, status, result,
-          termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
-        FROM games
-        WHERE tournament_id = ?
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (tournament_id, page_size, (page - 1) * page_size),
-    )
+    columns = """
+      id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
+      match_id, game_number, tiebreak_kind, opening_id, status, result,
+      termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
+    """
+    offset = (page - 1) * page_size
+    if status is None:
+        rows = connection.execute(
+            f"""
+            SELECT {columns} FROM games
+            WHERE tournament_id = ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (tournament_id, page_size, offset),
+        )
+    else:
+        rows = connection.execute(
+            f"""
+            SELECT {columns} FROM games
+            WHERE tournament_id = ? AND status = ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (tournament_id, status, page_size, offset),
+        )
     return tuple(_game_from_row(row) for row in rows)
 
 
@@ -2557,6 +2595,11 @@ def create_deployment_job(
     *,
     requested_ref: str,
 ) -> int:
+    dockerfile_pull = connection.execute(
+        "SELECT id FROM dockerfile_pull_jobs WHERE status NOT IN ('succeeded', 'failed') LIMIT 1"
+    ).fetchone()
+    if dockerfile_pull is not None:
+        raise ValueError(f"Dockerfile pull {dockerfile_pull['id']} is already in progress")
     active = connection.execute(
         """
         SELECT id FROM deployment_jobs
@@ -2613,6 +2656,92 @@ def create_deployment_job(
         (job_id, now),
     )
     return job_id
+
+
+def create_dockerfile_pull_job(
+    connection: sqlite3.Connection,
+    *,
+    requested_ref: str,
+) -> int:
+    deployment = connection.execute(
+        "SELECT id FROM deployment_jobs WHERE status NOT IN ('succeeded', 'failed') LIMIT 1"
+    ).fetchone()
+    if deployment is not None:
+        raise ValueError(f"deployment {deployment['id']} is already in progress")
+    active = connection.execute(
+        "SELECT id FROM dockerfile_pull_jobs WHERE status NOT IN ('succeeded', 'failed') LIMIT 1"
+    ).fetchone()
+    if active is not None:
+        raise ValueError(f"Dockerfile pull {active['id']} is already in progress")
+    cursor = connection.execute(
+        "INSERT INTO dockerfile_pull_jobs (requested_ref, requested_at) VALUES (?, ?)",
+        (requested_ref, utc_now()),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_dockerfile_pull_job(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> DockerfilePullJobRecord | None:
+    row = connection.execute(
+        "SELECT * FROM dockerfile_pull_jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    return None if row is None else _dockerfile_pull_job_from_row(row)
+
+
+def latest_dockerfile_pull_job(
+    connection: sqlite3.Connection,
+) -> DockerfilePullJobRecord | None:
+    row = connection.execute(
+        "SELECT * FROM dockerfile_pull_jobs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return None if row is None else _dockerfile_pull_job_from_row(row)
+
+
+def claim_dockerfile_pull_job(
+    connection: sqlite3.Connection,
+) -> DockerfilePullJobRecord | None:
+    row = connection.execute(
+        """
+        WITH candidate AS (
+          SELECT id FROM dockerfile_pull_jobs
+          WHERE status = 'pending'
+          ORDER BY id
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE dockerfile_pull_jobs
+        SET status = 'resolving', started_at = COALESCE(started_at, ?)
+        WHERE id = (SELECT id FROM candidate)
+        RETURNING *
+        """,
+        (utc_now(),),
+    ).fetchone()
+    return None if row is None else _dockerfile_pull_job_from_row(row)
+
+
+def update_dockerfile_pull_job(
+    connection: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    *,
+    target_commit: str | None = None,
+    files_updated: int = 0,
+    error: str | None = None,
+) -> None:
+    terminal = status in {"succeeded", "failed"}
+    connection.execute(
+        """
+        UPDATE dockerfile_pull_jobs
+        SET status = ?, target_commit = COALESCE(?, target_commit),
+            files_updated = ?, error = ?,
+            finished_at = CASE WHEN ? THEN ? ELSE NULL END
+        WHERE id = ?
+        """,
+        (status, target_commit, files_updated, error, terminal, utc_now(), job_id),
+    )
 
 
 def get_deployment_job(
@@ -2714,6 +2843,25 @@ def fail_interrupted_deployment_jobs(
             WHERE job_id = ?
             """,
             (now, job_id),
+        )
+    return job_ids
+
+
+def fail_interrupted_dockerfile_pull_jobs(
+    connection: sqlite3.Connection,
+) -> tuple[int, ...]:
+    rows = connection.execute(
+        "SELECT id FROM dockerfile_pull_jobs WHERE status NOT IN ('pending', 'succeeded', 'failed') ORDER BY id"
+    ).fetchall()
+    job_ids = tuple(int(row["id"]) for row in rows)
+    if job_ids:
+        connection.execute(
+            """
+            UPDATE dockerfile_pull_jobs
+            SET status = 'failed', finished_at = ?, error = ?
+            WHERE status NOT IN ('pending', 'succeeded', 'failed')
+            """,
+            (utc_now(), "Updater restarted before the Dockerfile pull completed."),
         )
     return job_ids
 
@@ -3145,6 +3293,20 @@ def list_rating_lists(connection: sqlite3.Connection) -> tuple[RatingListRecord,
     return tuple(
         _rating_list_from_row(row)
         for row in connection.execute("SELECT * FROM rating_lists ORDER BY name, id")
+    )
+
+
+def _dockerfile_pull_job_from_row(row: sqlite3.Row) -> DockerfilePullJobRecord:
+    return DockerfilePullJobRecord(
+        id=row["id"],
+        requested_ref=row["requested_ref"],
+        target_commit=row["target_commit"],
+        status=row["status"],
+        files_updated=row["files_updated"],
+        requested_at=row["requested_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        error=row["error"],
     )
 
 

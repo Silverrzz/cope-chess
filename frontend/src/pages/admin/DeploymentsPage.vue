@@ -35,10 +35,23 @@ interface DeploymentJob {
   targets: DeploymentTarget[];
 }
 
+interface DockerfilePullJob {
+  id: number;
+  requested_ref: string;
+  target_commit: string | null;
+  status: string;
+  files_updated: number;
+  requested_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 interface DeploymentsPayload {
   current_version: string;
   default_ref: string;
   updater: { service: string; app_version: string; last_seen: string } | null;
+  dockerfile_pull: DockerfilePullJob | null;
   jobs: DeploymentJob[];
 }
 
@@ -46,6 +59,7 @@ const data = ref<DeploymentsPayload | null>(null);
 const refName = ref("");
 const loading = ref(true);
 const submitting = ref(false);
+const pullingDockerfiles = ref(false);
 const error = ref("");
 const message = ref("");
 const reconnecting = ref(false);
@@ -57,6 +71,11 @@ let restoredTimer: number | undefined;
 const activeJob = computed(() =>
   data.value?.jobs.find((job) => !["succeeded", "failed"].includes(job.status)) ?? null,
 );
+const activeDockerfilePull = computed(() => {
+  const job = data.value?.dockerfile_pull;
+  return job && !["succeeded", "failed"].includes(job.status) ? job : null;
+});
+const updateBusy = computed(() => Boolean(activeJob.value || activeDockerfilePull.value));
 const updaterOnline = computed(() => {
   const lastSeen = data.value?.updater?.last_seen;
   if (!lastSeen) return false;
@@ -129,6 +148,30 @@ async function deploy(): Promise<void> {
   }
 }
 
+async function pullDockerfiles(): Promise<void> {
+  const target = refName.value.trim() || data.value?.default_ref || "main";
+  const accepted = await confirm({
+    title: "Pull engine Dockerfiles?",
+    message: `Replace the engine Dockerfiles with data/engines from ${target}. Platform services will keep running, but changed engine builds will require fresh benchmarks.`,
+    confirmLabel: "Pull Dockerfiles",
+  });
+  if (!accepted) return;
+  pullingDockerfiles.value = true;
+  error.value = "";
+  message.value = "";
+  try {
+    const response = await api.post<{ id: number; message: string }>("/api/admin/dockerfile-pulls", {
+      body: { ref: target },
+    });
+    message.value = response.message;
+    await load(true);
+  } catch (cause) {
+    error.value = errorText(cause);
+  } finally {
+    pullingDockerfiles.value = false;
+  }
+}
+
 onMounted(async () => {
   await load();
   timer = window.setInterval(() => load(true), 2000);
@@ -172,16 +215,27 @@ onBeforeUnmount(() => {
             :placeholder="data.default_ref"
             autocomplete="off"
             spellcheck="false"
-            :disabled="Boolean(activeJob)"
+            :disabled="updateBusy"
           />
-          <BaseButton
-            type="submit"
-            variant="primary"
-            :loading="submitting"
-            :disabled="Boolean(activeJob)"
-          >
-            Update & rebuild
-          </BaseButton>
+          <div class="update-actions">
+            <BaseButton
+              type="button"
+              variant="secondary"
+              :loading="pullingDockerfiles"
+              :disabled="updateBusy"
+              @click="pullDockerfiles"
+            >
+              Pull Dockerfiles
+            </BaseButton>
+            <BaseButton
+              type="submit"
+              variant="primary"
+              :loading="submitting"
+              :disabled="updateBusy"
+            >
+              Update & rebuild
+            </BaseButton>
+          </div>
         </form>
         <p v-if="activeJob" class="active-note">
           Deployment #{{ activeJob.id }} is {{ humanize(activeJob.status).toLowerCase() }}. The control panel may reconnect while the web service restarts.
@@ -189,6 +243,17 @@ onBeforeUnmount(() => {
         <p v-else-if="!updaterOnline" class="active-note">
           The updater is offline. You can queue an update now and it will start when the updater reconnects.
         </p>
+        <div v-if="data.dockerfile_pull" class="dockerfile-pull-status">
+          <span>
+            <strong>Dockerfile pull #{{ data.dockerfile_pull.id }}</strong>
+            <small>
+              {{ data.dockerfile_pull.requested_ref }}
+              <template v-if="data.dockerfile_pull.status === 'succeeded'"> · {{ data.dockerfile_pull.files_updated }} files updated</template>
+              <template v-if="data.dockerfile_pull.error"> · {{ data.dockerfile_pull.error }}</template>
+            </small>
+          </span>
+          <StatusBadge :status="data.dockerfile_pull.status" />
+        </div>
       </section>
 
       <section v-if="data.jobs.length" class="deployment-list">
@@ -238,7 +303,12 @@ onBeforeUnmount(() => {
 .version-grid span { color: var(--color-text-muted); font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .version-grid code, .version-grid strong { font-size: .82rem; }
 .update-form { align-items: end; display: grid; gap: .75rem; grid-template-columns: minmax(0, 1fr) auto; }
+.update-actions { display: flex; gap: .5rem; }
 .active-note { color: var(--color-text-muted); font-size: .75rem; margin: 0; }
+.dockerfile-pull-status { align-items: center; border-top: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding-top: .8rem; }
+.dockerfile-pull-status > span { display: grid; gap: .15rem; }
+.dockerfile-pull-status strong { font-size: .78rem; }
+.dockerfile-pull-status small { color: var(--color-text-muted); font-size: .68rem; }
 .deployment-list { display: grid; gap: .9rem; }
 .deployment-card { overflow: hidden; padding: 0; }
 .deployment-card > header { align-items: flex-start; border-bottom: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding: .9rem 1rem; }
@@ -261,5 +331,6 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 32rem) {
   .update-form { grid-template-columns: 1fr; }
+  .update-actions { align-items: stretch; flex-direction: column; }
 }
 </style>

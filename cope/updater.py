@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tarfile
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -15,15 +18,19 @@ from urllib.parse import urlsplit
 from cope.db import (
     DEFAULT_DATABASE_URL,
     activate_benchmarker_deployment_targets,
+    claim_dockerfile_pull_job,
     claim_deployment_job,
     connect_database,
     fail_interrupted_deployment_jobs,
+    fail_interrupted_dockerfile_pull_jobs,
     get_benchmarker,
     get_worker,
     list_deployment_targets,
     list_service_heartbeats,
     set_deployment_target_commit,
     touch_service_heartbeat,
+    sync_engine_dockerfiles,
+    update_dockerfile_pull_job,
     update_deployment_job_status,
     update_deployment_target_status,
     update_server_deployment_target,
@@ -56,12 +63,15 @@ def run_updater(config: UpdaterConfig) -> None:
     connection = connect_database(config.db_path)
     try:
         interrupted = fail_interrupted_deployment_jobs(connection)
+        interrupted_dockerfiles = fail_interrupted_dockerfile_pull_jobs(connection)
         touch_service_heartbeat(connection, "updater", app_version())
         connection.commit()
     finally:
         connection.close()
     if interrupted:
         LOG.warning("marked interrupted deployments failed jobs=%s", interrupted)
+    if interrupted_dockerfiles:
+        LOG.warning("marked interrupted Dockerfile pulls failed jobs=%s", interrupted_dockerfiles)
     threading.Thread(
         target=_heartbeat_loop,
         args=(config,),
@@ -72,14 +82,123 @@ def run_updater(config: UpdaterConfig) -> None:
         connection = connect_database(config.db_path)
         try:
             touch_service_heartbeat(connection, "updater", app_version())
-            job = claim_deployment_job(connection)
+            dockerfile_job = claim_dockerfile_pull_job(connection)
+            job = None if dockerfile_job is not None else claim_deployment_job(connection)
             connection.commit()
         finally:
             connection.close()
+        if dockerfile_job is not None:
+            _run_dockerfile_pull(config, source_dir, dockerfile_job.id, dockerfile_job.requested_ref)
+            continue
         if job is None:
             time.sleep(max(config.poll_interval_s, 0.5))
             continue
         _run_deployment(config, source_dir, job.id, job.requested_ref)
+
+
+def _run_dockerfile_pull(
+    config: UpdaterConfig,
+    source_dir: Path,
+    job_id: int,
+    requested_ref: str,
+) -> None:
+    target_commit = ""
+    try:
+        repository_url = config.repository_url or _git_output(
+            source_dir,
+            "remote",
+            "get-url",
+            "origin",
+        )
+        _validate_source_repository(source_dir, repository_url)
+        target_commit = _resolve_target_commit(source_dir, requested_ref or config.default_ref)
+        _update_dockerfile_pull_job(config, job_id, "syncing", target_commit=target_commit)
+        files_updated = _install_engine_dockerfiles(source_dir, target_commit)
+        connection = connect_database(config.db_path)
+        try:
+            sync_engine_dockerfiles(connection)
+            update_dockerfile_pull_job(
+                connection,
+                job_id,
+                "succeeded",
+                target_commit=target_commit,
+                files_updated=files_updated,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        LOG.info("Dockerfile pull completed job_id=%s commit=%s files=%s", job_id, target_commit, files_updated)
+    except Exception as error:
+        detail = (str(error).strip() or error.__class__.__name__)[:4000]
+        LOG.exception("Dockerfile pull failed job_id=%s", job_id)
+        _update_dockerfile_pull_job(
+            config,
+            job_id,
+            "failed",
+            target_commit=target_commit or None,
+            error=detail,
+        )
+
+
+def _install_engine_dockerfiles(source_dir: Path, target_commit: str) -> int:
+    result = subprocess.run(
+        ["git", "-C", str(source_dir), "archive", "--format=tar", target_commit, "data/engines"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = _command_failure_detail(result.stderr.decode("utf-8", errors="replace"))
+        raise RuntimeError(f"git archive failed: {detail}")
+    target = Path(os.environ.get("COPE_ENGINE_DOCKERFILES_DIR", "/app/data/engines")).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cope-engine-dockerfiles-") as temporary:
+        staging = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            members = archive.getmembers()
+            for member in members:
+                path = Path(member.name)
+                if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
+                    raise RuntimeError("repository contains an unsupported engine Dockerfile entry")
+            archive.extractall(staging, members=members, filter="data")
+        source = staging / "data" / "engines"
+        files = tuple(path for path in source.rglob("*") if path.is_file())
+        if not files:
+            raise RuntimeError("the selected ref does not contain any engine Dockerfiles")
+        for existing in target.iterdir():
+            if existing.is_dir():
+                shutil.rmtree(existing)
+            else:
+                existing.unlink()
+        for item in source.iterdir():
+            destination = target / item.name
+            if item.is_dir():
+                shutil.copytree(item, destination)
+            else:
+                shutil.copy2(item, destination)
+        return len(files)
+
+
+def _update_dockerfile_pull_job(
+    config: UpdaterConfig,
+    job_id: int,
+    status: str,
+    *,
+    target_commit: str | None = None,
+    error: str | None = None,
+) -> None:
+    connection = connect_database(config.db_path)
+    try:
+        update_dockerfile_pull_job(
+            connection,
+            job_id,
+            status,
+            target_commit=target_commit,
+            error=error,
+        )
+        touch_service_heartbeat(connection, "updater", app_version())
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _heartbeat_loop(config: UpdaterConfig) -> None:
@@ -105,6 +224,7 @@ def _run_deployment(
     original_commit = ""
     rollback_tag = f"cope-chess:rollback-{job_id}"
     built = False
+    dockerfiles_installed = False
     restart_attempted = False
     source_changed = False
     try:
@@ -154,6 +274,8 @@ def _run_deployment(
             f"COPE_BUILD_VERSION={target_commit}",
         )
         built = True
+        _install_engine_dockerfiles(source_dir, target_commit)
+        dockerfiles_installed = True
         _set_job_status(config, job_id, "migrating")
         _compose(config, source_dir, "run", "--rm", "migrate")
         _set_job_status(config, job_id, "updating_workers")
@@ -204,6 +326,17 @@ def _run_deployment(
                 _run(["git", "-C", str(source_dir), "checkout", "--detach", original_commit])
             except Exception as source_error:
                 rollback_detail = f" Source rollback failed: {source_error}"
+        if dockerfiles_installed and original_commit:
+            try:
+                _install_engine_dockerfiles(source_dir, original_commit)
+                connection = connect_database(config.db_path)
+                try:
+                    sync_engine_dockerfiles(connection)
+                    connection.commit()
+                finally:
+                    connection.close()
+            except Exception as dockerfile_error:
+                rollback_detail += f" Dockerfile rollback failed: {dockerfile_error}"
         if built or restart_attempted:
             try:
                 _run(["docker", "tag", rollback_tag, "cope-chess:local"])

@@ -21,7 +21,7 @@ from cope.engine_dockerfiles import (
 
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 _PLACEHOLDER = re.compile(r"\?")
 _pools: dict[tuple[str, str | None], ConnectionPool] = {}
@@ -240,10 +240,15 @@ def initialize_connection(connection: DatabaseConnection) -> None:
         connection._connection().execute(schema)
     except psycopg.Error as exc:
         raise sqlite3.DatabaseError(str(exc)) from exc
+    sync_engine_dockerfiles(connection)
+
+
+def sync_engine_dockerfiles(connection: DatabaseConnection) -> int:
     rows = connection.execute(
         """SELECT id, repository_url, source_ref, dockerfile_path, dockerfile, build_hash
            FROM engine_versions WHERE dockerfile_path <> ''"""
     ).fetchall()
+    updated = 0
     for row in rows:
         try:
             content = read_engine_dockerfile(str(row["dockerfile_path"]))
@@ -260,6 +265,8 @@ def initialize_connection(connection: DatabaseConnection) -> None:
             "UPDATE engine_versions SET dockerfile = ?, build_hash = ? WHERE id = ?",
             (content, build_hash, row["id"]),
         )
+        updated += 1
+    return updated
 
 
 def database_schema_version(connection: DatabaseConnection) -> int:

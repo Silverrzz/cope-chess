@@ -22,6 +22,7 @@ from cope.db import (
     ChatSettingsRecord,
     append_suite_openings,
     create_deployment_job,
+    create_dockerfile_pull_job,
     create_engine,
     create_engine_version,
     create_git_host,
@@ -62,6 +63,7 @@ from cope.db import (
     invalidate_game_pair,
     list_deployment_jobs,
     list_deployment_targets,
+    latest_dockerfile_pull_job,
     list_benchmarkers,
     list_chat_messages,
     list_engine_games,
@@ -538,12 +540,13 @@ def register_api_routes(app: FastAPI) -> None:
         if tournament.status == "draft":
             raise HTTPException(status_code=404, detail="Tournament not found.")
         engines = web_app._engine_names(connection)
-        total_games = count_games(connection, tournament.id)
+        total_games = count_games(connection, tournament.id, status="finished")
         games = list_games_page(
             connection,
             tournament.id,
             page=page,
             page_size=page_size,
+            status="finished",
         )
         active_games = list_active_games(
             connection,
@@ -891,6 +894,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "current_version": app_version(),
                 "default_ref": os.environ.get("COPE_UPDATE_REF", "main"),
                 "updater": heartbeats.get("updater"),
+                "dockerfile_pull": jsonable_encoder(latest_dockerfile_pull_job(connection)),
                 "jobs": [
                     {
                         **jsonable_encoder(job),
@@ -924,6 +928,31 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "id": job_id,
                 "message": f"Deployment {job_id} queued for {requested_ref}.",
+            },
+            status_code=202,
+        )
+
+    @app.post("/api/admin/dockerfile-pulls")
+    def admin_create_dockerfile_pull(
+        payload: DeploymentPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        try:
+            job_id = create_dockerfile_pull_job(
+                connection,
+                requested_ref=requested_ref,
+            )
+            connection.commit()
+        except ValueError as error:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "id": job_id,
+                "message": f"Dockerfile pull {job_id} queued for {requested_ref}.",
             },
             status_code=202,
         )

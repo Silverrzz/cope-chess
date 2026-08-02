@@ -872,9 +872,9 @@ function queryValue(value: unknown): string {
         </section>
 
         <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
-          <header><div><h2 id="games-title">All games</h2></div></header>
-          <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" caption="Tournament games" />
-          <ContentState v-else kind="empty" compact title="No games scheduled" />
+          <header><div><h2 id="games-title">Finished games</h2></div></header>
+          <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" caption="Finished tournament games" />
+          <ContentState v-else kind="empty" compact title="No finished games yet" />
           <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
             <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
             <span>Page {{ gamePage.toLocaleString() }} of {{ gamePages.toLocaleString() }}</span>

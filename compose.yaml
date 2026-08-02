@@ -18,6 +18,8 @@ x-cope-service: &cope-service
     - cope_admin_token
     - cope_event_token
     - cope_db_password
+  volumes:
+    - engine-dockerfiles:/app/data/engines
   logging:
     driver: json-file
     options:
@@ -133,6 +135,7 @@ services:
     volumes:
       - ${COPE_HOST_SOURCE_DIR:-.}:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
+      - engine-dockerfiles:/app/data/engines
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -201,3 +204,4 @@ volumes:
   postgres-data:
   caddy-data:
   caddy-config:
+  engine-dockerfiles:

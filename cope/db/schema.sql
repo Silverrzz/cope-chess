@@ -559,6 +559,19 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dockerfile_pull_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  requested_ref TEXT NOT NULL,
+  target_commit TEXT CHECK (target_commit IS NULL OR target_commit ~ '^[0-9a-f]{40}$'),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'resolving', 'syncing', 'succeeded', 'failed')),
+  files_updated INTEGER NOT NULL DEFAULT 0,
+  requested_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  error TEXT
+);
+
 ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_kind_check;
 ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_id_fkey;
 ALTER TABLE deployment_targets ADD CONSTRAINT deployment_targets_target_kind_check
@@ -571,7 +584,7 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 24)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 25)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -595,6 +608,10 @@ CREATE INDEX IF NOT EXISTS idx_game_hardware_scores_engine ON game_hardware_scor
 CREATE INDEX IF NOT EXISTS idx_deployment_jobs_status_id ON deployment_jobs(status, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deployment_jobs_one_active
   ON deployment_jobs ((TRUE))
+  WHERE status NOT IN ('succeeded', 'failed');
+CREATE INDEX IF NOT EXISTS idx_dockerfile_pull_jobs_status_id ON dockerfile_pull_jobs(status, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dockerfile_pull_jobs_one_active
+  ON dockerfile_pull_jobs ((TRUE))
   WHERE status NOT IN ('succeeded', 'failed');
 CREATE INDEX IF NOT EXISTS idx_deployment_targets_job ON deployment_targets(job_id, target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_targets_worker_pending ON deployment_targets(target_id, status)

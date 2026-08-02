@@ -43,7 +43,7 @@ onMounted(load)
     <InlineFeedback :message="error" />
     <form class="panel anchor-panel" @submit.prevent="calculate">
       <div class="anchor-heading"><h2>Elo anchor</h2><p>Choose the engine version that defines the rating scale. Its calculated rating will be fixed to the Elo entered here.</p></div>
-      <label class="field"><span>Engine version</span><select v-model.number="anchorEngineId" class="input" required><option disabled value="">Select an engine version</option><option v-for="engine in data.engine_versions" :key="engine.id" :value="engine.id">{{ engine.name }} — {{ engine.version }}</option></select></label>
+      <label class="field"><span>Engine version</span><select v-model.number="anchorEngineId" class="input" required><option disabled value="">Select an engine version</option><option v-for="engine in data.engine_versions" :key="engine.id" :value="engine.id">{{ engine.name }} - {{ engine.version }}</option></select></label>
       <label class="field"><span>Elo</span><input v-model.number="anchorElo" class="input" type="number" min="-10000" max="10000" step="1" required></label>
       <button class="button button--primary" type="submit" :disabled="!!pending || !data.engine_versions.length">{{ pending === 'calculate' ? 'Calculating…' : 'Calculate ratings' }}</button>
     </form>
