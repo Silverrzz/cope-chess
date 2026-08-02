@@ -165,12 +165,13 @@ async function copyDetails(): Promise<void> {
     const tournament = data.value.tournament
     const details = buildTournamentDetailsMarkdown({
       tournament,
-      settings: settingsRows.value,
+      settings: settingsRows.value.filter(([label]) => ![
+        'Concurrent games',
+        'Worker hash required',
+        'Lag compensation',
+      ].includes(label)),
       engines: tournament.config.participants.map(engineName),
-      gameSummary: data.value.game_summary,
-      ...(tournament.status === 'draft' ? {} : {
-        publicUrl: `${window.location.origin}/tournaments/${encodeURIComponent(String(tournament.id))}`,
-      }),
+      publicUrl: `${window.location.origin}/tournaments/${encodeURIComponent(String(tournament.id))}`,
     })
     if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(details)
     else fallbackCopy(details)

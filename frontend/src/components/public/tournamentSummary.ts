@@ -9,25 +9,11 @@ interface MarkdownColumn<T> {
 
 export interface TournamentDetailsMarkdownInput {
   tournament: {
-    id: number | string
     name: string
-    status: string
-    current_round?: number
-    created_at?: string
-    started_at?: string | null
-    finished_at?: string | null
   }
   settings: Array<[string, string]>
   engines: string[]
-  gameSummary: {
-    total: number
-    pending?: number
-    assigned?: number
-    live?: number
-    finished?: number
-    abandoned?: number
-  }
-  publicUrl?: string
+  publicUrl: string
 }
 
 function tableCell(value: string | number): string {
@@ -85,32 +71,13 @@ function setting(data: TournamentDetailResponse, label: string): string {
 
 export function buildTournamentDetailsMarkdown(data: TournamentDetailsMarkdownInput): string {
   const tournament = data.tournament
-  const summary = data.gameSummary
-  const gameBreakdown = [
-    ['finished', summary.finished],
-    ['live', summary.live],
-    ['assigned', summary.assigned],
-    ['pending', summary.pending],
-    ['abandoned', summary.abandoned],
-  ].filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
-    .map(([label, count]) => `${count} ${label}`)
-    .join(', ')
   const lines = [
     `# ${tournament.name}`,
     '',
-    `- **Status:** ${statusLabel(tournament.status)}`,
-    `- **Games:** ${summary.total}${gameBreakdown ? ` (${gameBreakdown})` : ''}`,
   ]
-  if (tournament.current_round) lines.push(`- **Current round:** ${tournament.current_round}`)
-  if (tournament.created_at) lines.push(`- **Created:** ${tournament.created_at.slice(0, 10)}`)
-  if (tournament.started_at) lines.push(`- **Started:** ${tournament.started_at.slice(0, 10)}`)
-  if (tournament.finished_at) lines.push(`- **Finished:** ${tournament.finished_at.slice(0, 10)}`)
 
   if (data.settings.length) {
     lines.push(
-      '',
-      '## Details',
-      '',
       ...markdownTable(
         [
           { heading: 'Setting', value: (row) => row[0] },
@@ -136,7 +103,7 @@ export function buildTournamentDetailsMarkdown(data: TournamentDetailsMarkdownIn
     )
   }
 
-  if (data.publicUrl) lines.push('', `[View tournament](${data.publicUrl})`)
+  lines.push('', `[View tournament](${data.publicUrl})`)
   return lines.join('\n')
 }
 
