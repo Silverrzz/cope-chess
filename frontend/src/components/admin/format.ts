@@ -122,19 +122,22 @@ function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {
   } as TournamentConfig
 }
 
-export function estimateGames(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {
+export function estimatePairs(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {
   if (players < 2) return 0
   if (format === 'round_robin') {
-    const pairs = (players * (players - 1)) / 2
-    return pairs * 2 * ('cycles' in options ? options.cycles : 0)
+    return (players * (players - 1)) / 2 * ('cycles' in options ? options.cycles : 0)
   }
   if (format === 'swiss') {
-    return Math.floor(players / 2) * 2 * ('rounds' in options ? options.rounds : 0)
+    return Math.floor(players / 2) * ('rounds' in options ? options.rounds : 0)
   }
   if (format === 'knockout') {
-    return (players - 1) * 2
+    return players - 1
   }
-  return (players - 1) * 2
+  return players - 1
+}
+
+export function estimateGames(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {
+  return estimatePairs(format, options, players) * 2
 }
 
 export function errorText(error: unknown): string {

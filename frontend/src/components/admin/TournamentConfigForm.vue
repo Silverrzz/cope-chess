@@ -5,7 +5,7 @@ import EngineOptionsEditor from './EngineOptionsEditor.vue'
 import InlineFeedback from './InlineFeedback.vue'
 import ParticipantPicker from './ParticipantPicker.vue'
 import TournamentSettingsEditor from './TournamentSettingsEditor.vue'
-import { cloneData, configFromSeed, estimateGames, formatTimeControl, humanize } from './format'
+import { cloneData, configFromSeed, estimateGames, estimatePairs, formatTimeControl, humanize } from './format'
 import type { FormSeed, TournamentConfig, TournamentSettings } from './types'
 
 const props = withDefaults(defineProps<{
@@ -36,6 +36,7 @@ const selectedParticipantNames = computed(() => props.seed.engine_options
   .filter((engine) => config.value.participants.includes(engine.id))
   .map((engine) => `${engine.name} ${engine.version}`))
 const gameEstimate = computed(() => estimateGames(config.value.format, config.value.format_options, config.value.participants.length))
+const pairEstimate = computed(() => estimatePairs(config.value.format, config.value.format_options, config.value.participants.length))
 const waves = computed(() => gameEstimate.value ? Math.ceil(gameEstimate.value / Math.max(config.value.concurrency, 1)) : 0)
 
 watch(() => props.seed, (seed) => {
@@ -167,6 +168,7 @@ function submit(): void {
       </div>
       <dl>
         <div><dt>Participants</dt><dd>{{ config.participants.length }}</dd></div>
+        <div><dt>Game pairs</dt><dd>{{ pairEstimate.toLocaleString() }}</dd></div>
         <div><dt>Format</dt><dd>{{ humanize(config.format) }}</dd></div>
         <div><dt>Time control</dt><dd>{{ formatTimeControl(config.time_control) }}</dd></div>
         <div><dt>Opening suite</dt><dd>{{ selectedOpening?.name ?? 'None' }}</dd></div>

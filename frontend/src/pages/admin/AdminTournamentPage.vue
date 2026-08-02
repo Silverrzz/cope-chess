@@ -17,7 +17,7 @@ import type { Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/com
 interface Commit { rating_list_id: number; status: string; requested_at: string; applied_at?: string | null; error?: string | null }
 interface RatingList { id: number; name: string }
 interface GamePagination { page: number; page_size: number; total: number; pages: number }
-interface GameSummary { total: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
+interface GameSummary { total: number; pairs: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
 interface Response {
   tournament: Tournament
   games: Game[]
@@ -285,7 +285,7 @@ onMounted(load)
       </section>
 
       <section class="panel games-panel">
-        <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }}</p></div></div>
+        <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }} · {{ data.game_summary.pairs }} game pair{{ data.game_summary.pairs === 1 ? '' : 's' }}</p></div></div>
         <div v-if="data.games.length" class="game-table-wrap">
           <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
             <tr v-for="game in data.games" :key="game.id">

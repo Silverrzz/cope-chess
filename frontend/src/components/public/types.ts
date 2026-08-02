@@ -23,6 +23,8 @@ export interface GameRecord {
   tournament_id: Identifier
   round?: number
   pair_index?: number
+  game_number?: number
+  opening_id?: Identifier | null
   white_engine_id: Identifier
   black_engine_id: Identifier
   white_name?: string
@@ -77,6 +79,7 @@ export interface EngineRecord {
 
 export interface GameSummary {
   total: number
+  pairs?: number
   pending?: number
   assigned?: number
   live?: number

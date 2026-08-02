@@ -669,7 +669,11 @@ function gameLabel(game: GameRecord): string {
   const white = engineName(data.value?.engines, game.white_engine_id, game.white_name)
   const black = engineName(data.value?.engines, game.black_engine_id, game.black_name)
   const outcome = game.result ? `, ${game.result}` : `, ${statusLabel(game.status)}`
-  return `Game ${game.id}, ${white} vs ${black}${outcome}`
+  const leg = game.game_number ? ((game.game_number - 1) % 2) + 1 : null
+  const position = game.round && game.pair_index
+    ? `Round ${game.round}, board ${game.pair_index}${leg ? `, game ${leg}` : ''}`
+    : 'Tournament game'
+  return `${position}, ${white} vs ${black}${outcome}`
 }
 
 function tabTarget(tab: TabKey): RouteLocationRaw {

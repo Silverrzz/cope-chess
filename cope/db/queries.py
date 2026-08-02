@@ -117,7 +117,23 @@ def list_active_games(
         """,
         tuple(parameters),
     )
-    return tuple(_game_from_row(row) for row in rows)
+    games = tuple(_game_from_row(row) for row in rows)
+    return tuple(
+        sorted(
+            games,
+            key=lambda game: (
+                game.tournament_id,
+                min(game.white_engine_id, game.black_engine_id),
+                max(game.white_engine_id, game.black_engine_id),
+                game.opening_id if game.opening_id is not None else -1,
+                game.match_id if game.match_id is not None else -1,
+                (game.game_number - 1) // 2,
+                game.tiebreak_kind or "",
+                game.game_number,
+                game.id,
+            ),
+        )
+    )
 
 
 def list_upcoming_games(

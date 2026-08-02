@@ -37,6 +37,10 @@ const overflow = computed(() => props.item.participant_overflow ?? Math.max(0, (
         <dd>{{ finished }} / {{ total }}</dd>
       </div>
       <div>
+        <dt>Game pairs</dt>
+        <dd>{{ item.summary.pairs || 0 }}</dd>
+      </div>
+      <div>
         <dt>Live</dt>
         <dd>{{ item.summary.live || 0 }}</dd>
       </div>

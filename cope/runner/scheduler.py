@@ -135,10 +135,10 @@ def generate_round_robin_games(
         next_pairing_offset += len(pairings)
 
     for cycle_index in range(options.cycles):
-        for leg_index in range(2):
-            for base_round, pairings in enumerate(round_pairings, start=1):
-                round_number = base_round + (cycle_index * 2 + leg_index) * rounds_per_cycle
-                for pair_index, pairing in enumerate(pairings, start=1):
+        for base_round, pairings in enumerate(round_pairings, start=1):
+            round_number = base_round + cycle_index * rounds_per_cycle
+            for pair_index, pairing in enumerate(pairings, start=1):
+                for leg_index in range(2):
                     white_engine_id, black_engine_id = pairing
                     if leg_index == 1:
                         white_engine_id, black_engine_id = black_engine_id, white_engine_id

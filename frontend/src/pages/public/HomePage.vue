@@ -124,6 +124,7 @@ function progress(item: TournamentSummary): number {
               <ProgressBar :value="progress(item.tournament)" :label="`${item.tournament.summary.finished || 0} of ${item.tournament.summary.total} tournament games finished`" />
               <dl class="live-card__facts">
                 <div><dt>Games</dt><dd>{{ item.tournament.summary.finished || 0 }} / {{ item.tournament.summary.total }}</dd></div>
+                <div><dt>Game pairs</dt><dd>{{ item.tournament.summary.pairs || 0 }}</dd></div>
                 <div><dt>Live</dt><dd>{{ item.tournament.summary.live || 0 }}</dd></div>
                 <div v-if="item.tournament.record.current_round"><dt>Round</dt><dd>{{ item.tournament.record.current_round }}</dd></div>
                 <div v-if="item.preview"><dt>Preview plies</dt><dd>{{ item.preview.moves.length }}</dd></div>

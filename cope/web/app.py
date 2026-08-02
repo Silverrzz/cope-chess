@@ -2015,6 +2015,9 @@ def _game_payload(
         "id": game.id,
         "tournament_id": game.tournament_id,
         "round": game.round,
+        "pair_index": game.pair_index,
+        "game_number": game.game_number,
+        "opening_id": game.opening_id,
         "status": game.status,
         "result": game.result,
         "white_name": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),
@@ -2506,6 +2509,7 @@ def _tournament_summary(
 def _summarize_games(games: tuple[GameRecord, ...]) -> dict[str, int]:
     summary = {
         "total": len(games),
+        "pairs": len({_game_pair_key(game) for game in games}),
         "pending": 0,
         "assigned": 0,
         "live": 0,
@@ -2523,6 +2527,7 @@ def _tournament_game_summary(
 ) -> dict[str, int]:
     summary = {
         "total": 0,
+        "pairs": 0,
         "pending": 0,
         "assigned": 0,
         "live": 0,
@@ -2542,7 +2547,41 @@ def _tournament_game_summary(
         count = int(row["count"])
         summary[row["status"]] = count
         summary["total"] += count
+    pair_row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM (
+          SELECT 1
+          FROM games
+          WHERE tournament_id = ?
+          GROUP BY
+            LEAST(white_engine_id, black_engine_id),
+            GREATEST(white_engine_id, black_engine_id),
+            opening_id,
+            match_id,
+            (game_number - 1) / 2,
+            tiebreak_kind
+        ) game_pairs
+        """,
+        (tournament_id,),
+    ).fetchone()
+    if pair_row is not None:
+        summary["pairs"] = int(pair_row["count"])
     return summary
+
+
+def _game_pair_key(game: GameRecord) -> tuple[int, int, int | None, int | None, int, str | None]:
+    first_engine_id, second_engine_id = sorted(
+        (game.white_engine_id, game.black_engine_id)
+    )
+    return (
+        first_engine_id,
+        second_engine_id,
+        game.opening_id,
+        game.match_id,
+        (game.game_number - 1) // 2,
+        game.tiebreak_kind,
+    )
 
 
 def _settings_view(
