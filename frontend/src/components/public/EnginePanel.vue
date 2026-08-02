@@ -112,7 +112,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   --side-name: var(--color-text, #17202a);
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(5.5rem, 0.8fr) minmax(0, 1.2fr);
+  grid-template-rows: auto minmax(4.5rem, 0.6fr) minmax(6.75rem, 1.4fr);
   gap: 0.75rem;
   height: 100%;
   min-height: 17rem;
@@ -321,8 +321,10 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 .pv-preview {
   display: grid;
   align-content: center;
+  justify-items: center;
   gap: 0.35rem;
   min-width: 0;
+  min-height: 0;
 }
 
 .pv-preview > span {
@@ -336,6 +338,10 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .pv-preview :deep(.board-mount) {
   border-color: color-mix(in srgb, var(--side-color) 62%, var(--color-border, #d5dbe1));
+}
+
+.pv-preview :deep(.chess-viewer) {
+  width: min(100%, 6rem);
 }
 
 @media (max-width: 40rem) {
