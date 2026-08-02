@@ -113,9 +113,12 @@ const activeTab = computed<TabKey>(() => {
   return ['standings', 'games', 'settings'].includes(tab) ? tab as TabKey : 'standings'
 })
 const viewerGame = computed(() => data.value?.viewer_game || null)
-const isPending = computed(() => viewerGame.value?.status === 'pending')
-const isAssigned = computed(() => viewerGame.value?.status === 'assigned')
-const assignedOpening = { name: 'Start position', fen: 'startpos' }
+const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
+const viewerGames = computed(() => (data.value?.games || []).filter(isActiveGame))
+const pickerGameId = computed(() => {
+  const game = viewerGame.value
+  return isActiveGame(game) ? String(game.id) : ''
+})
 const pgnDownloadUrl = computed(() => {
   const game = viewerGame.value
   return game?.status === 'finished'
@@ -125,6 +128,10 @@ const pgnDownloadUrl = computed(() => {
 const moves = computed(() => data.value?.viewer_moves || [])
 const bookPlyCount = computed(() => moves.value.filter((move) => move.is_book).length)
 const opening = computed(() => data.value?.opening || { name: 'Start position', fen: 'startpos' })
+const preparedOpening = computed(() => ({
+  ...opening.value,
+  fen: opening.value.final_fen || opening.value.fen,
+}))
 const isLatestPly = computed(() => selectedPly.value >= moves.value.length)
 const format = computed(() => {
   const value = data.value?.tournament.config?.format
@@ -649,10 +656,11 @@ function selectGame(event: Event): void {
   void router.push({ query: { ...route.query, game_id: value } })
 }
 
-function gameLabel(game: GameRecord, index: number): string {
+function gameLabel(game: GameRecord): string {
   const white = engineName(data.value?.engines, game.white_engine_id, game.white_name)
   const black = engineName(data.value?.engines, game.black_engine_id, game.black_name)
   const outcome = game.result ? `, ${game.result}` : `, ${statusLabel(game.status)}`
+  const index = data.value?.games.findIndex((candidate) => sameId(candidate.id, game.id)) ?? -1
   return `Game ${index + 1}, ${white} vs ${black}${outcome}`
 }
 
@@ -740,13 +748,14 @@ function queryValue(value: unknown): string {
           >
             Download PGN
           </a>
-          <label v-if="data.games.length" class="game-picker">
+          <label v-if="viewerGames.length" class="game-picker">
             <span class="game-picker__heading">
-              <span>Selected game</span>
+              <span>Active games</span>
               <StreamIndicator v-if="!tournamentComplete" :state="streamState" />
             </span>
-            <select :value="selectedGameId" @change="selectGame">
-              <option v-for="(game, index) in data.games" :key="game.id" :value="String(game.id)">{{ gameLabel(game, index) }}</option>
+            <select :value="pickerGameId" @change="selectGame">
+              <option v-if="!pickerGameId" value="" disabled>Select live or assigned game</option>
+              <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
             </select>
           </label>
         </div>
@@ -755,59 +764,49 @@ function queryValue(value: unknown): string {
       <p v-if="loadError" class="inline-error" role="alert">{{ loadError }} <button type="button" @click="loadDetail(true)">Try again</button></p>
 
       <section ref="arenaElement" v-if="viewerGame" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
-        <article v-if="isPending" class="waiting-screen" aria-labelledby="waiting-title">
-          <div>
-            <h2 id="waiting-title">Waiting for this game to start</h2>
-            <p>The board will appear once the game is ready.</p>
-          </div>
-        </article>
+        <div class="engine-column">
+          <EnginePanel
+            side="black"
+            :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
+            :engine-id="viewerGame.black_engine_id"
+            :clock="blackClock"
+            :analysis="blackAnalysis"
+            :position-fen="currentPositionFen"
+            :active="!isPreparing && activeSide === 'black'"
+            :loading="isPreparing"
+          />
+          <EnginePanel
+            side="white"
+            :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
+            :engine-id="viewerGame.white_engine_id"
+            :clock="whiteClock"
+            :analysis="whiteAnalysis"
+            :position-fen="currentPositionFen"
+            :active="!isPreparing && activeSide === 'white'"
+            :loading="isPreparing"
+          />
+          <dl class="game-facts">
+            <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
+            <div><dt>Status</dt><dd>{{ statusLabel(viewerGame.status) }}</dd></div>
+            <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
+            <div><dt>Termination</dt><dd>{{ viewerGame.termination ? statusLabel(viewerGame.termination) : '-' }}</dd></div>
+          </dl>
+        </div>
 
-        <template v-else>
-          <div class="engine-column">
-            <EnginePanel
-              side="black"
-              :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
-              :engine-id="viewerGame.black_engine_id"
-              :clock="blackClock"
-              :analysis="blackAnalysis"
-              :position-fen="currentPositionFen"
-              :active="!isAssigned && activeSide === 'black'"
-              :loading="isAssigned"
-            />
-            <EnginePanel
-              side="white"
-              :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
-              :engine-id="viewerGame.white_engine_id"
-              :clock="whiteClock"
-              :analysis="whiteAnalysis"
-              :position-fen="currentPositionFen"
-              :active="!isAssigned && activeSide === 'white'"
-              :loading="isAssigned"
-            />
-            <dl class="game-facts">
-              <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
-              <div><dt>Status</dt><dd>{{ statusLabel(viewerGame.status) }}</dd></div>
-              <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
-              <div><dt>Termination</dt><dd>{{ viewerGame.termination ? statusLabel(viewerGame.termination) : '-' }}</dd></div>
-            </dl>
-          </div>
+        <div ref="boardColumnElement" class="board-column">
+          <ChessViewer
+            :opening="isPreparing ? preparedOpening : opening"
+            :moves="isPreparing ? [] : moves"
+            :model-value="isPreparing ? 0 : selectedPly"
+            :arrows="isPreparing ? [] : suggestedMoves"
+            :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
+            @update:model-value="selectedPly = $event"
+            @position="currentPositionFen = $event.fen"
+          />
+        </div>
 
-          <div ref="boardColumnElement" class="board-column">
-            <ChessViewer
-              :opening="isAssigned ? assignedOpening : opening"
-              :moves="isAssigned ? [] : moves"
-              :model-value="isAssigned ? 0 : selectedPly"
-              :arrows="isAssigned ? [] : suggestedMoves"
-              :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
-              @update:model-value="selectedPly = $event"
-              @position="currentPositionFen = $event.fen"
-            />
-          </div>
-        </template>
-
-        <aside class="activity-column" :class="{ 'activity-column--waiting': isPending }" aria-label="Game activity">
+        <aside class="activity-column" aria-label="Game activity">
           <MoveList
-            v-if="!isPending"
             class="arena-moves"
             :moves="moves.map((move) => move.san || move.uci)"
             :uci-moves="moves.map((move) => move.uci)"
@@ -1073,10 +1072,6 @@ function queryValue(value: unknown): string {
   height: var(--arena-content-height);
 }
 
-.activity-column--waiting {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 .activity-column > * {
   min-width: 0;
   min-height: 0;
@@ -1128,35 +1123,6 @@ function queryValue(value: unknown): string {
 
 .empty-arena > * {
   min-height: 0;
-}
-
-.waiting-screen {
-  display: grid;
-  grid-column: 1 / 3;
-  place-items: center;
-  height: var(--arena-content-height);
-  min-height: 0;
-  padding: clamp(2rem, 6vw, 5rem);
-  border: 1px solid var(--color-border, #d5dbe1);
-  border-radius: var(--radius-lg, 0.75rem);
-  background: var(--color-surface, #fff);
-  text-align: center;
-}
-
-.waiting-screen h2,
-.waiting-screen p {
-  margin: 0;
-}
-
-.waiting-screen h2 {
-  font-size: clamp(1.35rem, 2.5vw, 2rem);
-  letter-spacing: -0.025em;
-}
-
-.waiting-screen p {
-  margin-block-start: 0.45rem;
-  color: var(--color-text-muted, #607080);
-  font-size: 0.78rem;
 }
 
 .tournament-data {
@@ -1261,8 +1227,6 @@ function queryValue(value: unknown): string {
   .engine-column .game-facts { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
   .activity-column { grid-column: 1; grid-row: 3; }
-  .activity-column--waiting { grid-row: 2; }
-  .waiting-screen { grid-column: 1; grid-row: 1; }
 }
 
 @media (max-width: 40rem) {
@@ -1270,7 +1234,6 @@ function queryValue(value: unknown): string {
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
-  .activity-column--waiting { grid-template-rows: minmax(18rem, 26rem); }
   .empty-arena { grid-template-columns: 1fr; height: auto; }
   .empty-chat { height: min(36rem, calc(100dvh - 8rem)); }
   .settings-list { grid-template-columns: 1fr; }

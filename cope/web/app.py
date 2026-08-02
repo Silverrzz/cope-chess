@@ -1966,7 +1966,7 @@ def _upcoming_rows(
 
 
 def _tournament_viewer_game(games: tuple[GameRecord, ...]) -> GameRecord | None:
-    for status in ("live", "assigned", "pending"):
+    for status in ("live", "assigned"):
         for game in games:
             if game.status == status:
                 return game
