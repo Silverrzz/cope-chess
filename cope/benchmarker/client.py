@@ -413,7 +413,7 @@ def _run_benchmark(
             f"Running {assignment.engine.name} bench with a {assignment.timeout_s} second limit",
         )
         try:
-            return_code, output, elapsed_ms, timed_out = _run_bench_command(
+            return_code, output, elapsed_ms, timed_out, unsupported = _run_bench_command(
                 engine.artifact_path.resolve(),
                 cwd=engine.artifact_directory,
                 timeout_s=assignment.timeout_s,
@@ -434,6 +434,19 @@ def _run_benchmark(
                     build_hash=assignment.engine.build_hash,
                     stage="bench",
                     error=str(error)[-8000:],
+                ),
+            )
+        if unsupported:
+            return (
+                "benchmark_failed",
+                BenchmarkFailed(
+                    job_id=assignment.job_id,
+                    job_key=assignment.job_key,
+                    hardware_key=assignment.hardware_key,
+                    build_hash=assignment.engine.build_hash,
+                    stage="unsupported",
+                    error="engine entered its UCI loop instead of running the command-line bench",
+                    output=output,
                 ),
             )
         if timed_out:
@@ -535,7 +548,7 @@ def _run_bench_command(
     cwd: Path,
     timeout_s: int,
     output_callback,
-) -> tuple[int, str, int, bool]:
+) -> tuple[int, str, int, bool, bool]:
     started = time.monotonic()
     command, container_name = _bench_command(executable)
     process = subprocess.Popen(
@@ -544,6 +557,7 @@ def _run_bench_command(
         text=True,
         encoding="utf-8",
         errors="replace",
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
@@ -565,10 +579,18 @@ def _run_bench_command(
 
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
+    try:
+        if process.stdin is not None:
+            process.stdin.write("uci\n")
+            process.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
     output = ""
     pending = ""
     last_emit = time.monotonic()
     timed_out = False
+    unsupported = False
+    stdin_closed = False
 
     def emit() -> None:
         nonlocal pending, last_emit
@@ -596,6 +618,18 @@ def _run_bench_command(
             break
         output = _trim_output(f"{output}\n{line}")
         pending = f"{pending}\n{line}"[-4000:]
+        nps = parse_benchmark_nps(output)
+        if nps is not None and not stdin_closed:
+            _close_process_stdin(process)
+            stdin_closed = True
+        if not unsupported and _contains_uciok(output) and nps is None:
+            unsupported = True
+            if not stdin_closed:
+                _close_process_stdin(process)
+                stdin_closed = True
+            if container_name is not None:
+                _remove_benchmark_container(container_name)
+            _kill_process(process)
         if time.monotonic() - last_emit >= 0.5:
             emit()
 
@@ -616,10 +650,25 @@ def _run_bench_command(
         _kill_process(process)
         return_code = process.wait(timeout=10)
     finally:
+        if not stdin_closed:
+            _close_process_stdin(process)
         if container_name is not None:
             _remove_benchmark_container(container_name)
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
-    return return_code, output.strip(), elapsed_ms, timed_out
+    return return_code, output.strip(), elapsed_ms, timed_out, unsupported
+
+
+def _contains_uciok(output: str) -> bool:
+    return any(line.strip() == "uciok" for line in output.replace("\r", "\n").split("\n"))
+
+
+def _close_process_stdin(process: subprocess.Popen[str]) -> None:
+    if process.stdin is None:
+        return
+    try:
+        process.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
 
 
 def _bench_command(executable: Path) -> tuple[list[str], str | None]:
@@ -642,6 +691,7 @@ def _bench_command(executable: Path) -> tuple[list[str], str | None]:
         [
             "docker",
             "run",
+            "--interactive",
             "--rm",
             "--name",
             container_name,
