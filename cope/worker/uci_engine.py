@@ -522,7 +522,11 @@ class UciEngineProcess:
                 )
                 build_jobs = _engine_build_jobs()
                 (repository / "Dockerfile.cope").write_text(
-                    _bounded_engine_dockerfile(self._spec.dockerfile, build_jobs),
+                    _bounded_engine_dockerfile(
+                        self._spec.dockerfile,
+                        build_jobs,
+                        self._spec.name,
+                    ),
                     encoding="utf-8",
                 )
                 # The supplied Dockerfile is built against Cope's complete checkout. An
@@ -873,9 +877,10 @@ def _run_checked(
         try:
             if process.stdout is not None:
                 while True:
-                    chunk = process.stdout.read(4096)
-                    if not chunk:
+                    raw = os.read(process.stdout.fileno(), 4096)
+                    if not raw:
                         break
+                    chunk = raw.decode("utf-8", errors="replace")
                     lines.put(chunk)
         finally:
             lines.put(None)
@@ -963,11 +968,15 @@ def _engine_build_jobs() -> int:
         return _DEFAULT_ENGINE_BUILD_JOBS
 
 
-def _bounded_engine_dockerfile(dockerfile: str, build_jobs: int) -> str:
+def _bounded_engine_dockerfile(
+    dockerfile: str,
+    build_jobs: int,
+    engine_name: str,
+) -> str:
     lines = dockerfile.splitlines()
     for index, line in enumerate(lines):
         if line.upper().startswith("FROM ") and " AS BUILDER" in line.upper():
-            lines[index + 1:index + 1] = [
+            injected = [
                 "",
                 f"ARG COPE_BUILD_JOBS={build_jobs}",
                 "ENV CARGO_BUILD_JOBS=${COPE_BUILD_JOBS} \\",
@@ -975,6 +984,26 @@ def _bounded_engine_dockerfile(dockerfile: str, build_jobs: int) -> str:
                 "    GOFLAGS=-p=${COPE_BUILD_JOBS} \\",
                 "    MAKEFLAGS=-j${COPE_BUILD_JOBS}",
             ]
+            normalized_name = engine_name.strip().casefold()
+            if normalized_name == "heimdall" and "ca-certificates git" not in dockerfile:
+                injected.extend(
+                    [
+                        "",
+                        "RUN apt-get update \\",
+                        "    && apt-get install --no-install-recommends -y ca-certificates git \\",
+                        "    && rm -rf /var/lib/apt/lists/*",
+                    ]
+                )
+            if normalized_name == "reckless" and "ca-certificates curl" not in dockerfile:
+                injected.extend(
+                    [
+                        "",
+                        "RUN apt-get update \\",
+                        "    && apt-get install --no-install-recommends -y ca-certificates curl \\",
+                        "    && rm -rf /var/lib/apt/lists/*",
+                    ]
+                )
+            lines[index + 1:index + 1] = injected
             break
     return "\n".join(lines).replace("$(nproc)", "${COPE_BUILD_JOBS}") + "\n"
 

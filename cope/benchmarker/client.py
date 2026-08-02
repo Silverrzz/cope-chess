@@ -555,9 +555,10 @@ def _run_bench_command(
         try:
             if process.stdout is not None:
                 while True:
-                    chunk = process.stdout.read(4096)
-                    if not chunk:
+                    raw = os.read(process.stdout.fileno(), 4096)
+                    if not raw:
                         break
+                    chunk = raw.decode("utf-8", errors="replace")
                     lines.put(chunk)
         finally:
             lines.put(None)
