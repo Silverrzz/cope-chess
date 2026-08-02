@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-INSTALLER_VERSION = "5"
+INSTALLER_VERSION = "6"
 
 
 @dataclass(frozen=True)
@@ -293,7 +294,11 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
 
 def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
     _require_command("docker")
-    _run(["docker", "version", "--format", "{{.Server.Version}}"])
+    _run(
+        ["docker", "version", "--format", "{{.Server.Version}}"],
+        attempts=5,
+        timeout_s=20,
+    )
     if not image_ready:
         print(
             "\nBuilding "
@@ -394,6 +399,17 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         "--env",
         f"COPE_BUILD_VERSION={build_version}",
     ]
+    if key == "benchmarker":
+        command.extend(
+            [
+                "--env",
+                f"COPE_ENGINE_CACHE_VOLUME={_cache_volume()}",
+                "--env",
+                f"COPE_BENCHMARK_IMAGE={IMAGE}",
+                "--env",
+                f"COPE_BENCHMARK_OWNER={machine_id}",
+            ]
+        )
     if settings[f"{key}_server_url"].startswith(
         ("ws://worker-server:", "ws://benchmark-server:")
     ):
@@ -445,6 +461,20 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         command.extend(["--session-file", "/state/benchmarker.session"])
     print(f"Starting {_target(key).label.lower()}...")
     _run(command, capture=True)
+    status = ""
+    for _ in range(3):
+        time.sleep(1)
+        status = _container_status(container)
+        if status == "running":
+            break
+        if status in {"exited", "dead"}:
+            break
+    if status != "running":
+        detail = _container_logs(container)
+        raise SystemExit(
+            f"{_target(key).label} failed to remain running: {status or 'unavailable'}"
+            + (f"\n{detail[-4000:]}" if detail else "")
+        )
     print(f"{_target(key).label} started in {container}.")
 
 
@@ -678,22 +708,49 @@ def _run(
     command: list[str],
     *,
     capture: bool = False,
+    attempts: int = 1,
+    timeout_s: int | None = None,
 ) -> str:
     display = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
     print(f"  {display}")
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        capture_output=capture,
-        check=False,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+    result = None
+    detail = ""
+    status = "unknown"
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            result = subprocess.run(
+                command,
+                cwd=ROOT,
+                capture_output=capture or attempts > 1,
+                check=False,
+                text=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as error:
+            result = None
+            status = "timeout"
+            raw_detail = error.stderr or error.stdout or ""
+            detail = raw_detail.decode(errors="replace") if isinstance(raw_detail, bytes) else raw_detail
+            detail = detail.strip()
+        else:
+            status = str(result.returncode)
+            detail = (result.stderr or result.stdout or "").strip()
+        if result is not None and result.returncode == 0:
+            break
+        if attempt < attempts:
+            print(
+                f"  {command[0]} attempt {attempt} failed; retrying in {attempt * 2}s"
+                + (f": {detail[-500:]}" if detail else "."),
+                file=sys.stderr,
+            )
+            time.sleep(attempt * 2)
+    if result is None or result.returncode != 0:
         raise SystemExit(
-            f"{command[0]} exited with status {result.returncode}"
+            f"{command[0]} exited with status {status}"
             + (f":\n{detail[-4000:]}" if detail else ".")
         )
+    if not capture and attempts > 1 and result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     return result.stdout.strip() if capture else ""
 
 
@@ -721,14 +778,33 @@ def _client_machine_id(key: str) -> str:
 
 
 def _container_status(name: str) -> str:
-    result = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.Status}}", name],
-        cwd=ROOT,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Status}}", name],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _container_logs(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", "80", name],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return "Docker logs timed out."
+    return (result.stderr or result.stdout or "").strip()
 
 
 def _container_image_id(name: str) -> str:

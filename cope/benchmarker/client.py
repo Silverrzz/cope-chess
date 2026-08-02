@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 import queue
+import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -42,6 +44,8 @@ RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
 OUTPUT_LIMIT = 64_000
 PROGRESS_HEARTBEAT_INTERVAL_S = 5.0
+BENCH_OUTPUT_QUEUE_SIZE = 256
+BENCH_CONTAINER_MEMORY = "4g"
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,7 @@ async def run_benchmarker_client(config: BenchmarkerClientConfig) -> None:
             _load_session(config.session_file) if config.token is None else None
         )
     )
+    _remove_stale_benchmark_containers()
     reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
     while True:
         state.connected = False
@@ -86,8 +91,7 @@ async def run_benchmarker_client(config: BenchmarkerClientConfig) -> None:
         except (OSError, asyncio.TimeoutError) as error:
             LOG.warning("benchmark server connection failed: %s", error)
         except Exception:
-            LOG.exception("benchmarker client failed")
-            raise
+            LOG.exception("benchmarker connection failed unexpectedly")
 
         if state.connected:
             reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
@@ -150,7 +154,10 @@ async def _run_connection(
             )
         welcome = BenchmarkerWelcome.model_validate(envelope.data)
         state.session_id = welcome.session_id
-        _save_session(connection_config.session_file, welcome.session_id)
+        try:
+            _save_session(connection_config.session_file, welcome.session_id)
+        except OSError:
+            LOG.exception("could not persist benchmarker session")
         state.connected = True
         LOG.info(
             "accepted benchmarker_id=%s hardware_key=%s",
@@ -231,38 +238,46 @@ async def _run_benchmark_with_progress(
             report,
         )
     )
-    while not task.done() or not progress_queue.empty():
-        try:
-            progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
-        except asyncio.TimeoutError:
-            now = time.monotonic()
-            if (
-                send_progress
-                and not task.done()
-                and last_progress is not None
-                and last_progress.status == "running"
-                and now - last_sent_at >= PROGRESS_HEARTBEAT_INTERVAL_S
-            ):
-                elapsed = _duration_text(now - stage_started_at)
-                heartbeat = last_progress.model_copy(
-                    update={
-                        "detail": (
-                            f"Heartbeat: {last_progress.substage.replace('_', ' ')} "
-                            f"has been active for {elapsed}"
-                        )
-                    }
-                )
+    try:
+        while not task.done() or not progress_queue.empty():
+            try:
+                progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                now = time.monotonic()
+                if (
+                    send_progress
+                    and not task.done()
+                    and last_progress is not None
+                    and last_progress.status == "running"
+                    and now - last_sent_at >= PROGRESS_HEARTBEAT_INTERVAL_S
+                ):
+                    elapsed = _duration_text(now - stage_started_at)
+                    heartbeat = last_progress.model_copy(
+                        update={
+                            "detail": (
+                                f"Heartbeat: {last_progress.substage.replace('_', ' ')} "
+                                f"has been active for {elapsed}"
+                            )
+                        }
+                    )
+                    await websocket.send(
+                        encode_message(make_message("benchmark_progress", heartbeat))
+                    )
+                    last_sent_at = now
+                continue
+            if send_progress:
                 await websocket.send(
-                    encode_message(make_message("benchmark_progress", heartbeat))
+                    encode_message(make_message("benchmark_progress", progress))
                 )
-                last_sent_at = now
-            continue
-        if send_progress:
-            await websocket.send(
-                encode_message(make_message("benchmark_progress", progress))
-            )
-            last_sent_at = time.monotonic()
-    message_type, result = await task
+                last_sent_at = time.monotonic()
+        message_type, result = await task
+    except BaseException:
+        if not task.done():
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                LOG.exception("benchmark job failed after its connection was lost")
+        raise
     if isinstance(result, BenchmarkFailed):
         LOG.warning(
             "benchmark job failed job_id=%s engine=%s stage=%s error=%s output=%s",
@@ -359,21 +374,22 @@ def _run_benchmark(
     credential: str,
     progress_callback,
 ) -> tuple[str, BenchmarkResult | BenchmarkFailed]:
-    progress_callback(
-        "setup",
-        "assignment",
-        "completed",
-        f"Accepted benchmark job {assignment.job_id} for {assignment.engine.name}",
-    )
-    engine = UciEngineProcess(
-        assignment.engine,
-        server_url=server_url,
-        credential=credential,
-        progress_callback=progress_callback,
-        command_timeout_s=assignment.preparation_timeout_s,
-    )
+    engine: UciEngineProcess | None = None
     output = ""
     try:
+        progress_callback(
+            "setup",
+            "assignment",
+            "completed",
+            f"Accepted benchmark job {assignment.job_id} for {assignment.engine.name}",
+        )
+        engine = UciEngineProcess(
+            assignment.engine,
+            server_url=server_url,
+            credential=credential,
+            progress_callback=progress_callback,
+            command_timeout_s=assignment.preparation_timeout_s,
+        )
         try:
             engine.prepare()
         except EnginePreparationError as error:
@@ -477,8 +493,35 @@ def _run_benchmark(
                 output=output,
             ),
         )
+    except Exception as error:
+        LOG.exception(
+            "unexpected benchmark job failure job_id=%s engine=%s",
+            assignment.job_id,
+            assignment.engine.name,
+        )
+        detail = str(error).strip() or error.__class__.__name__
+        return (
+            "benchmark_failed",
+            BenchmarkFailed(
+                job_id=assignment.job_id,
+                job_key=assignment.job_key,
+                hardware_key=assignment.hardware_key,
+                build_hash=assignment.engine.build_hash,
+                stage="internal",
+                error=detail[-8000:],
+                output=output,
+            ),
+        )
     finally:
-        engine.close()
+        if engine is not None:
+            try:
+                engine.close()
+            except Exception:
+                LOG.exception(
+                    "benchmark engine cleanup failed job_id=%s engine=%s",
+                    assignment.job_id,
+                    assignment.engine.name,
+                )
 
 
 def _trim_output(output: str) -> str:
@@ -493,8 +536,9 @@ def _run_bench_command(
     output_callback,
 ) -> tuple[int, str, int, bool]:
     started = time.monotonic()
+    command, container_name = _bench_command(executable)
     process = subprocess.Popen(
-        [str(executable), "bench"],
+        command,
         cwd=cwd,
         text=True,
         encoding="utf-8",
@@ -502,30 +546,32 @@ def _run_bench_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
+        start_new_session=os.name == "posix",
     )
-    lines: queue.Queue[str | None] = queue.Queue()
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=BENCH_OUTPUT_QUEUE_SIZE)
 
     def read_output() -> None:
         try:
             if process.stdout is not None:
-                for line in process.stdout:
-                    lines.put(line.rstrip("\r\n"))
+                while True:
+                    chunk = process.stdout.read(4096)
+                    if not chunk:
+                        break
+                    lines.put(chunk)
         finally:
             lines.put(None)
 
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     output = ""
-    pending: list[str] = []
-    pending_length = 0
+    pending = ""
     last_emit = time.monotonic()
     timed_out = False
 
     def emit() -> None:
-        nonlocal pending, pending_length, last_emit
-        detail = "\n".join(pending).strip()
-        pending = []
-        pending_length = 0
+        nonlocal pending, last_emit
+        detail = pending.strip()
+        pending = ""
         last_emit = time.monotonic()
         if detail:
             output_callback(detail[-4000:])
@@ -533,7 +579,9 @@ def _run_bench_command(
     while True:
         if not timed_out and time.monotonic() - started >= timeout_s:
             timed_out = True
-            process.kill()
+            if container_name is not None:
+                _remove_benchmark_container(container_name)
+            _kill_process(process)
         try:
             line = lines.get(timeout=0.2)
         except queue.Empty:
@@ -545,9 +593,8 @@ def _run_bench_command(
         if line is None:
             break
         output = _trim_output(f"{output}\n{line}")
-        pending.append(line)
-        pending_length += len(line) + 1
-        if pending_length >= 3000 or time.monotonic() - last_emit >= 0.5:
+        pending = f"{pending}\n{line}"[-4000:]
+        if time.monotonic() - last_emit >= 0.5:
             emit()
 
     reader.join(timeout=2)
@@ -559,11 +606,138 @@ def _run_bench_command(
         if line is None:
             continue
         output = _trim_output(f"{output}\n{line}")
-        pending.append(line)
+        pending = f"{pending}\n{line}"[-4000:]
     emit()
-    return_code = process.wait()
+    try:
+        return_code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _kill_process(process)
+        return_code = process.wait(timeout=10)
+    finally:
+        if container_name is not None:
+            _remove_benchmark_container(container_name)
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
     return return_code, output.strip(), elapsed_ms, timed_out
+
+
+def _bench_command(executable: Path) -> tuple[list[str], str | None]:
+    image = os.environ.get("COPE_BENCHMARK_IMAGE", "").strip()
+    volume = os.environ.get("COPE_ENGINE_CACHE_VOLUME", "").strip()
+    owner = os.environ.get("COPE_BENCHMARK_OWNER", "").strip()
+    if not image or not volume:
+        raise RuntimeError("secure benchmark sandbox is not configured")
+    cache_root = Path(
+        os.environ.get("COPE_WORKER_ENGINE_DIR", "/root/.cope-worker/engines")
+    ).resolve()
+    relative = executable.resolve().relative_to(cache_root)
+    container_path = Path("/engines") / relative
+    container_name = (
+        f"cope-benchmark-{os.getpid()}-{threading.get_ident()}-"
+        f"{secrets.token_hex(4)}"
+    )
+    executable.chmod(0o555)
+    return (
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            container_name,
+            "--label",
+            "cope-chess.role=benchmark-sandbox",
+            "--label",
+            f"cope-chess.benchmark-owner={owner}",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "256",
+            "--memory",
+            BENCH_CONTAINER_MEMORY,
+            "--memory-swap",
+            BENCH_CONTAINER_MEMORY,
+            "--ulimit",
+            "core=0",
+            "--ulimit",
+            "nofile=256:256",
+            "--user",
+            "10001:10001",
+            "--mount",
+            f"type=volume,source={volume},target=/engines,readonly",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--workdir",
+            str(container_path.parent),
+            "--entrypoint",
+            str(container_path),
+            image,
+            "bench",
+        ],
+        container_name,
+    )
+
+
+def _remove_benchmark_container(name: str) -> None:
+    try:
+        subprocess.run(
+            ["docker", "rm", "--force", name],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        LOG.exception("could not remove benchmark sandbox name=%s", name)
+
+
+def _remove_stale_benchmark_containers() -> None:
+    owner = os.environ.get("COPE_BENCHMARK_OWNER", "").strip()
+    if not owner:
+        return
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "--all",
+                "--quiet",
+                "--filter",
+                "label=cope-chess.role=benchmark-sandbox",
+                "--filter",
+                f"label=cope-chess.benchmark-owner={owner}",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        LOG.exception("could not inspect stale benchmark sandboxes")
+        return
+    if result.returncode != 0:
+        LOG.warning("could not inspect stale benchmark sandboxes: %s", result.stderr.strip())
+        return
+    for name in result.stdout.split():
+        _remove_benchmark_container(name)
+
+
+def _kill_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
 
 
 def _duration_text(seconds: float) -> str:
@@ -581,8 +755,9 @@ def _load_session(path: Path | None) -> str | None:
         value = path.expanduser().read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return None
-    except OSError as error:
-        raise ValueError(f"could not read benchmarker session file: {error}") from error
+    except OSError:
+        LOG.exception("could not read benchmarker session file")
+        return None
     return value or None
 
 

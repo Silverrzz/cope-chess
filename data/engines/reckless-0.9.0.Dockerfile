@@ -5,6 +5,10 @@ FROM silkeh/clang:18-bookworm AS builder
 COPY --from=rust-toolchain /usr/local/cargo/ /usr/local/cargo/
 COPY --from=rust-toolchain /usr/local/rustup/ /usr/local/rustup/
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
