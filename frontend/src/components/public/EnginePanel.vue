@@ -64,17 +64,16 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
             <template v-else>{{ title }}</template>
           </strong>
         </div>
-        <div class="engine-panel__headline">
-          <div class="evaluation">
-            <span>Evaluation</span>
-            <strong>{{ evaluation }}</strong>
-          </div>
-          <div class="engine-panel__time">
-            <span>Time</span>
-            <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
-          </div>
+        <div class="engine-panel__time">
+          <span>Time</span>
+          <time :aria-label="`${title} clock, ${clock}`">{{ clock }}</time>
         </div>
       </header>
+
+      <div class="evaluation">
+        <span>Evaluation</span>
+        <strong>{{ evaluation }}</strong>
+      </div>
 
       <div class="engine-panel__body">
         <div class="engine-panel__details">
@@ -113,7 +112,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   --side-name: var(--color-text, #17202a);
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(5.5rem, 0.8fr) minmax(0, 1.2fr);
   gap: 0.75rem;
   height: 100%;
   min-height: 17rem;
@@ -219,12 +218,6 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   text-underline-offset: 0.16em;
 }
 
-.engine-panel__headline {
-  display: flex;
-  align-items: flex-end;
-  gap: 1rem;
-}
-
 .engine-panel__time {
   display: flex;
   align-items: flex-end;
@@ -266,13 +259,19 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .evaluation {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  justify-content: center;
   flex-direction: column;
-  gap: 0.05rem;
+  gap: 0.25rem;
+  min-width: 0;
+  min-height: 0;
+  border-radius: var(--radius-sm, 0.35rem);
+  background: color-mix(in srgb, var(--color-text, #17202a) 4.5%, transparent);
 }
 
 .evaluation strong {
-  font-size: clamp(1.45rem, 2.5vw, 2rem);
+  font-size: clamp(3rem, 6vw, 4.5rem);
+  font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }

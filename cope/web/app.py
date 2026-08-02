@@ -58,6 +58,7 @@ from cope.db import (
     list_tournaments,
     list_tournament_matches,
     list_upcoming_games,
+    list_worker_tournament_ids,
     list_workers,
     list_worker_failures,
     list_worker_activities,
@@ -692,6 +693,7 @@ def create_app(
                     return {"worker_id": worker_id, "deleted": True}
                 return _worker_admin_api_payload(
                     row,
+                    connection=connection,
                     worker_server_url=_request_worker_server_url(request, connection),
                 )
             finally:
@@ -1327,14 +1329,21 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
         "memory": "-",
     }
     if worker.hw is not None:
+        effective_cores = worker.capacity.threads if worker.capacity is not None else 0
+        limit_detail = (
+            f" · limited to {effective_cores} engine-thread slots"
+            if effective_cores < worker.hw.physical_cores
+            else ""
+        )
         hardware = {
             "reported": True,
-            "summary": _worker_resource_summary(worker.hw.physical_cores),
+            "summary": _worker_resource_summary(effective_cores),
             "detail": (
                 f"{worker.hw.physical_cores} usable physical-core slots / "
                 f"{worker.hw.logical_cores} accessible threads · {worker.hw.ram_gb}GB RAM"
+                f"{limit_detail}"
             ),
-            "cores": str(worker.hw.physical_cores),
+            "cores": str(effective_cores),
             "memory": f"{worker.hw.ram_gb}GB",
         }
     return {
@@ -1449,6 +1458,8 @@ def _worker_record_payload(worker) -> dict[str, Any]:
         "protocol_version": worker.protocol_version,
         "machine_id": worker.machine_id,
         "hw": hardware,
+        "core_limit": worker.core_limit,
+        "tournament_scope": worker.tournament_scope,
         "last_seen": worker.last_seen,
     }
 
@@ -1456,9 +1467,25 @@ def _worker_record_payload(worker) -> dict[str, Any]:
 def _worker_admin_api_payload(
     row: dict[str, Any],
     *,
+    connection: sqlite3.Connection,
     worker_server_url: str | None = None,
 ) -> dict[str, Any]:
     worker = row["worker"]
+    tournaments = [
+        {
+            "id": tournament.id,
+            "name": tournament.name,
+            "status": tournament.status,
+        }
+        for tournament in list_tournaments(connection)
+        if tournament.status not in {"finished", "aborted"}
+    ]
+    available_tournament_ids = {tournament["id"] for tournament in tournaments}
+    tournament_ids = [
+        tournament_id
+        for tournament_id in list_worker_tournament_ids(connection, worker.id)
+        if tournament_id in available_tournament_ids
+    ]
     return {
         "row": {
             "worker": _worker_record_payload(worker),
@@ -1469,6 +1496,15 @@ def _worker_admin_api_payload(
             "work": row["work"],
         },
         "worker": _worker_record_payload(worker),
+        "settings": {
+            "core_limit": worker.core_limit,
+            "effective_cores": (
+                worker.capacity.threads if worker.capacity is not None else None
+            ),
+            "tournament_scope": worker.tournament_scope,
+            "tournament_ids": tournament_ids,
+            "tournaments": tournaments,
+        },
         "worker_launch_command": _worker_launch_command(worker, worker_server_url)
         if worker_server_url is not None
         else None,

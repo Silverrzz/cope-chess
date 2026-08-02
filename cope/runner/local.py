@@ -53,6 +53,7 @@ from cope.db import (
     list_games,
     list_moves,
     list_tournaments,
+    list_worker_tournament_ids,
     mark_game_assignment_live,
     mark_game_live,
     record_move,
@@ -219,8 +220,18 @@ def next_worker_assignment(
     )
     if available_resources is None:
         return None
+    allowed_tournament_ids = (
+        None
+        if worker.tournament_scope == "all"
+        else frozenset(list_worker_tournament_ids(connection, worker.id))
+    )
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
+            continue
+        if (
+            allowed_tournament_ids is not None
+            and tournament.id not in allowed_tournament_ids
+        ):
             continue
 
         games = list_games(connection, tournament.id)

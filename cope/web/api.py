@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -96,6 +96,7 @@ from cope.db import (
     update_opening_suite,
     update_rating_list_anchor,
     update_tournament,
+    update_worker_assignment_settings,
     update_worker_label,
 )
 from cope.engine_dockerfiles import (
@@ -388,6 +389,19 @@ class WorkerPayload(BaseModel):
 
 class WorkerTokenPayload(BaseModel):
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
+
+
+class WorkerSettingsPayload(BaseModel):
+    core_limit: int | None = Field(default=None, ge=1)
+    tournament_scope: Literal["all", "selected"] = "all"
+    tournament_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("tournament_ids")
+    @classmethod
+    def validate_tournament_ids(cls, value: list[int]) -> list[int]:
+        if any(tournament_id <= 0 for tournament_id in value):
+            raise ValueError("tournament ids must be positive")
+        return list(dict.fromkeys(value))
 
 
 class DeploymentPayload(BaseModel):
@@ -2057,6 +2071,7 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             web_app._worker_admin_api_payload(
                 row,
+                connection=connection,
                 worker_server_url=web_app._request_worker_server_url(request, connection),
             )
         )
@@ -2112,6 +2127,29 @@ def register_api_routes(app: FastAPI) -> None:
         connection.commit()
         _publish_admin_change(web_app, request)
         return _json({"message": "Worker renamed."})
+
+    @app.put("/api/admin/workers/{worker_id}/settings")
+    def admin_worker_settings(
+        worker_id: int,
+        payload: WorkerSettingsPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_worker(connection, worker_id) is None:
+            raise HTTPException(status_code=404, detail="Worker not found.")
+        try:
+            update_worker_assignment_settings(
+                connection,
+                worker_id,
+                core_limit=payload.core_limit,
+                tournament_scope=payload.tournament_scope,
+                tournament_ids=payload.tournament_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Worker assignment limits updated."})
 
     @app.post("/api/admin/workers/{worker_id}/revoke")
     def admin_worker_revoke(

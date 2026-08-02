@@ -147,7 +147,21 @@ CREATE TABLE IF NOT EXISTS workers (
   protocol_version INTEGER,
   machine_id TEXT,
   hw TEXT,
+  core_limit INTEGER CHECK (core_limit IS NULL OR core_limit > 0),
+  tournament_scope TEXT NOT NULL DEFAULT 'all'
+    CHECK (tournament_scope IN ('all', 'selected')),
   last_seen TEXT
+);
+
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS core_limit INTEGER
+  CHECK (core_limit IS NULL OR core_limit > 0);
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS tournament_scope TEXT NOT NULL DEFAULT 'all'
+  CHECK (tournament_scope IN ('all', 'selected'));
+
+CREATE TABLE IF NOT EXISTS worker_tournament_permissions (
+  worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  PRIMARY KEY (worker_id, tournament_id)
 );
 
 CREATE TABLE IF NOT EXISTS game_assignments (
@@ -556,11 +570,13 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 22)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 23)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_machine_active ON workers(machine_id, status);
+CREATE INDEX IF NOT EXISTS idx_worker_tournament_permissions_tournament
+  ON worker_tournament_permissions(tournament_id, worker_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_machine_id ON workers(machine_id)
   WHERE machine_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignments(worker_id, status);

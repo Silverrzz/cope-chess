@@ -129,6 +129,8 @@ export interface Worker {
   app_version?: string | null
   protocol_version?: number | null
   machine_id?: string | null
+  core_limit?: number | null
+  tournament_scope?: 'all' | 'selected'
   last_seen?: string | null
   hw?: {
     cpu_model: string

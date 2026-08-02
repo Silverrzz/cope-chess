@@ -12,7 +12,9 @@ import { errorText, formatDate, formatNumber } from '@/components/admin/format'
 import type { Worker, WorkerRow } from '@/components/admin/types'
 
 interface WorkerFailure { id: number; worker_id: number | null; worker_label: string; machine_id: string | null; assignment_id: number | null; game_id: number | null; engine_id: number | null; engine_name: string; stage: string; error: string; occurred_at: string }
-interface Response { row: WorkerRow; worker: Worker; worker_launch_command?: string | null; failures: WorkerFailure[] }
+interface WorkerTournament { id: number; name: string; status: string }
+interface WorkerSettings { core_limit: number | null; effective_cores: number | null; tournament_scope: 'all' | 'selected'; tournament_ids: number[]; tournaments: WorkerTournament[] }
+interface Response { row: WorkerRow; worker: Worker; settings: WorkerSettings; worker_launch_command?: string | null; failures: WorkerFailure[] }
 interface Minted { token: string; expires_at: string; start_command?: string; message: string }
 interface WorkerTokenBindings { token: string; expiresAt: string; startCommand?: string }
 const route = useRoute()
@@ -26,9 +28,22 @@ const loading = ref(true)
 const error = ref('')
 const pending = ref('')
 const label = ref('')
+const coreLimit = ref<number | ''>('')
+const tournamentScope = ref<'all' | 'selected'>('all')
+const selectedTournamentIds = ref<number[]>([])
+const savedSettingsKey = ref('')
+const settingsInitialized = ref(false)
 const copied = ref(false)
 const streamConnected = ref(false)
 let source: EventSource | null = null
+
+const detectedCoreCount = computed(() => data.value?.worker.hw?.physical_cores ?? null)
+const settingsKey = computed(() => JSON.stringify({
+  core_limit: coreLimit.value === '' ? null : Number(coreLimit.value),
+  tournament_scope: tournamentScope.value,
+  tournament_ids: [...selectedTournamentIds.value].sort((left, right) => left - right),
+}))
+const settingsDirty = computed(() => settingsInitialized.value && settingsKey.value !== savedSettingsKey.value)
 
 function workerTokenBindings(value: Minted): WorkerTokenBindings {
   const bindings: WorkerTokenBindings = { token: value.token, expiresAt: value.expires_at }
@@ -36,9 +51,25 @@ function workerTokenBindings(value: Minted): WorkerTokenBindings {
   return bindings
 }
 
-async function load(background = false): Promise<void> {
+function syncSettings(response: Response): void {
+  coreLimit.value = response.settings.core_limit ?? ''
+  tournamentScope.value = response.settings.tournament_scope
+  selectedTournamentIds.value = response.settings.tournament_scope === 'all'
+    ? response.settings.tournaments.map((tournament) => tournament.id)
+    : [...response.settings.tournament_ids]
+  settingsInitialized.value = true
+  savedSettingsKey.value = settingsKey.value
+}
+
+async function load(background = false, replaceSettings = false): Promise<void> {
   if (!background) loading.value = true
-  try { const response = await api.get<Response>(`/api/admin/workers/${id.value}`); data.value = response; label.value = response.worker.label }
+  try {
+    const response = await api.get<Response>(`/api/admin/workers/${id.value}`)
+    const preserveSettings = settingsDirty.value && !replaceSettings
+    data.value = response
+    label.value = response.worker.label
+    if (!preserveSettings) syncSettings(response)
+  }
   catch (cause) { error.value = errorText(cause) }
   finally { if (!background) loading.value = false }
 }
@@ -53,10 +84,54 @@ function connectStream(): void {
       const envelope = JSON.parse((event as MessageEvent<string>).data) as { data?: Response & { deleted?: boolean } }
       if (envelope.data?.deleted) { void router.replace('/admin/workers'); return }
       if (!envelope.data?.worker || !envelope.data.row) return
+      const preserveSettings = settingsDirty.value || pending.value === 'settings'
       data.value = envelope.data
       if (pending.value !== 'label') label.value = envelope.data.worker.label
+      if (!preserveSettings) syncSettings(envelope.data)
     } catch { /* Keep the last complete worker snapshot. */ }
   })
+}
+
+function toggleTournamentScope(event: Event): void {
+  const allowAll = (event.target as HTMLInputElement).checked
+  tournamentScope.value = allowAll ? 'all' : 'selected'
+  if (!allowAll && selectedTournamentIds.value.length === 0) selectAllTournaments()
+}
+
+function selectAllTournaments(): void {
+  selectedTournamentIds.value = data.value?.settings.tournaments.map((tournament) => tournament.id) ?? []
+}
+
+function clearTournaments(): void {
+  selectedTournamentIds.value = []
+}
+
+async function saveSettings(): Promise<void> {
+  const parsedCoreLimit = coreLimit.value === '' ? null : Number(coreLimit.value)
+  if (parsedCoreLimit !== null && (!Number.isInteger(parsedCoreLimit) || parsedCoreLimit < 1)) {
+    error.value = 'Core limit must be a positive whole number.'
+    return
+  }
+  if (parsedCoreLimit !== null && detectedCoreCount.value !== null && parsedCoreLimit > detectedCoreCount.value) {
+    error.value = `Core limit cannot exceed the detected ${detectedCoreCount.value} cores.`
+    return
+  }
+  const availableTournamentIds = new Set(data.value?.settings.tournaments.map((tournament) => tournament.id) ?? [])
+  pending.value = 'settings'
+  try {
+    const response = await api.put<{ message: string }>(`/api/admin/workers/${id.value}/settings`, {
+      body: {
+        core_limit: parsedCoreLimit,
+        tournament_scope: tournamentScope.value,
+        tournament_ids: tournamentScope.value === 'selected'
+          ? selectedTournamentIds.value.filter((tournamentId) => availableTournamentIds.has(tournamentId))
+          : [],
+      },
+    })
+    toast.success(response.message)
+    await load(true, true)
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
 }
 
 async function rename(): Promise<void> {
@@ -141,9 +216,36 @@ onBeforeUnmount(() => source?.close())
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Identity</h2></div><form class="rename-form" @submit.prevent="rename"><label><span>Worker label</span><input v-model="label" class="input" required maxlength="80"></label><button class="button button--primary button--small" type="submit" :disabled="pending === 'label'">{{ pending === 'label' ? 'Saving…' : 'Save label' }}</button></form></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Connection state</h2></div><dl class="fact-list"><div><dt>Overall</dt><dd><StatusBadge :status="data.row.status" /></dd></div><div><dt>Machine</dt><dd>{{ data.row.machine?.label ?? 'Unknown' }}<small>{{ data.row.machine?.detail }}</small></dd></div><div><dt>Session</dt><dd>{{ data.row.session?.label ?? 'None' }}<small>{{ data.row.session?.detail }}</small></dd></div><div><dt>Token</dt><dd>{{ data.row.token?.label ?? 'None' }}<small>{{ data.row.token?.detail }}</small></dd></div></dl></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Hardware</h2></div><dl v-if="data.worker.hw" class="fact-list"><div><dt>CPU</dt><dd>{{ data.worker.hw.cpu_model }}</dd></div><div><dt>CPU access</dt><dd>{{ data.worker.hw.physical_cores }} usable physical-core slots · {{ data.worker.hw.logical_cores }} accessible threads</dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw.ram_gb }} GB</dd></div><div v-if="data.worker.hw.gpu"><dt>GPU</dt><dd>{{ data.worker.hw.gpu }}</dd></div><div v-if="data.worker.hw.bench?.nps_probe"><dt>Bench</dt><dd>{{ formatNumber(data.worker.hw.bench.nps_probe) }} NPS</dd></div></dl><p v-else class="card-empty">Not reported.</p></section>
-        <section class="panel detail-card"><div class="detail-card__heading"><h2>Dynamic capacity</h2></div><dl class="fact-list"><div><dt>CPU</dt><dd>{{ data.worker.hw ? `${data.worker.hw.physical_cores} engine-thread slots` : 'Reported on first connection' }}</dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw ? `${formatNumber(data.worker.hw.ram_mb ?? data.worker.hw.ram_gb * 1024)} MB` : 'Reported on first connection' }}</dd></div><div><dt>Machine ID</dt><dd>{{ data.worker.machine_id ?? 'Reported on first connection' }}</dd></div></dl><p class="capacity-note">Each live game consumes its configured engine-thread count. Its two engines share that allocation because only the side to move searches. Capacity is released when the engine processes stop.</p></section>
+        <section class="panel detail-card"><div class="detail-card__heading"><h2>Dynamic capacity</h2></div><dl class="fact-list"><div><dt>CPU</dt><dd>{{ data.settings.effective_cores !== null ? `${data.settings.effective_cores} engine-thread slots` : 'Reported on first connection' }}<small v-if="data.worker.core_limit">Limited from {{ data.worker.hw?.physical_cores ?? 'unknown' }} detected slots</small></dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw ? `${formatNumber(data.worker.hw.ram_mb ?? data.worker.hw.ram_gb * 1024)} MB` : 'Reported on first connection' }}</dd></div><div><dt>Machine ID</dt><dd>{{ data.worker.machine_id ?? 'Reported on first connection' }}</dd></div></dl><p class="capacity-note">Each live game consumes its configured engine-thread count. Its two engines share that allocation because only the side to move searches. Capacity is released when the engine processes stop.</p></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Credentials</h2></div><div class="credential-actions"><button v-if="data.worker.status !== 'revoked' && !data.worker.session_id" class="button button--primary button--small" type="button" :disabled="pending === 'token'" @click="generateToken">{{ pending === 'token' ? 'Generating…' : minted ? 'Regenerate token' : 'Generate one-time token' }}</button><button v-if="data.worker_launch_command" class="button button--secondary button--small" type="button" @click="copy(data.worker_launch_command)">{{ copied ? 'Copied' : 'Copy start command' }}</button><p v-if="data.worker.session_id">This machine worker already registered. Its existing session command can be copied without exposing a registration token.</p><p v-else>A registration token is valid for two hours and shown only until this page is left or refreshed.</p></div></section>
       </div>
+
+      <section class="panel assignment-settings">
+        <div class="assignment-settings__heading">
+          <div><h2>Assignment limits</h2><p>Changes apply to future assignments. Active games continue normally.</p></div>
+          <span>{{ data.settings.effective_cores ?? 'Unknown' }} scheduler core slots</span>
+        </div>
+        <form @submit.prevent="saveSettings">
+          <div class="assignment-settings__grid">
+            <fieldset class="core-limit-field">
+              <legend>Core usage</legend>
+              <label><span>Maximum cores</span><input v-model.number="coreLimit" class="input" type="number" min="1" :max="detectedCoreCount ?? undefined" step="1" placeholder="Use detected capacity"></label>
+              <p>Leave blank to use all {{ detectedCoreCount ?? 'detected' }} available physical-core slots.</p>
+            </fieldset>
+            <fieldset class="tournament-limit-field">
+              <legend>Tournament access</legend>
+              <label class="scope-toggle"><input type="checkbox" :checked="tournamentScope === 'all'" @change="toggleTournamentScope"><span><strong>Allow every unfinished tournament</strong><small>New tournaments will also be eligible automatically.</small></span></label>
+              <div class="tournament-picker__heading"><span>Unfinished tournaments</span><div><button type="button" :disabled="tournamentScope === 'all'" @click="selectAllTournaments">Select all</button><button type="button" :disabled="tournamentScope === 'all'" @click="clearTournaments">Clear</button></div></div>
+              <div v-if="data.settings.tournaments.length" class="tournament-picker">
+                <label v-for="tournament in data.settings.tournaments" :key="tournament.id" :class="{ disabled: tournamentScope === 'all' }"><input v-model="selectedTournamentIds" type="checkbox" :value="tournament.id" :disabled="tournamentScope === 'all'"><span><strong>{{ tournament.name }}</strong><small>{{ tournament.status }}</small></span></label>
+              </div>
+              <p v-else class="tournament-picker__empty">There are no unfinished tournaments.</p>
+              <p v-if="tournamentScope === 'selected' && selectedTournamentIds.length === 0" class="tournament-picker__warning">This worker will remain idle because no tournaments are selected.</p>
+            </fieldset>
+          </div>
+          <div class="assignment-settings__actions"><button class="button button--primary" type="submit" :disabled="!!pending || !settingsDirty">{{ pending === 'settings' ? 'Saving…' : 'Save assignment limits' }}</button></div>
+        </form>
+      </section>
 
       <section class="panel danger-zone"><div><h2>Worker access</h2><p>Revocation removes the worker, stops new work, and returns active games to the scheduler.</p></div><div><button class="button button--secondary" type="button" :disabled="!!pending" @click="revoke">{{ pending === 'revoke' ? 'Revoking…' : 'Revoke worker' }}</button><button class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete worker' }}</button></div></section>
     </template>
@@ -161,6 +263,8 @@ onBeforeUnmount(() => source?.close())
 .dependency-missing { background: color-mix(in srgb, var(--color-warning, #b7791f) 9%, transparent); color: var(--color-warning, #8a5a12); font-size: .7rem; margin: 0; padding: .65rem 1rem; }
 .capacity-note { border-top: 1px solid var(--color-border, #d9e0ea); color: var(--color-text-muted, #64748b); font-size: .7rem; line-height: 1.5; margin: 0; padding: .75rem 1rem; }
 .worker-grid { display: grid; gap: .9rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }.detail-card { overflow: hidden; padding: 0; }.detail-card__heading { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .75rem 1rem; }.detail-card h2, .danger-zone h2 { font-size: .88rem; margin: 0; }.rename-form { align-items: end; display: grid; gap: .7rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1rem; }.rename-form label { display: grid; font-size: .75rem; font-weight: 650; gap: .35rem; }.fact-list { display: grid; margin: 0; }.fact-list > div { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: grid; gap: .75rem; grid-template-columns: minmax(5rem, .35fr) minmax(0, 1fr); padding: .65rem 1rem; }.fact-list > div:last-child { border-bottom: 0; }.fact-list dt { color: var(--color-text-muted, #64748b); font-size: .69rem; }.fact-list dd { font-size: .75rem; font-weight: 600; margin: 0; }.fact-list dd small { color: var(--color-text-muted, #64748b); display: block; font-size: .65rem; font-weight: 400; margin-top: .15rem; }.card-empty { color: var(--color-text-muted, #64748b); font-size: .75rem; margin: 0; padding: 1rem; }.credential-actions { align-items: flex-start; display: flex; flex-direction: column; gap: .65rem; padding: 1rem; }.credential-actions p { color: var(--color-text-muted, #64748b); font-size: .72rem; line-height: 1.45; margin: 0; }.danger-zone { align-items: center; border-color: color-mix(in srgb, var(--color-danger, #b42318) 25%, var(--color-border, #d9e0ea)); display: flex; gap: 1rem; justify-content: space-between; padding: 1rem; }.danger-zone p { color: var(--color-text-muted, #64748b); font-size: .72rem; margin: .2rem 0 0; }.danger-zone > div:last-child { display: flex; gap: .5rem; }
+.assignment-settings { overflow: hidden; padding: 0; }.assignment-settings__heading { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; gap: 1rem; justify-content: space-between; padding: .85rem 1rem; }.assignment-settings__heading h2 { font-size: .92rem; margin: 0; }.assignment-settings__heading p { color: var(--color-text-muted, #64748b); font-size: .7rem; margin: .2rem 0 0; }.assignment-settings__heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .68rem; font-weight: 700; padding: .3rem .55rem; white-space: nowrap; }.assignment-settings__grid { display: grid; grid-template-columns: minmax(14rem, .65fr) minmax(18rem, 1.35fr); }.assignment-settings fieldset { border: 0; margin: 0; min-width: 0; padding: 1rem; }.assignment-settings fieldset + fieldset { border-inline-start: 1px solid var(--color-border, #d9e0ea); }.assignment-settings legend { font-size: .76rem; font-weight: 750; padding: 0; }.core-limit-field label { display: grid; font-size: .72rem; font-weight: 650; gap: .35rem; margin-top: .75rem; }.core-limit-field p, .tournament-picker__empty { color: var(--color-text-muted, #64748b); font-size: .68rem; line-height: 1.45; margin: .55rem 0 0; }.scope-toggle, .tournament-picker label { align-items: flex-start; display: flex; gap: .55rem; }.scope-toggle { margin-top: .75rem; }.scope-toggle input, .tournament-picker input { margin-top: .15rem; }.scope-toggle span, .tournament-picker span { display: grid; gap: .12rem; }.scope-toggle strong, .tournament-picker strong { font-size: .73rem; }.scope-toggle small, .tournament-picker small { color: var(--color-text-muted, #64748b); font-size: .65rem; font-weight: 400; text-transform: capitalize; }.tournament-picker__heading { align-items: center; display: flex; justify-content: space-between; margin-top: 1rem; }.tournament-picker__heading > span { color: var(--color-text-muted, #64748b); font-size: .65rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }.tournament-picker__heading > div { display: flex; gap: .6rem; }.tournament-picker__heading button { background: none; border: 0; color: var(--color-accent, #2f78c4); cursor: pointer; font-size: .65rem; padding: 0; }.tournament-picker__heading button:disabled { color: var(--color-text-muted, #64748b); cursor: default; opacity: .6; }.tournament-picker { border: 1px solid var(--color-border, #d9e0ea); border-radius: .4rem; display: grid; margin-top: .45rem; max-height: 15rem; overflow: auto; }.tournament-picker label { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .6rem .7rem; }.tournament-picker label:last-child { border-bottom: 0; }.tournament-picker label.disabled { opacity: .58; }.tournament-picker__warning { color: var(--color-warning, #8a5a12); font-size: .68rem; margin: .55rem 0 0; }.assignment-settings__actions { border-top: 1px solid var(--color-border, #d9e0ea); display: flex; justify-content: flex-end; padding: .75rem 1rem; }
 @media (max-width: 48rem) { .worker-grid { grid-template-columns: 1fr; }.danger-zone { align-items: flex-start; flex-direction: column; }.failure-entry__body dl { grid-template-columns: 1fr; } }
+@media (max-width: 48rem) { .assignment-settings__heading { align-items: flex-start; flex-direction: column; }.assignment-settings__grid { grid-template-columns: 1fr; }.assignment-settings fieldset + fieldset { border-block-start: 1px solid var(--color-border, #d9e0ea); border-inline-start: 0; } }
 @media (max-width: 32rem) { .rename-form { grid-template-columns: 1fr; }.rename-form .button { justify-self: start; } }
 </style>

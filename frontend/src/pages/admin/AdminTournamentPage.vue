@@ -40,6 +40,9 @@ const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => data.value?.games.some(
   (game) => game.status === 'finished' && game.result !== null,
 ) ?? false)
+const activeGames = computed(() => data.value?.games.filter(
+  (game) => ['assigned', 'live'].includes(game.status),
+).length ?? 0)
 const resultsLocked = computed(() => data.value?.commits.some(
   (item) => ['pending', 'claimed', 'applied'].includes(item.status),
 ) ?? false)
@@ -184,6 +187,17 @@ onMounted(load)
         </div>
       </section>
 
+      <section v-if="data.tournament.status === 'running'" class="panel concurrency-panel">
+        <div>
+          <h2>Game concurrency</h2>
+          <p>Set the maximum number of games this tournament may run at once. {{ activeGames }} currently active.</p>
+        </div>
+        <form class="concurrency-form" @submit.prevent="saveConcurrency">
+          <label><span>Maximum concurrent games</span><input v-model.number="concurrency" class="input" type="number" min="1" step="1" required></label>
+          <button class="button button--primary" type="submit" :disabled="!!pending || concurrency === data.tournament.config.concurrency">{{ pending === 'concurrency' ? 'Saving…' : 'Update concurrency' }}</button>
+        </form>
+      </section>
+
       <section v-if="showCommit" class="panel commit-picker">
         <div><h2>Commit results to rating lists</h2><p>Select one or more independent lists.</p></div>
         <label v-for="ratingList in data.rating_lists" :key="ratingList.id"><input v-model="selectedLists" type="checkbox" :value="ratingList.id" :disabled="data.commits.some((item) => item.rating_list_id === ratingList.id && ['pending','claimed','applied'].includes(item.status))"><span>{{ ratingList.name }}</span></label>
@@ -199,13 +213,7 @@ onMounted(load)
       <TournamentConfigForm v-if="data.tournament.status === 'draft' && data.form" :seed="data.form" :pending="pending === 'save'" submit-label="Save draft" @submit="saveDraft" @cancel="router.push('/admin/tournaments')" />
 
       <section v-else class="panel settings-panel">
-        <div class="settings-panel__heading">
-          <div><h2>Settings</h2><p v-if="data.tournament.status === 'running'">Concurrency changes apply to future game assignments.</p></div>
-          <form v-if="data.tournament.status === 'running'" class="concurrency-form" @submit.prevent="saveConcurrency">
-            <label><span>Concurrent games</span><input v-model.number="concurrency" class="input" type="number" min="1" step="1" required></label>
-            <button class="button button--primary button--small" type="submit" :disabled="!!pending || concurrency === data.tournament.config.concurrency">{{ pending === 'concurrency' ? 'Saving…' : 'Save' }}</button>
-          </form>
-        </div>
+        <div class="settings-panel__heading"><div><h2>Settings</h2></div></div>
         <dl v-if="settingsRows.length" class="definition-list">
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
         </dl>
@@ -242,6 +250,9 @@ onMounted(load)
 .control-bar__status { align-items: center; display: flex; gap: .65rem; }
 .control-bar__status > span { color: var(--color-text-muted, #64748b); font-size: .72rem; font-weight: 650; }
 .control-bar__actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }
+.concurrency-panel { align-items: end; display: flex; gap: 1.5rem; justify-content: space-between; padding: 1rem; }
+.concurrency-panel h2 { font-size: .92rem; margin: 0; }
+.concurrency-panel p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
 .commit-panel { align-items: center; display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1rem; }
 .commit-picker { display: flex; flex-wrap: wrap; gap: .75rem 1rem; padding: 1rem; }
 .commit-picker > div { flex: 1 0 100%; }
@@ -257,7 +268,7 @@ onMounted(load)
 .concurrency-form { align-items: end; display: flex; gap: .5rem; }
 .concurrency-form label { display: grid; gap: .25rem; }
 .concurrency-form label span { color: var(--color-text-muted, #64748b); font-size: .68rem; }
-.concurrency-form .input { min-width: 0; width: 7rem; }
+.concurrency-form .input { min-width: 0; width: 9rem; }
 .definition-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); margin: 0; padding: .35rem 1rem 1rem; }
 .definition-list div { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .7rem 0; }
 .definition-list dt { color: var(--color-text-muted, #64748b); font-size: .68rem; }
@@ -267,5 +278,5 @@ onMounted(load)
 .data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .8rem; text-align: left; text-transform: uppercase; }
 .data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .76rem; padding: .7rem .8rem; }
 .game-actions { display: flex; gap: .4rem; }
-@media (max-width: 42rem) { .control-bar, .settings-panel__heading { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } }
+@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } }
 </style>

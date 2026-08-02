@@ -135,6 +135,8 @@ class WorkerRecord:
     protocol_version: int | None
     machine_id: str | None
     hw: HardwareInfo | None
+    core_limit: int | None
+    tournament_scope: str
     last_seen: str | None
 
     @property
@@ -142,7 +144,7 @@ class WorkerRecord:
         if self.hw is None:
             return None
         return WorkerResources(
-            threads=self.hw.physical_cores,
+            threads=min(self.hw.physical_cores, self.core_limit or self.hw.physical_cores),
             hash_mb=self.hw.total_ram_mb,
         )
 
@@ -1751,6 +1753,88 @@ def list_workers(connection: sqlite3.Connection) -> tuple[WorkerRecord, ...]:
     )
 
 
+def list_worker_tournament_ids(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> tuple[int, ...]:
+    return tuple(
+        int(row["tournament_id"])
+        for row in connection.execute(
+            """
+            SELECT tournament_id
+            FROM worker_tournament_permissions
+            WHERE worker_id = ?
+            ORDER BY tournament_id
+            """,
+            (worker_id,),
+        )
+    )
+
+
+def update_worker_assignment_settings(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    *,
+    core_limit: int | None,
+    tournament_scope: str,
+    tournament_ids: Iterable[int],
+) -> None:
+    worker = get_worker(connection, worker_id)
+    if worker is None:
+        raise ValueError("worker not found")
+    if core_limit is not None:
+        if core_limit <= 0:
+            raise ValueError("worker core limit must be positive")
+        if worker.hw is not None and core_limit > worker.hw.physical_cores:
+            raise ValueError(
+                f"worker core limit cannot exceed its {worker.hw.physical_cores}-core capacity"
+            )
+    if tournament_scope not in {"all", "selected"}:
+        raise ValueError("worker tournament scope is invalid")
+
+    selected_ids = tuple(dict.fromkeys(int(value) for value in tournament_ids))
+    if any(tournament_id <= 0 for tournament_id in selected_ids):
+        raise ValueError("worker tournament ids must be positive")
+    if tournament_scope == "all":
+        selected_ids = ()
+    elif selected_ids:
+        placeholders = ", ".join("?" for _ in selected_ids)
+        available_ids = {
+            int(row["id"])
+            for row in connection.execute(
+                f"""
+                SELECT id FROM tournaments
+                WHERE id IN ({placeholders})
+                  AND status NOT IN ('finished', 'aborted')
+                """,
+                selected_ids,
+            )
+        }
+        if available_ids != set(selected_ids):
+            raise ValueError("workers can only be assigned to unfinished tournaments")
+
+    connection.execute(
+        """
+        UPDATE workers
+        SET core_limit = ?, tournament_scope = ?
+        WHERE id = ?
+        """,
+        (core_limit, tournament_scope, worker_id),
+    )
+    connection.execute(
+        "DELETE FROM worker_tournament_permissions WHERE worker_id = ?",
+        (worker_id,),
+    )
+    if selected_ids:
+        connection.executemany(
+            """
+            INSERT INTO worker_tournament_permissions (worker_id, tournament_id)
+            VALUES (?, ?)
+            """,
+            ((worker_id, tournament_id) for tournament_id in selected_ids),
+        )
+
+
 def record_worker_failure(
     connection: sqlite3.Connection,
     *,
@@ -3167,6 +3251,8 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         protocol_version=row["protocol_version"],
         machine_id=row["machine_id"],
         hw=hw,
+        core_limit=row["core_limit"],
+        tournament_scope=row["tournament_scope"],
         last_seen=row["last_seen"],
     )
 
