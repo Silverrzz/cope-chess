@@ -8,8 +8,9 @@ from cope.db.repo import RunnerCommandRecord, get_tournament, list_games, utc_no
 
 
 DEFAULT_ELO = 1500.0
-ELO_K_FACTOR = 32.0
 ELO_SCALE = 400.0
+RATING_CONVERGENCE = 0.000001
+RATING_ITERATIONS = 10000
 
 
 class RatingCommitError(ValueError):
@@ -167,12 +168,9 @@ def recalculate_ratings(
         selected,
     ).fetchall()
 
-    ratings: dict[int, dict[int, float]] = {list_id: {} for list_id in selected}
-    games_played: dict[int, dict[int, int]] = {list_id: {} for list_id in selected}
-    for rating_list_id, (anchor_engine_id, _) in anchors.items():
-        if anchor_engine_id is not None:
-            ratings[rating_list_id][anchor_engine_id] = DEFAULT_ELO
-            games_played[rating_list_id][anchor_engine_id] = 0
+    games_by_list: dict[int, list[tuple[int, object, str]]] = {
+        list_id: [] for list_id in selected
+    }
     games_applied = 0
     applied_at = utc_now()
 
@@ -185,73 +183,54 @@ def recalculate_ratings(
         games = _committable_games(tournament, list_games(connection, tournament_id))
         _validate_games(tournament, games)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at
-        category_ratings = ratings[rating_list_id]
-        category_games = games_played[rating_list_id]
+        games_by_list[rating_list_id].extend(
+            (tournament_id, game, history_at) for game in games
+        )
+        games_applied += len(games)
 
-        for game in games:
-            white_id = game.white_engine_id
-            black_id = game.black_engine_id
-            white_before = category_ratings.setdefault(white_id, DEFAULT_ELO)
-            black_before = category_ratings.setdefault(black_id, DEFAULT_ELO)
-            category_games.setdefault(white_id, 0)
-            category_games.setdefault(black_id, 0)
+    ratings: dict[int, dict[int, float]] = {}
+    games_played: dict[int, dict[int, int]] = {}
+    for rating_list_id in selected:
+        anchor_engine_id, anchor_elo = anchors[rating_list_id]
+        category_games = games_by_list[rating_list_id]
+        category_ratings, category_counts = _calculate_ratings_together(
+            tuple(game for _, game, _ in category_games),
+            anchor_engine_id=anchor_engine_id,
+            anchor_elo=anchor_elo,
+        )
+        ratings[rating_list_id] = category_ratings
+        games_played[rating_list_id] = category_counts
+        for tournament_id, game, history_at in category_games:
+            white_rating = category_ratings[game.white_engine_id]
+            black_rating = category_ratings[game.black_engine_id]
             white_score = _white_score(game.result)
-            black_score = 1.0 - white_score
-            white_expected = expected_score(
-                white_before,
-                black_before,
-            )
-            white_change = ELO_K_FACTOR * (white_score - white_expected)
-            white_after = round(white_before + white_change, 6)
-            black_after = round(black_before - white_change, 6)
-
+            white_expected = expected_score(white_rating, black_rating)
             _record_history(
                 connection,
-                engine_id=white_id,
-                opponent_engine_id=black_id,
+                engine_id=game.white_engine_id,
+                opponent_engine_id=game.black_engine_id,
                 rating_list_id=rating_list_id,
                 tournament_id=tournament_id,
                 game_id=game.id,
-                elo_before=white_before,
-                elo=white_after,
+                elo_before=white_rating,
+                elo=white_rating,
                 score=white_score,
                 expected_score=white_expected,
                 at=history_at,
             )
             _record_history(
                 connection,
-                engine_id=black_id,
-                opponent_engine_id=white_id,
+                engine_id=game.black_engine_id,
+                opponent_engine_id=game.white_engine_id,
                 rating_list_id=rating_list_id,
                 tournament_id=tournament_id,
                 game_id=game.id,
-                elo_before=black_before,
-                elo=black_after,
-                score=black_score,
+                elo_before=black_rating,
+                elo=black_rating,
+                score=1.0 - white_score,
                 expected_score=1.0 - white_expected,
                 at=history_at,
             )
-            category_ratings[white_id] = white_after
-            category_ratings[black_id] = black_after
-            category_games[white_id] += 1
-            category_games[black_id] += 1
-            games_applied += 1
-
-    for rating_list_id, category_ratings in ratings.items():
-        anchor_engine_id, anchor_elo = anchors[rating_list_id]
-        if anchor_engine_id is None:
-            continue
-        offset = anchor_elo - category_ratings[anchor_engine_id]
-        for engine_id in category_ratings:
-            category_ratings[engine_id] = round(category_ratings[engine_id] + offset, 6)
-        connection.execute(
-            """
-            UPDATE rating_list_history
-            SET elo_before = elo_before + ?, elo = elo + ?
-            WHERE rating_list_id = ?
-            """,
-            (offset, offset, rating_list_id),
-        )
 
     engines_updated = 0
     for rating_list_id, category_ratings in ratings.items():
@@ -317,6 +296,70 @@ def _validate_games(tournament, games: tuple) -> None:
             raise RatingCommitError(f"game {game.id} does not have a finished result")
         if game.white_engine_id not in participants or game.black_engine_id not in participants:
             raise RatingCommitError(f"game {game.id} contains a non-participant engine")
+
+
+def _calculate_ratings_together(
+    games: tuple,
+    *,
+    anchor_engine_id: int | None,
+    anchor_elo: float,
+) -> tuple[dict[int, float], dict[int, int]]:
+    engine_ids = {
+        engine_id
+        for game in games
+        for engine_id in (game.white_engine_id, game.black_engine_id)
+    }
+    if not engine_ids:
+        return {}, {}
+    if anchor_engine_id is not None and anchor_engine_id not in engine_ids:
+        raise RatingCommitError("the Elo anchor must be a participant in the rated games")
+
+    ratings = {engine_id: 0.0 for engine_id in engine_ids}
+    scores = {engine_id: 0.0 for engine_id in engine_ids}
+    games_played = {engine_id: 0 for engine_id in engine_ids}
+    for game in games:
+        white_score = _white_score(game.result)
+        scores[game.white_engine_id] += white_score
+        scores[game.black_engine_id] += 1.0 - white_score
+        games_played[game.white_engine_id] += 1
+        games_played[game.black_engine_id] += 1
+
+    fixed_engine_id = anchor_engine_id or min(engine_ids)
+    for _ in range(RATING_ITERATIONS):
+        expected_scores = {engine_id: 0.0 for engine_id in engine_ids}
+        for game in games:
+            white_expected = expected_score(
+                ratings[game.white_engine_id],
+                ratings[game.black_engine_id],
+            )
+            expected_scores[game.white_engine_id] += white_expected
+            expected_scores[game.black_engine_id] += 1.0 - white_expected
+
+        adjustments = {
+            engine_id: ELO_SCALE
+            * (scores[engine_id] - expected_scores[engine_id])
+            / games_played[engine_id]
+            for engine_id in engine_ids
+            if engine_id != fixed_engine_id
+        }
+        if not adjustments or max(abs(value) for value in adjustments.values()) < RATING_CONVERGENCE:
+            break
+        for engine_id, adjustment in adjustments.items():
+            ratings[engine_id] += adjustment
+    else:
+        raise RatingCommitError("the tournament results did not produce stable Elo ratings")
+
+    if anchor_engine_id is None:
+        offset = DEFAULT_ELO - sum(ratings.values()) / len(ratings)
+    else:
+        offset = anchor_elo - ratings[anchor_engine_id]
+    return (
+        {
+            engine_id: round(rating + offset, 6)
+            for engine_id, rating in ratings.items()
+        },
+        games_played,
+    )
 
 
 def _record_history(
