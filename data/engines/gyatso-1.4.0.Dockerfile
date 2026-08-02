@@ -1,8 +1,4 @@
-FROM nimlang/nim:2.2.6-ubuntu-regular AS builder
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates clang git lld \
-    && rm -rf /var/lib/apt/lists/*
+FROM nimlang/nim:2.2.6-alpine-regular AS builder
 
 WORKDIR /build
 COPY . .
@@ -15,14 +11,15 @@ RUN --mount=type=cache,target=/root/.nimble \
         -d:danger \
         -d:simd \
         -d:avx2 \
-        --cc:clang \
+        --cc:gcc \
+        --parallelBuild:0 \
         --mm:arc \
         --define:useMalloc \
         --styleCheck:hint \
         --panics:on \
         --opt:speed \
         --passC:"-O3 -ffast-math -fstrict-aliasing -funroll-loops -fomit-frame-pointer -flto -fno-plt -march=x86-64-v3" \
-        --passL:"-O3 -flto -fuse-ld=lld -static" \
+        --passL:"-O3 -flto -static" \
         -o:/opt/cope/engine \
         Gyatso/src/main.nim \
     && strip /opt/cope/engine

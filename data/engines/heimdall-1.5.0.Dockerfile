@@ -1,8 +1,10 @@
-FROM nimlang/nim:2.2.6-ubuntu-regular AS builder
+FROM nimlang/nim:2.2.6-ubuntu-regular AS nim-toolchain
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates clang git libssl-dev lld make zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM silkeh/clang:18-bookworm AS builder
+
+COPY --from=nim-toolchain /nim/ /nim/
+
+ENV PATH=/nim/bin:$PATH
 
 WORKDIR /build
 COPY . .

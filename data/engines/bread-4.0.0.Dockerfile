@@ -1,8 +1,9 @@
 FROM gcc:14.3.0-bookworm AS builder
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake \
-    && rm -rf /var/lib/apt/lists/*
+ADD --checksum=sha256:0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-linux-x86_64.tar.gz /tmp/cmake.tar.gz
+
+RUN tar -xzf /tmp/cmake.tar.gz --strip-components=1 -C /usr/local \
+    && rm /tmp/cmake.tar.gz
 
 WORKDIR /build
 COPY . .

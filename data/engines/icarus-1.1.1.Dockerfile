@@ -1,14 +1,8 @@
-FROM rust:1.95.0-bookworm AS builder
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.95.0-alpine AS builder
 
 WORKDIR /build
 COPY . .
 ADD --checksum=sha256:ae1c7ec7f901b5e032538a85b4ddf715c5afe6d5a5f787c2f2f2132b5eda1da1 https://github.com/Sp00ph/icarus-nets/releases/download/glide-v22/glide-v22.nnue /build/nets/icarus.nnue
-
-RUN rustup target add x86_64-unknown-linux-musl
 
 ENV CARGO_TERM_COLOR=never \
     ICARUS_RELEASE=1 \
