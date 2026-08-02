@@ -3,7 +3,7 @@ FROM nimlang/nim:2.2.6-ubuntu-regular AS nim-toolchain
 FROM silkeh/clang:18-bookworm AS builder
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates git \
+    && apt-get install --no-install-recommends -y ca-certificates gcc git zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=nim-toolchain /nim/ /nim/
