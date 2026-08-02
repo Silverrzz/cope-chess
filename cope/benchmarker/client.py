@@ -112,6 +112,7 @@ async def _run_connection(
     machine_id = connection_config.machine_id or _detect_machine_id()
     hw = _detect_hardware()
     hardware_key = benchmark_hardware_key(machine_id, hw)
+    supports_updates = os.environ.get("COPE_DISABLE_CLIENT_UPDATES") != "1"
     credential_count = sum(
         value is not None
         for value in (connection_config.token, connection_config.session_id)
@@ -126,7 +127,7 @@ async def _run_connection(
             hardware_key=hardware_key,
             hw=hw,
             app_version=connection_config.app_version,
-            supports_updates=True,
+            supports_updates=supports_updates,
             supports_progress=True,
         )
     else:
@@ -136,7 +137,7 @@ async def _run_connection(
             hardware_key=hardware_key,
             hw=hw,
             app_version=connection_config.app_version,
-            supports_updates=True,
+            supports_updates=supports_updates,
             supports_progress=True,
         )
 

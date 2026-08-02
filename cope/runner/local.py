@@ -1039,12 +1039,37 @@ def _next_playable_game_for_worker(
     return next(
         (
             game
-            for game in games
+            for game in _paired_game_queue(games)
             if game.status == "pending"
             and game.white_engine_id not in excluded_engine_ids
             and game.black_engine_id not in excluded_engine_ids
         ),
         None,
+    )
+
+
+def _paired_game_queue(games: tuple[GameRecord, ...]) -> tuple[GameRecord, ...]:
+    groups: dict[
+        tuple[int, int, int | None, int | None, int, str | None],
+        list[GameRecord],
+    ] = {}
+    for game in games:
+        engine1_id, engine2_id = sorted(
+            (game.white_engine_id, game.black_engine_id)
+        )
+        key = (
+            engine1_id,
+            engine2_id,
+            game.opening_id,
+            game.match_id,
+            (game.game_number - 1) // 2,
+            game.tiebreak_kind,
+        )
+        groups.setdefault(key, []).append(game)
+    return tuple(
+        game
+        for paired_games in groups.values()
+        for game in sorted(paired_games, key=lambda item: (item.game_number, item.id))
     )
 
 

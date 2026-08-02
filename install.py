@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-INSTALLER_VERSION = "6"
+INSTALLER_VERSION = "7"
 
 
 @dataclass(frozen=True)
@@ -309,6 +309,8 @@ def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
             [
                 "docker",
                 "build",
+                "--target",
+                "client-runtime",
                 "--build-arg",
                 f"COPE_BUILD_VERSION={_build_version()}",
                 "--tag",
@@ -355,6 +357,7 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
     current_image_id = _container_image_id(container)
     desired_image_id = _image_id(IMAGE)
     build_version = _build_version()
+    local_build_dirty = _working_tree_dirty()
     if (
         status == "running"
         and current_installer_version == INSTALLER_VERSION
@@ -399,6 +402,8 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         "--env",
         f"COPE_BUILD_VERSION={build_version}",
     ]
+    if local_build_dirty:
+        command.extend(["--env", "COPE_DISABLE_CLIENT_UPDATES=1"])
     if key == "benchmarker":
         command.extend(
             [
@@ -435,8 +440,14 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
             "/bin/sh",
             IMAGE,
             "-c",
-            'binary=cope; if [ -x /update/current/venv/bin/cope ]; then '
-            'binary=/update/current/venv/bin/cope; fi; state="$1"; token="$2"; '
+            'binary=cope; current=/update/current/venv/bin/cope; '
+            'current_version=/update/current/source/cope/BUILD_VERSION; '
+            'if [ "${COPE_DISABLE_CLIENT_UPDATES:-0}" != 1 ] '
+            '&& [ -x "$current" ] && [ -s "$current_version" ] '
+            '&& git -C /update/repository merge-base --is-ancestor '
+            '"$COPE_BUILD_VERSION" "$(cat "$current_version")"; then '
+            'binary="$current"; fi; state="$1"; token="$2"; '
+            'echo "COPE client binary=$binary build=$COPE_BUILD_VERSION updates=${COPE_DISABLE_CLIENT_UPDATES:-0}"; '
             'shift 2; if [ -s "$state" ]; then exec "$binary" "$@"; '
             'else exec "$binary" "$@" --token-file "$token"; fi',
             "cope-bootstrap",
@@ -617,6 +628,10 @@ def _build_version() -> str:
     if len(commit) == 40 and all(character in "0123456789abcdef" for character in commit):
         return commit
     return (ROOT / "cope" / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def _working_tree_dirty() -> bool:
+    return bool(_git_value("status", "--porcelain", "--untracked-files=no"))
 
 
 def _compose_prefix(project: str) -> list[str]:

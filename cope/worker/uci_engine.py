@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -21,6 +22,8 @@ LOG = logging.getLogger("cope.worker.engine")
 _ARTIFACT_FAILURE_COOLDOWN_S = 60.0
 _ARTIFACT_LOCKS: dict[Path, threading.Lock] = {}
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
+_COMMAND_OUTPUT_QUEUE_SIZE = 256
+_DEFAULT_ENGINE_BUILD_JOBS = 4
 
 
 class EnginePreparationError(RuntimeError):
@@ -517,7 +520,11 @@ class UciEngineProcess:
                     "running",
                     f"Building the {self._spec.name} engine image",
                 )
-                (repository / "Dockerfile.cope").write_text(self._spec.dockerfile, encoding="utf-8")
+                build_jobs = _engine_build_jobs()
+                (repository / "Dockerfile.cope").write_text(
+                    _bounded_engine_dockerfile(self._spec.dockerfile, build_jobs),
+                    encoding="utf-8",
+                )
                 # The supplied Dockerfile is built against Cope's complete checkout. An
                 # upstream .dockerignore may belong to a completely different Dockerfile
                 # (and some repositories exclude their entire source tree), so it must not
@@ -531,6 +538,8 @@ class UciEngineProcess:
                     [
                         "docker",
                         "build",
+                        "--build-arg",
+                        f"COPE_BUILD_JOBS={build_jobs}",
                         "--file",
                         "Dockerfile.cope",
                         "--tag",
@@ -853,32 +862,36 @@ def _run_checked(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
+            start_new_session=os.name == "posix",
         )
     except OSError as exc:
         raise RuntimeError(f"failed to run command: {command}") from exc
 
-    lines: queue.Queue[str | None] = queue.Queue()
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=_COMMAND_OUTPUT_QUEUE_SIZE)
 
     def read_output() -> None:
-        if process.stdout is not None:
-            for line in process.stdout:
-                lines.put(line.rstrip("\r\n"))
-        lines.put(None)
+        try:
+            if process.stdout is not None:
+                while True:
+                    chunk = process.stdout.read(4096)
+                    if not chunk:
+                        break
+                    lines.put(chunk)
+        finally:
+            lines.put(None)
 
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     output = ""
-    pending: list[str] = []
-    pending_length = 0
+    pending = ""
     last_emit = time.monotonic()
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     timed_out = False
 
     def emit() -> None:
-        nonlocal pending, pending_length, last_emit
-        detail = "\n".join(pending).strip()
-        pending = []
-        pending_length = 0
+        nonlocal pending, last_emit
+        detail = pending.strip()
+        pending = ""
         last_emit = time.monotonic()
         if not detail:
             return
@@ -894,8 +907,7 @@ def _run_checked(
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
-            process.kill()
-            break
+            _kill_command_process(process)
         try:
             line = lines.get(timeout=0.2)
         except queue.Empty:
@@ -907,9 +919,8 @@ def _run_checked(
         if line is None:
             break
         output = f"{output}\n{line}"[-64_000:]
-        pending.append(line)
-        pending_length += len(line) + 1
-        if pending_length >= 3000 or time.monotonic() - last_emit >= 0.5:
+        pending = f"{pending}\n{line}"[-4000:]
+        if time.monotonic() - last_emit >= 0.5:
             emit()
 
     reader.join(timeout=2)
@@ -921,9 +932,13 @@ def _run_checked(
         if line is None:
             continue
         output = f"{output}\n{line}"[-64_000:]
-        pending.append(line)
+        pending = f"{pending}\n{line}"[-4000:]
     emit()
-    return_code = process.wait()
+    try:
+        return_code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _kill_command_process(process)
+        return_code = process.wait(timeout=10)
     LOG.info(
         "worker command finished cwd=%s exit_code=%s command=%s",
         cwd,
@@ -938,6 +953,42 @@ def _run_checked(
         raise RuntimeError(
             f"command failed with exit code {return_code}: {formatted}\n{output[-8000:].strip()}"
         )
+
+
+def _engine_build_jobs() -> int:
+    raw = os.environ.get("COPE_ENGINE_BUILD_JOBS", str(_DEFAULT_ENGINE_BUILD_JOBS))
+    try:
+        return max(1, min(int(raw), 8))
+    except ValueError:
+        return _DEFAULT_ENGINE_BUILD_JOBS
+
+
+def _bounded_engine_dockerfile(dockerfile: str, build_jobs: int) -> str:
+    lines = dockerfile.splitlines()
+    for index, line in enumerate(lines):
+        if line.upper().startswith("FROM ") and " AS BUILDER" in line.upper():
+            lines[index + 1:index + 1] = [
+                "",
+                f"ARG COPE_BUILD_JOBS={build_jobs}",
+                "ENV CARGO_BUILD_JOBS=${COPE_BUILD_JOBS} \\",
+                "    CMAKE_BUILD_PARALLEL_LEVEL=${COPE_BUILD_JOBS} \\",
+                "    GOFLAGS=-p=${COPE_BUILD_JOBS} \\",
+                "    MAKEFLAGS=-j${COPE_BUILD_JOBS}",
+            ]
+            break
+    return "\n".join(lines).replace("$(nproc)", "${COPE_BUILD_JOBS}") + "\n"
+
+
+def _kill_command_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
 
 
 def _format_command(command) -> str:
