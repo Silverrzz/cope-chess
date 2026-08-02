@@ -132,7 +132,7 @@ async function saveDraft(payload: { name: string; config: TournamentConfig }): P
 }
 
 async function saveConcurrency(): Promise<void> {
-  if (!data.value || data.value.tournament.status !== 'running') return
+  if (!data.value || !['running', 'paused'].includes(data.value.tournament.status)) return
   if (!Number.isInteger(concurrency.value) || concurrency.value < 1) {
     error.value = 'Concurrent games must be a whole number of at least 1.'
     return
@@ -303,7 +303,7 @@ onMounted(load)
         </div>
       </section>
 
-      <section v-if="data.tournament.status === 'running'" class="panel concurrency-panel">
+      <section v-if="['running', 'paused'].includes(data.tournament.status)" class="panel concurrency-panel">
         <div>
           <h2>Game concurrency</h2>
           <p>Set the maximum number of games this tournament may run at once. {{ activeGames }} currently active.</p>
@@ -315,9 +315,10 @@ onMounted(load)
       </section>
 
       <LiveParticipantManager
-        v-if="data.tournament.status === 'running'"
+        v-if="['running', 'paused'].includes(data.tournament.status)"
         :roster="data.roster"
         :config="data.tournament.config"
+        :tournament-status="data.tournament.status"
         :engine-labels="engineLabels"
         :pending="pending"
         @add="addParticipant"

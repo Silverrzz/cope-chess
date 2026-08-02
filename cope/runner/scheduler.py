@@ -133,8 +133,8 @@ def _lock_live_roster_tournament(
     tournament = lock_tournament(connection, tournament_id)
     if tournament is None:
         raise ValueError("tournament does not exist")
-    if tournament.status != "running":
-        raise ValueError("participants can only be changed while the tournament is running")
+    if tournament.status not in {"running", "paused"}:
+        raise ValueError("participants can only be changed while the tournament is running or paused")
     if tournament.config.format not in {
         TournamentFormat.ROUND_ROBIN,
         TournamentFormat.GAUNTLET,

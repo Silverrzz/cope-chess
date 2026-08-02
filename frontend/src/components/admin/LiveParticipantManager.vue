@@ -26,6 +26,7 @@ const props = defineProps<{
   config: TournamentConfig
   engineLabels: Record<number, string>
   pending: string
+  tournamentStatus: string
 }>()
 
 const emit = defineEmits<{
@@ -90,7 +91,8 @@ function scheduleSelected(): void {
         <span class="live-roster__icon"><AppIcon name="engine" :size="18" /></span>
         <div>
           <h2>Live participants</h2>
-          <p v-if="roster.editable">Change the field without stopping the tournament. Schedule updates take effect immediately.</p>
+          <p v-if="roster.editable && tournamentStatus === 'paused'">Adjust the field before resuming. Newly scheduled games remain queued until the tournament resumes.</p>
+          <p v-else-if="roster.editable">Change the field without stopping the tournament. Schedule updates take effect immediately.</p>
           <p v-else>{{ roster.reason }}</p>
         </div>
       </div>

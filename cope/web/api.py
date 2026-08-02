@@ -1124,7 +1124,7 @@ def register_api_routes(app: FastAPI) -> None:
             "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
                 "editable": tournament.status == "draft",
-                "concurrency_editable": tournament.status == "running",
+                "concurrency_editable": tournament.status in {"running", "paused"},
                 "deletable": tournament.status not in {"scheduled", "running"},
                 "can_commit_ratings": (
                     tournament.status in {"finished", "aborted"}
@@ -1149,13 +1149,13 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        if tournament.status not in {"draft", "running"}:
+        if tournament.status not in {"draft", "running", "paused"}:
             raise HTTPException(
                 status_code=409,
-                detail="Only draft tournaments and the concurrency of running tournaments can be edited.",
+                detail="Only draft tournaments and the concurrency of running or paused tournaments can be edited.",
             )
         try:
-            if tournament.status == "running":
+            if tournament.status in {"running", "paused"}:
                 unchanged_config = payload.config.model_dump(
                     mode="json",
                     exclude={"concurrency"},
@@ -1167,7 +1167,7 @@ def register_api_routes(app: FastAPI) -> None:
                 if payload.name != tournament.name or unchanged_config != current_config:
                     raise HTTPException(
                         status_code=409,
-                        detail="Only game concurrency can be changed while a tournament is running.",
+                        detail="Only game concurrency can be changed while a tournament is running or paused.",
                     )
                 set_tournament_concurrency(
                     connection,
@@ -1206,7 +1206,7 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         message = (
             "Tournament concurrency updated."
-            if tournament.status == "running"
+            if tournament.status in {"running", "paused"}
             else "Tournament updated."
         )
         return _json({"id": tournament_id, "message": message})
@@ -2607,9 +2607,9 @@ def _live_tournament_roster_payload(
     tournament,
 ) -> dict[str, Any]:
     supported = tournament.config.format.value in {"round_robin", "gauntlet"}
-    editable = tournament.status == "running" and supported
-    if tournament.status != "running":
-        reason = "Live roster changes are available while the tournament is running."
+    editable = tournament.status in {"running", "paused"} and supported
+    if tournament.status not in {"running", "paused"}:
+        reason = "Live roster changes are available while the tournament is running or paused."
     elif not supported:
         reason = "Swiss pairings and knockout brackets are fixed after the tournament starts."
     else:
