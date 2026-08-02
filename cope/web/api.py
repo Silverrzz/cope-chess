@@ -30,6 +30,7 @@ from cope.db import (
     create_tournament,
     create_worker,
     connect_database,
+    count_games,
     database_stats,
     database_schema_version,
     delete_chat_message,
@@ -71,7 +72,9 @@ from cope.db import (
     list_engine_versions,
     list_git_hosts,
     list_games,
+    list_games_page,
     list_games_by_status,
+    list_active_games,
     list_opening_suites,
     list_rating_lists,
     list_rating_rows,
@@ -122,6 +125,7 @@ from cope.ratings import (
 
 
 LOG = logging.getLogger("cope.web.api")
+OPENING_EDITOR_POSITION_LIMIT = 10_000
 
 
 def _load_engine_dockerfile(selected_path: str) -> str:
@@ -526,14 +530,36 @@ def register_api_routes(app: FastAPI) -> None:
     def public_tournament(
         tournament_id: int,
         request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=100, ge=25, le=200),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
         if tournament.status == "draft":
             raise HTTPException(status_code=404, detail="Tournament not found.")
         engines = web_app._engine_names(connection)
-        games = list_games(connection, tournament.id)
-        viewer_game = web_app._selected_viewer_game(request, games)
+        total_games = count_games(connection, tournament.id)
+        games = list_games_page(
+            connection,
+            tournament.id,
+            page=page,
+            page_size=page_size,
+        )
+        active_games = list_active_games(
+            connection,
+            tournament_id=tournament.id,
+            limit=500,
+        )
+        raw_game_id = request.query_params.get("game_id")
+        if raw_game_id is not None:
+            try:
+                viewer_game = get_game(connection, int(raw_game_id))
+            except ValueError:
+                viewer_game = None
+            if viewer_game is None or viewer_game.tournament_id != tournament.id:
+                raise HTTPException(status_code=404, detail="game not found")
+        else:
+            viewer_game = web_app._tournament_viewer_game(active_games)
         viewer_moves = (
             web_app.list_moves(connection, viewer_game.id) if viewer_game else ()
         )
@@ -566,6 +592,16 @@ def register_api_routes(app: FastAPI) -> None:
                     web_app._game_payload(game, engines, live=True)
                     for game in games
                 ],
+                "active_games": [
+                    web_app._game_payload(game, engines, live=True)
+                    for game in active_games
+                ],
+                "game_pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total_games,
+                    "pages": max(1, (total_games + page_size - 1) // page_size),
+                },
                 "engines": engines,
                 "viewer_game": (
                     web_app._game_payload(viewer_game, engines, live=True)
@@ -577,7 +613,11 @@ def register_api_routes(app: FastAPI) -> None:
                 "engine_data": engine_data,
                 "clocks": clocks,
                 "clock_state": clock_state,
-                "standings": web_app._standings(connection, tournament, games, engines),
+                "standings": web_app._standings(
+                    connection,
+                    tournament,
+                    engines,
+                ),
                 "rating_summaries": (
                     web_app._tournament_rating_summaries(connection, tournament.id)
                     if tournament.status == "finished"
@@ -986,12 +1026,30 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_tournament(
         tournament_id: int,
         request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=100, ge=25, le=200),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
+        total_games = count_games(connection, tournament.id)
         payload: dict[str, Any] = {
             "tournament": tournament,
-            "games": list_games(connection, tournament.id),
+            "games": list_games_page(
+                connection,
+                tournament.id,
+                page=page,
+                page_size=page_size,
+            ),
+            "game_pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total_games,
+                "pages": max(1, (total_games + page_size - 1) // page_size),
+            },
+            "game_summary": web_app._tournament_game_summary(
+                connection,
+                tournament.id,
+            ),
             "engines": web_app._engine_names(connection),
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
@@ -1901,11 +1959,15 @@ def register_api_routes(app: FastAPI) -> None:
         suite = get_opening_suite(connection, suite_id)
         if suite is None:
             raise HTTPException(status_code=404, detail="Opening suite not found.")
-        openings = list_suite_openings(connection, suite_id)
+        position_count = suite_opening_count(connection, suite_id)
+        positions_truncated = position_count > OPENING_EDITOR_POSITION_LIMIT
+        openings = () if positions_truncated else list_suite_openings(connection, suite_id)
         return _json(
             {
                 "suite": suite,
                 "openings": openings,
+                "position_count": position_count,
+                "positions_truncated": positions_truncated,
                 "positions_text": "\n".join(
                     format_opening(
                         OpeningLine(

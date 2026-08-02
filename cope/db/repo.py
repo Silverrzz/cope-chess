@@ -1048,6 +1048,37 @@ def list_games(
     return tuple(_game_from_row(row) for row in rows)
 
 
+def count_games(connection: sqlite3.Connection, tournament_id: int) -> int:
+    row = connection.execute(
+        "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
+        (tournament_id,),
+    ).fetchone()
+    return int(row["count"])
+
+
+def list_games_page(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[GameRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT
+          id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
+          match_id, game_number, tiebreak_kind, opening_id, status, result,
+          termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
+        FROM games
+        WHERE tournament_id = ?
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (tournament_id, page_size, (page - 1) * page_size),
+    )
+    return tuple(_game_from_row(row) for row in rows)
+
+
 def replay_game(
     connection: sqlite3.Connection,
     tournament_id: int,
@@ -2225,6 +2256,82 @@ def append_suite_openings(
 ) -> int:
     if not openings:
         return 0
+    copy_rows = getattr(connection, "copy_rows", None)
+    if copy_rows is None:
+        return _append_suite_openings_in_memory(connection, suite_id, openings)
+    connection.execute("DROP TABLE IF EXISTS cope_pending_openings")
+    connection.execute(
+        """
+        CREATE TEMP TABLE cope_pending_openings (
+          input_order BIGINT NOT NULL,
+          name TEXT NOT NULL,
+          start_fen TEXT NOT NULL,
+          moves TEXT NOT NULL,
+          fen TEXT NOT NULL
+        ) ON COMMIT DROP
+        """
+    )
+    copy_rows(
+        """
+        COPY cope_pending_openings (input_order, name, start_fen, moves, fen)
+        FROM STDIN
+        """,
+        (
+            (
+                input_order,
+                opening.name,
+                opening.start_fen,
+                json.dumps(opening.moves),
+                opening.fen,
+            )
+            for input_order, opening in enumerate(openings, start=1)
+        ),
+    )
+    connection.execute(
+        "CREATE INDEX ON cope_pending_openings (start_fen, moves)"
+    )
+    connection.execute("ANALYZE cope_pending_openings")
+    connection.execute(
+        """
+        DELETE FROM cope_pending_openings pending
+        USING openings existing
+        WHERE existing.suite_id = ?
+          AND existing.start_fen = pending.start_fen
+          AND existing.moves = pending.moves
+        """,
+        (suite_id,),
+    )
+    row = connection.execute(
+        "SELECT COALESCE(MAX(position), 0) AS position FROM openings WHERE suite_id = ?",
+        (suite_id,),
+    ).fetchone()
+    cursor = connection.execute(
+        """
+        WITH unique_pending AS (
+          SELECT DISTINCT ON (start_fen, moves)
+                 input_order, name, start_fen, moves, fen
+          FROM cope_pending_openings
+          ORDER BY start_fen, moves, input_order
+        ), numbered AS (
+          SELECT ? + ROW_NUMBER() OVER (ORDER BY input_order) AS position,
+                 name, start_fen, moves, fen
+          FROM unique_pending
+        )
+        INSERT INTO openings (suite_id, position, name, start_fen, moves, fen)
+        SELECT ?, position, name, start_fen, moves, fen
+        FROM numbered
+        ORDER BY position
+        """,
+        (int(row["position"]), suite_id),
+    )
+    return cursor.rowcount
+
+
+def _append_suite_openings_in_memory(
+    connection: sqlite3.Connection,
+    suite_id: int,
+    openings: list[OpeningLine],
+) -> int:
     rows = connection.execute(
         "SELECT start_fen, moves FROM openings WHERE suite_id = ?",
         (suite_id,),
@@ -2304,6 +2411,40 @@ def suite_opening_count(connection: sqlite3.Connection, suite_id: int) -> int:
         (suite_id,),
     ).fetchone()
     return int(row["count"])
+
+
+def list_suite_opening_ids(
+    connection: sqlite3.Connection,
+    suite_id: int,
+    *,
+    limit: int,
+    start_position: int,
+) -> tuple[int, ...]:
+    if limit <= 0:
+        return ()
+    rows = connection.execute(
+        """
+        SELECT id FROM openings
+        WHERE suite_id = ? AND position >= ?
+        ORDER BY position
+        LIMIT ?
+        """,
+        (suite_id, start_position, limit),
+    ).fetchall()
+    opening_ids = [int(row["id"]) for row in rows]
+    remaining = limit - len(opening_ids)
+    if remaining > 0:
+        rows = connection.execute(
+            """
+            SELECT id FROM openings
+            WHERE suite_id = ? AND position < ?
+            ORDER BY position
+            LIMIT ?
+            """,
+            (suite_id, start_position, remaining),
+        ).fetchall()
+        opening_ids.extend(int(row["id"]) for row in rows)
+    return tuple(opening_ids)
 
 
 def create_chat_message(

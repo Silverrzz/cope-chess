@@ -106,6 +106,7 @@ let viewportBeforeUpdate: ViewportPosition | null = null
 
 const tournamentId = computed(() => String(route.params.id || ''))
 const routeGameId = computed(() => queryValue(route.query.game_id))
+const gamePage = computed(() => Math.max(1, Number(queryValue(route.query.page)) || 1))
 const selectedGameId = computed(() => routeGameId.value || String(data.value?.viewer_game?.id || ''))
 const tournamentComplete = computed(() => ['finished', 'aborted'].includes(data.value?.tournament.status || ''))
 const activeTab = computed<TabKey>(() => {
@@ -114,7 +115,9 @@ const activeTab = computed<TabKey>(() => {
 })
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
-const viewerGames = computed(() => (data.value?.games || []).filter(isActiveGame))
+const viewerGames = computed(() => data.value?.active_games || [])
+const gameTotal = computed(() => data.value?.game_pagination.total || 0)
+const gamePages = computed(() => data.value?.game_pagination.pages || 1)
 const pickerGameId = computed(() => {
   const game = viewerGame.value
   return isActiveGame(game) ? String(game.id) : ''
@@ -179,7 +182,7 @@ const activeSide = computed<'white' | 'black' | null>(() => {
 })
 
 watch(
-  () => `${tournamentId.value}:${routeGameId.value}`,
+  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}`,
   () => {
     if (awaitingNextLiveAfterGameId && routeGameId.value !== awaitingNextLiveAfterGameId) {
       awaitingNextLiveAfterGameId = ''
@@ -298,7 +301,10 @@ async function loadDetail(background: boolean): Promise<void> {
   const requestedGameId = routeGameId.value || selectedGameId.value
   try {
     const response = await api.get<TournamentDetailResponse>(`/api/tournaments/${encodeURIComponent(tournamentId.value)}`, {
-      query: requestedGameId ? { game_id: requestedGameId } : {},
+      query: {
+        game_id: requestedGameId || undefined,
+        page: gamePage.value,
+      },
       signal: controller.signal,
     })
     applyDetail(response)
@@ -484,7 +490,10 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   if (!data.value) return
   loadError.value = ''
   if (snapshot.tournament) data.value.tournament = { ...data.value.tournament, ...snapshot.tournament }
-  if (snapshot.games) data.value.games = mergeGames(data.value.games, snapshot.games)
+  if (snapshot.active_games) {
+    data.value.active_games = snapshot.active_games
+    data.value.games = updateGames(data.value.games, snapshot.active_games)
+  }
 
   const displayedGame = data.value.viewer_game
   const displayedGameUpdate = displayedGame
@@ -537,7 +546,7 @@ function followNextLiveGame(preferredGame?: GameRecord | null): void {
   const nextLiveGame = isActiveGame(preferredGame)
     && !sameId(preferredGame.id, awaitingNextLiveAfterGameId)
     ? preferredGame
-    : data.value.games.find(
+    : data.value.active_games.find(
       (game) => isActiveGame(game) && !sameId(game.id, awaitingNextLiveAfterGameId),
     )
   if (nextLiveGame) void followLiveGame(nextLiveGame.id)
@@ -660,12 +669,16 @@ function gameLabel(game: GameRecord): string {
   const white = engineName(data.value?.engines, game.white_engine_id, game.white_name)
   const black = engineName(data.value?.engines, game.black_engine_id, game.black_name)
   const outcome = game.result ? `, ${game.result}` : `, ${statusLabel(game.status)}`
-  const index = data.value?.games.findIndex((candidate) => sameId(candidate.id, game.id)) ?? -1
-  return `Game ${index + 1}, ${white} vs ${black}${outcome}`
+  return `Game ${game.id}, ${white} vs ${black}${outcome}`
 }
 
 function tabTarget(tab: TabKey): RouteLocationRaw {
   return { query: { ...route.query, tab } }
+}
+
+function setGamePage(page: number): void {
+  if (page < 1 || page > gamePages.value || page === gamePage.value) return
+  void router.push({ query: { ...route.query, page: String(page), tab: 'games' } })
 }
 
 function appendChatMessage(message: ChatMessage): void {
@@ -697,9 +710,9 @@ function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
   })
 }
 
-function mergeGames(existing: GameRecord[], incoming: GameRecord[]): GameRecord[] {
-  const byId = new Map(existing.map((game) => [String(game.id), game]))
-  return incoming.map((game) => ({ ...byId.get(String(game.id)), ...game } as GameRecord))
+function updateGames(existing: GameRecord[], incoming: GameRecord[]): GameRecord[] {
+  const byId = new Map(incoming.map((game) => [String(game.id), game]))
+  return existing.map((game) => ({ ...game, ...byId.get(String(game.id)) } as GameRecord))
 }
 
 function parseEnvelope<T>(event: Event): StreamEnvelope<T> | null {
@@ -833,7 +846,7 @@ function queryValue(value: unknown): string {
       <section class="tournament-data">
         <nav class="data-tabs" aria-label="Tournament information">
           <RouterLink :to="tabTarget('standings')" :aria-current="activeTab === 'standings' ? 'page' : undefined">Standings <span>{{ data.standings?.length || 0 }}</span></RouterLink>
-          <RouterLink :to="tabTarget('games')" :aria-current="activeTab === 'games' ? 'page' : undefined">Games <span>{{ data.games.length }}</span></RouterLink>
+          <RouterLink :to="tabTarget('games')" :aria-current="activeTab === 'games' ? 'page' : undefined">Games <span>{{ gameTotal }}</span></RouterLink>
           <RouterLink :to="tabTarget('settings')" :aria-current="activeTab === 'settings' ? 'page' : undefined">Settings</RouterLink>
         </nav>
 
@@ -862,6 +875,11 @@ function queryValue(value: unknown): string {
           <header><div><h2 id="games-title">All games</h2></div></header>
           <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" caption="Tournament games" />
           <ContentState v-else kind="empty" compact title="No games scheduled" />
+          <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
+            <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
+            <span>Page {{ gamePage.toLocaleString() }} of {{ gamePages.toLocaleString() }}</span>
+            <button type="button" :disabled="gamePage >= gamePages" @click="setGamePage(gamePage + 1)">Next</button>
+          </nav>
         </section>
 
         <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
@@ -1186,6 +1204,10 @@ function queryValue(value: unknown): string {
 .data-panel tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
 .data-panel td a { color: inherit; font-weight: 700; text-decoration: none; }
 .data-panel td a:hover { color: var(--color-accent, #2f78c4); text-decoration: underline; text-underline-offset: 0.16em; }
+.pagination { align-items: center; border-top: 1px solid var(--color-border, #d5dbe1); display: flex; gap: 0.75rem; justify-content: flex-end; padding: 0.75rem 0.85rem; }
+.pagination button { border: 1px solid var(--color-border, #d5dbe1); border-radius: 0.35rem; background: var(--color-surface, #fff); color: inherit; cursor: pointer; font: inherit; padding: 0.4rem 0.65rem; }
+.pagination button:disabled { cursor: default; opacity: 0.45; }
+.pagination span { color: var(--color-text-muted, #607080); font-size: 0.72rem; }
 .rank-cell { width: 4rem; color: var(--color-text-muted, #607080); font-variant-numeric: tabular-nums; }
 .number-cell { width: 6rem; font-weight: 730; font-variant-numeric: tabular-nums; }
 .action-cell { width: 4rem; text-align: end !important; }

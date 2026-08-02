@@ -14,6 +14,8 @@ import type { Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/com
 
 interface Commit { rating_list_id: number; status: string; requested_at: string; applied_at?: string | null; error?: string | null }
 interface RatingList { id: number; name: string }
+interface GamePagination { page: number; page_size: number; total: number; pages: number }
+interface GameSummary { total: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
 interface Response {
   tournament: Tournament
   games: Game[]
@@ -22,6 +24,8 @@ interface Response {
   commits: Commit[]
   rating_lists: RatingList[]
   actions: Record<string, string>
+  game_pagination: GamePagination
+  game_summary: GameSummary
   form?: FormSeed
 }
 
@@ -36,13 +40,12 @@ const pending = ref('')
 const concurrency = ref(1)
 const showCommit = ref(false)
 const selectedLists = ref<number[]>([])
+const gamePage = ref(1)
 const id = computed(() => Number(route.params.id))
-const hasCommittableGames = computed(() => data.value?.games.some(
-  (game) => game.status === 'finished' && game.result !== null,
-) ?? false)
-const activeGames = computed(() => data.value?.games.filter(
-  (game) => ['assigned', 'live'].includes(game.status),
-).length ?? 0)
+const hasCommittableGames = computed(() => (data.value?.game_summary.finished || 0) > 0)
+const activeGames = computed(() => (
+  (data.value?.game_summary.assigned || 0) + (data.value?.game_summary.live || 0)
+))
 const resultsLocked = computed(() => data.value?.commits.some(
   (item) => ['pending', 'claimed', 'applied'].includes(item.status),
 ) ?? false)
@@ -64,11 +67,20 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    data.value = await api.get<Response>(`/api/admin/tournaments/${id.value}`)
+    data.value = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
+      query: { page: gamePage.value },
+    })
     concurrency.value = data.value.tournament.config.concurrency
   }
   catch (cause) { error.value = errorText(cause) }
   finally { loading.value = false }
+}
+
+async function setGamePage(page: number): Promise<void> {
+  const pages = data.value?.game_pagination.pages || 1
+  if (page < 1 || page > pages || page === gamePage.value) return
+  gamePage.value = page
+  await load()
 }
 
 async function changeStatus(action: string): Promise<void> {
@@ -229,7 +241,7 @@ onMounted(load)
       </section>
 
       <section class="panel games-panel">
-        <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.games.length }} generated game{{ data.games.length === 1 ? '' : 's' }}</p></div></div>
+        <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }}</p></div></div>
         <div v-if="data.games.length" class="game-table-wrap">
           <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
             <tr v-for="game in data.games" :key="game.id">
@@ -238,6 +250,11 @@ onMounted(load)
           </tbody></table>
         </div>
         <AdminEmptyState v-else title="No games generated" />
+        <nav v-if="data.game_pagination.pages > 1" class="pagination" aria-label="Game pages">
+          <button class="button button--secondary button--small" type="button" :disabled="gamePage <= 1 || loading" @click="setGamePage(gamePage - 1)">Previous</button>
+          <span>Page {{ gamePage.toLocaleString() }} of {{ data.game_pagination.pages.toLocaleString() }}</span>
+          <button class="button button--secondary button--small" type="button" :disabled="gamePage >= data.game_pagination.pages || loading" @click="setGamePage(gamePage + 1)">Next</button>
+        </nav>
       </section>
     </template>
     <InlineFeedback v-else :message="error" />
@@ -278,5 +295,7 @@ onMounted(load)
 .data-table th { color: var(--color-text-muted, #64748b); font-size: .65rem; letter-spacing: .04em; padding: .65rem .8rem; text-align: left; text-transform: uppercase; }
 .data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .76rem; padding: .7rem .8rem; }
 .game-actions { display: flex; gap: .4rem; }
+.pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .75rem 1rem; }
+.pagination span { color: var(--color-text-muted, #64748b); font-size: .72rem; }
 @media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } }
 </style>

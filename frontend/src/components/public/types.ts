@@ -101,6 +101,9 @@ export interface StandingRecord {
   name: string
   points: number
   played: number
+  wins: number
+  draws: number
+  losses: number
   buchholz?: number
   bye_points?: number
   stage?: number
@@ -172,6 +175,8 @@ export interface HardwareRecord {
 export interface TournamentDetailResponse {
   tournament: TournamentRecord
   games: GameRecord[]
+  active_games: GameRecord[]
+  game_pagination: GamePagination
   engines: Record<string, string>
   viewer_game: GameRecord | null
   viewer_moves: MoveRecord[]
@@ -197,7 +202,14 @@ export interface LiveSnapshot {
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
   standings?: StandingRecord[]
-  games?: GameRecord[]
+  active_games?: GameRecord[]
+}
+
+export interface GamePagination {
+  page: number
+  page_size: number
+  total: number
+  pages: number
 }
 
 export interface StreamEnvelope<T = Record<string, unknown>> {

@@ -9,7 +9,7 @@ import OpeningImportEditor from '@/components/admin/OpeningImportEditor.vue'
 import { errorText } from '@/components/admin/format'
 import type { OpeningSuite } from '@/components/admin/types'
 
-interface Response { suite?: OpeningSuite | null; positions_text?: string }
+interface Response { suite?: OpeningSuite | null; positions_text?: string; position_count?: number; positions_truncated?: boolean }
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
@@ -19,11 +19,16 @@ const pending = ref(false)
 const error = ref('')
 const form = reactive({ name: '', description: '', positions: '', mode: 'replace' as 'replace' | 'append', source: 'files' as 'files' | 'manual', files: [] as File[] })
 const originalPositions = ref('')
+const positionCount = ref(0)
+const positionsTruncated = ref(false)
 
 async function load(): Promise<void> {
   try {
     const response = await api.get<Response>(id.value ? `/api/admin/openings/${id.value}` : '/api/admin/openings/form')
     if (response.suite) { form.name = response.suite.name; form.description = response.suite.description ?? ''; form.source = 'manual' }
+    positionCount.value = response.position_count ?? 0
+    positionsTruncated.value = Boolean(response.positions_truncated)
+    if (positionsTruncated.value) { form.mode = 'append'; form.source = 'files' }
     form.positions = response.positions_text ?? ''
     originalPositions.value = form.positions
   } catch (cause) { error.value = errorText(cause) }
@@ -41,14 +46,14 @@ async function save(): Promise<void> {
   const hasPositions = form.source === 'files' ? form.files.length > 0 : Boolean(form.positions.trim())
   if (!form.name.trim()) { error.value = 'Enter a suite name.'; return }
   if (!id.value && !hasPositions) { error.value = 'Add at least one PGN, EPD, FEN, or manual position.'; return }
-  if (id.value && form.mode === 'append' && !hasPositions) { error.value = 'Add at least one position to append.'; return }
+  if (id.value && form.mode === 'append' && !hasPositions && !positionsTruncated.value) { error.value = 'Add at least one position to append.'; return }
   if (id.value && form.mode === 'replace' && !hasPositions) { error.value = 'Add at least one position for the replacement set.'; return }
   pending.value = true
   const body = new FormData()
   body.set('name', form.name.trim())
   body.set('description', form.description.trim())
   body.set('positions', form.source === 'manual' ? form.positions : '')
-  body.set('mode', form.mode)
+  body.set('mode', id.value && positionsTruncated.value && form.mode === 'append' && !hasPositions ? 'keep' : form.mode)
   if (form.source === 'files') form.files.forEach((file) => body.append('files', file, file.name))
   try {
     const response = id.value ? await api.put<{ id: number; message: string }>(`/api/admin/openings/${id.value}`, { body }) : await api.post<{ id: number; message: string }>('/api/admin/openings', { body })
@@ -75,7 +80,7 @@ onMounted(load)
         <div class="form-grid"><label class="field"><span>Name</span><input v-model="form.name" class="input" required maxlength="100"></label><label class="field"><span>Description <small>optional</small></span><input v-model="form.description" class="input" maxlength="240"></label></div>
       </section>
       <section class="panel form-card">
-        <div class="form-card__heading"><h2>Positions</h2></div>
+        <div class="form-card__heading"><h2>Positions</h2><p v-if="positionsTruncated">This suite contains {{ positionCount.toLocaleString() }} positions. Existing positions are not loaded into the browser; append a file, or choose replace to upload a complete replacement.</p></div>
         <OpeningImportEditor v-model="form.positions" v-model:files="form.files" v-model:source="form.source" :mode="form.mode" :editing="!!id" @update:mode="setMode" />
       </section>
       <div class="form-actions"><RouterLink class="button button--ghost" to="/admin/openings">Cancel</RouterLink><button class="button button--primary" type="submit" :disabled="pending">{{ pending ? 'Importing…' : id ? 'Save suite' : 'Create suite' }}</button></div>

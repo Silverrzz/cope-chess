@@ -93,13 +93,29 @@ def get_opening_position(
     )
 
 
-def list_active_games(connection: sqlite3.Connection) -> tuple[GameRecord, ...]:
+def list_active_games(
+    connection: sqlite3.Connection,
+    *,
+    tournament_id: int | None = None,
+    limit: int | None = None,
+) -> tuple[GameRecord, ...]:
+    conditions = "status IN ('live', 'assigned')"
+    parameters: list[int] = []
+    if tournament_id is not None:
+        conditions += " AND tournament_id = ?"
+        parameters.append(tournament_id)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = " LIMIT ?"
+        parameters.append(limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT * FROM games
-        WHERE status IN ('live', 'assigned')
+        WHERE {conditions}
         ORDER BY CASE status WHEN 'live' THEN 0 ELSE 1 END, id DESC
-        """
+        {limit_sql}
+        """,
+        tuple(parameters),
     )
     return tuple(_game_from_row(row) for row in rows)
 

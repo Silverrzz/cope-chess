@@ -1,5 +1,5 @@
 import { engineName, statusLabel } from './format'
-import type { GameRecord, Identifier, TournamentDetailResponse } from './types'
+import type { TournamentDetailResponse } from './types'
 
 interface MarkdownColumn<T> {
   heading: string
@@ -36,26 +36,6 @@ function markdownTable<T>(columns: MarkdownColumn<T>[], rows: T[]): string[] {
   ]
 }
 
-function sameId(left: Identifier, right: Identifier): boolean {
-  return String(left) === String(right)
-}
-
-function record(games: GameRecord[], engineId: Identifier): string {
-  let wins = 0
-  let draws = 0
-  let losses = 0
-  for (const game of games) {
-    if (!game.result || (!sameId(game.white_engine_id, engineId) && !sameId(game.black_engine_id, engineId))) continue
-    if (game.result === '1/2-1/2') draws += 1
-    else if (
-      (game.result === '1-0' && sameId(game.white_engine_id, engineId))
-      || (game.result === '0-1' && sameId(game.black_engine_id, engineId))
-    ) wins += 1
-    else losses += 1
-  }
-  return `${wins}-${draws}-${losses}`
-}
-
 function roundedElo(value: number | null | undefined): string {
   return value === null || value === undefined ? '-' : Math.round(value).toLocaleString('en-US')
 }
@@ -82,11 +62,10 @@ function setting(data: TournamentDetailResponse, label: string): string {
 
 export function buildTournamentSummaryMarkdown(data: TournamentDetailResponse, origin: string): string {
   const format = tournamentFormat(data)
-  const completedGames = data.games.filter((game) => Boolean(game.result))
-  const whiteWins = completedGames.filter((game) => game.result === '1-0').length
-  const draws = completedGames.filter((game) => game.result === '1/2-1/2').length
-  const blackWins = completedGames.filter((game) => game.result === '0-1').length
   const standings = data.standings || []
+  const completedGames = standings.reduce((total, row) => total + row.played, 0) / 2
+  const decisiveGames = standings.reduce((total, row) => total + row.wins, 0)
+  const draws = standings.reduce((total, row) => total + row.draws, 0) / 2
   const lines = [
     `# ${data.tournament.name}`,
     '',
@@ -95,8 +74,8 @@ export function buildTournamentSummaryMarkdown(data: TournamentDetailResponse, o
   const timeControl = setting(data, 'Time control')
   if (timeControl) lines.push(`- **Time control:** ${timeControl}`)
   lines.push(
-    `- **Games:** ${completedGames.length}`,
-    `- **Results:** ${whiteWins} White wins, ${draws} draws, ${blackWins} Black wins`,
+    `- **Games:** ${completedGames}`,
+    `- **Results:** ${decisiveGames} decisive, ${draws} draws`,
   )
   if (data.tournament.finished_at) lines.push(`- **Finished:** ${data.tournament.finished_at.slice(0, 10)}`)
 
@@ -106,7 +85,7 @@ export function buildTournamentSummaryMarkdown(data: TournamentDetailResponse, o
     { heading: 'Engine', value: (row) => row.name },
     { heading: 'Score', align: 'right', value: (row) => String(row.points) },
     { heading: 'Played', align: 'right', value: (row) => String(row.played) },
-    { heading: 'W-D-L', align: 'center', value: (row) => record(data.games, row.engine_id) },
+    { heading: 'W-D-L', align: 'center', value: (row) => `${row.wins}-${row.draws}-${row.losses}` },
   ]
   if (format === 'swiss') {
     standingColumns.push({ heading: 'Buchholz', align: 'right', value: (row) => String(row.buchholz ?? 0) })

@@ -14,14 +14,13 @@ from cope.core.models import (
 from cope.chat import announce_tournament_started
 from cope.db import (
     GameRecord,
-    OpeningRecord,
     TournamentMatchRecord,
     TournamentRecord,
     create_game,
     create_tournament_match,
     finish_tournament_match,
     list_games,
-    list_suite_openings,
+    list_suite_opening_ids,
     list_tournament_matches,
     list_tournaments,
     set_tournament_status,
@@ -125,11 +124,10 @@ def generate_round_robin_games(
 
     participants = tournament.config.participants
     created_games = 0
-    opening_offset = len(list_games(connection, tournament.id)) // 2
-    opening_ids = _opening_ids(connection, tournament)
     round_pairings = _round_robin_pairings(participants)
     rounds_per_cycle = len(round_pairings)
     pairings_per_cycle = sum(len(pairings) for pairings in round_pairings)
+    opening_ids = _opening_ids(connection, tournament, options.cycles * pairings_per_cycle)
     round_pairing_offsets: list[int] = []
     next_pairing_offset = 0
     for pairings in round_pairings:
@@ -153,8 +151,7 @@ def generate_round_robin_games(
                         black_engine_id=black_engine_id,
                         game_number=cycle_index * 2 + leg_index + 1,
                         opening_offset=(
-                            opening_offset
-                            + cycle_index * pairings_per_cycle
+                            cycle_index * pairings_per_cycle
                             + round_pairing_offsets[base_round - 1]
                             + pair_index - 1
                         ),
@@ -175,8 +172,7 @@ def generate_gauntlet_games(
     hero = options.hero_engine_id
     opponents = [engine_id for engine_id in tournament.config.participants if engine_id != hero]
     created_games = 0
-    opening_offset = len(list_games(connection, tournament.id)) // 2
-    opening_ids = _opening_ids(connection, tournament)
+    opening_ids = _opening_ids(connection, tournament, len(opponents))
     for game_number in range(1, 3):
         for opponent_index, opponent in enumerate(opponents, start=1):
             round_number = (game_number - 1) * len(opponents) + opponent_index
@@ -190,7 +186,7 @@ def generate_gauntlet_games(
                 white_engine_id=white,
                 black_engine_id=black,
                 game_number=game_number,
-                opening_offset=opening_offset + opponent_index - 1,
+                opening_offset=opponent_index - 1,
                 opening_ids=opening_ids,
             )
             created_games += 1
@@ -236,8 +232,7 @@ def generate_swiss_round(
         pairings = _swiss_pairings(ranked, points, opponents)
 
     created_games = 0
-    opening_offset = len(games) // 2
-    opening_ids = _opening_ids(connection, tournament)
+    opening_ids = _opening_ids(connection, tournament, len(pairings))
     match_index = 1
     for first, second in pairings:
         white, black = _swiss_colours(first, second, games)
@@ -262,7 +257,7 @@ def generate_swiss_round(
                 black_engine_id=game_black,
                 match_id=match_id,
                 game_number=game_number,
-                opening_offset=opening_offset + match_index - 1,
+                opening_offset=match_index - 1,
                 opening_ids=opening_ids,
             )
             created_games += 1
@@ -416,8 +411,7 @@ def _create_knockout_round(
         raise ValueError("knockout tournament has invalid format options")
     created_games = 0
     pair_index = 1
-    opening_offset = len(list_games(connection, tournament.id)) // 2
-    opening_ids = _opening_ids(connection, tournament)
+    opening_ids = _opening_ids(connection, tournament, len(pairings))
     for match_index, (first, second) in enumerate(pairings, start=1):
         entrant = first if first is not None else second
         if entrant is None:
@@ -447,7 +441,7 @@ def _create_knockout_round(
                 black_engine_id=black,
                 match_id=match_id,
                 game_number=game_number,
-                opening_offset=opening_offset + match_index - 1,
+                opening_offset=match_index - 1,
                 opening_ids=opening_ids,
             )
             pair_index += 1
@@ -503,8 +497,7 @@ def _append_knockout_games(
     tournament_games = list_games(connection, tournament.id)
     round_games = [game for game in tournament_games if game.round == match.round]
     next_pair_index = max((game.pair_index for game in round_games), default=0) + 1
-    opening_offset = len(tournament_games) // 2
-    opening_ids = _opening_ids(connection, tournament)
+    opening_ids = _opening_ids(connection, tournament, (count + 1) // 2)
     for offset in range(count):
         game_number = next_game_number + offset
         white, black = (
@@ -522,7 +515,7 @@ def _append_knockout_games(
             match_id=match.id,
             game_number=game_number,
             tiebreak_kind=tiebreak_kind,
-            opening_offset=opening_offset + (offset // 2),
+            opening_offset=offset // 2,
             opening_ids=opening_ids,
         )
     return count
@@ -542,10 +535,10 @@ def _create_scheduled_game(
     opening_offset: int | None = None,
     opening_ids: tuple[int, ...] | None = None,
 ) -> int:
-    if opening_ids is None:
-        opening_ids = _opening_ids(connection, tournament)
     if opening_offset is None:
-        opening_offset = len(list_games(connection, tournament.id))
+        opening_offset = 0
+    if opening_ids is None:
+        opening_ids = _opening_ids(connection, tournament, opening_offset + 1)
     opening_id = opening_ids[opening_offset % len(opening_ids)] if opening_ids else None
     return create_game(
         connection,
@@ -738,14 +731,24 @@ def _round_robin_pairings(participants: list[int]) -> tuple[tuple[tuple[int, int
 def _opening_ids(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
+    limit: int,
 ) -> tuple[int, ...]:
     suite_id = tournament.config.opening_suite_id
-    if suite_id is None:
+    if suite_id is None or limit <= 0:
         return ()
-    openings: tuple[OpeningRecord, ...] = list_suite_openings(connection, suite_id)
-    opening_ids = [opening.id for opening in openings]
-    random.shuffle(opening_ids)
-    return tuple(opening_ids)
+    row = connection.execute(
+        "SELECT COALESCE(MAX(position), 0) AS maximum FROM openings WHERE suite_id = ?",
+        (suite_id,),
+    ).fetchone()
+    maximum = int(row["maximum"])
+    if maximum <= 0:
+        return ()
+    return list_suite_opening_ids(
+        connection,
+        suite_id,
+        limit=min(limit, maximum),
+        start_position=random.randint(1, maximum),
+    )
 
 
 def _refresh_tournament(

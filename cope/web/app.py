@@ -44,12 +44,14 @@ from cope.db import (
     database_schema_version,
     get_chat_settings,
     get_chat_message,
+    get_game,
     get_opening_position,
     get_opening_suite,
     get_tournament,
     get_worker,
     get_worker_activity,
     get_service_endpoint,
+    list_active_games,
     list_benchmarkers,
     list_engine_records,
     list_engines,
@@ -1019,7 +1021,7 @@ def _tournament_snapshot(app: FastAPI, tournament_id: int) -> dict[str, Any]:
             tournament_id,
             {
                 game["id"]
-                for game in payload["games"]
+                for game in payload["active_games"]
                 if game["status"] in {"assigned", "live"}
             },
         )
@@ -1915,8 +1917,12 @@ def _home_tournament_cards(
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
             continue
-        tournament_games = list_games(connection, tournament.id)
-        game = next((game for game in tournament_games if game.status == "live"), None)
+        active_games = list_active_games(
+            connection,
+            tournament_id=tournament.id,
+            limit=1,
+        )
+        game = next((game for game in active_games if game.status == "live"), None)
         moves = list_moves(connection, game.id) if game is not None else ()
         cards.append(
             {
@@ -2025,13 +2031,16 @@ def _tournament_live_payload(
     selected_game_id: int | None = None,
 ) -> dict[str, Any]:
     engines = _engine_names(connection)
-    games = list_games(connection, tournament.id)
-    viewer_game = next(
-        (game for game in games if game.id == selected_game_id),
-        None,
-    ) if selected_game_id is not None else None
+    active_games = list_active_games(
+        connection,
+        tournament_id=tournament.id,
+        limit=500,
+    )
+    viewer_game = get_game(connection, selected_game_id) if selected_game_id is not None else None
+    if viewer_game is not None and viewer_game.tournament_id != tournament.id:
+        viewer_game = None
     if viewer_game is None:
-        viewer_game = _tournament_viewer_game(games)
+        viewer_game = _tournament_viewer_game(active_games)
     viewer_moves = list_moves(connection, viewer_game.id) if viewer_game else ()
     opening = _opening_view(connection, viewer_game.opening_id) if viewer_game else None
     engine_data = _engine_data(viewer_game, viewer_moves)
@@ -2055,8 +2064,8 @@ def _tournament_live_payload(
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
-        "standings": _standings(connection, tournament, games, engines),
-        "games": [_game_payload(game, engines) for game in games],
+        "standings": _standings(connection, tournament, engines),
+        "active_games": [_game_payload(game, engines, live=True) for game in active_games],
     }
 
 
@@ -2234,25 +2243,49 @@ def _tournament_index_stats(tournaments: list[dict[str, Any]]) -> dict[str, int]
 def _standings(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
-    games: tuple[GameRecord, ...],
     engines: dict[int, str],
 ) -> list[dict[str, Any]]:
+    games = tuple(
+        (
+            int(row["white_engine_id"]),
+            int(row["black_engine_id"]),
+            row["result"],
+        )
+        for row in connection.execute(
+            """
+            SELECT white_engine_id, black_engine_id, result
+            FROM games
+            WHERE tournament_id = ? AND result IS NOT NULL
+            """,
+            (tournament.id,),
+        )
+    )
     points: dict[int, float] = {engine_id: 0.0 for engine_id in tournament.config.participants}
     played: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
-    for game in games:
-        if game.result is None:
-            continue
-        for engine_id in (game.white_engine_id, game.black_engine_id):
+    wins: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
+    draws: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
+    losses: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
+    for white_engine_id, black_engine_id, result in games:
+        for engine_id in (white_engine_id, black_engine_id):
             points.setdefault(engine_id, 0.0)
             played.setdefault(engine_id, 0)
+            wins.setdefault(engine_id, 0)
+            draws.setdefault(engine_id, 0)
+            losses.setdefault(engine_id, 0)
             played[engine_id] += 1
-        if game.result == "1-0":
-            points[game.white_engine_id] += 1
-        elif game.result == "0-1":
-            points[game.black_engine_id] += 1
+        if result == "1-0":
+            points[white_engine_id] += 1
+            wins[white_engine_id] += 1
+            losses[black_engine_id] += 1
+        elif result == "0-1":
+            points[black_engine_id] += 1
+            wins[black_engine_id] += 1
+            losses[white_engine_id] += 1
         else:
-            points[game.white_engine_id] += 0.5
-            points[game.black_engine_id] += 0.5
+            points[white_engine_id] += 0.5
+            points[black_engine_id] += 0.5
+            draws[white_engine_id] += 1
+            draws[black_engine_id] += 1
 
     matches = list_tournament_matches(connection, tournament.id)
     bye_points: dict[int, float] = {}
@@ -2264,11 +2297,9 @@ def _standings(
 
     buchholz = {engine_id: 0.0 for engine_id in points}
     if tournament.config.format == TournamentFormat.SWISS:
-        for game in games:
-            if game.result is None:
-                continue
-            buchholz[game.white_engine_id] += points[game.black_engine_id]
-            buchholz[game.black_engine_id] += points[game.white_engine_id]
+        for white_engine_id, black_engine_id, _result in games:
+            buchholz[white_engine_id] += points[black_engine_id]
+            buchholz[black_engine_id] += points[white_engine_id]
 
     stage = {engine_id: 0 for engine_id in points}
     if tournament.config.format == TournamentFormat.KNOCKOUT:
@@ -2289,6 +2320,9 @@ def _standings(
             "name": engines.get(engine_id, f"Engine {engine_id}"),
             "points": points[engine_id],
             "played": played[engine_id],
+            "wins": wins[engine_id],
+            "draws": draws[engine_id],
+            "losses": losses[engine_id],
             "buchholz": buchholz[engine_id],
             "bye_points": bye_points.get(engine_id, 0.0),
             "stage": stage[engine_id],
@@ -2423,8 +2457,7 @@ def _tournament_summary(
     tournament: TournamentRecord,
     engines: dict[int, str],
 ) -> dict[str, Any]:
-    games = list_games(connection, tournament.id)
-    summary = _summarize_games(games)
+    summary = _tournament_game_summary(connection, tournament.id)
     participant_names = [
         engines.get(engine_id, f"Engine {engine_id}")
         for engine_id in tournament.config.participants
@@ -2455,6 +2488,34 @@ def _summarize_games(games: tuple[GameRecord, ...]) -> dict[str, int]:
     }
     for game in games:
         summary[game.status] = summary.get(game.status, 0) + 1
+    return summary
+
+
+def _tournament_game_summary(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> dict[str, int]:
+    summary = {
+        "total": 0,
+        "pending": 0,
+        "assigned": 0,
+        "live": 0,
+        "finished": 0,
+        "abandoned": 0,
+    }
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM games
+        WHERE tournament_id = ?
+        GROUP BY status
+        """,
+        (tournament_id,),
+    )
+    for row in rows:
+        count = int(row["count"])
+        summary[row["status"]] = count
+        summary["total"] += count
     return summary
 
 
