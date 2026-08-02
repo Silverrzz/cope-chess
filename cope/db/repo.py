@@ -2754,6 +2754,12 @@ def reconcile_worker_deployment(
     worker_id: int,
     app_commit: str,
 ) -> DeploymentTargetRecord | None:
+    target = worker_deployment_target(connection, worker_id)
+    if target is not None and target.target_commit == app_commit:
+        connection.execute(
+            "DELETE FROM worker_failures WHERE worker_id = ?",
+            (worker_id,),
+        )
     return _reconcile_client_deployment(connection, "worker", worker_id, app_commit)
 
 

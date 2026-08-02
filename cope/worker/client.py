@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from websockets.client import connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from cope.core.models import (
     AssignmentCleanupComplete,
@@ -95,7 +95,7 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
                 )
         except ConnectionClosed as error:
             _log_connection_closed(error)
-        except (OSError, asyncio.TimeoutError) as error:
+        except (OSError, asyncio.TimeoutError, InvalidHandshake) as error:
             LOG.warning("runner connection failed: %s", error)
         except Exception:
             LOG.exception("worker client failed")
@@ -1197,7 +1197,7 @@ async def _send_message(
     *,
     lock: asyncio.Lock | None = None,
 ) -> None:
-    log = LOG.debug if message_type == "engine_info" else LOG.info
+    log = LOG.debug if message_type in {"engine_clock", "engine_info"} else LOG.info
     log(
         "sending runner message type=%s %s",
         message_type,
