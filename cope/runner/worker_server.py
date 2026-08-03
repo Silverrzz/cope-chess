@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import faulthandler
 import logging
 import math
+import os
 import secrets
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -100,6 +103,8 @@ TRANSIENT_PLAY_PROGRESS = {
     "move_turn",
     "position_sync",
 }
+WORKER_SERVER_STALL_TIMEOUT_S = 60.0
+WORKER_SERVER_WATCHDOG_INTERVAL_S = 5.0
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -112,6 +117,40 @@ class AssignmentPreparationFailed(RuntimeError):
 
 class AssignmentWithdrawn(RuntimeError):
     pass
+
+
+class EventLoopWatchdog:
+    def __init__(self, timeout_s: float) -> None:
+        self._timeout_s = timeout_s
+        self._last_beat = time.monotonic()
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="cope-worker-watchdog",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def beat(self) -> None:
+        self._last_beat = time.monotonic()
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    def _run(self) -> None:
+        while not self._stopped.wait(WORKER_SERVER_WATCHDOG_INTERVAL_S):
+            stalled_s = time.monotonic() - self._last_beat
+            if stalled_s < self._timeout_s:
+                continue
+            os.write(
+                2,
+                f"worker-server event loop stalled for {stalled_s:.1f}s\n".encode(),
+            )
+            with contextlib.suppress(Exception):
+                faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            os._exit(70)
 
 
 @dataclass(frozen=True)
@@ -154,6 +193,9 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
         publish_tournament_event(tournament_id)
     heartbeat_interval_s = max(config.heartbeat_interval_ms / 1000, 0.5)
     ping_timeout_s = max(heartbeat_interval_s * 3, 15.0)
+    watchdog = EventLoopWatchdog(_worker_server_stall_timeout_s())
+    watchdog.start()
+    watchdog_task = asyncio.create_task(_watchdog_heartbeat(watchdog))
     await server.start_background_tasks()
     try:
         async with serve(
@@ -174,7 +216,31 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
             )
             await asyncio.Future()
     finally:
+        watchdog_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog_task
+        watchdog.stop()
         await server.stop_background_tasks()
+
+
+async def _watchdog_heartbeat(watchdog: EventLoopWatchdog) -> None:
+    while True:
+        watchdog.beat()
+        await asyncio.sleep(WORKER_SERVER_WATCHDOG_INTERVAL_S)
+
+
+def _worker_server_stall_timeout_s() -> float:
+    raw = os.environ.get(
+        "COPE_WORKER_SERVER_STALL_TIMEOUT_S",
+        str(WORKER_SERVER_STALL_TIMEOUT_S),
+    )
+    try:
+        timeout_s = float(raw)
+    except ValueError as exc:
+        raise ValueError("COPE_WORKER_SERVER_STALL_TIMEOUT_S must be a number") from exc
+    if timeout_s < 15:
+        raise ValueError("COPE_WORKER_SERVER_STALL_TIMEOUT_S must be at least 15")
+    return timeout_s
 
 
 def _register_worker_endpoint(config: WorkerServerConfig) -> None:
@@ -249,17 +315,7 @@ class WorkerHandshakeServer:
             (worker_id, session_id)
             for worker_id, (session_id, _websocket) in self._connections.items()
         ]
-        connection = connect_database(self._config.db_path)
-        try:
-            current = touch_workers_seen(connection, sessions) if sessions else set()
-            touch_service_heartbeat(
-                connection,
-                "worker-server",
-                self._config.expected_app_version or "dev",
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        current = await asyncio.to_thread(self._flush_worker_presence_database, sessions)
 
         stale = [item for item in sessions if item[0] not in current]
         for worker_id, session_id in stale:
@@ -271,6 +327,23 @@ class WorkerHandshakeServer:
                     code=WORKER_CONNECTION_REPLACED_CLOSE_CODE,
                     reason="worker session is no longer current",
                 )
+
+    def _flush_worker_presence_database(
+        self,
+        sessions: list[tuple[int, str]],
+    ) -> set[int]:
+        connection = connect_database(self._config.db_path)
+        try:
+            current = touch_workers_seen(connection, sessions) if sessions else set()
+            touch_service_heartbeat(
+                connection,
+                "worker-server",
+                self._config.expected_app_version or "dev",
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return current
 
     def install_stream_wake_handler(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -323,7 +396,10 @@ class WorkerHandshakeServer:
                 WorkerTokenHello
                 | WorkerSessionHello,
             )
-            authenticated_worker = self._authenticate_worker(hello)
+            authenticated_worker = await asyncio.to_thread(
+                self._authenticate_worker,
+                hello,
+            )
             session_id = (
                 authenticated_worker.session_id
                 if isinstance(hello, WorkerSessionHello)
@@ -332,8 +408,18 @@ class WorkerHandshakeServer:
             if not session_id:
                 raise ProtocolValidationError("worker session is unavailable")
             label = _worker_label(authenticated_worker, hello)
-            worker = self._record_connection(authenticated_worker, label, session_id, hello)
-            update = self._worker_update_command(worker.id, hello.app_version)
+            worker = await asyncio.to_thread(
+                self._record_connection,
+                authenticated_worker,
+                label,
+                session_id,
+                hello,
+            )
+            update = await asyncio.to_thread(
+                self._worker_update_command,
+                worker.id,
+                hello.app_version,
+            )
 
             welcome = WorkerWelcome(
                 worker_id=worker.id,
@@ -375,7 +461,10 @@ class WorkerHandshakeServer:
                     self._connections.pop(worker.id, None)
                     self._worker_capabilities.pop(worker.id, None)
                     try:
-                        tournament_ids = self._record_worker_disconnected(worker)
+                        tournament_ids = await asyncio.to_thread(
+                            self._record_worker_disconnected,
+                            worker,
+                        )
                         for tournament_id in tournament_ids:
                             publish_tournament_event(tournament_id)
                         await self._wake_workers()
@@ -407,7 +496,8 @@ class WorkerHandshakeServer:
         worker_status = "connected"
         try:
             while True:
-                pending_update = self._worker_update_command(
+                pending_update = await asyncio.to_thread(
+                    self._worker_update_command,
                     worker.id,
                     worker.app_commit or "",
                 )
@@ -795,7 +885,7 @@ class WorkerHandshakeServer:
                 record_progress=not withdrawn,
             )
             if game_completed:
-                self._finish_assignment(assignment)
+                await asyncio.to_thread(self._finish_assignment, assignment)
             LOG.info(
                 "assignment complete worker_id=%s assignment_id=%s game_id=%s",
                 worker.id,
@@ -1223,7 +1313,8 @@ class WorkerHandshakeServer:
         async with self._assignment_lock:
             if self._empty_claim_generation.get(capability) == wake_generation:
                 return None
-            assignment = self._claim_next_assignment_from_database(
+            assignment = await asyncio.to_thread(
+                self._claim_next_assignment_from_database,
                 worker,
                 used_resources,
             )

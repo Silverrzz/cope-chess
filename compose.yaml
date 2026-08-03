@@ -116,6 +116,7 @@ services:
       <<: *cope-environment
       COPE_DATABASE_POOL_MAX: "150"
       COPE_SERVICE_NAME: worker-server
+      COPE_WORKER_SERVER_STALL_TIMEOUT_S: ${COPE_WORKER_SERVER_STALL_TIMEOUT_S:-60}
     command:
       - worker-server
       - --worker-host
