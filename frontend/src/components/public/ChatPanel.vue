@@ -182,8 +182,7 @@ async function scrollToLatest(): Promise<void> {
   overflow-wrap: anywhere;
 }
 
-.chat-log .chat-message--system,
-.chat-log .chat-message--system time {
+.chat-log .chat-message--system strong {
   color: var(--color-primary, var(--color-accent, #2f78c4));
 }
 

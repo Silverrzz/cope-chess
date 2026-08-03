@@ -21,6 +21,7 @@ interface GamePagination { page: number; page_size: number; total: number; pages
 interface GameSummary { total: number; pairs: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
 interface LiveParticipantSummary { engine_id: number; total: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
 interface LiveTournamentRoster { editable: boolean; reason: string; available_engines: Engine[]; participants: LiveParticipantSummary[]; hero_engine_id: number | null }
+interface ResultFilterOption { value: string; label: string }
 interface Response {
   tournament: Tournament
   games: Game[]
@@ -35,12 +36,44 @@ interface Response {
   form?: FormSeed
 }
 
+const resultFilterGroups: Array<{ label: string; options: ResultFilterOption[] }> = [
+  {
+    label: 'Wins',
+    options: [
+      { value: 'win_checkmate', label: 'Checkmate' },
+      { value: 'win_adjudication', label: 'Adjudication' },
+      { value: 'win_max_moves', label: 'Maximum moves' },
+      { value: 'win_timeout', label: 'Timeout' },
+      { value: 'win_illegal_move', label: 'Illegal move' },
+      { value: 'win_engine_error', label: 'Engine error' },
+      { value: 'win_variant_end', label: 'Variant end' },
+      { value: 'win_other', label: 'Other' },
+    ],
+  },
+  {
+    label: 'Draws',
+    options: [
+      { value: 'draw_stalemate', label: 'Stalemate' },
+      { value: 'draw_insufficient_material', label: 'Insufficient material' },
+      { value: 'draw_adjudication', label: 'Adjudication' },
+      { value: 'draw_max_moves', label: 'Maximum moves' },
+      { value: 'draw_threefold_repetition', label: 'Threefold repetition' },
+      { value: 'draw_fivefold_repetition', label: 'Fivefold repetition' },
+      { value: 'draw_fifty_moves', label: 'Fifty moves' },
+      { value: 'draw_seventyfive_moves', label: 'Seventy-five moves' },
+      { value: 'draw_variant_end', label: 'Variant end' },
+      { value: 'draw_other', label: 'Other' },
+    ],
+  },
+]
+
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const { confirm } = useConfirm()
 const data = ref<Response | null>(null)
 const loading = ref(true)
+const gamesLoading = ref(false)
 const error = ref('')
 const pending = ref('')
 const copyingDetails = ref(false)
@@ -48,7 +81,9 @@ const detailsCopied = ref(false)
 const concurrency = ref(1)
 const showCommit = ref(false)
 const selectedLists = ref<number[]>([])
+const selectedResultTypes = ref<string[]>([])
 const gamePage = ref(1)
+let loadSequence = 0
 const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => (data.value?.game_summary.finished || 0) > 0)
 const activeGames = computed(() => (
@@ -57,6 +92,9 @@ const activeGames = computed(() => (
 const resultsLocked = computed(() => data.value?.commits.some(
   (item) => ['pending', 'claimed', 'applied'].includes(item.status),
 ) ?? false)
+const resultFilterLabel = computed(() => selectedResultTypes.value.length
+  ? `Game result (${selectedResultTypes.value.length})`
+  : 'Game result')
 const settingsRows = computed(() => {
   if (!data.value?.settings) return []
   return Array.isArray(data.value.settings)
@@ -81,23 +119,35 @@ function engineName(engineId: number): string {
 }
 
 async function load(): Promise<void> {
-  loading.value = true
+  const sequence = ++loadSequence
+  const resultTypes = [...selectedResultTypes.value]
+  loading.value = !data.value
+  gamesLoading.value = true
   error.value = ''
   try {
     let response = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
-      query: { page: gamePage.value },
+      query: { page: gamePage.value, result_type: resultTypes },
     })
+    if (sequence !== loadSequence) return
     if (gamePage.value > response.game_pagination.pages) {
       gamePage.value = response.game_pagination.pages
       response = await api.get<Response>(`/api/admin/tournaments/${id.value}`, {
-        query: { page: gamePage.value },
+        query: { page: gamePage.value, result_type: resultTypes },
       })
+      if (sequence !== loadSequence) return
     }
     data.value = response
     concurrency.value = response.tournament.config.concurrency
   }
-  catch (cause) { error.value = errorText(cause) }
-  finally { loading.value = false }
+  catch (cause) {
+    if (sequence === loadSequence) error.value = errorText(cause)
+  }
+  finally {
+    if (sequence === loadSequence) {
+      loading.value = false
+      gamesLoading.value = false
+    }
+  }
 }
 
 async function setGamePage(page: number): Promise<void> {
@@ -105,6 +155,16 @@ async function setGamePage(page: number): Promise<void> {
   if (page < 1 || page > pages || page === gamePage.value) return
   gamePage.value = page
   await load()
+}
+
+async function applyResultFilters(): Promise<void> {
+  gamePage.value = 1
+  await load()
+}
+
+async function clearResultFilters(): Promise<void> {
+  selectedResultTypes.value = []
+  await applyResultFilters()
 }
 
 async function changeStatus(action: string): Promise<void> {
@@ -356,7 +416,29 @@ onMounted(load)
       </section>
 
       <section class="panel games-panel">
-        <div class="games-panel__heading"><div><h2>Games</h2><p>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }} · {{ data.game_summary.pairs }} game pair{{ data.game_summary.pairs === 1 ? '' : 's' }}</p></div></div>
+        <div class="games-panel__heading">
+          <div>
+            <h2>Games</h2>
+            <p v-if="selectedResultTypes.length">{{ data.game_pagination.total }} matching game{{ data.game_pagination.total === 1 ? '' : 's' }} of {{ data.game_summary.total }} generated</p>
+            <p v-else>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }} · {{ data.game_summary.pairs }} game pair{{ data.game_summary.pairs === 1 ? '' : 's' }}</p>
+          </div>
+          <details class="result-filter">
+            <summary class="button button--secondary button--small">{{ resultFilterLabel }}</summary>
+            <div class="result-filter__menu">
+              <div class="result-filter__topline">
+                <strong>Result type</strong>
+                <button v-if="selectedResultTypes.length" class="button button--ghost button--small" type="button" @click="clearResultFilters">Clear</button>
+              </div>
+              <fieldset v-for="group in resultFilterGroups" :key="group.label">
+                <legend>{{ group.label }}</legend>
+                <label v-for="option in group.options" :key="option.value">
+                  <input v-model="selectedResultTypes" type="checkbox" :value="option.value" @change="applyResultFilters">
+                  <span>{{ group.label === 'Wins' ? 'Win' : 'Draw' }} - {{ option.label }}</span>
+                </label>
+              </fieldset>
+            </div>
+          </details>
+        </div>
         <div v-if="data.games.length" class="game-table-wrap">
           <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
             <tr v-for="game in data.games" :key="game.id">
@@ -364,11 +446,11 @@ onMounted(load)
             </tr>
           </tbody></table>
         </div>
-        <AdminEmptyState v-else title="No games generated" />
+        <AdminEmptyState v-else :title="selectedResultTypes.length ? 'No games match these result types' : 'No games generated'" />
         <nav v-if="data.game_pagination.pages > 1" class="pagination" aria-label="Game pages">
-          <button class="button button--secondary button--small" type="button" :disabled="gamePage <= 1 || loading" @click="setGamePage(gamePage - 1)">Previous</button>
+          <button class="button button--secondary button--small" type="button" :disabled="gamePage <= 1 || gamesLoading" @click="setGamePage(gamePage - 1)">Previous</button>
           <span>Page {{ gamePage.toLocaleString() }} of {{ data.game_pagination.pages.toLocaleString() }}</span>
-          <button class="button button--secondary button--small" type="button" :disabled="gamePage >= data.game_pagination.pages || loading" @click="setGamePage(gamePage + 1)">Next</button>
+          <button class="button button--secondary button--small" type="button" :disabled="gamePage >= data.game_pagination.pages || gamesLoading" @click="setGamePage(gamePage + 1)">Next</button>
         </nav>
       </section>
     </template>
@@ -395,9 +477,20 @@ onMounted(load)
 .commit-panel h2, .settings-panel h2, .games-panel h2 { font-size: .92rem; margin: 0; }
 .commit-panel p, .settings-panel__heading p, .games-panel__heading p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
 .commit-panel__error { background: color-mix(in srgb, var(--color-danger, #b42318) 8%, transparent); border-radius: .4rem; color: var(--color-danger, #b42318) !important; grid-column: 1 / -1; padding: .65rem; }
-.settings-panel, .games-panel { overflow: hidden; padding: 0; }
-.settings-panel__heading, .games-panel__heading { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; justify-content: space-between; padding: .85rem 1rem; }
+.settings-panel { overflow: hidden; padding: 0; }
+.games-panel { overflow: visible; padding: 0; }
+.settings-panel__heading, .games-panel__heading { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; flex-wrap: wrap; gap: .75rem; justify-content: space-between; padding: .85rem 1rem; }
 .settings-panel__heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; color: var(--color-text-muted, #64748b); font-size: .68rem; font-weight: 650; padding: .3rem .5rem; }
+.result-filter { position: relative; }
+.result-filter > summary { cursor: pointer; list-style: none; }
+.result-filter > summary::-webkit-details-marker { display: none; }
+.result-filter__menu { background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: .5rem; box-shadow: 0 .75rem 2rem rgb(15 23 42 / 18%); display: grid; gap: .75rem; grid-template-columns: repeat(2, minmax(12rem, 1fr)); padding: .8rem; position: absolute; right: 0; top: calc(100% + .4rem); width: min(31rem, calc(100vw - 2rem)); z-index: 10; }
+.result-filter__topline { align-items: center; display: flex; grid-column: 1 / -1; justify-content: space-between; }
+.result-filter__topline > strong, .result-filter legend { font-size: .7rem; }
+.result-filter fieldset { border: 0; display: grid; gap: .45rem; margin: 0; min-width: 0; padding: 0; }
+.result-filter legend { color: var(--color-text-muted, #64748b); font-weight: 700; margin-bottom: .45rem; padding: 0; text-transform: uppercase; }
+.result-filter label { align-items: center; display: flex; font-size: .74rem; gap: .45rem; }
+.result-filter input { accent-color: var(--color-accent, #2563eb); }
 .concurrency-form { align-items: end; display: flex; gap: .5rem; }
 .concurrency-form label { display: grid; gap: .25rem; }
 .concurrency-form label span { color: var(--color-text-muted, #64748b); font-size: .68rem; }
@@ -413,5 +506,5 @@ onMounted(load)
 .game-actions { display: flex; gap: .4rem; }
 .pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .75rem 1rem; }
 .pagination span { color: var(--color-text-muted, #64748b); font-size: .72rem; }
-@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } }
+@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } .result-filter__menu { grid-template-columns: 1fr; } .result-filter__topline { grid-column: auto; } }
 </style>

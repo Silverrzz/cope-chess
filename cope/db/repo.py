@@ -1127,22 +1127,95 @@ def list_games(
     return tuple(_game_from_row(row) for row in rows)
 
 
+_WIN_TERMINATIONS = (
+    "checkmate",
+    "timeout",
+    "illegal move",
+    "engine error",
+    "variant end",
+)
+_DRAW_TERMINATIONS = (
+    "stalemate",
+    "insufficient material",
+    "seventy-five moves",
+    "fivefold repetition",
+    "fifty moves",
+    "threefold repetition",
+    "variant end",
+)
+
+
+def _game_result_filter(
+    result_types: Iterable[str] | None,
+) -> tuple[str, tuple[str, ...]]:
+    requested = tuple(dict.fromkeys(result_types or ()))
+    if not requested:
+        return "", ()
+
+    termination = "LOWER(COALESCE(termination, ''))"
+    decisive = "result IN ('1-0', '0-1')"
+    draw = "result = '1/2-1/2'"
+    win_known = " OR ".join(
+        [f"{termination} = ?" for _ in _WIN_TERMINATIONS]
+        + [f"{termination} LIKE ?", f"{termination} LIKE ?"]
+    )
+    draw_known = " OR ".join(
+        [f"{termination} = ?" for _ in _DRAW_TERMINATIONS]
+        + [f"{termination} LIKE ?", f"{termination} LIKE ?"]
+    )
+    filters: dict[str, tuple[str, tuple[str, ...]]] = {
+        "win_checkmate": (f"{decisive} AND {termination} = ?", ("checkmate",)),
+        "win_adjudication": (f"{decisive} AND {termination} LIKE ?", ("win adjudication%",)),
+        "win_max_moves": (f"{decisive} AND {termination} LIKE ?", ("max moves%",)),
+        "win_timeout": (f"{decisive} AND {termination} = ?", ("timeout",)),
+        "win_illegal_move": (f"{decisive} AND {termination} = ?", ("illegal move",)),
+        "win_engine_error": (f"{decisive} AND {termination} = ?", ("engine error",)),
+        "win_variant_end": (f"{decisive} AND {termination} = ?", ("variant end",)),
+        "win_other": (
+            f"{decisive} AND NOT ({win_known})",
+            _WIN_TERMINATIONS + ("win adjudication%", "max moves%"),
+        ),
+        "draw_stalemate": (f"{draw} AND {termination} = ?", ("stalemate",)),
+        "draw_insufficient_material": (f"{draw} AND {termination} = ?", ("insufficient material",)),
+        "draw_adjudication": (f"{draw} AND {termination} LIKE ?", ("draw adjudication%",)),
+        "draw_max_moves": (f"{draw} AND {termination} LIKE ?", ("max moves%",)),
+        "draw_threefold_repetition": (f"{draw} AND {termination} = ?", ("threefold repetition",)),
+        "draw_fivefold_repetition": (f"{draw} AND {termination} = ?", ("fivefold repetition",)),
+        "draw_fifty_moves": (f"{draw} AND {termination} = ?", ("fifty moves",)),
+        "draw_seventyfive_moves": (f"{draw} AND {termination} = ?", ("seventy-five moves",)),
+        "draw_variant_end": (f"{draw} AND {termination} = ?", ("variant end",)),
+        "draw_other": (
+            f"{draw} AND NOT ({draw_known})",
+            _DRAW_TERMINATIONS + ("draw adjudication%", "max moves%"),
+        ),
+    }
+    selected = [filters[value] for value in requested if value in filters]
+    if not selected:
+        return " AND 1 = 0", ()
+    sql = " AND (" + " OR ".join(f"({condition})" for condition, _ in selected) + ")"
+    parameters = tuple(parameter for _, values in selected for parameter in values)
+    return sql, parameters
+
+
 def count_games(
     connection: sqlite3.Connection,
     tournament_id: int,
     *,
     status: str | None = None,
+    result_types: Iterable[str] | None = None,
 ) -> int:
-    if status is None:
-        row = connection.execute(
-            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
-            (tournament_id,),
-        ).fetchone()
-    else:
-        row = connection.execute(
-            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ? AND status = ?",
-            (tournament_id, status),
-        ).fetchone()
+    conditions = "tournament_id = ?"
+    parameters: list[Any] = [tournament_id]
+    if status is not None:
+        conditions += " AND status = ?"
+        parameters.append(status)
+    result_sql, result_parameters = _game_result_filter(result_types)
+    conditions += result_sql
+    parameters.extend(result_parameters)
+    row = connection.execute(
+        f"SELECT COUNT(*) AS count FROM games WHERE {conditions}",
+        tuple(parameters),
+    ).fetchone()
     return int(row["count"])
 
 
@@ -1153,6 +1226,7 @@ def list_games_page(
     page: int,
     page_size: int,
     status: str | None = None,
+    result_types: Iterable[str] | None = None,
 ) -> tuple[GameRecord, ...]:
     columns = """
       id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
@@ -1160,26 +1234,24 @@ def list_games_page(
       termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
     """
     offset = (page - 1) * page_size
-    if status is None:
-        rows = connection.execute(
-            f"""
-            SELECT {columns} FROM games
-            WHERE tournament_id = ?
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (tournament_id, page_size, offset),
-        )
-    else:
-        rows = connection.execute(
-            f"""
-            SELECT {columns} FROM games
-            WHERE tournament_id = ? AND status = ?
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (tournament_id, status, page_size, offset),
-        )
+    conditions = "tournament_id = ?"
+    parameters: list[Any] = [tournament_id]
+    if status is not None:
+        conditions += " AND status = ?"
+        parameters.append(status)
+    result_sql, result_parameters = _game_result_filter(result_types)
+    conditions += result_sql
+    parameters.extend(result_parameters)
+    parameters.extend((page_size, offset))
+    rows = connection.execute(
+        f"""
+        SELECT {columns} FROM games
+        WHERE {conditions}
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?
+        """,
+        tuple(parameters),
+    )
     return tuple(_game_from_row(row) for row in rows)
 
 

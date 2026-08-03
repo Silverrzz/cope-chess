@@ -22,10 +22,21 @@ interface EngineResponse {
   record: EngineRecordSummary
 }
 
+type GameResultFilter = '' | 'win' | 'draw' | 'loss'
+
+const gameResultFilters: Array<{ value: GameResultFilter; label: string }> = [
+  { value: '', label: 'All' },
+  { value: 'win', label: 'Win' },
+  { value: 'draw', label: 'Draw' },
+  { value: 'loss', label: 'Loss' },
+]
+
 const route = useRoute()
 const data = ref<EngineResponse | null>(null)
 const loading = ref(true)
+const gamesLoading = ref(false)
 const loadError = ref('')
+const gameResultFilter = ref<GameResultFilter>('')
 let controller: AbortController | null = null
 
 const engineId = computed(() => String(route.params.id || ''))
@@ -35,23 +46,43 @@ const scorePercent = computed(() => {
 })
 const uciOptions = computed(() => Object.entries(data.value?.engine.uci_options || {}))
 
-watch(engineId, load, { immediate: true })
+watch(engineId, () => {
+  data.value = null
+  void load()
+}, { immediate: true })
+watch(gameResultFilter, load)
 onBeforeUnmount(() => controller?.abort())
+
+function gameResultCount(filter: GameResultFilter): number {
+  if (!data.value) return 0
+  if (filter === 'win') return data.value.record.wins
+  if (filter === 'draw') return data.value.record.draws
+  if (filter === 'loss') return data.value.record.losses
+  return data.value.record.games
+}
 
 async function load(): Promise<void> {
   controller?.abort()
-  controller = new AbortController()
-  loading.value = true
+  const requestController = new AbortController()
+  controller = requestController
+  loading.value = !data.value
+  gamesLoading.value = true
   loadError.value = ''
-  data.value = null
   try {
-    data.value = await api.get<EngineResponse>(`/api/engines/${encodeURIComponent(engineId.value)}`, { signal: controller.signal })
+    const response = await api.get<EngineResponse>(`/api/engines/${encodeURIComponent(engineId.value)}`, {
+      query: { result: gameResultFilter.value || undefined },
+      signal: requestController.signal,
+    })
+    if (controller === requestController) data.value = response
   } catch (error) {
-    if ((error as { name?: string })?.name !== 'AbortError') {
+    if (controller === requestController && (error as { name?: string })?.name !== 'AbortError') {
       loadError.value = errorMessage(error, 'This engine could not be loaded.')
     }
   } finally {
-    loading.value = false
+    if (controller === requestController) {
+      loading.value = false
+      gamesLoading.value = false
+    }
   }
 }
 
@@ -117,9 +148,24 @@ async function load(): Promise<void> {
             <h2 id="engine-games-title">Recent games</h2>
             <p>{{ data.record.games }} completed game{{ data.record.games === 1 ? '' : 's' }} in the recorded result.</p>
           </div>
+          <div class="game-result-filter" role="group" aria-label="Filter games by result">
+            <button
+              v-for="filter in gameResultFilters"
+              :key="filter.value"
+              class="game-result-filter__button"
+              :class="{ 'game-result-filter__button--active': gameResultFilter === filter.value }"
+              type="button"
+              :aria-pressed="gameResultFilter === filter.value"
+              :disabled="gamesLoading"
+              @click="gameResultFilter = filter.value"
+            >
+              <span>{{ filter.label }}</span>
+              <strong>{{ gameResultCount(filter.value) }}</strong>
+            </button>
+          </div>
         </header>
         <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" :show-round="false" caption="Recent games for this engine" />
-        <ContentState v-else kind="empty" compact title="No games yet" />
+        <ContentState v-else kind="empty" compact :title="gameResultFilter ? `No ${gameResultFilter === 'loss' ? 'losses' : `${gameResultFilter}s`} found` : 'No games yet'" />
       </section>
     </template>
   </div>
@@ -240,6 +286,12 @@ async function load(): Promise<void> {
 .panel h2 { font-size: 1rem; }
 .panel header p { margin-block-start: 0.2rem; color: var(--color-text-muted, #607080); font-size: 0.72rem; }
 .options-panel header > span { color: var(--color-text-muted, #607080); font-size: 0.72rem; }
+.game-result-filter { display: flex; gap: .25rem; }
+.game-result-filter__button { align-items: center; background: transparent; border: 1px solid transparent; border-radius: .4rem; color: var(--color-text-muted, #607080); cursor: pointer; display: flex; font: inherit; font-size: .7rem; gap: .35rem; padding: .35rem .5rem; }
+.game-result-filter__button:hover { background: var(--color-surface-subtle, #f1f5f9); color: var(--color-text, #17202a); }
+.game-result-filter__button--active { background: var(--color-surface-subtle, #f1f5f9); border-color: var(--color-border, #d5dbe1); color: var(--color-text, #17202a); }
+.game-result-filter__button:disabled { cursor: wait; opacity: .65; }
+.game-result-filter__button strong { font-size: .64rem; font-variant-numeric: tabular-nums; }
 
 .build-details {
   display: grid;
@@ -291,5 +343,7 @@ async function load(): Promise<void> {
   .record-stats { grid-template-columns: repeat(2, 1fr); }
   .build-details { grid-template-columns: 1fr 1fr; }
   .build-details .detail-wide { grid-column: span 2; }
+  .games-panel > header { align-items: stretch; flex-direction: column; }
+  .game-result-filter { overflow-x: auto; }
 }
 </style>

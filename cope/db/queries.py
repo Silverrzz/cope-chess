@@ -176,16 +176,36 @@ def list_engine_games(
     engine_id: int,
     *,
     limit: int = 50,
+    result_filter: str | None = None,
 ) -> tuple[GameRecord, ...]:
+    conditions = [
+        "result IS NOT NULL",
+        "(white_engine_id = ? OR black_engine_id = ?)",
+    ]
+    parameters: list[int | str] = [engine_id, engine_id]
+    if result_filter == "win":
+        conditions.append(
+            "((result = '1-0' AND white_engine_id = ?) "
+            "OR (result = '0-1' AND black_engine_id = ?))"
+        )
+        parameters.extend((engine_id, engine_id))
+    elif result_filter == "draw":
+        conditions.append("result = '1/2-1/2'")
+    elif result_filter == "loss":
+        conditions.append(
+            "((result = '0-1' AND white_engine_id = ?) "
+            "OR (result = '1-0' AND black_engine_id = ?))"
+        )
+        parameters.extend((engine_id, engine_id))
+    parameters.append(limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT * FROM games
-        WHERE result IS NOT NULL
-          AND (white_engine_id = ? OR black_engine_id = ?)
+        WHERE {" AND ".join(conditions)}
         ORDER BY id DESC
         LIMIT ?
         """,
-        (engine_id, engine_id, limit),
+        tuple(parameters),
     )
     return tuple(_game_from_row(row) for row in rows)
 

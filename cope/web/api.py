@@ -134,6 +134,28 @@ from cope.runner.scheduler import (
 
 LOG = logging.getLogger("cope.web.api")
 OPENING_EDITOR_POSITION_LIMIT = 10_000
+ADMIN_GAME_RESULT_TYPES = frozenset(
+    {
+        "win_checkmate",
+        "win_adjudication",
+        "win_max_moves",
+        "win_timeout",
+        "win_illegal_move",
+        "win_engine_error",
+        "win_variant_end",
+        "win_other",
+        "draw_stalemate",
+        "draw_insufficient_material",
+        "draw_adjudication",
+        "draw_max_moves",
+        "draw_threefold_repetition",
+        "draw_fivefold_repetition",
+        "draw_fifty_moves",
+        "draw_seventyfive_moves",
+        "draw_variant_end",
+        "draw_other",
+    }
+)
 
 
 def _load_engine_dockerfile(selected_path: str) -> str:
@@ -692,12 +714,13 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/engines/{engine_id}")
     def public_engine(
         engine_id: int,
+        result: Literal["win", "draw", "loss"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engine = get_engine_record(connection, engine_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
-        games = list_engine_games(connection, engine_id)
+        games = list_engine_games(connection, engine_id, result_filter=result)
         return _json(
             {
                 "engine": engine,
@@ -1094,10 +1117,20 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=25, le=200),
+        result_type: list[str] = Query(default=[]),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        if invalid_result_types := set(result_type) - ADMIN_GAME_RESULT_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown game result type: {sorted(invalid_result_types)[0]}",
+            )
         tournament = _require_tournament(connection, tournament_id)
-        total_games = count_games(connection, tournament.id)
+        total_games = count_games(
+            connection,
+            tournament.id,
+            result_types=result_type,
+        )
         payload: dict[str, Any] = {
             "tournament": tournament,
             "games": list_games_page(
@@ -1105,6 +1138,7 @@ def register_api_routes(app: FastAPI) -> None:
                 tournament.id,
                 page=page,
                 page_size=page_size,
+                result_types=result_type,
             ),
             "game_pagination": {
                 "page": page,
