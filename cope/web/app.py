@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote
 from urllib.parse import urlsplit, urlunsplit
 
+import chess
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -66,6 +67,7 @@ from cope.db import (
     list_worker_activities,
     touch_service_heartbeat,
 )
+from cope.core.san import pv_to_san
 from cope.core.models import HardwareInfo, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
@@ -2036,7 +2038,7 @@ def _game_payload(
     return payload
 
 
-def _move_payload(move: MoveRecord) -> dict[str, Any]:
+def _move_payload(move: MoveRecord, root_fen: str | None) -> dict[str, Any]:
     score_bound = move.score_bound or _uci_score_bound(move.info_line)
     seldepth = move.seldepth if move.seldepth is not None else _uci_info_int(move.info_line, "seldepth")
     hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
@@ -2054,11 +2056,11 @@ def _move_payload(move: MoveRecord) -> dict[str, Any]:
         "nps": move.nps,
         "hashfull": hashfull,
         "pv": move.pv,
+        "pv_san": pv_to_san(move.pv, root_fen),
         "info_line": move.info_line,
         "time_ms": move.time_ms,
         "clock_after_ms": move.clock_after_ms,
     }
-
 
 def _tournament_live_payload(
     connection: sqlite3.Connection,
@@ -2080,7 +2082,7 @@ def _tournament_live_payload(
         viewer_game = _tournament_viewer_game(active_games)
     viewer_moves = list_moves(connection, viewer_game.id) if viewer_game else ()
     opening = _opening_view(connection, viewer_game.opening_id) if viewer_game else None
-    engine_data = _engine_data(viewer_game, viewer_moves)
+    engine_data = _engine_data(viewer_game, viewer_moves, opening)
     clocks = _clock_data(viewer_moves)
     clock_state = _persisted_clock_state(viewer_game, viewer_moves)
     game_live = _live_for_game(live, viewer_game.id if viewer_game else None)
@@ -2097,7 +2099,7 @@ def _tournament_live_payload(
         },
         "game": _game_payload(viewer_game, engines, live=True) if viewer_game else None,
         "opening": opening or {"name": "Start position", "fen": "startpos"},
-        "moves": [_move_payload(move) for move in viewer_moves],
+        "moves": _move_payloads(viewer_moves, opening),
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
@@ -2165,6 +2167,7 @@ def _merge_engine_data(
                         "hashfull",
                         "eval",
                         "pv",
+                        "pv_san",
                         "info",
                         "root_fen",
                     }
@@ -2205,10 +2208,41 @@ def _clock_label(value: Any) -> str:
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes:02d}:{seconds:02d}.{remainder // 100}"
 
+def _move_root_fens(
+    moves: tuple[MoveRecord, ...],
+    opening: dict[str, Any] | None,
+) -> list[str | None]:
+    start_fen = (opening or {}).get("fen") or "startpos"
+    try:
+        board: chess.Board | None = (
+            chess.Board() if start_fen == "startpos" else chess.Board(start_fen)
+        )
+    except ValueError:
+        board = None
+
+    fens: list[str | None] = []
+    for move in moves:
+        fens.append(board.fen() if board else None)
+        if board is None:
+            continue
+        try:
+            board.push_uci(move.uci)
+        except ValueError:
+            board = None
+    return fens
+
+
+def _move_payloads(
+    moves: tuple[MoveRecord, ...],
+    opening: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    root_fens = _move_root_fens(moves, opening)
+    return [_move_payload(move, root_fens[index]) for index, move in enumerate(moves)]
 
 def _engine_data(
     game: GameRecord | None,
     moves: tuple[MoveRecord, ...],
+    opening: dict[str, Any] | None = None,      # new
 ) -> dict[str, dict[str, str]]:
     if game is None:
         return {
@@ -2216,21 +2250,25 @@ def _engine_data(
             "black": _engine_data_for_move(None),
         }
 
-    return {
-        "white": _engine_data_for_move(_latest_move_for_side(moves, "white")),
-        "black": _engine_data_for_move(_latest_move_for_side(moves, "black")),
-    }
+    root_fens = _move_root_fens(moves, opening)
+
+    def for_side(side: str) -> dict[str, str]:
+        index = _latest_move_index_for_side(moves, side)
+        if index < 0:
+            return _engine_data_for_move(None)
+        return _engine_data_for_move(moves[index], root_fens[index])
+
+    return {"white": for_side("white"), "black": for_side("black")}
 
 
-def _latest_move_for_side(moves: tuple[MoveRecord, ...], side: str) -> MoveRecord | None:
+def _latest_move_index_for_side(moves: tuple[MoveRecord, ...], side: str) -> int:
     white = side == "white"
-    for move in reversed(moves):
-        if (move.ply % 2 == 1) == white:
-            return move
-    return None
+    for index in range(len(moves) - 1, -1, -1):
+        if (moves[index].ply % 2 == 1) == white:
+            return index
+    return -1
 
-
-def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
+def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) -> dict[str, str]:
     if move is None:
         return {
             "depth": "-",
@@ -2241,6 +2279,7 @@ def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
             "eval": "-",
             "info": "not recorded",
             "pv": "not recorded",
+            "pv_san": "not recorded",
         }
 
     nps = f"{move.nps:,}" if move.nps is not None else "-"
@@ -2258,6 +2297,7 @@ def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
         "eval": _eval_label(move),
         "info": move.info_line or move.pv or "not recorded",
         "pv": move.pv or "not recorded",
+        "pv_san": pv_to_san(move.pv, root_fen) if move.pv else "not recorded",
     }
 
 

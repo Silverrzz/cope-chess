@@ -649,7 +649,7 @@ function analysisForSide(side: 'white' | 'black'): EngineAnalysis {
   if (move.seldepth !== undefined) analysis.seldepth = move.seldepth
   if (move.nodes !== undefined) analysis.nodes = move.nodes
   if (move.hashfull !== undefined) analysis.hashfull = move.hashfull
-  if (move.pv !== undefined) analysis.pv = move.pv
+  if (move.pv_san !== undefined) analysis.pv_san = move.pv_san
   const info = move.info_line || move.pv
   if (info !== undefined) analysis.info = info
   return analysis

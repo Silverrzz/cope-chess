@@ -623,7 +623,12 @@ def register_api_routes(app: FastAPI) -> None:
             if viewer_game
             else None
         )
-        engine_data = web_app._engine_data(viewer_game, viewer_moves)
+        opening = (
+            web_app._opening_view(connection, viewer_game.opening_id)
+            if viewer_game
+            else None
+        )
+        engine_data = web_app._engine_data(viewer_game, viewer_moves, opening)
         clocks = web_app._clock_data(viewer_moves)
         clock_state = web_app._persisted_clock_state(viewer_game, viewer_moves)
         if isinstance(game_live, dict):
@@ -657,7 +662,7 @@ def register_api_routes(app: FastAPI) -> None:
                     if viewer_game
                     else None
                 ),
-                "viewer_moves": [web_app._move_payload(move) for move in viewer_moves],
+                "viewer_moves": web_app._move_payloads(viewer_moves, opening),
                 "viewer_locked": viewer_locked,
                 "engine_data": engine_data,
                 "clocks": clocks,
@@ -680,11 +685,7 @@ def register_api_routes(app: FastAPI) -> None:
                     tournament_id=tournament_id,
                 ),
                 "chat_settings": chat_settings,
-                "opening": (
-                    web_app._opening_view(connection, viewer_game.opening_id)
-                    if viewer_game
-                    else None
-                ),
+                "opening": opening,
             }
         )
 

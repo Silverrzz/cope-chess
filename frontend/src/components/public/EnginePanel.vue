@@ -88,7 +88,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
           <div class="analysis-line">
             <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-            <p :title="info">{{ analysis?.pv || info }}</p>
+            <p :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
           </div>
         </div>
 

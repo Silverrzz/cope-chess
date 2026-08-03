@@ -17,6 +17,7 @@ from cope.chat import (
     announce_game_finished,
     announce_tournament_finished,
 )
+from cope.core.san import pv_to_san
 from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
@@ -766,6 +767,7 @@ class _LiveGameReporter:
         engine_data = _live_engine_data(info)
         root_fen = root_fen or self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen
+        engine_data["pv_san"] = pv_to_san(info.pv, root_fen) or "not recorded"
         engine_data["info"] = line
         publish_engine_info(
             self._tournament_id,
