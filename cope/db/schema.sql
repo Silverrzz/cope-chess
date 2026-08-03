@@ -384,15 +384,22 @@ CREATE TABLE IF NOT EXISTS moves (
   is_book INTEGER NOT NULL DEFAULT 0 CHECK (is_book IN (0, 1)),
   eval_cp INTEGER,
   eval_mate INTEGER,
+  score_bound TEXT CHECK (score_bound IN ('lowerbound', 'upperbound')),
   depth INTEGER,
+  seldepth INTEGER,
   nodes INTEGER,
   nps INTEGER,
+  hashfull INTEGER,
   pv TEXT,
   info_line TEXT,
   time_ms INTEGER NOT NULL DEFAULT 0,
   clock_after_ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (game_id, ply)
 );
+
+ALTER TABLE moves ADD COLUMN IF NOT EXISTS score_bound TEXT CHECK (score_bound IN ('lowerbound', 'upperbound'));
+ALTER TABLE moves ADD COLUMN IF NOT EXISTS seldepth INTEGER;
+ALTER TABLE moves ADD COLUMN IF NOT EXISTS hashfull INTEGER;
 
 CREATE TABLE IF NOT EXISTS rating_lists (
   id BIGSERIAL PRIMARY KEY,
@@ -584,7 +591,7 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 25)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 26)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

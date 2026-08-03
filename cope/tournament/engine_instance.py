@@ -26,9 +26,12 @@ class EngineSearchResult:
     command_elapsed_ms: int | None = None
     eval_cp: int | None = None
     eval_mate: int | None = None
+    score_bound: str | None = None
     depth: int | None = None
+    seldepth: int | None = None
     nodes: int | None = None
     nps: int | None = None
+    hashfull: int | None = None
     time_ms: int = 0
     pv: str | None = None
     info_line: str | None = None
@@ -38,9 +41,12 @@ class EngineSearchResult:
 class EngineSearchInfo:
     eval_cp: int | None = None
     eval_mate: int | None = None
+    score_bound: str | None = None
     depth: int | None = None
+    seldepth: int | None = None
     nodes: int | None = None
     nps: int | None = None
+    hashfull: int | None = None
     time_ms: int = 0
     pv: str | None = None
 
@@ -480,9 +486,12 @@ def _parse_search_result(
         command_elapsed_ms=command_elapsed_ms,
         eval_cp=search_info.eval_cp,
         eval_mate=search_info.eval_mate,
+        score_bound=search_info.score_bound,
         depth=search_info.depth,
+        seldepth=search_info.seldepth,
         nodes=search_info.nodes,
         nps=search_info.nps,
+        hashfull=search_info.hashfull,
         time_ms=search_info.time_ms,
         pv=search_info.pv,
         info_line=info_line,
@@ -497,19 +506,20 @@ def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSear
     previous = previous or EngineSearchInfo()
     eval_cp = previous.eval_cp
     eval_mate = previous.eval_mate
+    score_bound = previous.score_bound
     depth = _int_after(parts, "depth", previous.depth)
+    seldepth = _int_after(parts, "seldepth", previous.seldepth)
     nodes = _int_after(parts, "nodes", previous.nodes)
     nps = _int_after(parts, "nps", previous.nps)
+    hashfull = _int_after(parts, "hashfull", previous.hashfull)
     time_ms = _int_after(parts, "time", previous.time_ms) or 0
     pv = previous.pv
 
     if "score" in parts:
         score_index = parts.index("score")
-        bounded = "lowerbound" in parts[score_index + 3 :] or "upperbound" in parts[score_index + 3 :]
-        if bounded:
-            eval_cp = None
-            eval_mate = None
-        elif score_index + 2 < len(parts) and parts[score_index + 1] == "cp":
+        bound = parts[score_index + 3] if score_index + 3 < len(parts) else None
+        score_bound = bound if bound in {"lowerbound", "upperbound"} else None
+        if score_index + 2 < len(parts) and parts[score_index + 1] == "cp":
             score_cp = _int_at(parts, score_index + 2)
             if score_cp is not None:
                 eval_cp = score_cp
@@ -528,9 +538,12 @@ def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSear
     return EngineSearchInfo(
         eval_cp=eval_cp,
         eval_mate=eval_mate,
+        score_bound=score_bound,
         depth=depth,
+        seldepth=seldepth,
         nodes=nodes,
         nps=nps,
+        hashfull=hashfull,
         time_ms=time_ms,
         pv=pv,
     )

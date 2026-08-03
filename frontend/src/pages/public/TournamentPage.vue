@@ -19,7 +19,9 @@ import {
   moveEvaluation,
   moveNps,
   resultLabel,
+  scorePercentLabel,
   statusLabel,
+  timeControlLabel,
 } from '@/components/public/format'
 import type {
   ChatMessage,
@@ -87,6 +89,7 @@ const loadError = ref('')
 const selectedPly = ref(0)
 const currentPositionFen = ref('startpos')
 const streamState = ref<StreamState>('closed')
+const followedEngineId = ref('')
 const clockLabels = ref<Record<'white' | 'black', string>>({ white: '--:--', black: '--:--' })
 const clockRuntime = ref<ClockRuntime | null>(null)
 const headingElement = ref<HTMLElement | null>(null)
@@ -116,6 +119,12 @@ const activeTab = computed<TabKey>(() => {
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
 const viewerGames = computed(() => data.value?.active_games || [])
+const participantEngines = computed(() => (data.value?.tournament.config?.participants || [])
+  .map((engineId) => ({
+    id: String(engineId),
+    name: engineName(data.value?.engines, engineId),
+  }))
+  .sort((left, right) => left.name.localeCompare(right.name)))
 const gameTotal = computed(() => data.value?.game_pagination.total || 0)
 const gamePages = computed(() => data.value?.game_pagination.pages || 1)
 const pickerGameId = computed(() => {
@@ -149,32 +158,37 @@ const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
 const blackClock = computed(() => clockForSide('black'))
 const suggestedMoves = computed<BoardArrow[]>(() => {
-  if (!isLatestPly.value || viewerGame.value?.status !== 'live') return []
-
   const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci))
-  const latestFen = positionFen(positions.at(-1)!)
-  const sideToMove = parseFen(latestFen).turn === 'w' ? 'white' : 'black'
+  const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length))
+  const viewedFen = positionFen(positions[viewedPly]!)
+  const sideToMove = parseFen(viewedFen).turn === 'w' ? 'white' : 'black'
   const arrows: BoardArrow[] = []
-  const previousMove = moves.value.at(-1)
+  const previousMove = viewedPly > 0 ? moves.value[viewedPly - 1] : undefined
 
   if (previousMove) {
-    const previousPv = pvMoves(previousMove.info_line)
-    const fallbackPv = previousPv.length ? previousPv : pvMoves(previousMove.pv)
+    const fallbackPv = movePv(previousMove)
     const playedMove = normalizedUci(previousMove.uci)
     if (fallbackPv[0] === playedMove && fallbackPv[1]) {
-      arrows.push({ move: fallbackPv[1], color: moveSide(moves.value.length - 1) })
+      arrows.push({ move: fallbackPv[1], color: moveSide(viewedPly - 1) })
     }
   }
 
-  const currentAnalysis = data.value?.engine_data?.[sideToMove]
-  if (samePosition(currentAnalysis?.root_fen, latestFen)) {
-    const currentPv = pvMoves(currentAnalysis?.info)
-    const fallbackPv = currentPv.length ? currentPv : pvMoves(currentAnalysis?.pv)
-    if (fallbackPv[0]) arrows.push({ move: fallbackPv[0], color: sideToMove })
+  const nextMove = moves.value[viewedPly]
+  if (nextMove) {
+    const nextPv = movePv(nextMove)
+    if (nextPv[0]) arrows.push({ move: nextPv[0], color: sideToMove })
+  } else if (viewerGame.value?.status === 'live') {
+    const currentAnalysis = data.value?.engine_data?.[sideToMove]
+    if (samePosition(currentAnalysis?.root_fen, viewedFen)) {
+      const currentPv = pvMoves(currentAnalysis?.info)
+      const fallbackPv = currentPv.length ? currentPv : pvMoves(currentAnalysis?.pv)
+      if (fallbackPv[0]) arrows.push({ move: fallbackPv[0], color: sideToMove })
+    }
   }
 
   return arrows
 })
+const headerTimeControl = computed(() => timeControlLabel(data.value?.tournament.config?.time_control))
 const activeSide = computed<'white' | 'black' | null>(() => {
   if (isLatestPly.value && clockRuntime.value?.running) return clockRuntime.value.activeSide
   if (!viewerGame.value) return null
@@ -202,6 +216,14 @@ watch(() => data.value?.tournament.name, (name) => {
 })
 
 watch(loadError, () => scheduleArenaFit(), { flush: 'post' })
+
+watch(followedEngineId, (engineId) => {
+  if (!engineId) {
+    awaitingNextLiveAfterGameId = ''
+    return
+  }
+  followNextLiveGame()
+})
 
 watch(headingElement, (next, previous) => {
   if (previous) headingResizeObserver?.unobserve(previous)
@@ -341,7 +363,7 @@ function applyDetail(response: TournamentDetailResponse): void {
     && sameId(previousViewerGame.id, response.viewer_game.id)
     && sameId(previousViewerGame.id, selectedGameId.value)
   ) {
-    awaitingNextLiveAfterGameId = String(previousViewerGame.id)
+    startFollowingAfterGame(previousViewerGame.id)
   }
 
   if (String(previousGame ?? '') !== String(response.viewer_game?.id ?? '') || followedLatest) {
@@ -507,7 +529,7 @@ function applySnapshot(snapshot: LiveSnapshot): void {
     && selectedGameUpdate?.status === 'finished'
     && sameId(displayedGame.id, selectedGameId.value)
   ) {
-    awaitingNextLiveAfterGameId = String(displayedGame.id)
+    startFollowingAfterGame(displayedGame.id)
   }
 
   if (snapshot.game && sameId(snapshot.game.id, selectedGameId.value)) {
@@ -539,15 +561,29 @@ function isActiveGame(game: GameRecord | null | undefined): game is GameRecord {
   return game?.status === 'assigned' || game?.status === 'live'
 }
 
+function startFollowingAfterGame(gameId: Identifier): void {
+  awaitingNextLiveAfterGameId = followedEngineId.value ? String(gameId) : ''
+}
+
+function includesFollowedEngine(game: GameRecord): boolean {
+  return Boolean(followedEngineId.value) && (
+    sameId(game.white_engine_id, followedEngineId.value)
+    || sameId(game.black_engine_id, followedEngineId.value)
+  )
+}
+
 function followNextLiveGame(preferredGame?: GameRecord | null): void {
-  if (!data.value || !awaitingNextLiveAfterGameId) return
+  if (!data.value || !followedEngineId.value || !awaitingNextLiveAfterGameId) return
   if (routeGameId.value !== awaitingNextLiveAfterGameId) return
 
   const nextLiveGame = isActiveGame(preferredGame)
     && !sameId(preferredGame.id, awaitingNextLiveAfterGameId)
+    && includesFollowedEngine(preferredGame)
     ? preferredGame
     : data.value.active_games.find(
-      (game) => isActiveGame(game) && !sameId(game.id, awaitingNextLiveAfterGameId),
+      (game) => isActiveGame(game)
+        && !sameId(game.id, awaitingNextLiveAfterGameId)
+        && includesFollowedEngine(game),
     )
   if (nextLiveGame) void followLiveGame(nextLiveGame.id)
 }
@@ -610,7 +646,9 @@ function analysisForSide(side: 'white' | 'black'): EngineAnalysis {
     ).at(-1)!),
   }
   if (move.depth !== undefined) analysis.depth = move.depth
+  if (move.seldepth !== undefined) analysis.seldepth = move.seldepth
   if (move.nodes !== undefined) analysis.nodes = move.nodes
+  if (move.hashfull !== undefined) analysis.hashfull = move.hashfull
   if (move.pv !== undefined) analysis.pv = move.pv
   const info = move.info_line || move.pv
   if (info !== undefined) analysis.info = info
@@ -648,6 +686,11 @@ function pvMoves(value: string | null | undefined): string[] {
     .slice(pvIndex >= 0 ? pvIndex + 1 : 0)
     .map(normalizedUci)
     .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move))
+}
+
+function movePv(move: MoveRecord): string[] {
+  const infoPv = pvMoves(move.info_line)
+  return infoPv.length ? infoPv : pvMoves(move.pv)
 }
 
 function normalizedUci(value: string): string {
@@ -746,7 +789,7 @@ function queryValue(value: unknown): string {
       <header ref="headingElement" class="tournament-heading">
         <div class="tournament-heading__title">
           <div class="title-line">
-            <h1>{{ data.tournament.name }}</h1>
+            <h1>{{ data.tournament.name }}<template v-if="headerTimeControl"> ({{ headerTimeControl }})</template></h1>
             <StatusPill :status="data.tournament.status" />
           </div>
           <p>
@@ -773,6 +816,13 @@ function queryValue(value: unknown): string {
             <select :value="pickerGameId" @change="selectGame">
               <option v-if="!pickerGameId" value="" disabled>Select live or assigned game</option>
               <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
+            </select>
+          </label>
+          <label v-if="participantEngines.length" class="follow-engine-picker">
+            <span>Follow Engine</span>
+            <select v-model="followedEngineId">
+              <option value="">Dont Follow</option>
+              <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }}</option>
             </select>
           </label>
         </div>
@@ -858,12 +908,13 @@ function queryValue(value: unknown): string {
           <header><div><h2 id="standings-title">Standings</h2></div></header>
           <div v-if="data.standings?.length" class="table-wrap">
             <table>
-              <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
+              <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
               <tbody>
                 <tr v-for="(standing, index) in data.standings" :key="standing.engine_id">
                   <td class="rank-cell">{{ index + 1 }}</td>
                   <td><RouterLink :to="`/engines/${standing.engine_id}`">{{ standing.name }}</RouterLink></td>
                   <td class="number-cell">{{ standing.points }}</td>
+                  <td class="number-cell">{{ scorePercentLabel(standing.score_percent) }}</td>
                   <td class="number-cell">{{ standing.played }}</td>
                   <td v-if="format === 'swiss'" class="number-cell">{{ standing.buchholz ?? 0 }}</td>
                   <td v-if="format === 'knockout'" class="number-cell">{{ standing.stage ?? 0 }}</td>
@@ -940,12 +991,14 @@ function queryValue(value: unknown): string {
 .tournament-heading__title {
   display: grid;
   align-items: center;
+  min-width: 0;
 }
 
 .title-line {
   display: flex;
   align-items: center;
   gap: var(--space-sm, 0.5rem);
+  min-width: 0;
 }
 
 .tournament-heading h1,
@@ -959,6 +1012,7 @@ function queryValue(value: unknown): string {
   font-size: clamp(1.45rem, 2.7vw, 2.15rem);
   letter-spacing: -0.035em;
   line-height: 1.05;
+  overflow-wrap: anywhere;
 }
 
 .tournament-heading__title > p {
@@ -996,10 +1050,18 @@ function queryValue(value: unknown): string {
 .tournament-heading__controls label {
   display: grid;
   gap: 0.25rem;
-  min-width: min(27rem, 42vw);
+  min-width: 0;
   color: var(--color-text-muted, #607080);
   font-size: 0.64rem;
   font-weight: 700;
+}
+
+.game-picker {
+  width: clamp(16rem, 27vw, 27rem);
+}
+
+.follow-engine-picker {
+  width: clamp(10rem, 15vw, 14rem);
 }
 
 .game-picker__heading {
@@ -1247,7 +1309,7 @@ function queryValue(value: unknown): string {
 @media (max-width: 58rem) {
   .tournament-heading { align-items: stretch; flex-direction: column; }
   .tournament-heading__controls { justify-content: space-between; }
-  .tournament-heading__controls label { min-width: 0; flex: 1; }
+  .tournament-heading__controls label { width: auto; min-width: 0; flex: 1; }
   .arena { grid-template-columns: 1fr; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
   .engine-column .game-facts { grid-column: 1 / -1; }
@@ -1257,6 +1319,7 @@ function queryValue(value: unknown): string {
 
 @media (max-width: 40rem) {
   .tournament-heading__controls { align-items: stretch; flex-direction: column-reverse; }
+  .tournament-heading__controls label { width: 100%; }
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }

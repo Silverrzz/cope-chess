@@ -1,4 +1,4 @@
-import type { GameRecord, Identifier, MoveRecord } from './types'
+import type { GameRecord, Identifier, MoveRecord, TimeControl } from './types'
 
 export function recordValue<T>(record: Record<string, T> | undefined, id: Identifier): T | undefined {
   return record?.[String(id)]
@@ -100,12 +100,40 @@ export function gameHref(game: GameRecord): { name: string; params: { id: Identi
 
 export function moveEvaluation(move?: MoveRecord | null): string {
   if (!move) return '-'
-  if (move.eval_mate !== null && move.eval_mate !== undefined) return `#${move.eval_mate}`
+  const prefix = move.score_bound === 'lowerbound' ? '≥' : move.score_bound === 'upperbound' ? '≤' : ''
+  if (move.eval_mate !== null && move.eval_mate !== undefined) return `${prefix}#${move.eval_mate}`
   if (move.eval_cp !== null && move.eval_cp !== undefined) {
     const value = move.eval_cp / 100
-    return `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
+    return `${prefix}${value >= 0 ? '+' : ''}${value.toFixed(2)}`
   }
   return '-'
+}
+
+export function scorePercentLabel(value: number): string {
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`
+}
+
+export function timeControlLabel(control?: TimeControl): string {
+  if (!control) return ''
+  if (control.category === 'increment') {
+    return `${durationLabel(control.initial_ms)}+${durationLabel(control.increment_ms)}`
+  }
+  if (control.category === 'movetime') return `${durationLabel(control.move_time_ms)}/move`
+  if (control.category === 'movestogo') {
+    return `${durationLabel(control.initial_ms)}/${control.moves_to_go}`
+  }
+  return `${formatNumber(control.nodes)} nodes`
+}
+
+function durationLabel(milliseconds: number): string {
+  if (milliseconds === 0) return '0s'
+  if (milliseconds >= 60_000) {
+    const minutes = Math.floor(milliseconds / 60_000)
+    const remainder = milliseconds % 60_000
+    return remainder ? `${minutes}m${durationLabel(remainder)}` : `${minutes}m`
+  }
+  if (milliseconds >= 1_000) return `${(milliseconds / 1_000).toLocaleString()}s`
+  return `${milliseconds}ms`
 }
 
 export function moveNps(move?: MoveRecord | null): string {

@@ -572,9 +572,12 @@ def run_worker_assignment_game(
             san=board_before_move.san(move),
             eval_cp=None if search is None else search.eval_cp,
             eval_mate=None if search is None else search.eval_mate,
+            score_bound=None if search is None else search.score_bound,
             depth=None if search is None else search.depth,
+            seldepth=None if search is None else search.seldepth,
             nodes=None if search is None else search.nodes,
             nps=None if search is None else search.nps,
+            hashfull=None if search is None else search.hashfull,
             pv=None if search is None else search.pv,
             info_line=None if search is None else search.info_line,
             time_ms=0 if search is None else search.time_ms,
@@ -715,9 +718,12 @@ class _LiveGameReporter:
             EngineSearchInfo(
                 eval_cp=result.eval_cp,
                 eval_mate=result.eval_mate,
+                score_bound=result.score_bound,
                 depth=result.depth,
+                seldepth=result.seldepth,
                 nodes=result.nodes,
                 nps=result.nps,
+                hashfull=result.hashfull,
                 time_ms=result.time_ms,
                 pv=result.pv,
             ),
@@ -803,8 +809,10 @@ def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, str]:
     if info is None:
         return {
             "depth": "-",
+            "seldepth": "-",
             "nps": "-",
             "nodes": "-",
+            "hashfull": "-",
             "eval": "-",
             "pv": "not recorded",
         }
@@ -815,18 +823,21 @@ def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, str]:
 
     return {
         "depth": str(info.depth) if info.depth is not None else "-",
+        "seldepth": str(info.seldepth) if info.seldepth is not None else "-",
         "nps": f"{nps:,}" if nps is not None else "-",
         "nodes": f"{info.nodes:,}" if info.nodes is not None else "-",
+        "hashfull": str(info.hashfull) if info.hashfull is not None else "-",
         "eval": _live_eval_label(info),
         "pv": info.pv or "not recorded",
     }
 
 
 def _live_eval_label(info: EngineSearchInfo) -> str:
+    prefix = {"lowerbound": "≥", "upperbound": "≤"}.get(info.score_bound, "")
     if info.eval_mate is not None:
-        return f"#{info.eval_mate}"
+        return f"{prefix}#{info.eval_mate}"
     if info.eval_cp is not None:
-        return f"{info.eval_cp / 100:+.2f}"
+        return f"{prefix}{info.eval_cp / 100:+.2f}"
     return "-"
 
 
@@ -1145,6 +1156,7 @@ def _adjudication_result(
             (move.ply + 1) // 2 >= draw.min_fullmove
             and move.eval_mate is None
             and move.eval_cp is not None
+            and move.score_bound is None
             and abs(move.eval_cp) <= draw.max_abs_cp
             for move in window
         ):
@@ -1166,13 +1178,16 @@ def _adjudication_result(
         score = _white_relative_move_score(move)
         if score is None:
             return None
-        mate, cp = score
+        mate, cp, bound = score
         if mate is not None:
-            if mate == 0:
+            if mate == 0 or bound is not None:
                 return None
             winners.append("white" if mate > 0 else "black")
-        elif cp is not None and abs(cp) >= resign.min_abs_cp:
-            winners.append("white" if cp > 0 else "black")
+        elif cp is not None:
+            winner = _decisive_score_winner(cp, bound, resign.min_abs_cp)
+            if winner is None:
+                return None
+            winners.append(winner)
         else:
             return None
 
@@ -1202,12 +1217,23 @@ def _adjudication_window(
 
 def _white_relative_move_score(
     move: MoveRecord,
-) -> tuple[int | None, int | None] | None:
+) -> tuple[int | None, int | None, str | None] | None:
     mover_sign = 1 if move.ply % 2 == 1 else -1
+    bound = move.score_bound
+    if mover_sign < 0:
+        bound = {"lowerbound": "upperbound", "upperbound": "lowerbound"}.get(bound)
     if move.eval_mate is not None:
-        return mover_sign * move.eval_mate, None
+        return mover_sign * move.eval_mate, None, bound
     if move.eval_cp is not None:
-        return None, mover_sign * move.eval_cp
+        return None, mover_sign * move.eval_cp, bound
+    return None
+
+
+def _decisive_score_winner(cp: int, bound: str | None, threshold: int) -> str | None:
+    if cp >= threshold and bound != "upperbound":
+        return "white"
+    if cp <= -threshold and bound != "lowerbound":
+        return "black"
     return None
 
 
@@ -1219,8 +1245,10 @@ def _max_moves_result(
     if score is None:
         return "1/2-1/2", "max moves"
 
-    mate, cp = score
+    mate, cp, bound = score
     if mate is not None:
+        if bound is not None:
+            return "1/2-1/2", "max moves"
         if mate > 0:
             return "1-0", "max moves: white has forced mate"
         if mate < 0:
@@ -1231,22 +1259,23 @@ def _max_moves_result(
         return "1/2-1/2", "max moves"
 
     threshold = _max_moves_decisive_cp(tournament)
-    if cp >= threshold:
+    winner = _decisive_score_winner(cp, bound, threshold)
+    if winner == "white":
         return "1-0", f"max moves: white winning by evaluation ({cp / 100:+.2f})"
-    if cp <= -threshold:
+    if winner == "black":
         return "0-1", f"max moves: black winning by evaluation ({cp / 100:+.2f})"
+    if bound is not None:
+        return "1/2-1/2", "max moves"
     return "1/2-1/2", f"max moves: evaluation within decisive threshold ({cp / 100:+.2f})"
 
 
 def _latest_white_relative_score(
     moves: Sequence[MoveRecord],
-) -> tuple[int | None, int | None] | None:
+) -> tuple[int | None, int | None, str | None] | None:
     for move in reversed(moves):
-        mover_sign = 1 if move.ply % 2 == 1 else -1
-        if move.eval_mate is not None:
-            return mover_sign * move.eval_mate, None
-        if move.eval_cp is not None:
-            return None, mover_sign * move.eval_cp
+        score = _white_relative_move_score(move)
+        if score is not None:
+            return score
     return None
 
 

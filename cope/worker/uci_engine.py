@@ -577,8 +577,8 @@ class UciEngineProcess:
                             [
                                 "docker",
                                 "cp",
-                                f"{container_name}:/opt/cope/engine",
-                                str(temporary / "engine"),
+                                f"{container_name}:/opt/cope/.",
+                                str(temporary),
                             ],
                             cwd=None,
                             substage="artifact_extract",

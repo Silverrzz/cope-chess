@@ -88,21 +88,21 @@ def is_full_uci_info_line(line: str) -> bool:
     parts = line.split()
     if not parts or parts[0] != "info":
         return False
-    if "depth" not in parts or "score" not in parts or "pv" not in parts:
+    if "depth" not in parts or "score" not in parts:
         return False
     try:
         depth_index = parts.index("depth")
         score_index = parts.index("score")
-        pv_index = parts.index("pv")
         int(parts[depth_index + 1])
         int(parts[score_index + 2])
     except (IndexError, ValueError):
         return False
     if parts[score_index + 1] not in {"cp", "mate"}:
         return False
-    if "lowerbound" in parts or "upperbound" in parts:
+    bound = parts[score_index + 3] if score_index + 3 < len(parts) else None
+    if "pv" in parts and parts.index("pv") + 1 >= len(parts):
         return False
-    if pv_index + 1 >= len(parts):
+    if "pv" not in parts and bound not in {"lowerbound", "upperbound"}:
         return False
     if "multipv" in parts:
         try:

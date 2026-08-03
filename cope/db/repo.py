@@ -92,9 +92,12 @@ class MoveRecord:
     is_book: bool
     eval_cp: int | None
     eval_mate: int | None
+    score_bound: str | None
     depth: int | None
+    seldepth: int | None
     nodes: int | None
     nps: int | None
+    hashfull: int | None
     pv: str | None
     info_line: str | None
     time_ms: int
@@ -1423,9 +1426,12 @@ def record_move(
     is_book: bool = False,
     eval_cp: int | None = None,
     eval_mate: int | None = None,
+    score_bound: str | None = None,
     depth: int | None = None,
+    seldepth: int | None = None,
     nodes: int | None = None,
     nps: int | None = None,
+    hashfull: int | None = None,
     pv: str | None = None,
     info_line: str | None = None,
     time_ms: int = 0,
@@ -1441,9 +1447,12 @@ def record_move(
         int(is_book),
         eval_cp,
         eval_mate,
+        score_bound,
         depth,
+        seldepth,
         nodes,
         nps,
+        hashfull,
         pv,
         info_line,
         time_ms,
@@ -1453,10 +1462,10 @@ def record_move(
         cursor = connection.execute(
             """
             INSERT INTO moves (
-              game_id, ply, uci, san, is_book, eval_cp, eval_mate, depth,
-              nodes, nps, pv, info_line, time_ms, clock_after_ms
+              game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
+              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -1464,10 +1473,10 @@ def record_move(
         cursor = connection.execute(
             """
             INSERT INTO moves (
-              game_id, ply, uci, san, is_book, eval_cp, eval_mate, depth,
-              nodes, nps, pv, info_line, time_ms, clock_after_ms
+              game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
+              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
               SELECT 1 FROM game_assignments
               WHERE id = ? AND assignment_key = ? AND game_id = ?
@@ -1486,9 +1495,12 @@ def record_move(
         is_book=is_book,
         eval_cp=eval_cp,
         eval_mate=eval_mate,
+        score_bound=score_bound,
         depth=depth,
+        seldepth=seldepth,
         nodes=nodes,
         nps=nps,
+        hashfull=hashfull,
         pv=pv,
         info_line=info_line,
         time_ms=time_ms,
@@ -3605,9 +3617,12 @@ def _move_from_row(row: sqlite3.Row) -> MoveRecord:
         is_book=bool(row["is_book"]),
         eval_cp=row["eval_cp"],
         eval_mate=row["eval_mate"],
+        score_bound=row["score_bound"],
         depth=row["depth"],
+        seldepth=row["seldepth"],
         nodes=row["nodes"],
         nps=row["nps"],
+        hashfull=row["hashfull"],
         pv=row["pv"],
         info_line=row["info_line"],
         time_ms=row["time_ms"],

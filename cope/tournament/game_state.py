@@ -83,24 +83,9 @@ class GameState():
             return chess.Outcome(chess.Termination.FIVEFOLD_REPETITION, None)
         if board.halfmove_clock >= 99 and board.can_claim_fifty_moves():
             return chess.Outcome(chess.Termination.FIFTY_MOVES, None)
-        if self._can_claim_threefold_repetition():
+        if self._position_counts.get(self._position_key(board), 0) >= 3:
             return chess.Outcome(chess.Termination.THREEFOLD_REPETITION, None)
         return None
-
-    def _can_claim_threefold_repetition(self) -> bool:
-        board = self._board
-        if self._position_counts.get(self._position_key(board), 0) >= 3:
-            return True
-        if not self._position_counts or max(self._position_counts.values()) < 2:
-            return False
-        for move in board.generate_legal_moves():
-            board.push(move)
-            try:
-                if self._position_counts.get(self._position_key(board), 0) >= 2:
-                    return True
-            finally:
-                board.pop()
-        return False
 
     def _reset_position_counts(self) -> None:
         replay = self._board.root()

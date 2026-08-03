@@ -1,9 +1,15 @@
 export type Identifier = number | string
 
+export type TimeControl =
+  | { category: 'increment'; initial_ms: number; increment_ms: number }
+  | { category: 'movetime'; move_time_ms: number }
+  | { category: 'movestogo'; initial_ms: number; moves_to_go: number }
+  | { category: 'movenodes'; nodes: number }
+
 export interface TournamentConfig {
   participants?: Identifier[]
   format?: string | { value?: string }
-  time_control?: Record<string, unknown>
+  time_control?: TimeControl
   [key: string]: unknown
 }
 
@@ -45,9 +51,12 @@ export interface MoveRecord {
   is_book?: boolean
   eval_cp?: number | null
   eval_mate?: number | null
+  score_bound?: 'lowerbound' | 'upperbound' | null
   depth?: number | null
+  seldepth?: number | null
   nodes?: number | null
   nps?: number | null
+  hashfull?: number | null
   pv?: string | null
   info_line?: string | null
   time_ms?: number | null
@@ -104,6 +113,7 @@ export interface StandingRecord {
   name: string
   points: number
   played: number
+  score_percent: number
   wins: number
   draws: number
   losses: number
@@ -135,8 +145,10 @@ export interface TournamentRatingSummary {
 
 export interface EngineAnalysis {
   depth?: string | number | null
+  seldepth?: string | number | null
   nodes?: string | number | null
   nps?: string | number | null
+  hashfull?: string | number | null
   eval?: string | number | null
   info?: string | null
   pv?: string | null

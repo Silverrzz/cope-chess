@@ -5,7 +5,7 @@ import ChessBoard from '@/components/chess/ChessBoard.vue'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
-import { formatNodes, formatNps } from './format'
+import { formatNodes, formatNps, formatNumber } from './format'
 
 const props = withDefaults(defineProps<{
   side: 'white' | 'black'
@@ -32,12 +32,14 @@ const evaluation = computed(() => {
   const value = props.analysis?.eval
   if (value === null || value === undefined || props.side === 'white') return value ?? '-'
   if (typeof value === 'number') return -value
-  const match = value.match(/^(#?)([+-]?)(\d+(?:\.\d+)?)$/)
+  const match = value.match(/^(≤|≥)?(#?)([+-]?)(\d+(?:\.\d+)?)$/)
   if (!match) return value
-  const [, mate, sign, magnitude] = match
+  const [, bound, mate, sign, magnitude] = match
+  const reversedBound = bound === '≤' ? '≥' : bound === '≥' ? '≤' : ''
   const reversedSign = sign === '-' ? (mate ? '' : '+') : '-'
-  return `${mate}${reversedSign}${magnitude}`
+  return `${reversedBound}${mate}${reversedSign}${magnitude}`
 })
+const depth = computed(() => `${props.analysis?.depth ?? '-'}/${props.analysis?.seldepth ?? '-'}`)
 const pvMoves = computed(() => (props.analysis?.pv || '')
   .split(/\s+/)
   .map((move) => move.toLowerCase())
@@ -78,9 +80,10 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
       <div class="engine-panel__body">
         <div class="engine-panel__details">
           <dl class="engine-stats">
-            <div><dt>Depth</dt><dd>{{ analysis?.depth ?? '-' }}</dd></div>
+            <div><dt>Depth</dt><dd>{{ depth }}</dd></div>
             <div><dt>Nodes</dt><dd>{{ formatNodes(analysis?.nodes) }}</dd></div>
             <div><dt>NPS</dt><dd>{{ formatNps(analysis?.nps) }}</dd></div>
+            <div><dt>Hashfull</dt><dd>{{ formatNumber(analysis?.hashfull) }}</dd></div>
           </dl>
 
           <div class="analysis-line">
@@ -278,13 +281,13 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .engine-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin: 0;
 }
 
 .engine-stats div {
   min-width: 0;
-  padding-inline: 0.55rem;
+  padding-inline: 0.35rem;
   border-inline-start: 1px solid var(--color-border, #d5dbe1);
 }
 
@@ -301,6 +304,10 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.engine-stats dt {
+  font-size: 0.56rem;
 }
 
 .analysis-line {

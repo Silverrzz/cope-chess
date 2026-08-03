@@ -1786,6 +1786,8 @@ def _create_chat_message_from_form(
             display_name = "Anonymous"
         else:
             raise HTTPException(status_code=422, detail="A display name is required.")
+    if display_name.casefold() == "system":
+        raise HTTPException(status_code=422, detail="System is a reserved display name.")
     text = form_value(form, "text").strip()
     if not text:
         raise HTTPException(status_code=422, detail="Enter a message.")
@@ -2035,6 +2037,9 @@ def _game_payload(
 
 
 def _move_payload(move: MoveRecord) -> dict[str, Any]:
+    score_bound = move.score_bound or _uci_score_bound(move.info_line)
+    seldepth = move.seldepth if move.seldepth is not None else _uci_info_int(move.info_line, "seldepth")
+    hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
     return {
         "ply": move.ply,
         "uci": move.uci,
@@ -2042,9 +2047,12 @@ def _move_payload(move: MoveRecord) -> dict[str, Any]:
         "is_book": move.is_book,
         "eval_cp": move.eval_cp,
         "eval_mate": move.eval_mate,
+        "score_bound": score_bound,
         "depth": move.depth,
+        "seldepth": seldepth,
         "nodes": move.nodes,
         "nps": move.nps,
+        "hashfull": hashfull,
         "pv": move.pv,
         "info_line": move.info_line,
         "time_ms": move.time_ms,
@@ -2149,7 +2157,17 @@ def _merge_engine_data(
                 {
                     key: str(value)
                     for key, value in live_data[side].items()
-                    if key in {"depth", "nps", "nodes", "eval", "pv", "info", "root_fen"}
+                    if key in {
+                        "depth",
+                        "seldepth",
+                        "nps",
+                        "nodes",
+                        "hashfull",
+                        "eval",
+                        "pv",
+                        "info",
+                        "root_fen",
+                    }
                 }
             )
     return merged
@@ -2216,8 +2234,10 @@ def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
     if move is None:
         return {
             "depth": "-",
+            "seldepth": "-",
             "nps": "-",
             "nodes": "-",
+            "hashfull": "-",
             "eval": "-",
             "info": "not recorded",
             "pv": "not recorded",
@@ -2226,11 +2246,15 @@ def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
     nps = f"{move.nps:,}" if move.nps is not None else "-"
     if move.nps is None and move.nodes is not None and move.time_ms > 0:
         nps = f"{int(move.nodes / (move.time_ms / 1000)):,}"
+    seldepth = move.seldepth if move.seldepth is not None else _uci_info_int(move.info_line, "seldepth")
+    hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
 
     return {
         "depth": str(move.depth) if move.depth is not None else "-",
+        "seldepth": str(seldepth) if seldepth is not None else "-",
         "nps": nps,
         "nodes": f"{move.nodes:,}" if move.nodes is not None else "-",
+        "hashfull": str(hashfull) if hashfull is not None else "-",
         "eval": _eval_label(move),
         "info": move.info_line or move.pv or "not recorded",
         "pv": move.pv or "not recorded",
@@ -2238,11 +2262,34 @@ def _engine_data_for_move(move: MoveRecord | None) -> dict[str, str]:
 
 
 def _eval_label(move: MoveRecord) -> str:
+    bound = move.score_bound or _uci_score_bound(move.info_line)
+    prefix = {"lowerbound": "≥", "upperbound": "≤"}.get(bound, "")
     if move.eval_mate is not None:
-        return f"#{move.eval_mate}"
+        return f"{prefix}#{move.eval_mate}"
     if move.eval_cp is not None:
-        return f"{move.eval_cp / 100:+.2f}"
+        return f"{prefix}{move.eval_cp / 100:+.2f}"
     return "-"
+
+
+def _uci_info_int(line: str | None, key: str) -> int | None:
+    if not line:
+        return None
+    parts = line.split()
+    try:
+        return int(parts[parts.index(key) + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _uci_score_bound(line: str | None) -> str | None:
+    if not line:
+        return None
+    parts = line.split()
+    try:
+        bound = parts[parts.index("score") + 3]
+    except (ValueError, IndexError):
+        return None
+    return bound if bound in {"lowerbound", "upperbound"} else None
 
 
 def _opening_view(connection: sqlite3.Connection, opening_id: int | None) -> dict[str, Any] | None:
@@ -2349,6 +2396,10 @@ def _standings(
             "name": engines.get(engine_id, f"Engine {engine_id}"),
             "points": points[engine_id],
             "played": played[engine_id],
+            "score_percent": _score_percent(
+                points[engine_id],
+                played[engine_id] + bye_points.get(engine_id, 0.0),
+            ),
             "wins": wins[engine_id],
             "draws": draws[engine_id],
             "losses": losses[engine_id],
@@ -2359,18 +2410,30 @@ def _standings(
         for engine_id in points
     ]
     if tournament.config.format == TournamentFormat.KNOCKOUT:
-        rows.sort(key=lambda row: (-row["stage"], -row["points"], seed[row["engine_id"]]))
+        rows.sort(
+            key=lambda row: (
+                -row["score_percent"],
+                -row["stage"],
+                -row["points"],
+                seed[row["engine_id"]],
+            )
+        )
     elif tournament.config.format == TournamentFormat.SWISS:
         rows.sort(
             key=lambda row: (
+                -row["score_percent"],
                 -row["points"],
                 -row["buchholz"],
                 seed[row["engine_id"]],
             )
         )
     else:
-        rows.sort(key=lambda row: (-row["points"], row["name"]))
+        rows.sort(key=lambda row: (-row["score_percent"], -row["points"], row["name"]))
     return rows
+
+
+def _score_percent(points: float, scoring_opportunities: float) -> float:
+    return points / scoring_opportunities * 100 if scoring_opportunities else 0.0
 
 
 def _tournament_rating_summaries(

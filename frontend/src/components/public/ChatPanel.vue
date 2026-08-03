@@ -30,7 +30,8 @@ const submitError = ref('')
 const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
 const requiresName = computed(() => props.settings.allow_anonymous_names === false)
-const canSend = computed(() => props.tournamentId !== null && enabled.value && !submitting.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
+const reservedName = computed(() => displayName.value.trim().toLocaleLowerCase() === 'system')
+const canSend = computed(() => props.tournamentId !== null && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
 
 onMounted(() => {
   try { displayName.value = localStorage.getItem(STORAGE_KEY) || '' } catch { /* Storage can be disabled. */ }
@@ -79,7 +80,7 @@ async function scrollToLatest(): Promise<void> {
 
     <div ref="log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions">
       <ol v-if="messages.length">
-        <li v-for="(message, index) in messages" :key="message.id ?? `${message.at}-${index}`">
+        <li v-for="(message, index) in messages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': message.display_name === 'System' }">
           <div>
             <strong>{{ message.display_name }}</strong>
             <time v-if="message.at" :datetime="message.at">{{ new Date(message.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
@@ -94,6 +95,7 @@ async function scrollToLatest(): Promise<void> {
       <label>
         <span>Name{{ requiresName ? '' : ' (optional)' }}</span>
         <input v-model="displayName" name="display_name" maxlength="40" autocomplete="nickname" :required="requiresName" placeholder="Your name">
+        <small v-if="reservedName" class="chat-error" role="alert">System is a reserved display name.</small>
       </label>
       <label>
         <span>Message</span>
@@ -178,6 +180,11 @@ async function scrollToLatest(): Promise<void> {
   font-size: 0.78rem;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.chat-log .chat-message--system,
+.chat-log .chat-message--system time {
+  color: var(--color-primary, var(--color-accent, #2f78c4));
 }
 
 .chat-empty,

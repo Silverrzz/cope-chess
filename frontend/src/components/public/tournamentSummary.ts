@@ -1,4 +1,4 @@
-import { engineName, statusLabel } from './format'
+import { engineName, scorePercentLabel, statusLabel } from './format'
 import type { TournamentDetailResponse } from './types'
 
 interface MarkdownColumn<T> {
@@ -131,6 +131,7 @@ export function buildTournamentSummaryMarkdown(data: TournamentDetailResponse, o
     { heading: '#', align: 'right', value: (_row, index) => String(index + 1) },
     { heading: 'Engine', value: (row) => row.name },
     { heading: 'Score', align: 'right', value: (row) => String(row.points) },
+    { heading: 'Score %', align: 'right', value: (row) => scorePercentLabel(row.score_percent) },
     { heading: 'Played', align: 'right', value: (row) => String(row.played) },
     { heading: 'W-D-L', align: 'center', value: (row) => `${row.wins}-${row.draws}-${row.losses}` },
   ]
