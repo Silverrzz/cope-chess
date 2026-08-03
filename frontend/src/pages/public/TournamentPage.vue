@@ -16,6 +16,7 @@ import {
   clockLabel,
   engineName,
   errorMessage,
+  formatDate,
   moveEvaluation,
   moveNps,
   resultLabel,
@@ -796,6 +797,8 @@ function queryValue(value: unknown): string {
             {{ format ? statusLabel(format) : 'Tournament' }}
             <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
             <template v-if="viewerGame"> / {{ resultLabel(viewerGame.result) }}</template>
+            <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>
+            <template v-else-if="data.tournament.status === 'running' && data.estimate?.estimated_finish_at"> / Estimated finish {{ formatDate(data.estimate.estimated_finish_at, true) }}</template>
           </p>
         </div>
 

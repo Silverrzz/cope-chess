@@ -143,9 +143,14 @@ def list_upcoming_games(
 ) -> tuple[GameRecord, ...]:
     rows = connection.execute(
         """
-        SELECT * FROM games
-        WHERE status = 'pending'
-        ORDER BY id ASC
+        SELECT games.* FROM games
+        JOIN tournaments ON tournaments.id = games.tournament_id
+        WHERE games.status = 'pending'
+          AND tournaments.status IN ('scheduled', 'running')
+        ORDER BY
+          CASE WHEN tournaments.status = 'scheduled' THEN 0 ELSE 1 END,
+          tournaments.scheduled_start_at NULLS LAST,
+          games.id ASC
         LIMIT ?
         """,
         (limit,),

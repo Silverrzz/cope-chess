@@ -111,6 +111,33 @@ export function configFromSeed(seed: FormSeed): TournamentConfig {
   return normalizeConfig(seed.config)
 }
 
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return 'Unknown'
+  const totalMinutes = Math.max(0, Math.round(seconds / 60))
+  const days = Math.floor(totalMinutes / 1_440)
+  const hours = Math.floor((totalMinutes % 1_440) / 60)
+  const minutes = totalMinutes % 60
+  const parts: string[] = []
+  if (days) parts.push(`${days}d`)
+  if (hours) parts.push(`${hours}h`)
+  if (minutes || !parts.length) parts.push(`${minutes}m`)
+  return parts.slice(0, 2).join(' ')
+}
+
+export function formatRelativeDate(value: string | null | undefined, now = Date.now()): string {
+  if (!value) return ''
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return ''
+  const seconds = Math.round((timestamp - now) / 1000)
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  if (Math.abs(seconds) < 90) return formatter.format(seconds, 'second')
+  const minutes = Math.round(seconds / 60)
+  if (Math.abs(minutes) < 90) return formatter.format(minutes, 'minute')
+  const hours = Math.round(minutes / 60)
+  if (Math.abs(hours) < 36) return formatter.format(hours, 'hour')
+  return formatter.format(Math.round(hours / 24), 'day')
+}
+
 function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {
   const normalized = normalizeSettings(config)
   return {

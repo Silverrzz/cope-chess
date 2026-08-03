@@ -36,7 +36,16 @@ const statusFilter = computed({
   set: (value: string) => updateQuery({ status: value === 'all' ? undefined : value }),
 })
 
-const publicTournaments = computed(() => (data.value?.tournaments || []).filter((item) => item.record.status !== 'draft'))
+const publicTournaments = computed(() => (data.value?.tournaments || [])
+  .filter((item) => item.record.status !== 'draft')
+  .sort((left, right) => {
+    if (left.record.status === 'scheduled' && right.record.status === 'scheduled') {
+      return new Date(left.record.scheduled_start_at || 0).getTime() - new Date(right.record.scheduled_start_at || 0).getTime()
+    }
+    if (left.record.status === 'scheduled') return -1
+    if (right.record.status === 'scheduled') return 1
+    return 0
+  }))
 const filtered = computed(() => {
   const term = search.value.toLocaleLowerCase()
   return publicTournaments.value.filter((item) => {

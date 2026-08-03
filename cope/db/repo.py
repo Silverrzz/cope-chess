@@ -37,6 +37,7 @@ class TournamentRecord:
     current_round: int
     worker_profile: str | None
     created_at: str
+    scheduled_start_at: str | None
     started_at: str | None
     finished_at: str | None
 
@@ -342,6 +343,16 @@ def utc_now() -> str:
 
 def utc_now_datetime() -> datetime:
     return datetime.now(UTC)
+
+
+def _utc_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be a valid ISO date and time") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def set_service_endpoint(
@@ -714,18 +725,24 @@ def create_tournament(
     config: TournamentConfig,
     *,
     status: str = "draft",
+    scheduled_start_at: str | None = None,
 ) -> int:
+    if status == "scheduled" and scheduled_start_at is None:
+        raise ValueError("scheduled tournaments require a start time")
+    if scheduled_start_at is not None:
+        scheduled_start_at = _utc_timestamp(scheduled_start_at)
     created_at = utc_now()
     cursor = connection.execute(
         """
-        INSERT INTO tournaments (name, config, status, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO tournaments (name, config, status, created_at, scheduled_start_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             name,
             config.model_dump_json(),
             status,
             created_at,
+            scheduled_start_at,
         ),
     )
     tournament_id = int(cursor.lastrowid)
@@ -812,6 +829,72 @@ def set_tournament_current_round_at_least(
         """,
         (round_number, tournament_id, round_number),
     )
+
+
+def list_due_scheduled_tournaments(
+    connection: sqlite3.Connection,
+    now: str,
+) -> tuple[TournamentRecord, ...]:
+    return tuple(
+        _tournament_from_row(row)
+        for row in connection.execute(
+            """
+            SELECT * FROM tournaments
+            WHERE status = 'scheduled'
+              AND scheduled_start_at <= ?
+            ORDER BY scheduled_start_at, id
+            FOR UPDATE SKIP LOCKED
+            """,
+            (now,),
+        )
+    )
+
+
+def schedule_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    scheduled_start_at: str,
+) -> TournamentRecord:
+    scheduled_start_at = _utc_timestamp(scheduled_start_at)
+    cursor = connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'scheduled', scheduled_start_at = ?, finished_at = NULL
+        WHERE id = ? AND status IN ('draft', 'scheduled') AND started_at IS NULL
+        """,
+        (scheduled_start_at, tournament_id),
+    )
+    if cursor.rowcount == 0:
+        raise ValueError("only a draft or scheduled tournament can be scheduled")
+    tournament = get_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    return tournament
+
+
+def unschedule_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> TournamentRecord:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    if tournament.status != "scheduled" or tournament.started_at is not None:
+        raise ValueError("only an unstarted scheduled tournament can be returned to draft")
+    connection.execute("DELETE FROM games WHERE tournament_id = ?", (tournament_id,))
+    connection.execute("DELETE FROM tournament_matches WHERE tournament_id = ?", (tournament_id,))
+    connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'draft', scheduled_start_at = NULL, current_round = 0
+        WHERE id = ?
+        """,
+        (tournament_id,),
+    )
+    current = get_tournament(connection, tournament_id)
+    if current is None:
+        raise ValueError("tournament does not exist")
+    return current
 
 
 def set_tournament_concurrency(
@@ -3629,6 +3712,7 @@ def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
         current_round=row["current_round"],
         worker_profile=row["worker_profile"],
         created_at=row["created_at"],
+        scheduled_start_at=row["scheduled_start_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
     )

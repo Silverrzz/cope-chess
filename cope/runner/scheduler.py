@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from cope.core.models import (
     GauntletFormatOptions,
@@ -21,10 +22,10 @@ from cope.db import (
     create_tournament_match,
     finish_tournament_match,
     invalidate_tournament_participant_games,
+    list_due_scheduled_tournaments,
     list_games,
     list_suite_opening_ids,
     list_tournament_matches,
-    list_tournaments,
     lock_tournament,
     set_tournament_participants,
     set_tournament_status,
@@ -149,13 +150,41 @@ def prepare_scheduled_tournaments(
     connection: sqlite3.Connection,
 ) -> tuple[TournamentPreparation, ...]:
     prepared: list[TournamentPreparation] = []
-    for tournament in list_tournaments(connection):
-        if tournament.status == "scheduled":
-            prepared.append(prepare_tournament(connection, tournament))
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    for tournament in list_due_scheduled_tournaments(connection, now):
+        prepared.append(prepare_tournament(connection, tournament))
     return tuple(prepared)
 
 
 def prepare_tournament(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+) -> TournamentPreparation:
+    current = lock_tournament(connection, tournament.id)
+    if current is None or current.status != "scheduled":
+        return TournamentPreparation(
+            tournament_id=tournament.id,
+            tournament_name=tournament.name,
+            created_games=0,
+            skipped_reason="tournament is no longer scheduled",
+        )
+    preparation = materialize_tournament_schedule(connection, current)
+    set_tournament_status(connection, current.id, "running")
+    running = _refresh_tournament(connection, current)
+    advance = advance_tournament(connection, running)
+    announce_tournament_started(
+        connection,
+        running,
+        scheduled_games=len(list_games(connection, current.id)),
+    )
+    return TournamentPreparation(
+        tournament_id=current.id,
+        tournament_name=current.name,
+        created_games=preparation.created_games + advance.created_games,
+    )
+
+
+def materialize_tournament_schedule(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> TournamentPreparation:
@@ -173,34 +202,11 @@ def prepare_tournament(
         elif tournament.config.format == TournamentFormat.GAUNTLET:
             created_games = generate_gauntlet_games(connection, tournament)
         else:
-            return _invalid_preparation(connection, tournament, "unsupported tournament format")
-
-    set_tournament_status(connection, tournament.id, "running")
-    current = _refresh_tournament(connection, tournament)
-    advance = advance_tournament(connection, current)
-    announce_tournament_started(
-        connection,
-        current,
-        scheduled_games=len(list_games(connection, tournament.id)),
-    )
+            raise ValueError("unsupported tournament format")
     return TournamentPreparation(
         tournament_id=tournament.id,
         tournament_name=tournament.name,
-        created_games=created_games + advance.created_games,
-    )
-
-
-def _invalid_preparation(
-    connection: sqlite3.Connection,
-    tournament: TournamentRecord,
-    reason: str,
-) -> TournamentPreparation:
-    set_tournament_status(connection, tournament.id, "paused")
-    return TournamentPreparation(
-        tournament_id=tournament.id,
-        tournament_name=tournament.name,
-        created_games=0,
-        skipped_reason=reason,
+        created_games=created_games,
     )
 
 

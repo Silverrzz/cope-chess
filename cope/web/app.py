@@ -86,6 +86,7 @@ from cope.network import (
 )
 from cope.web.forms import form_value
 from cope.version import app_version
+from cope.tournament.estimates import TournamentEstimator
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -97,10 +98,9 @@ MAX_BROADCAST_SNAPSHOT_GAMES = 1000
 
 # Valid admin actions on a tournament, per current status.
 TOURNAMENT_ACTIONS: dict[str, dict[str, str]] = {
-    "draft": {"schedule": "scheduled"},
-    "scheduled": {"pause": "paused", "abort": "aborted"},
+    "scheduled": {"abort": "aborted"},
     "running": {"pause": "paused", "abort": "aborted"},
-    "paused": {"resume": "scheduled", "abort": "aborted"},
+    "paused": {"resume": "running", "abort": "aborted"},
 }
 CONNECTED_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
 WORKER_RECENT_SECONDS = 60
@@ -1942,6 +1942,7 @@ def _home_tournament_cards(
     engines: dict[int, str],
 ) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
+    estimator = TournamentEstimator(connection)
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
             continue
@@ -1954,7 +1955,12 @@ def _home_tournament_cards(
         moves = list_moves(connection, game.id) if game is not None else ()
         cards.append(
             {
-                "tournament": _tournament_summary(connection, tournament, engines),
+                "tournament": _tournament_summary(
+                    connection,
+                    tournament,
+                    engines,
+                    estimator=estimator,
+                ),
                 "preview": None
                 if game is None
                 else {
@@ -1981,22 +1987,29 @@ def _upcoming_rows(
     engines: dict[int, str],
     *,
     limit: int,
-) -> list[dict[str, str]]:
-    pending_games = list_upcoming_games(connection, limit=limit)
-    tournament_names = _tournament_names(connection)
-    rows = [
-        {
+) -> list[dict[str, str | None]]:
+    pending_games = list_upcoming_games(connection, limit=max(limit * 16, limit))
+    tournaments = {tournament.id: tournament for tournament in list_tournaments(connection)}
+    rows: list[dict[str, str | None]] = []
+    scheduled_tournament_ids: set[int] = set()
+    for game in pending_games:
+        tournament = tournaments.get(game.tournament_id)
+        if tournament is not None and tournament.status == "scheduled":
+            if tournament.id in scheduled_tournament_ids:
+                continue
+            scheduled_tournament_ids.add(tournament.id)
+        rows.append({
             "href": f"/tournaments/{game.tournament_id}?game_id={game.id}",
-            "tournament": tournament_names.get(game.tournament_id, f"Tournament {game.tournament_id}"),
+            "tournament": tournament.name if tournament is not None else f"Tournament {game.tournament_id}",
             "round": str(game.round),
             "white": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),
             "black": engines.get(game.black_engine_id, f"Engine {game.black_engine_id}"),
-            "status": game.status,
-        }
-        for game in pending_games
-    ]
-
-    return rows[:limit]
+            "status": "scheduled" if tournament is not None and tournament.status == "scheduled" else game.status,
+            "scheduled_start_at": tournament.scheduled_start_at if tournament is not None else None,
+        })
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _tournament_viewer_game(games: tuple[GameRecord, ...]) -> GameRecord | None:
@@ -2548,8 +2561,12 @@ def _tournament_summary(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
     engines: dict[int, str],
+    *,
+    estimator: TournamentEstimator | None = None,
 ) -> dict[str, Any]:
-    summary = _tournament_game_summary(connection, tournament.id)
+    games = list_games(connection, tournament.id)
+    summary = _summarize_games(games)
+    estimate = (estimator or TournamentEstimator(connection)).estimate(tournament, games)
     participant_names = [
         engines.get(engine_id, f"Engine {engine_id}")
         for engine_id in tournament.config.participants
@@ -2566,6 +2583,7 @@ def _tournament_summary(
         "progress_percent": round(finished_games / total_games * 100) if total_games else 0,
         "time_control": _time_control_label(tournament.config.time_control),
         "format": tournament.config.format.value.replace("_", " ").title(),
+        "estimate": estimate.to_dict(),
     }
 
 

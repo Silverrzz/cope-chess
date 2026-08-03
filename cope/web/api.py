@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -93,6 +94,7 @@ from cope.db import (
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
+    schedule_tournament,
     set_tournament_concurrency,
     set_tournament_status,
     suite_opening_count,
@@ -105,6 +107,7 @@ from cope.db import (
     update_tournament,
     update_worker_assignment_settings,
     update_worker_label,
+    unschedule_tournament,
 )
 from cope.engine_dockerfiles import (
     EngineDockerfileError,
@@ -128,8 +131,10 @@ from cope.ratings import (
 )
 from cope.runner.scheduler import (
     add_running_tournament_participant,
+    materialize_tournament_schedule,
     remove_running_tournament_participant,
 )
+from cope.tournament.estimates import TournamentEstimator
 
 
 LOG = logging.getLogger("cope.web.api")
@@ -330,6 +335,17 @@ class RatingListPayload(BaseModel):
 
 class TournamentStatusPayload(BaseModel):
     action: str = Field(min_length=1, max_length=20)
+
+
+class TournamentSchedulePayload(BaseModel):
+    scheduled_start_at: datetime
+
+    @field_validator("scheduled_start_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled start time must include a timezone")
+        return value.astimezone(UTC)
 
 
 class EnginePayload(BaseModel):
@@ -562,8 +578,14 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/tournaments")
     def public_tournaments(connection: sqlite3.Connection = Depends(web_app._database)):
         engines = web_app._engine_names(connection)
+        estimator = TournamentEstimator(connection)
         items = [
-            web_app._tournament_summary(connection, tournament, engines)
+            web_app._tournament_summary(
+                connection,
+                tournament,
+                engines,
+                estimator=estimator,
+            )
             for tournament in list_tournaments(connection)
             if tournament.status != "draft"
         ]
@@ -634,9 +656,14 @@ def register_api_routes(app: FastAPI) -> None:
             clocks = web_app._merge_clock_data(clocks, game_live.get("clocks"))
             if isinstance(game_live.get("clock_state"), dict):
                 clock_state = game_live["clock_state"]
+        estimate = TournamentEstimator(connection).estimate(
+            tournament,
+            list_games(connection, tournament.id),
+        )
         return _json(
             {
                 "tournament": tournament,
+                "estimate": estimate.to_dict(),
                 "games": [
                     web_app._game_payload(game, engines, live=True)
                     for game in games
@@ -1047,8 +1074,14 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engines = web_app._engine_names(connection)
+        estimator = TournamentEstimator(connection)
         items = [
-            web_app._tournament_summary(connection, tournament, engines)
+            web_app._tournament_summary(
+                connection,
+                tournament,
+                engines,
+                estimator=estimator,
+            )
             for tournament in list_tournaments(connection)
             if not status or tournament.status == status
         ]
@@ -1126,6 +1159,7 @@ def register_api_routes(app: FastAPI) -> None:
                 detail=f"Unknown game result type: {sorted(invalid_result_types)[0]}",
             )
         tournament = _require_tournament(connection, tournament_id)
+        all_games = list_games(connection, tournament.id)
         total_games = count_games(
             connection,
             tournament.id,
@@ -1150,6 +1184,10 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 tournament.id,
             ),
+            "estimate": TournamentEstimator(connection).estimate(
+                tournament,
+                all_games,
+            ).to_dict(),
             "engines": web_app._engine_names(connection),
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
@@ -1158,6 +1196,8 @@ def register_api_routes(app: FastAPI) -> None:
             "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
                 "editable": tournament.status == "draft",
+                "schedulable": tournament.status in {"draft", "scheduled"},
+                "unschedulable": tournament.status == "scheduled" and tournament.started_at is None,
                 "concurrency_editable": tournament.status in {"running", "paused"},
                 "deletable": tournament.status not in {"scheduled", "running"},
                 "can_commit_ratings": (
@@ -1244,6 +1284,71 @@ def register_api_routes(app: FastAPI) -> None:
             else "Tournament updated."
         )
         return _json({"id": tournament_id, "message": message})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/schedule")
+    @app.patch("/api/admin/tournaments/{tournament_id}/schedule")
+    def admin_schedule_tournament(
+        tournament_id: int,
+        payload: TournamentSchedulePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        if tournament.status not in {"draft", "scheduled"} or tournament.started_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Only a draft or unstarted scheduled tournament can be scheduled.",
+            )
+        try:
+            preparation = materialize_tournament_schedule(connection, tournament)
+            scheduled = schedule_tournament(
+                connection,
+                tournament_id,
+                payload.scheduled_start_at.isoformat(timespec="seconds"),
+            )
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament scheduling failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not schedule the tournament. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "status": scheduled.status,
+                "scheduled_start_at": scheduled.scheduled_start_at,
+                "created_games": preparation.created_games,
+                "message": "Tournament scheduled.",
+            }
+        )
+
+    @app.delete("/api/admin/tournaments/{tournament_id}/schedule")
+    def admin_unschedule_tournament(
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        _require_tournament(connection, tournament_id)
+        try:
+            unschedule_tournament(connection, tournament_id)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament unscheduling failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not return the tournament to draft. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"status": "draft", "message": "Tournament returned to draft."})
 
     @app.post("/api/admin/tournaments/{tournament_id}/participants")
     def admin_add_tournament_participant(

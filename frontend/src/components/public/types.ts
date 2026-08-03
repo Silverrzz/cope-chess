@@ -19,6 +19,7 @@ export interface TournamentRecord {
   status: string
   current_round?: number
   created_at?: string
+  scheduled_start_at?: string | null
   started_at?: string | null
   finished_at?: string | null
   config?: TournamentConfig
@@ -106,6 +107,20 @@ export interface TournamentSummary {
   progress_percent?: number
   time_control?: string
   format?: string
+  estimate?: TournamentEstimate
+}
+
+export interface TournamentEstimate {
+  estimated_finish_at: string | null
+  estimated_remaining_seconds: number | null
+  median_game_seconds: number | null
+  sample_size: number
+  remaining_games: number
+  projected_total_games: number
+  concurrency: number
+  confidence: 'high' | 'medium' | 'low' | 'unavailable'
+  basis: 'tournament' | 'historical' | 'unavailable'
+  state: 'estimated' | 'paused' | 'complete' | 'unavailable'
 }
 
 export interface StandingRecord {
@@ -189,6 +204,7 @@ export interface HardwareRecord {
 
 export interface TournamentDetailResponse {
   tournament: TournamentRecord
+  estimate?: TournamentEstimate
   games: GameRecord[]
   active_games: GameRecord[]
   game_pagination: GamePagination

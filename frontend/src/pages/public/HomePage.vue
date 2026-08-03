@@ -7,7 +7,7 @@ import ContentState from '@/components/public/ContentState.vue'
 import GameTable from '@/components/public/GameTable.vue'
 import ProgressBar from '@/components/public/ProgressBar.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
-import { errorMessage } from '@/components/public/format'
+import { errorMessage, formatDate } from '@/components/public/format'
 import type { GameRecord, MoveRecord, OpeningRecord, TournamentSummary } from '@/components/public/types'
 
 interface GamePreview {
@@ -31,6 +31,7 @@ interface UpcomingRow {
   white: string
   black: string
   status: string
+  scheduled_start_at?: string | null
 }
 
 interface HomeResponse {
@@ -149,7 +150,8 @@ function progress(item: TournamentSummary): number {
             <RouterLink v-for="row in data.upcoming_rows" :key="`${row.href}-${row.tournament}-${row.round}`" :to="row.href" class="upcoming-row">
               <div>
                 <strong>{{ row.tournament }}</strong>
-                <span>Round {{ row.round }}</span>
+                <span v-if="row.status === 'scheduled' && row.scheduled_start_at">Starts {{ formatDate(row.scheduled_start_at, true) }}</span>
+                <span v-else>Round {{ row.round }}</span>
               </div>
               <p>{{ row.white }} <span aria-hidden="true">vs</span><span class="sr-only">versus</span> {{ row.black }}</p>
               <StatusPill :status="row.status" />

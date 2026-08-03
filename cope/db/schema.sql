@@ -87,9 +87,21 @@ CREATE TABLE IF NOT EXISTS tournaments (
   current_round INTEGER NOT NULL DEFAULT 0,
   worker_profile TEXT,
   created_at TEXT NOT NULL,
+  scheduled_start_at TEXT,
   started_at TEXT,
   finished_at TEXT
 );
+
+ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS scheduled_start_at TEXT;
+UPDATE tournaments
+SET scheduled_start_at = to_char(
+  CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
+  'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'
+)
+WHERE status = 'scheduled' AND scheduled_start_at IS NULL;
+ALTER TABLE tournaments DROP CONSTRAINT IF EXISTS tournaments_scheduled_start_check;
+ALTER TABLE tournaments ADD CONSTRAINT tournaments_scheduled_start_check
+  CHECK (status != 'scheduled' OR scheduled_start_at IS NOT NULL);
 
 CREATE TABLE IF NOT EXISTS participants (
   tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -591,7 +603,10 @@ CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(to
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 26)
+CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
+  ON tournaments(status, scheduled_start_at);
+
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 27)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
