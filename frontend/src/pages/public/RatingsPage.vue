@@ -6,6 +6,7 @@ import { api } from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import type { EngineRecord, Identifier } from '@/components/public/types'
+import { bestVersionRatings } from '@/utils/ratings'
 
 interface RatingListRecord {
   id: Identifier
@@ -32,6 +33,7 @@ const router = useRouter()
 const data = ref<RatingsResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
+const onlyBestVersions = ref(true)
 let controller: AbortController | null = null
 
 const routeRatingList = computed(() => {
@@ -39,6 +41,10 @@ const routeRatingList = computed(() => {
   return value ? String(value) : ''
 })
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
+const displayedRatings = computed(() => {
+  const ratings = data.value?.ratings ?? []
+  return onlyBestVersions.value ? bestVersionRatings(ratings) : ratings
+})
 
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
@@ -95,12 +101,15 @@ function selectRatingList(event: Event): void {
         <div>
           <h1>Ratings</h1>
         </div>
-        <label v-if="data.rating_lists.length" class="category-picker">
-          <span>Rating list</span>
-          <select :value="selectedRatingList" @change="selectRatingList">
-            <option v-for="ratingList in data.rating_lists" :key="ratingList.id" :value="String(ratingList.id)">{{ ratingList.name }}</option>
-          </select>
-        </label>
+        <div class="ratings-controls">
+          <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
+          <label v-if="data.rating_lists.length" class="category-picker">
+            <span>Rating list</span>
+            <select :value="selectedRatingList" @change="selectRatingList">
+              <option v-for="ratingList in data.rating_lists" :key="ratingList.id" :value="String(ratingList.id)">{{ ratingList.name }}</option>
+            </select>
+          </label>
+        </div>
       </header>
 
       <section v-if="data.rating_list" class="category-overview" aria-label="Selected rating list summary">
@@ -110,7 +119,7 @@ function selectRatingList(event: Event): void {
         </div>
         <dl>
           <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>
-          <div><dt>Rated engines</dt><dd>{{ data.ratings.length }}</dd></div>
+          <div><dt>Rated engines</dt><dd>{{ displayedRatings.length }}</dd></div>
           <div><dt>Games represented</dt><dd>{{ Math.max(0, Math.round(data.ratings.reduce((sum, row) => sum + row.games_played, 0) / 2)) }}</dd></div>
         </dl>
       </section>
@@ -119,7 +128,7 @@ function selectRatingList(event: Event): void {
         <div v-if="loading" class="refreshing" role="status"><span aria-hidden="true"></span>Updating ratings</div>
         <div v-if="loadError" class="inline-error" role="alert">{{ loadError }} <button type="button" @click="load">Try again</button></div>
 
-        <div v-if="data.ratings.length" class="ratings-table-wrap">
+        <div v-if="displayedRatings.length" class="ratings-table-wrap">
           <table class="ratings-table">
             <caption class="sr-only">{{ data.rating_list?.name }} engine ratings</caption>
             <thead>
@@ -135,7 +144,7 @@ function selectRatingList(event: Event): void {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, index) in data.ratings" :key="engineId(row.engine)">
+              <tr v-for="(row, index) in displayedRatings" :key="engineId(row.engine)">
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
                 <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small>{{ row.engine.version }}</small></RouterLink></td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
@@ -192,6 +201,25 @@ function selectRatingList(event: Event): void {
   font-size: clamp(2rem, 5vw, 3.5rem);
   letter-spacing: -0.04em;
   line-height: 1;
+}
+
+.ratings-controls {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 0.9rem;
+}
+
+.best-versions-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.55rem;
+  color: var(--color-text-muted, #607080);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .category-picker {
@@ -397,6 +425,7 @@ function selectRatingList(event: Event): void {
 
 @media (max-width: 52rem) {
   .ratings-heading { align-items: stretch; flex-direction: column; }
+  .ratings-controls { align-items: stretch; justify-content: flex-start; }
   .category-picker { min-width: 0; }
   .category-overview { align-items: stretch; flex-direction: column; }
   .category-overview dl { align-self: stretch; }
@@ -404,6 +433,8 @@ function selectRatingList(event: Event): void {
 }
 
 @media (max-width: 38rem) {
+  .ratings-controls { flex-direction: column; }
+  .best-versions-filter { min-height: auto; }
   .category-overview dl { display: grid; grid-template-columns: repeat(2, 1fr); }
   .category-overview dl div:first-child { grid-column: 1 / -1; }
 }
