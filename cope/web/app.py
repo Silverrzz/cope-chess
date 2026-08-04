@@ -424,7 +424,7 @@ def create_app(
                 pass
         content_length = request.headers.get("content-length")
         if (
-            not _is_opening_import_request(request)
+            not _is_large_upload_request(request)
             and content_length
             and content_length.isdigit()
             and int(content_length) > MAX_REQUEST_BODY_BYTES
@@ -896,11 +896,11 @@ def _social_preview_document(
     return document.replace("</head>", f"    {tags}\n  </head>", 1)
 
 
-def _is_opening_import_request(request: Request) -> bool:
+def _is_large_upload_request(request: Request) -> bool:
     if request.method not in {"POST", "PUT"}:
         return False
     path = request.url.path
-    return path in {"/admin/openings", "/api/admin/openings"} or bool(
+    return bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or path in {"/admin/openings", "/api/admin/openings"} or bool(
         re.fullmatch(r"/(?:api/)?admin/openings/\d+", path)
     )
 

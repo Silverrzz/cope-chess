@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from cope.engine_dockerfiles import engine_build_hash
 from cope.core.models import (
     AssignmentProgress,
+    EngineArtifactSpec,
     EngineSpec,
     HardwareInfo,
     OpeningLine,
@@ -203,9 +204,22 @@ class EngineVersionRecord:
     dockerfile: str
     build_hash: str
     uci_options: dict[str, Any]
+    artifact: EngineArtifactSpec | None
     active: bool
     benchmark_current: bool
     engine_active: bool
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EngineArtifactRecord:
+    build_hash: str
+    artifact_sha256: str
+    artifact_size: int
+    artifact_format: str
+    entrypoint: str
+    platform: str
+    storage_key: str
     created_at: str
 
 
@@ -524,6 +538,96 @@ def update_engine_version(
     )
 
 
+def get_engine_artifact(
+    connection: sqlite3.Connection,
+    build_hash: str,
+) -> EngineArtifactRecord | None:
+    row = connection.execute(
+        "SELECT * FROM engine_artifacts WHERE build_hash = ?",
+        (build_hash,),
+    ).fetchone()
+    return None if row is None else _engine_artifact_from_row(row)
+
+
+def get_engine_artifact_by_sha256(
+    connection: sqlite3.Connection,
+    artifact_sha256: str,
+) -> EngineArtifactRecord | None:
+    row = connection.execute(
+        """SELECT * FROM engine_artifacts
+           WHERE artifact_sha256 = ?
+           ORDER BY created_at, build_hash
+           LIMIT 1""",
+        (artifact_sha256,),
+    ).fetchone()
+    return None if row is None else _engine_artifact_from_row(row)
+
+
+def register_engine_artifact(
+    connection: sqlite3.Connection,
+    *,
+    build_hash: str,
+    artifact_sha256: str,
+    artifact_size: int,
+    artifact_format: str,
+    entrypoint: str,
+    platform: str,
+    storage_key: str,
+) -> EngineArtifactRecord:
+    current = get_engine_artifact(connection, build_hash)
+    values = (
+        artifact_sha256,
+        artifact_size,
+        artifact_format,
+        entrypoint,
+        platform,
+        storage_key,
+    )
+    if current is not None:
+        existing = (
+            current.artifact_sha256,
+            current.artifact_size,
+            current.artifact_format,
+            current.entrypoint,
+            current.platform,
+            current.storage_key,
+        )
+        if existing != values:
+            raise ValueError("a different artifact is already registered for this build")
+        return current
+    connection.execute(
+        """INSERT INTO engine_artifacts (
+             build_hash, artifact_sha256, artifact_size, artifact_format,
+             entrypoint, platform, storage_key, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(build_hash) DO NOTHING""",
+        (
+            build_hash,
+            artifact_sha256,
+            artifact_size,
+            artifact_format,
+            entrypoint,
+            platform,
+            storage_key,
+            utc_now(),
+        ),
+    )
+    artifact = get_engine_artifact(connection, build_hash)
+    if artifact is None:
+        raise RuntimeError("engine artifact was not registered")
+    registered = (
+        artifact.artifact_sha256,
+        artifact.artifact_size,
+        artifact.artifact_format,
+        artifact.entrypoint,
+        artifact.platform,
+        artifact.storage_key,
+    )
+    if registered != values:
+        raise ValueError("a different artifact is already registered for this build")
+    return artifact
+
+
 def engine_game_count(connection: sqlite3.Connection, engine_id: int) -> int:
     row = connection.execute(
         "SELECT COUNT(*) AS count FROM games WHERE white_engine_id = ? OR black_engine_id = ?",
@@ -653,11 +757,17 @@ def get_engine_family(connection: sqlite3.Connection, engine_id: int) -> EngineR
 def get_engine_version_record(connection: sqlite3.Connection, version_id: int) -> EngineVersionRecord | None:
     row = connection.execute(
         """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                  artifact.artifact_sha256, artifact.artifact_size,
+                  artifact.artifact_format, artifact.entrypoint,
+                  artifact.platform, artifact.storage_key,
                   EXISTS (
                     SELECT 1 FROM engine_benchmarks benchmark
                     WHERE benchmark.build_hash = version.build_hash
+                      AND benchmark.artifact_sha256 = artifact.artifact_sha256
                   ) AS benchmark_current
-           FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+           FROM engine_versions version
+           JOIN engines engine ON engine.id = version.engine_id
+           LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
            WHERE version.id = ?""",
         (version_id,),
     ).fetchone()
@@ -678,11 +788,17 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
         _engine_version_from_row(row)
         for row in connection.execute(
             """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                      artifact.artifact_sha256, artifact.artifact_size,
+                      artifact.artifact_format, artifact.entrypoint,
+                      artifact.platform, artifact.storage_key,
                       EXISTS (
                         SELECT 1 FROM engine_benchmarks benchmark
                         WHERE benchmark.build_hash = version.build_hash
+                          AND benchmark.artifact_sha256 = artifact.artifact_sha256
                       ) AS benchmark_current
-               FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+               FROM engine_versions version
+               JOIN engines engine ON engine.id = version.engine_id
+               LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
                ORDER BY engine.name, version.created_at DESC, version.id DESC"""
         )
     )
@@ -694,8 +810,13 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
 
 def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | None:
     row = connection.execute(
-        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
-           FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                  artifact.artifact_sha256, artifact.artifact_size,
+                  artifact.artifact_format, artifact.entrypoint,
+                  artifact.platform, artifact.storage_key
+           FROM engine_versions version
+           JOIN engines engine ON engine.id = version.engine_id
+           LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
            WHERE version.id = ?""",
         (engine_id,),
     ).fetchone()
@@ -705,14 +826,20 @@ def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | N
 
 
 def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -> tuple[EngineSpec, ...]:
-    sql = """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
-             FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id"""
+    sql = """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                    artifact.artifact_sha256, artifact.artifact_size,
+                    artifact.artifact_format, artifact.entrypoint,
+                    artifact.platform, artifact.storage_key
+             FROM engine_versions version
+             JOIN engines engine ON engine.id = version.engine_id
+             LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash"""
     params: tuple[Any, ...] = ()
     if active_only:
-        sql = f"""{sql} WHERE engine.active = ?
+        sql = f"""{sql} WHERE engine.active = ? AND artifact.build_hash IS NOT NULL
                  AND EXISTS (
                    SELECT 1 FROM engine_benchmarks benchmark
                    WHERE benchmark.build_hash = version.build_hash
+                     AND benchmark.artifact_sha256 = artifact.artifact_sha256
                  )"""
         params = (1,)
     sql = f"{sql} ORDER BY version.id"
@@ -3623,6 +3750,7 @@ def _engine_from_row(row: sqlite3.Row) -> EngineSpec:
         source_ref=row["source_ref"],
         dockerfile=row["dockerfile"],
         build_hash=row["build_hash"],
+        artifact=_artifact_spec_from_row(row),
         uci_options=json.loads(row["uci_options"]),
     )
 
@@ -3650,6 +3778,7 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         dockerfile=row["dockerfile"] or "",
         build_hash=row["build_hash"] or "",
         uci_options=json.loads(row["uci_options"]),
+        artifact=_artifact_spec_from_row(row),
         active=engine_active and benchmark_current,
         benchmark_current=benchmark_current,
         engine_active=engine_active,
@@ -3840,6 +3969,33 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         core_limit=row["core_limit"],
         tournament_scope=row["tournament_scope"],
         last_seen=row["last_seen"],
+    )
+
+
+def _artifact_spec_from_row(row: sqlite3.Row) -> EngineArtifactSpec | None:
+    sha256 = row["artifact_sha256"]
+    if not sha256:
+        return None
+    return EngineArtifactSpec(
+        url=f"/api/engine-artifacts/{sha256}",
+        sha256=str(sha256),
+        size=int(row["artifact_size"]),
+        format=str(row["artifact_format"]),
+        entrypoint=str(row["entrypoint"]),
+        platform=str(row["platform"]),
+    )
+
+
+def _engine_artifact_from_row(row: sqlite3.Row) -> EngineArtifactRecord:
+    return EngineArtifactRecord(
+        build_hash=str(row["build_hash"]),
+        artifact_sha256=str(row["artifact_sha256"]),
+        artifact_size=int(row["artifact_size"]),
+        artifact_format=str(row["artifact_format"]),
+        entrypoint=str(row["entrypoint"]),
+        platform=str(row["platform"]),
+        storage_key=str(row["storage_key"]),
+        created_at=str(row["created_at"]),
     )
 
 

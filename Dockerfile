@@ -21,11 +21,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git-lfs \
     && groupadd --system --gid 10001 cope \
     && useradd --system --uid 10001 --gid cope --home-dir /app cope
+
+FROM common-system AS docker-system
 COPY --from=docker-tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 COPY --from=docker-tools /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
-FROM common-system AS client-runtime
+FROM docker-system AS client-runtime
 ARG COPE_BUILD_VERSION=0.1.0
 ENV COPE_BUILD_VERSION=${COPE_BUILD_VERSION}
 COPY pyproject.toml MANIFEST.in ./
@@ -38,7 +40,24 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 USER cope
 ENTRYPOINT ["cope"]
 
-FROM common-system AS runtime
+FROM common-system AS worker-runtime
+ARG COPE_BUILD_VERSION=0.1.0
+ENV COPE_BUILD_VERSION=${COPE_BUILD_VERSION} \
+    COPE_DISABLE_CLIENT_UPDATES=1 \
+    COPE_WORKER_ENGINE_DIR=/var/lib/cope-worker/engines
+COPY pyproject.toml MANIFEST.in ./
+COPY cope/ ./cope/
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    printf '%s\n' "${COPE_BUILD_VERSION}" > cope/BUILD_VERSION \
+    && python -m pip install ".[worker]" \
+    && mkdir -p /var/lib/cope-worker/engines \
+    && chown -R cope:cope /var/lib/cope-worker /app
+USER cope
+VOLUME ["/var/lib/cope-worker"]
+ENTRYPOINT ["cope"]
+CMD ["worker", "--state-file", "/var/lib/cope-worker/worker.json"]
+
+FROM docker-system AS runtime
 ENV COPE_DATABASE_URL=postgresql://cope@db:5432/cope
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -53,8 +72,8 @@ COPY --from=frontend-build /src/cope/web/frontend_dist/ ./cope/web/frontend_dist
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     printf '%s\n' "${COPE_BUILD_VERSION}" > cope/BUILD_VERSION \
     && python -m pip install ".[database,web,runner,worker]" \
-    && mkdir -p /backups \
-    && chown -R cope:cope /backups /app
+    && mkdir -p /backups /var/lib/cope/engine-artifacts \
+    && chown -R cope:cope /backups /var/lib/cope /app
 USER cope
 EXPOSE 8701 8702 8703
 ENTRYPOINT ["cope"]

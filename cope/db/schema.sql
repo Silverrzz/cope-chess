@@ -78,6 +78,21 @@ UPDATE engine_versions
 SET active = 0
 WHERE repository_url IS NULL OR source_ref IS NULL OR dockerfile IS NULL OR build_hash IS NULL;
 
+CREATE TABLE IF NOT EXISTS engine_artifacts (
+  build_hash TEXT PRIMARY KEY CHECK (build_hash ~ '^[0-9a-f]{64}$'),
+  artifact_sha256 TEXT NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+  artifact_size BIGINT NOT NULL CHECK (artifact_size > 0),
+  artifact_format TEXT NOT NULL CHECK (artifact_format = 'cope-tar-gzip-v1'),
+  entrypoint TEXT NOT NULL DEFAULT 'engine',
+  platform TEXT NOT NULL DEFAULT 'linux-x86_64'
+    CHECK (platform = 'linux-x86_64'),
+  storage_key TEXT NOT NULL CHECK (storage_key ~ '^[0-9a-f]{64}$'),
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_engine_artifacts_sha256
+  ON engine_artifacts(artifact_sha256);
+
 CREATE TABLE IF NOT EXISTS tournaments (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
@@ -364,6 +379,7 @@ CREATE TABLE IF NOT EXISTS engine_benchmarks (
   engine_name TEXT NOT NULL,
   engine_version TEXT NOT NULL,
   build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
+  artifact_sha256 TEXT CHECK (artifact_sha256 IS NULL OR artifact_sha256 ~ '^[0-9a-f]{64}$'),
   hardware_key TEXT NOT NULL REFERENCES benchmark_hardware(hardware_key),
   nps BIGINT NOT NULL CHECK (nps > 0),
   elapsed_ms BIGINT NOT NULL CHECK (elapsed_ms >= 0),
@@ -408,6 +424,11 @@ CREATE TABLE IF NOT EXISTS moves (
   clock_after_ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (game_id, ply)
 );
+
+ALTER TABLE engine_benchmarks ADD COLUMN IF NOT EXISTS artifact_sha256 TEXT;
+ALTER TABLE engine_benchmarks DROP CONSTRAINT IF EXISTS engine_benchmarks_artifact_sha256_check;
+ALTER TABLE engine_benchmarks ADD CONSTRAINT engine_benchmarks_artifact_sha256_check
+  CHECK (artifact_sha256 IS NULL OR artifact_sha256 ~ '^[0-9a-f]{64}$');
 
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS score_bound TEXT CHECK (score_bound IN ('lowerbound', 'upperbound'));
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS seldepth INTEGER;
@@ -606,7 +627,7 @@ CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 27)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 28)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

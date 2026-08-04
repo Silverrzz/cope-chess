@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 12
 UciOptionValue = str | int | bool
 
 
@@ -86,6 +86,22 @@ class AdjudicationConfig(StrictModel):
     max_moves: int | None = Field(default=None, gt=0)
 
 
+class EngineArtifactSpec(StrictModel):
+    url: str = Field(min_length=1, max_length=1000)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0)
+    format: Literal["cope-tar-gzip-v1"] = "cope-tar-gzip-v1"
+    entrypoint: str = Field(default="engine", pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+    platform: Literal["linux-x86_64"] = "linux-x86_64"
+
+    @field_validator("entrypoint")
+    @classmethod
+    def validate_entrypoint(cls, value: str) -> str:
+        if value.startswith("/") or ".." in value.split("/"):
+            raise ValueError("artifact entrypoint must stay inside the artifact")
+        return value
+
+
 class EngineSpec(StrictModel):
     engine_id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=80)
@@ -95,6 +111,7 @@ class EngineSpec(StrictModel):
     source_ref: str = Field(min_length=1, max_length=200)
     dockerfile: str = Field(default="", max_length=100_000)
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact: EngineArtifactSpec | None = None
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
 
     @field_validator("uci_options")
@@ -575,6 +592,7 @@ class BenchmarkResult(StrictModel):
     job_key: str = Field(min_length=16, max_length=128)
     hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact: EngineArtifactSpec
     nps: int = Field(gt=0)
     elapsed_ms: int = Field(ge=0)
     output: str = Field(default="", max_length=64_000)
@@ -585,13 +603,13 @@ class BenchmarkFailed(StrictModel):
     job_key: str = Field(min_length=16, max_length=128)
     hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    stage: Literal["build", "bench", "parse"]
+    stage: Literal["build", "upload", "bench", "parse", "unsupported", "internal"]
     error: str = Field(min_length=1, max_length=8000)
     output: str = Field(default="", max_length=64_000)
 
 
 class Envelope(StrictModel):
-    v: Literal[11] = PROTOCOL_VERSION
+    v: Literal[12] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

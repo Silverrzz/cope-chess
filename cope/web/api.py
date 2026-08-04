@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -8,17 +9,19 @@ import os
 import re
 import secrets
 import sqlite3
+import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
 from cope.chat import announce_tournament_finished
-from cope.core.models import HardwareInfo, OpeningLine, TournamentConfig
+from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
     append_suite_openings,
@@ -50,9 +53,11 @@ from cope.db import (
     forget_engine_benchmarks,
     forget_failed_benchmark_job,
     get_benchmarker,
+    get_benchmarker_by_session_id,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
+    get_engine_artifact_by_sha256,
     get_engine_family,
     get_engine_version_record,
     get_git_host,
@@ -61,6 +66,7 @@ from cope.db import (
     get_rating_list,
     get_tournament,
     get_worker,
+    get_worker_by_session_id,
     invalidate_game_pair,
     list_deployment_jobs,
     list_deployment_targets,
@@ -91,6 +97,7 @@ from cope.db import (
     replace_suite_openings,
     replay_game,
     record_manual_benchmark,
+    register_engine_artifact,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
@@ -113,6 +120,12 @@ from cope.engine_dockerfiles import (
     EngineDockerfileError,
     list_engine_dockerfiles,
     read_engine_dockerfile,
+)
+from cope.engine_artifacts import (
+    ARTIFACT_FORMAT,
+    ARTIFACT_PLATFORM,
+    sha256_file,
+    validate_artifact_archive,
 )
 from cope.web.engine_sources import (
     SourceServiceError,
@@ -161,6 +174,49 @@ ADMIN_GAME_RESULT_TYPES = frozenset(
         "draw_other",
     }
 )
+
+
+def _engine_artifact_root() -> Path:
+    return Path(
+        os.environ.get("COPE_ENGINE_ARTIFACT_DIR", "/var/lib/cope/engine-artifacts")
+    ).expanduser().resolve()
+
+
+def _engine_artifact_path(storage_key: str) -> Path:
+    return _engine_artifact_root() / f"{storage_key}.tar.gz"
+
+
+def _engine_artifact_spec(record) -> EngineArtifactSpec:
+    return EngineArtifactSpec(
+        url=f"/api/engine-artifacts/{record.artifact_sha256}",
+        sha256=record.artifact_sha256,
+        size=record.artifact_size,
+        format=record.artifact_format,
+        entrypoint=record.entrypoint,
+        platform=record.platform,
+    )
+
+
+def _bearer_credential(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    return credential if scheme.lower() == "bearer" else ""
+
+
+def _artifact_client_is_authenticated(connection, credential: str) -> bool:
+    if not credential:
+        return False
+    worker = get_worker_by_session_id(connection, credential)
+    if worker is not None and worker.status in {
+        "connected",
+        "downloading",
+        "building",
+        "ready",
+        "busy",
+    }:
+        return True
+    benchmarker = get_benchmarker_by_session_id(connection, credential)
+    return benchmarker is not None and benchmarker.status in {"connected", "busy"}
 
 
 def _load_engine_dockerfile(selected_path: str) -> str:
@@ -556,6 +612,124 @@ def register_api_routes(app: FastAPI) -> None:
         response = _json({"authenticated": False, "message": "Signed out."})
         response.delete_cookie("cope_admin_session")
         response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.put("/api/benchmarker/engine-artifacts/{build_hash}")
+    async def upload_engine_artifact(
+        build_hash: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", build_hash) is None:
+            raise HTTPException(status_code=422, detail="Build hash is invalid.")
+        credential = _bearer_credential(request)
+        benchmarker = get_benchmarker_by_session_id(connection, credential) if credential else None
+        if benchmarker is None or benchmarker.status != "busy":
+            raise HTTPException(status_code=401, detail="A busy benchmarker session is required.")
+        running = connection.execute(
+            """SELECT 1 FROM benchmark_jobs
+               WHERE benchmarker_id = ? AND build_hash = ? AND status = 'running'
+               LIMIT 1""",
+            (benchmarker.id, build_hash),
+        ).fetchone()
+        if running is None:
+            raise HTTPException(status_code=409, detail="No matching benchmark job is running.")
+        expected_sha256 = request.headers.get("x-cope-artifact-sha256", "")
+        if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise HTTPException(status_code=422, detail="Artifact SHA-256 header is invalid.")
+        maximum = int(
+            os.environ.get("COPE_ENGINE_ARTIFACT_MAX_BYTES", str(1024 * 1024 * 1024))
+        )
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > maximum:
+            raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+        root = _engine_artifact_root()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = root / f".upload-{uuid.uuid4().hex}"
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with temporary.open("xb") as output:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > maximum:
+                        raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if size == 0:
+                raise HTTPException(status_code=422, detail="Engine artifact is empty.")
+            artifact_sha256 = digest.hexdigest()
+            if artifact_sha256 != expected_sha256:
+                raise HTTPException(status_code=422, detail="Engine artifact SHA-256 does not match.")
+            try:
+                await asyncio.to_thread(
+                    validate_artifact_archive,
+                    temporary,
+                    expected_build_hash=build_hash,
+                    expected_entrypoint="engine",
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            destination = _engine_artifact_path(artifact_sha256)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                artifact = register_engine_artifact(
+                    connection,
+                    build_hash=build_hash,
+                    artifact_sha256=artifact_sha256,
+                    artifact_size=size,
+                    artifact_format=ARTIFACT_FORMAT,
+                    entrypoint="engine",
+                    platform=ARTIFACT_PLATFORM,
+                    storage_key=artifact_sha256,
+                )
+                if destination.exists():
+                    stored_sha256 = await asyncio.to_thread(sha256_file, destination)
+                    if destination.stat().st_size != size or stored_sha256 != artifact_sha256:
+                        os.replace(temporary, destination)
+                else:
+                    os.replace(temporary, destination)
+                destination.chmod(0o600)
+                connection.commit()
+            except ValueError as exc:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except Exception:
+                connection.rollback()
+                raise
+            return _json({"artifact": _engine_artifact_spec(artifact)})
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get("/api/engine-artifacts/{artifact_sha256}")
+    def download_engine_artifact(
+        artifact_sha256: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+            raise HTTPException(status_code=404, detail="Engine artifact was not found.")
+        if not _artifact_client_is_authenticated(connection, _bearer_credential(request)):
+            raise HTTPException(status_code=401, detail="A current client session is required.")
+        artifact = get_engine_artifact_by_sha256(connection, artifact_sha256)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Engine artifact was not found.")
+        path = _engine_artifact_path(artifact.storage_key)
+        if not path.is_file() or path.stat().st_size != artifact.artifact_size:
+            LOG.error("engine artifact is missing or corrupt sha256=%s path=%s", artifact_sha256, path)
+            raise HTTPException(status_code=503, detail="Engine artifact is unavailable.")
+        response = FileResponse(
+            path,
+            media_type="application/gzip",
+            filename=f"{artifact_sha256}.tar.gz",
+        )
+        response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        response.headers["X-Cope-Artifact-SHA256"] = artifact.artifact_sha256
+        response.headers["X-Cope-Artifact-Format"] = artifact.artifact_format
         return response
 
     # ------------------------------------------------------------------

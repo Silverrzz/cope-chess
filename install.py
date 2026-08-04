@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-INSTALLER_VERSION = "7"
+INSTALLER_VERSION = "8"
 
 
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
                 "docker",
                 "build",
                 "--target",
-                "client-runtime",
+                "worker-runtime" if clients == ["worker"] else "client-runtime",
                 "--build-arg",
                 f"COPE_BUILD_VERSION={_build_version()}",
                 "--tag",
@@ -396,9 +396,8 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         "--mount",
         f"type=bind,source={RUNTIME},target=/state",
         "--mount",
-        "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
-        "--mount",
-        f"type=volume,source={_cache_volume()},target=/root/.cope-worker/engines",
+        f"type=volume,source={_cache_volume()},target="
+        + ("/var/lib/cope-worker/engines" if key == "worker" else "/root/.cope-worker/engines"),
         "--env",
         f"COPE_BUILD_VERSION={build_version}",
     ]
@@ -407,6 +406,8 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
     if key == "benchmarker":
         command.extend(
             [
+                "--mount",
+                "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock",
                 "--env",
                 f"COPE_ENGINE_CACHE_VOLUME={_cache_volume()}",
                 "--env",
@@ -415,6 +416,10 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
                 f"COPE_BENCHMARK_OWNER={machine_id}",
             ]
         )
+    else:
+        command.extend(["--env", "COPE_WORKER_ENGINE_DIR=/var/lib/cope-worker/engines"])
+        if not local_build_dirty:
+            command.extend(["--env", "COPE_DISABLE_CLIENT_UPDATES=0"])
     if settings[f"{key}_server_url"].startswith(
         ("ws://worker-server:", "ws://benchmark-server:")
     ):

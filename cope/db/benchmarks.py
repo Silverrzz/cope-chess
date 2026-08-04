@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-from cope.core.models import EngineSpec, HardwareInfo
+from cope.core.models import EngineArtifactSpec, EngineSpec, HardwareInfo
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +69,7 @@ class EngineBenchmarkRecord:
     engine_name: str
     engine_version: str
     build_hash: str
+    artifact_sha256: str | None
     hardware_key: str
     nps: int
     elapsed_ms: int
@@ -398,7 +399,24 @@ def claim_benchmark_job(
         "SELECT * FROM benchmark_jobs WHERE id = ?",
         (row["id"],),
     ).fetchone()
-    return None if current is None else _benchmark_job_from_row(current)
+    if current is None:
+        return None
+    job = _benchmark_job_from_row(current)
+    artifact = connection.execute(
+        "SELECT * FROM engine_artifacts WHERE build_hash = ?",
+        (job.build_hash,),
+    ).fetchone()
+    if artifact is None:
+        return job
+    spec = EngineArtifactSpec(
+        url=f"/api/engine-artifacts/{artifact['artifact_sha256']}",
+        sha256=str(artifact["artifact_sha256"]),
+        size=int(artifact["artifact_size"]),
+        format=str(artifact["artifact_format"]),
+        entrypoint=str(artifact["entrypoint"]),
+        platform=str(artifact["platform"]),
+    )
+    return replace(job, engine=job.engine.model_copy(update={"artifact": spec}))
 
 
 def record_benchmark_progress(
@@ -428,6 +446,7 @@ def complete_benchmark_job(
     nps: int,
     elapsed_ms: int,
     output: str,
+    artifact_sha256: str,
 ) -> None:
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
@@ -435,10 +454,10 @@ def complete_benchmark_job(
     connection.execute(
         """
         INSERT INTO engine_benchmarks (
-          job_id, engine_version_id, engine_name, engine_version, build_hash,
+          job_id, engine_version_id, engine_name, engine_version, build_hash, artifact_sha256,
           hardware_key, nps, elapsed_ms, output, recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(build_hash, hardware_key) DO NOTHING
         """,
         (
@@ -447,6 +466,7 @@ def complete_benchmark_job(
             current.engine_name,
             current.engine_version,
             current.build_hash,
+            artifact_sha256,
             current.hardware_key,
             nps,
             elapsed_ms,
@@ -532,8 +552,10 @@ def engine_build_is_benchmarked(
     del engine_version_id
     row = connection.execute(
         """
-        SELECT 1 FROM engine_benchmarks
-        WHERE build_hash = ?
+        SELECT 1 FROM engine_benchmarks benchmark
+        JOIN engine_artifacts artifact ON artifact.build_hash = benchmark.build_hash
+        WHERE benchmark.build_hash = ?
+          AND benchmark.artifact_sha256 = artifact.artifact_sha256
         LIMIT 1
         """,
         (build_hash,),
@@ -561,6 +583,7 @@ def list_engine_benchmark_jobs(
                result.engine_name AS result_engine_name,
                result.engine_version AS result_engine_version,
                result.build_hash AS result_build_hash,
+               result.artifact_sha256 AS result_artifact_sha256,
                result.hardware_key AS result_hardware_key,
                result.nps AS result_nps, result.elapsed_ms AS result_elapsed_ms,
                result.output AS result_output, result.recorded_at AS result_recorded_at
@@ -585,6 +608,7 @@ def list_engine_benchmark_jobs(
                 id=int(row["result_id"]), job_id=int(row["result_job_id"]),
                 engine_version_id=row["result_engine_version_id"], engine_name=str(row["result_engine_name"]),
                 engine_version=str(row["result_engine_version"]), build_hash=str(row["result_build_hash"]),
+                artifact_sha256=row["result_artifact_sha256"],
                 hardware_key=str(row["result_hardware_key"]), nps=int(row["result_nps"]),
                 elapsed_ms=int(row["result_elapsed_ms"]), output=str(row["result_output"]),
                 recorded_at=str(row["result_recorded_at"]),
@@ -630,6 +654,8 @@ def record_manual_benchmark(
 ) -> int:
     from cope.core.benchmark import benchmark_hardware_key
 
+    if engine.artifact is None:
+        raise ValueError("The engine must have a published artifact before a benchmark can be recorded.")
     if nps <= 0:
         raise ValueError("Benchmark NPS must be positive.")
     if elapsed_ms < 0:
@@ -705,14 +731,14 @@ def record_manual_benchmark(
     connection.execute(
         """
         INSERT INTO engine_benchmarks (
-          job_id, engine_version_id, engine_name, engine_version, build_hash,
+          job_id, engine_version_id, engine_name, engine_version, build_hash, artifact_sha256,
           hardware_key, nps, elapsed_ms, output, recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)
         """,
         (
             job_id, engine.engine_id, engine.name, engine.version,
-            engine.build_hash, hardware_key, nps, elapsed_ms, now,
+            engine.build_hash, engine.artifact.sha256, hardware_key, nps, elapsed_ms, now,
         ),
     )
     connection.execute(
@@ -850,6 +876,9 @@ def get_common_benchmark_reference(
         f"""
         SELECT benchmark.hardware_key
         FROM engine_benchmarks benchmark
+        JOIN engine_artifacts artifact
+          ON artifact.build_hash = benchmark.build_hash
+         AND artifact.artifact_sha256 = benchmark.artifact_sha256
         JOIN benchmark_hardware hardware
           ON hardware.hardware_key = benchmark.hardware_key
         WHERE benchmark.build_hash IN ({placeholders})
@@ -865,10 +894,13 @@ def get_common_benchmark_reference(
     hardware_key = str(row["hardware_key"])
     rows = connection.execute(
         f"""
-        SELECT build_hash, nps
-        FROM engine_benchmarks
-        WHERE hardware_key = ?
-          AND build_hash IN ({placeholders})
+        SELECT benchmark.build_hash, benchmark.nps
+        FROM engine_benchmarks benchmark
+        JOIN engine_artifacts artifact
+          ON artifact.build_hash = benchmark.build_hash
+         AND artifact.artifact_sha256 = benchmark.artifact_sha256
+        WHERE benchmark.hardware_key = ?
+          AND benchmark.build_hash IN ({placeholders})
         """,
         (hardware_key, *build_hashes),
     )
@@ -1042,6 +1074,7 @@ def _engine_benchmark_from_row(row) -> EngineBenchmarkRecord:
         engine_name=str(row["engine_name"]),
         engine_version=str(row["engine_version"]),
         build_hash=str(row["build_hash"]),
+        artifact_sha256=row["artifact_sha256"],
         hardware_key=str(row["hardware_key"]),
         nps=int(row["nps"]),
         elapsed_ms=int(row["elapsed_ms"]),

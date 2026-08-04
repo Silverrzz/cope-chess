@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
+import json
 import logging
 import os
 import queue
@@ -12,6 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from websockets.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -19,6 +22,7 @@ from websockets.exceptions import ConnectionClosed
 from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
 from cope.core.models import (
     BenchmarkAssignment,
+    EngineArtifactSpec,
     BenchmarkFailed,
     BenchmarkProgress,
     BenchmarkerSessionHello,
@@ -37,6 +41,7 @@ from cope.core.protocol import (
 from cope.worker.client import _detect_hardware, _detect_machine_id, _restart_arguments
 from cope.worker.update import install_client_release
 from cope.worker.uci_engine import EnginePreparationError, UciEngineProcess
+from cope.engine_artifacts import create_artifact_archive
 
 
 LOG = logging.getLogger("cope.benchmarker")
@@ -406,6 +411,61 @@ def _run_benchmark(
                 ),
             )
 
+        artifact = assignment.engine.artifact
+        if artifact is None:
+            archive_directory = engine.artifact_directory.parent / ".uploads"
+            archive_directory.mkdir(parents=True, exist_ok=True)
+            archive_path = archive_directory / (
+                f"{assignment.engine.build_hash}-{os.getpid()}-"
+                f"{threading.get_ident()}-{secrets.token_hex(4)}.tar.gz"
+            )
+            try:
+                progress_callback(
+                    "artifact",
+                    "package",
+                    "running",
+                    f"Packaging the {assignment.engine.name} engine artifact",
+                )
+                artifact_sha256, artifact_size = create_artifact_archive(
+                    engine.artifact_directory,
+                    archive_path,
+                    build_hash=assignment.engine.build_hash,
+                )
+                progress_callback(
+                    "artifact",
+                    "upload",
+                    "running",
+                    f"Uploading the {assignment.engine.name} engine artifact",
+                )
+                artifact = _upload_artifact(
+                    server_url,
+                    credential,
+                    build_hash=assignment.engine.build_hash,
+                    archive_path=archive_path,
+                    artifact_sha256=artifact_sha256,
+                    artifact_size=artifact_size,
+                )
+                progress_callback(
+                    "artifact",
+                    "upload",
+                    "completed",
+                    f"Published the {assignment.engine.name} engine artifact",
+                )
+            except Exception as error:
+                return (
+                    "benchmark_failed",
+                    BenchmarkFailed(
+                        job_id=assignment.job_id,
+                        job_key=assignment.job_key,
+                        hardware_key=assignment.hardware_key,
+                        build_hash=assignment.engine.build_hash,
+                        stage="upload",
+                        error=(str(error).strip() or error.__class__.__name__)[-8000:],
+                    ),
+                )
+            finally:
+                archive_path.unlink(missing_ok=True)
+
         progress_callback(
             "benchmark",
             "engine_bench",
@@ -502,6 +562,7 @@ def _run_benchmark(
                 job_key=assignment.job_key,
                 hardware_key=assignment.hardware_key,
                 build_hash=assignment.engine.build_hash,
+                artifact=artifact,
                 nps=nps,
                 elapsed_ms=elapsed_ms,
                 output=output,
@@ -540,6 +601,61 @@ def _run_benchmark(
 
 def _trim_output(output: str) -> str:
     return output[-OUTPUT_LIMIT:]
+
+
+def _upload_artifact(
+    server_url: str,
+    credential: str,
+    *,
+    build_hash: str,
+    archive_path: Path,
+    artifact_sha256: str,
+    artifact_size: int,
+) -> EngineArtifactSpec:
+    parsed_server = urlsplit(server_url)
+    scheme = "https" if parsed_server.scheme in {"wss", "https"} else "http"
+    origin = urlunsplit((scheme, parsed_server.netloc, "/", "", ""))
+    url = urljoin(origin, f"api/benchmarker/engine-artifacts/{build_hash}")
+    parsed = urlsplit(url)
+    if parsed.scheme == "https":
+        connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, timeout=600)
+    elif parsed.scheme == "http":
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=600)
+    else:
+        raise RuntimeError("artifact server URL is unsupported")
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    try:
+        connection.putrequest("PUT", target)
+        connection.putheader("Authorization", f"Bearer {credential}")
+        connection.putheader("Content-Type", "application/gzip")
+        connection.putheader("Content-Length", str(artifact_size))
+        connection.putheader("X-Cope-Artifact-SHA256", artifact_sha256)
+        connection.endheaders()
+        with archive_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                connection.send(chunk)
+        response = connection.getresponse()
+        payload = response.read(64 * 1024 + 1)
+        if len(payload) > 64 * 1024:
+            raise RuntimeError("artifact server returned an oversized response")
+        if response.status < 200 or response.status >= 300:
+            try:
+                detail = json.loads(payload.decode("utf-8")).get("detail", "")
+            except (UnicodeError, json.JSONDecodeError, AttributeError):
+                detail = payload.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"artifact server returned HTTP {response.status}"
+                + (f": {detail}" if detail else "")
+            )
+        try:
+            body = json.loads(payload.decode("utf-8"))
+            return EngineArtifactSpec.model_validate(body["artifact"])
+        except (UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise RuntimeError("artifact server returned an invalid descriptor") from exc
+    finally:
+        connection.close()
 
 
 def _run_bench_command(
