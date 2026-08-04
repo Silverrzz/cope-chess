@@ -82,6 +82,7 @@ interface ViewportPosition {
   top: number
 }
 
+const FOLLOWED_ENGINE_STORAGE_KEY = 'cope.tournament.followedEngineId'
 const route = useRoute()
 const router = useRouter()
 const data = ref<TournamentDetailResponse | null>(null)
@@ -90,7 +91,7 @@ const loadError = ref('')
 const selectedPly = ref(0)
 const currentPositionFen = ref('startpos')
 const streamState = ref<StreamState>('closed')
-const followedEngineId = ref('')
+const rememberedFollowedEngineId = ref(readFollowedEngineId())
 const clockLabels = ref<Record<'white' | 'black', string>>({ white: '--:--', black: '--:--' })
 const clockRuntime = ref<ClockRuntime | null>(null)
 const headingElement = ref<HTMLElement | null>(null)
@@ -126,6 +127,12 @@ const participantEngines = computed(() => (data.value?.tournament.config?.partic
     name: engineName(data.value?.engines, engineId),
   }))
   .sort((left, right) => left.name.localeCompare(right.name)))
+const followedEngineId = computed({
+  get: () => participantEngines.value.some((engine) => engine.id === rememberedFollowedEngineId.value)
+    ? rememberedFollowedEngineId.value
+    : '',
+  set: rememberFollowedEngine,
+})
 const gameTotal = computed(() => data.value?.game_pagination.total || 0)
 const gamePages = computed(() => data.value?.game_pagination.pages || 1)
 const pickerGameId = computed(() => {
@@ -218,12 +225,8 @@ watch(() => data.value?.tournament.name, (name) => {
 
 watch(loadError, () => scheduleArenaFit(), { flush: 'post' })
 
-watch(followedEngineId, (engineId) => {
-  if (!engineId) {
-    awaitingNextLiveAfterGameId = ''
-    return
-  }
-  followNextLiveGame()
+watch(followedEngineId, () => {
+  followNextGame()
 })
 
 watch(headingElement, (next, previous) => {
@@ -364,7 +367,7 @@ function applyDetail(response: TournamentDetailResponse): void {
     && sameId(previousViewerGame.id, response.viewer_game.id)
     && sameId(previousViewerGame.id, selectedGameId.value)
   ) {
-    startFollowingAfterGame(previousViewerGame.id)
+    startGameHandoff(previousViewerGame.id)
   }
 
   if (String(previousGame ?? '') !== String(response.viewer_game?.id ?? '') || followedLatest) {
@@ -383,7 +386,7 @@ function applyDetail(response: TournamentDetailResponse): void {
     stopClock()
   }
 
-  followNextLiveGame()
+  followNextGame()
 }
 
 function connectStream(): void {
@@ -530,7 +533,7 @@ function applySnapshot(snapshot: LiveSnapshot): void {
     && selectedGameUpdate?.status === 'finished'
     && sameId(displayedGame.id, selectedGameId.value)
   ) {
-    startFollowingAfterGame(displayedGame.id)
+    startGameHandoff(displayedGame.id)
   }
 
   if (snapshot.game && sameId(snapshot.game.id, selectedGameId.value)) {
@@ -555,15 +558,15 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   }
   if (snapshot.standings) data.value.standings = snapshot.standings
 
-  followNextLiveGame(snapshot.game)
+  followNextGame(snapshot.game)
 }
 
 function isActiveGame(game: GameRecord | null | undefined): game is GameRecord {
   return game?.status === 'assigned' || game?.status === 'live'
 }
 
-function startFollowingAfterGame(gameId: Identifier): void {
-  awaitingNextLiveAfterGameId = followedEngineId.value ? String(gameId) : ''
+function startGameHandoff(gameId: Identifier): void {
+  awaitingNextLiveAfterGameId = String(gameId)
 }
 
 function includesFollowedEngine(game: GameRecord): boolean {
@@ -573,20 +576,29 @@ function includesFollowedEngine(game: GameRecord): boolean {
   )
 }
 
-function followNextLiveGame(preferredGame?: GameRecord | null): void {
-  if (!data.value || !followedEngineId.value || !awaitingNextLiveAfterGameId) return
+function followNextGame(preferredGame?: GameRecord | null): void {
+  if (!data.value || !awaitingNextLiveAfterGameId) return
   if (routeGameId.value !== awaitingNextLiveAfterGameId) return
 
-  const nextLiveGame = isActiveGame(preferredGame)
-    && !sameId(preferredGame.id, awaitingNextLiveAfterGameId)
-    && includesFollowedEngine(preferredGame)
-    ? preferredGame
-    : data.value.active_games.find(
-      (game) => isActiveGame(game)
-        && !sameId(game.id, awaitingNextLiveAfterGameId)
-        && includesFollowedEngine(game),
-    )
-  if (nextLiveGame) void followLiveGame(nextLiveGame.id)
+  const candidates = [preferredGame, ...data.value.active_games]
+    .filter((game): game is GameRecord => isActiveGame(game))
+    .filter((game, index, games) => !sameId(game.id, awaitingNextLiveAfterGameId)
+      && games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
+  const followedEngineGame = followedEngineId.value
+    ? candidates.find(includesFollowedEngine)
+    : undefined
+  const nextGame = followedEngineGame || mostRecentlyStartedGame(candidates)
+  if (nextGame) void followLiveGame(nextGame.id)
+}
+
+function mostRecentlyStartedGame(games: GameRecord[]): GameRecord | undefined {
+  return games.reduce<GameRecord | undefined>((latest, game) => {
+    if (game.status !== 'live') return latest
+    const startedAt = Date.parse(game.started_at || '')
+    if (!Number.isFinite(startedAt)) return latest
+    if (!latest || startedAt > Date.parse(latest.started_at || '')) return game
+    return latest
+  }, undefined)
 }
 
 async function followLiveGame(gameId: Identifier): Promise<void> {
@@ -779,6 +791,24 @@ function queryValue(value: unknown): string {
   return Array.isArray(value) ? String(value[0] || '') : typeof value === 'string' ? value : ''
 }
 
+function readFollowedEngineId(): string {
+  try {
+    return localStorage.getItem(FOLLOWED_ENGINE_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function rememberFollowedEngine(engineId: string): void {
+  rememberedFollowedEngineId.value = engineId
+  try {
+    if (engineId) localStorage.setItem(FOLLOWED_ENGINE_STORAGE_KEY, engineId)
+    else localStorage.removeItem(FOLLOWED_ENGINE_STORAGE_KEY)
+  } catch {
+    return
+  }
+}
+
 </script>
 
 <template>
@@ -796,7 +826,7 @@ function queryValue(value: unknown): string {
           <p>
             {{ format ? statusLabel(format) : 'Tournament' }}
             <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
-            <template v-if="viewerGame"> / {{ resultLabel(viewerGame.result) }}</template>
+            <template v-if="viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
             <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>
             <template v-else-if="data.tournament.status === 'running' && data.estimate?.estimated_finish_at"> / Estimated finish {{ formatDate(data.estimate.estimated_finish_at, true) }}</template>
           </p>

@@ -2044,6 +2044,7 @@ def _game_payload(
                 "termination": game.termination,
                 "white_engine_id": game.white_engine_id,
                 "black_engine_id": game.black_engine_id,
+                "started_at": game.started_at,
             }
         )
     return payload
