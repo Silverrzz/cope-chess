@@ -32,8 +32,8 @@ const search = computed({
   set: (value: string) => updateQuery({ q: value.trim() || undefined }),
 })
 const statusFilter = computed({
-  get: () => queryValue(route.query.status) || 'all',
-  set: (value: string) => updateQuery({ status: value === 'all' ? undefined : value }),
+  get: () => queryValue(route.query.status) || 'active',
+  set: (value: string) => updateQuery({ status: value === 'active' ? undefined : value }),
 })
 
 const publicTournaments = computed(() => (data.value?.tournaments || [])
