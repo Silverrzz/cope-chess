@@ -21,6 +21,7 @@ from cope.db import (
     create_game,
     create_tournament_match,
     finish_tournament_match,
+    get_tournament,
     invalidate_tournament_participant_games,
     list_due_scheduled_tournaments,
     list_games,
@@ -168,18 +169,40 @@ def prepare_tournament(
             created_games=0,
             skipped_reason="tournament is no longer scheduled",
         )
-    preparation = materialize_tournament_schedule(connection, current)
-    set_tournament_status(connection, current.id, "running")
-    running = _refresh_tournament(connection, current)
+    return _start_tournament(connection, current)
+
+
+def start_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> TournamentPreparation:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    if (
+        tournament.status not in {"draft", "scheduled"}
+        or tournament.started_at is not None
+    ):
+        raise ValueError("only a draft or unstarted scheduled tournament can be started")
+    return _start_tournament(connection, tournament)
+
+
+def _start_tournament(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+) -> TournamentPreparation:
+    preparation = materialize_tournament_schedule(connection, tournament)
+    set_tournament_status(connection, tournament.id, "running")
+    running = _refresh_tournament(connection, tournament)
     advance = advance_tournament(connection, running)
     announce_tournament_started(
         connection,
         running,
-        scheduled_games=len(list_games(connection, current.id)),
+        scheduled_games=len(list_games(connection, tournament.id)),
     )
     return TournamentPreparation(
-        tournament_id=current.id,
-        tournament_name=current.name,
+        tournament_id=tournament.id,
+        tournament_name=tournament.name,
         created_games=preparation.created_games + advance.created_games,
     )
 
@@ -964,6 +987,7 @@ def _refresh_tournament(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> TournamentRecord:
-    return next(
-        current for current in list_tournaments(connection) if current.id == tournament.id
-    )
+    current = get_tournament(connection, tournament.id)
+    if current is None:
+        raise ValueError("tournament does not exist")
+    return current

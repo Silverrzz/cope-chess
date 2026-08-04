@@ -146,6 +146,7 @@ from cope.runner.scheduler import (
     add_running_tournament_participant,
     materialize_tournament_schedule,
     remove_running_tournament_participant,
+    start_tournament,
 )
 from cope.tournament.estimates import TournamentEstimator
 
@@ -1524,6 +1525,34 @@ def register_api_routes(app: FastAPI) -> None:
             ) from exc
         _publish_admin_change(web_app, request)
         return _json({"status": "draft", "message": "Tournament returned to draft."})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/start")
+    def admin_start_tournament(
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            preparation = start_tournament(connection, tournament_id)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament start failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not start the tournament. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "status": "running",
+                "created_games": preparation.created_games,
+                "message": "Tournament started.",
+            }
+        )
 
     @app.post("/api/admin/tournaments/{tournament_id}/participants")
     def admin_add_tournament_participant(

@@ -224,6 +224,18 @@ async function saveSchedule(scheduledStartAt: string): Promise<void> {
   finally { pending.value = '' }
 }
 
+async function startTournament(): Promise<void> {
+  pending.value = 'start'
+  error.value = ''
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/start`)
+    toast.success(response.message)
+    showSchedule.value = false
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
 async function unschedule(): Promise<void> {
   if (!data.value) return
   const accepted = await confirm({
@@ -426,8 +438,9 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
       <TournamentScheduleEditor
         v-if="showSchedule && data.capabilities.schedulable"
         :initial-value="data.tournament.scheduled_start_at"
-        :pending="pending === 'schedule'"
+        :pending="['schedule', 'start'].includes(pending)"
         @submit="saveSchedule"
+        @start="startTournament"
         @cancel="showSchedule = false"
       />
 

@@ -12,6 +12,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   submit: [scheduledStartAt: string]
+  start: []
   cancel: []
 }>()
 
@@ -52,7 +53,7 @@ function chooseDay(offset: number): void {
 }
 
 function startNow(): void {
-  emit('submit', new Date().toISOString())
+  emit('start')
 }
 
 function submit(): void {
