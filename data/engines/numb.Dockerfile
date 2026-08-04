@@ -35,8 +35,11 @@ RUN rm -rf \
         --collect-all numba \
         --collect-all llvmlite \
         numba_engine_PRE_NNUE_clean.py \
-    && dist/numbengine/numbengine --warmup \
     && mv dist/numbengine/numbengine dist/numbengine/engine \
+    && cp -a numba_engine_PRE_NNUE_clean.py dist/numbengine/ \
+    && cd dist/numbengine \
+    && ./engine --warmup \
+    && cd /build \
     && find dist/numbengine -type d -exec chmod 755 {} + \
     && find dist/numbengine -type f -exec chmod 644 {} + \
     && chmod 755 dist/numbengine/engine \
