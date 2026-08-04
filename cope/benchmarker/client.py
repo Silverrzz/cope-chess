@@ -51,6 +51,7 @@ OUTPUT_LIMIT = 64_000
 PROGRESS_HEARTBEAT_INTERVAL_S = 5.0
 BENCH_OUTPUT_QUEUE_SIZE = 256
 BENCH_CONTAINER_MEMORY = "4g"
+BENCH_CONTAINER_TMPFS = "512m"
 
 
 @dataclass(frozen=True)
@@ -532,7 +533,7 @@ def _run_benchmark(
                     hardware_key=assignment.hardware_key,
                     build_hash=assignment.engine.build_hash,
                     stage="bench",
-                    error=f"engine bench exited with code {return_code}",
+                    error=f"engine bench {_process_exit_description(return_code)}",
                     output=output,
                 ),
             )
@@ -838,7 +839,7 @@ def _bench_command(executable: Path) -> tuple[list[str], str | None]:
             "--mount",
             f"type=volume,source={volume},target=/engines,readonly",
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            f"/tmp:rw,noexec,nosuid,nodev,size={BENCH_CONTAINER_TMPFS}",
             "--workdir",
             str(container_path.parent),
             "--entrypoint",
@@ -907,6 +908,17 @@ def _kill_process(process: subprocess.Popen[str]) -> None:
             process.kill()
     except ProcessLookupError:
         return
+
+
+def _process_exit_description(return_code: int) -> str:
+    signal_number = -return_code if return_code < 0 else return_code - 128
+    if 0 < signal_number < 64:
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        return f"was terminated by {signal_name} (exit code {return_code})"
+    return f"exited with code {return_code}"
 
 
 def _duration_text(seconds: float) -> str:

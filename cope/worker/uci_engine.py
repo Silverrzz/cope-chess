@@ -139,6 +139,7 @@ class UciEngineProcess:
                 completed = subprocess.run(
                     [str(self._binary_path.resolve()), "bench"],
                     cwd=self._source_dir,
+                    env=self._engine_environment(),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -163,7 +164,7 @@ class UciEngineProcess:
                 raise EnginePreparationError(
                     self._spec,
                     "benchmark",
-                    f"engine bench exited with code {completed.returncode}: {output}",
+                    f"engine bench {_process_exit_description(completed.returncode)}: {output}",
                 )
             nps = parse_benchmark_nps(output)
             if nps is None:
@@ -338,7 +339,7 @@ class UciEngineProcess:
                 self._process.returncode,
             )
             raise RuntimeError(
-                f"{self._spec.name} exited with code {self._process.returncode}"
+                f"{self._spec.name} {_process_exit_description(self._process.returncode)}"
             )
 
         self._ensure_artifact()
@@ -362,6 +363,7 @@ class UciEngineProcess:
             self._process = subprocess.Popen(
                 [str(self._binary_path.resolve())],
                 cwd=self._source_dir,
+                env=self._engine_environment(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -391,6 +393,16 @@ class UciEngineProcess:
         )
         self._stdout_thread.start()
         return self._process
+
+    def _engine_environment(self) -> dict[str, str]:
+        runtime_temp = self._source_dir.parent / ".runtime" / self._source_dir.name
+        runtime_temp.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        runtime_temp_value = str(runtime_temp.resolve())
+        environment["TMPDIR"] = runtime_temp_value
+        environment["TMP"] = runtime_temp_value
+        environment["TEMP"] = runtime_temp_value
+        return environment
 
     def _ensure_downloaded_artifact(self) -> None:
         artifact = self._spec.artifact
@@ -892,7 +904,11 @@ class UciEngineProcess:
             if line is None:
                 process = self._process
                 code = None if process is None else process.poll()
-                raise RuntimeError(f"{self._spec.name} exited: {code}")
+                raise RuntimeError(
+                    f"{self._spec.name} {_process_exit_description(code)}"
+                    if code is not None
+                    else f"{self._spec.name} exited"
+                )
             lines.append(line)
 
 
@@ -905,6 +921,17 @@ def _engine_source_dir(spec: EngineSpec) -> Path:
     cache_key = spec.build_hash if spec.artifact is None else spec.artifact.sha256
     prefix = "build" if spec.artifact is None else "artifact"
     return cache_root / f"{prefix}-{cache_key}"
+
+
+def _process_exit_description(return_code: int) -> str:
+    signal_number = -return_code if return_code < 0 else return_code - 128
+    if 0 < signal_number < 64:
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        return f"was terminated by {signal_name} (exit code {return_code})"
+    return f"exited with code {return_code}"
 
 
 def _effective_home_dir() -> Path:
