@@ -34,6 +34,13 @@ async function load(): Promise<void> {
   finally { loading.value = false }
 }
 
+function engineGameCount(engine: EngineFamily): number {
+  return engine.versions.reduce(
+    (total, version) => total + (data.value?.game_counts[String(version.id)] ?? 0),
+    0,
+  )
+}
+
 async function remove(engine: EngineFamily): Promise<void> {
   if (engine.versions.length) {
     error.value = 'Delete every version before deleting the engine.'
@@ -71,21 +78,18 @@ onMounted(load)
       <div v-if="loading" class="loading">Loading engines…</div>
       <div v-else-if="filtered.length" class="grid">
         <article v-for="engine in filtered" :key="engine.id" class="engine-card">
+          <RouterLink class="engine-card__link" :to="`/admin/engines/${engine.id}`" :aria-label="`Open ${engine.name}`" />
           <div class="heading">
             <div class="mark">{{ engine.name[0]?.toUpperCase() }}</div>
             <div><h2>{{ engine.name }}</h2><p>{{ engine.author || 'Unknown author' }}</p></div>
             <StatusBadge :status="engine.active ? 'active' : 'inactive'" />
           </div>
-          <div class="versions">
-            <div v-for="version in engine.versions.slice(0, 3)" :key="version.id" class="version">
-              <div><strong>{{ version.version }}</strong><small>{{ version.repository_full_name }} · {{ version.source_ref }}</small></div>
-              <div><span>{{ formatNumber(data?.game_counts[String(version.id)]) }} games</span><StatusBadge :status="version.active ? 'active' : 'inactive'" /></div>
-            </div>
-            <p v-if="!engine.versions.length">No versions yet</p>
-            <p v-else-if="engine.versions.length > 3">+{{ engine.versions.length - 3 }} more</p>
-          </div>
+          <dl class="stats">
+            <div><dt>Versions</dt><dd>{{ formatNumber(engine.versions.length) }}</dd></div>
+            <div><dt>Active versions</dt><dd>{{ formatNumber(engine.versions.filter((version) => version.active).length) }}</dd></div>
+            <div><dt>Total games</dt><dd>{{ formatNumber(engineGameCount(engine)) }}</dd></div>
+          </dl>
           <div class="actions">
-            <RouterLink class="button button--secondary button--small" :to="`/admin/engines/${engine.id}`">Open engine</RouterLink>
             <button class="button button--danger button--small" type="button" :disabled="deleting === engine.id || engine.versions.length > 0" @click="remove(engine)">Delete</button>
           </div>
         </article>
@@ -98,5 +102,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.engine-index{overflow:hidden;padding:0}.toolbar{align-items:center;border-bottom:1px solid var(--color-border);display:flex;gap:.75rem;padding:.75rem}.toolbar .input{flex:1;max-width:28rem}.toolbar label,.toolbar span{color:var(--color-text-muted);font-size:.72rem}.grid{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fill,minmax(min(100%,21rem),1fr));padding:.8rem}.engine-card{border:1px solid var(--color-border);border-radius:var(--radius-md);display:grid;gap:.8rem;padding:.9rem}.heading{align-items:center;display:grid;gap:.65rem;grid-template-columns:auto minmax(0,1fr) auto}.mark{align-items:center;background:color-mix(in srgb,var(--color-accent) 10%,transparent);border-radius:.5rem;color:var(--color-accent);display:flex;font-weight:750;height:2.1rem;justify-content:center;width:2.1rem}.heading h2{font-size:.88rem;margin:0}.heading p{color:var(--color-text-muted);font-size:.68rem;margin:.15rem 0 0}.versions{border-block:1px solid var(--color-border);display:grid}.version{align-items:center;border-bottom:1px solid var(--color-border);display:flex;gap:.75rem;justify-content:space-between;padding:.55rem 0}.version:last-child{border:0}.version>div{display:grid;gap:.15rem;min-width:0}.version>div:last-child{align-items:end;flex:none}.version strong{font-size:.76rem}.version small,.version span,.versions>p{color:var(--color-text-muted);font-size:.66rem}.version small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.versions>p{margin:.7rem 0}.actions{display:flex;gap:.5rem;margin-top:auto}.loading{color:var(--color-text-muted);min-height:14rem;padding:2rem}@media(max-width:38rem){.toolbar{align-items:stretch;flex-wrap:wrap}.toolbar .input{flex-basis:100%;max-width:none}}
+.engine-index{overflow:hidden;padding:0}.toolbar{align-items:center;border-bottom:1px solid var(--color-border);display:flex;gap:.75rem;padding:.75rem}.toolbar .input{flex:1;max-width:28rem}.toolbar label,.toolbar span{color:var(--color-text-muted);font-size:.72rem}.grid{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fill,minmax(min(100%,21rem),1fr));padding:.8rem}.engine-card{border:1px solid var(--color-border);border-radius:var(--radius-md);display:grid;gap:.8rem;padding:.9rem;position:relative;transition:border-color var(--transition-fast),transform var(--transition-fast)}.engine-card:hover{border-color:var(--color-accent);transform:translateY(-1px)}.engine-card:has(.engine-card__link:focus-visible){border-color:var(--color-accent);outline:2px solid var(--color-accent);outline-offset:2px}.engine-card__link{border-radius:inherit;inset:0;position:absolute}.heading{align-items:center;display:grid;gap:.65rem;grid-template-columns:auto minmax(0,1fr) auto}.mark{align-items:center;background:color-mix(in srgb,var(--color-accent) 10%,transparent);border-radius:.5rem;color:var(--color-accent);display:flex;font-weight:750;height:2.1rem;justify-content:center;width:2.1rem}.heading h2{font-size:.88rem;margin:0}.heading p{color:var(--color-text-muted);font-size:.68rem;margin:.15rem 0 0}.stats{border-block:1px solid var(--color-border);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;padding:.75rem 0}.stats div{display:grid;gap:.2rem;padding:0 .65rem}.stats div:first-child{padding-left:0}.stats div+div{border-left:1px solid var(--color-border)}.stats dt{color:var(--color-text-muted);font-size:.62rem;text-transform:uppercase}.stats dd{font-size:.82rem;font-weight:700;margin:0}.actions{display:flex;gap:.5rem;justify-content:flex-end;margin-top:auto;position:relative;width:max-content;z-index:1}.loading{color:var(--color-text-muted);min-height:14rem;padding:2rem}@media(max-width:38rem){.toolbar{align-items:stretch;flex-wrap:wrap}.toolbar .input{flex-basis:100%;max-width:none}}
 </style>
