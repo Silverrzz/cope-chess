@@ -251,7 +251,7 @@ def _projected_game_total(config: TournamentConfig) -> int:
     if isinstance(options, KnockoutFormatOptions):
         return max(0, participants - 1) * 2
     if isinstance(options, GauntletFormatOptions):
-        return max(0, participants - 1) * 2
+        return max(0, participants - 1) * options.cycles * 2
     return 0
 
 

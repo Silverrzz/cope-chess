@@ -82,7 +82,10 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
       ? { rounds: positiveInt(rawOptions.rounds, 7) }
       : value.format === 'knockout'
         ? { tiebreak: 'extra_pair' }
-        : { hero_engine_id: positiveInt(rawOptions.hero_engine_id, 0) }
+        : {
+            hero_engine_id: positiveInt(rawOptions.hero_engine_id, 0),
+            cycles: positiveInt(rawOptions.cycles, 1),
+          }
   return {
     ...defaults,
     ...cloneData(value),
@@ -160,7 +163,7 @@ export function estimatePairs(format: TournamentFormat, options: TournamentSetti
   if (format === 'knockout') {
     return players - 1
   }
-  return players - 1
+  return (players - 1) * ('cycles' in options ? options.cycles : 0)
 }
 
 export function estimateGames(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {

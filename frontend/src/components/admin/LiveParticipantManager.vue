@@ -62,7 +62,10 @@ const scheduledGameEstimate = computed(() => {
   if (props.config.format === 'round_robin' && 'cycles' in props.config.format_options) {
     return props.config.participants.length * props.config.format_options.cycles * 2
   }
-  return 2
+  if (props.config.format === 'gauntlet' && 'cycles' in props.config.format_options) {
+    return props.config.format_options.cycles * 2
+  }
+  return 0
 })
 
 watch(() => props.roster.available_engines, (engines) => {
@@ -140,7 +143,7 @@ function scheduleSelected(): void {
           <strong v-if="selectedEngine">{{ scheduledGameEstimate }} new games</strong>
           <strong v-else>Select an engine</strong>
           <small v-if="selectedEngine && config.format === 'round_robin'">Every opponent, both colours, across every configured cycle. Earlier-cycle games enter the queue first.</small>
-          <small v-else-if="selectedEngine">Both colours against the gauntlet hero. The first leg enters its historical round position.</small>
+          <small v-else-if="selectedEngine">Both colours against the gauntlet hero in every configured cycle. Earlier-cycle games enter the queue first.</small>
           <small v-else>Choose a version to preview the live schedule change.</small>
         </div>
         <div class="schedule-preview__actions">

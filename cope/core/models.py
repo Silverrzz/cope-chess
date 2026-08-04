@@ -133,6 +133,7 @@ class KnockoutFormatOptions(StrictModel):
 
 class GauntletFormatOptions(StrictModel):
     hero_engine_id: int = Field(gt=0)
+    cycles: int = Field(default=1, gt=0)
 
 
 FormatOptions = (

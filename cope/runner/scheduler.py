@@ -333,24 +333,26 @@ def generate_gauntlet_games(
     hero = options.hero_engine_id
     opponents = [engine_id for engine_id in tournament.config.participants if engine_id != hero]
     created_games = 0
-    opening_ids = _opening_ids(connection, tournament, len(opponents))
-    for game_number in range(1, 3):
-        for opponent_index, opponent in enumerate(opponents, start=1):
-            round_number = (game_number - 1) * len(opponents) + opponent_index
-            hero_is_white = (game_number + opponent_index) % 2 == 0
-            white, black = (hero, opponent) if hero_is_white else (opponent, hero)
-            _create_scheduled_game(
-                connection,
-                tournament,
-                round_number=round_number,
-                pair_index=1,
-                white_engine_id=white,
-                black_engine_id=black,
-                game_number=game_number,
-                opening_offset=opponent_index - 1,
-                opening_ids=opening_ids,
-            )
-            created_games += 1
+    opening_ids = _opening_ids(connection, tournament, options.cycles * len(opponents))
+    for cycle_index in range(options.cycles):
+        for leg_index in range(2):
+            game_number = cycle_index * 2 + leg_index + 1
+            for opponent_index, opponent in enumerate(opponents, start=1):
+                round_number = (game_number - 1) * len(opponents) + opponent_index
+                hero_is_white = (game_number + opponent_index) % 2 == 0
+                white, black = (hero, opponent) if hero_is_white else (opponent, hero)
+                _create_scheduled_game(
+                    connection,
+                    tournament,
+                    round_number=round_number,
+                    pair_index=1,
+                    white_engine_id=white,
+                    black_engine_id=black,
+                    game_number=game_number,
+                    opening_offset=cycle_index * len(opponents) + opponent_index - 1,
+                    opening_ids=opening_ids,
+                )
+                created_games += 1
     return created_games
 
 
@@ -371,31 +373,33 @@ def _generate_gauntlet_participant_games(
         if participant != hero
     ]
     opponent_index = opponents.index(engine_id) + 1
-    opening_ids = _opening_ids(connection, tournament, 1)
+    opening_ids = _opening_ids(connection, tournament, options.cycles)
     next_pair_index: dict[int, int] = {}
     for game in list_games(connection, tournament.id):
         next_pair_index[game.round] = max(
             next_pair_index.get(game.round, 1),
             game.pair_index + 1,
         )
-    for game_number in range(1, 3):
-        round_number = (game_number - 1) * len(opponents) + opponent_index
-        pair_index = next_pair_index.get(round_number, 1)
-        next_pair_index[round_number] = pair_index + 1
-        hero_is_white = (game_number + opponent_index) % 2 == 0
-        white, black = (hero, engine_id) if hero_is_white else (engine_id, hero)
-        _create_scheduled_game(
-            connection,
-            tournament,
-            round_number=round_number,
-            pair_index=pair_index,
-            white_engine_id=white,
-            black_engine_id=black,
-            game_number=game_number,
-            opening_offset=0,
-            opening_ids=opening_ids,
-        )
-    return 2
+    for cycle_index in range(options.cycles):
+        for leg_index in range(2):
+            game_number = cycle_index * 2 + leg_index + 1
+            round_number = (game_number - 1) * len(opponents) + opponent_index
+            pair_index = next_pair_index.get(round_number, 1)
+            next_pair_index[round_number] = pair_index + 1
+            hero_is_white = (game_number + opponent_index) % 2 == 0
+            white, black = (hero, engine_id) if hero_is_white else (engine_id, hero)
+            _create_scheduled_game(
+                connection,
+                tournament,
+                round_number=round_number,
+                pair_index=pair_index,
+                white_engine_id=white,
+                black_engine_id=black,
+                game_number=game_number,
+                opening_offset=cycle_index,
+                opening_ids=opening_ids,
+            )
+    return options.cycles * 2
 
 
 def generate_swiss_round(

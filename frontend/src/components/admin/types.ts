@@ -59,7 +59,7 @@ export type FormatOptions =
   | { cycles: number }
   | { rounds: number }
   | { tiebreak: 'extra_pair' }
-  | { hero_engine_id: number }
+  | { hero_engine_id: number; cycles: number }
 
 export type TimeControl =
   | { category: 'increment'; initial_ms: number; increment_ms: number }
