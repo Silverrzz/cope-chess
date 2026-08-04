@@ -451,17 +451,22 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Dockerfile</h2><p>Select a repository-managed file. Its contents are read-only in Cope Admin.</p></div></div>
-        <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
-        <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
-        <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
-      </section>
+      <div class="version-settings-grid">
+        <section class="panel detail-card">
+          <div class="detail-heading"><div><h2>Dockerfile</h2><p>Select a repository-managed file. Its contents are read-only in Cope Admin.</p></div></div>
+          <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
+          <details class="dockerfile-preview">
+            <summary>Preview Dockerfile</summary>
+            <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
+            <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
+          </details>
+        </section>
 
-      <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Default UCI options</h2><p>Applied whenever this version starts unless a tournament overrides them.</p></div></div>
-        <EngineOptionsEditor v-model="version.uci_options" />
-      </section>
+        <section class="panel detail-card">
+          <div class="detail-heading"><div><h2>Default UCI options</h2><p>Applied whenever this version starts unless a tournament overrides them.</p></div></div>
+          <EngineOptionsEditor v-model="version.uci_options" />
+        </section>
+      </div>
 
       <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
@@ -552,4 +557,5 @@ onBeforeUnmount(() => {
 .benchmark-console{background:#0b111b;border:1px solid #263346;border-radius:var(--radius-md);box-shadow:inset 0 1px 0 rgb(255 255 255 / 4%);min-width:0;overflow:hidden}.benchmark-console header{align-items:center;background:#121b28;border-bottom:1px solid #263346;color:#aebbd0;display:flex;font-size:.65rem;gap:.8rem;min-height:2.35rem;padding:.45rem .7rem}.benchmark-console__title{align-items:center;color:#edf4ff;display:flex;gap:.45rem}.benchmark-console__light{background:#718096;border-radius:50%;height:.5rem;width:.5rem}.benchmark-console__light--active,.benchmark-console__light--success{background:#45d483;box-shadow:0 0 .45rem rgb(69 212 131 / 65%)}.benchmark-console__light--waiting,.benchmark-console__light--warning{background:#f4c95d}.benchmark-console__light--danger{background:#ff6b78}.benchmark-console__meta{margin-left:auto}.benchmark-console label{align-items:center;cursor:pointer;display:flex;gap:.35rem;white-space:nowrap}.benchmark-console input{accent-color:#78a7ff}.benchmark-console pre{background:#0b111b;color:#d9e5f5;font-family:var(--font-mono);font-size:.68rem;line-height:1.55;margin:0;max-height:27rem;min-height:12rem;overflow:auto;padding:.85rem;scrollbar-color:#42536b #0b111b;tab-size:2;white-space:pre-wrap;word-break:break-word}.benchmark-console pre:focus{outline:2px solid var(--color-focus);outline-offset:-2px}
 @keyframes benchmark-live-pulse{50%{opacity:.45;transform:scale(.8)}}@keyframes benchmark-stripes{to{background-position:1.2rem 0}}@media(max-width:42rem){.benchmark-summary{align-items:stretch;flex-direction:column}.benchmark-health{max-width:none}.benchmark-actions{align-items:flex-end;flex-wrap:wrap}.benchmark-stage small{font-size:.56rem}.benchmark-console header{align-items:flex-start;flex-wrap:wrap}.benchmark-console__meta{margin-left:0;order:3;width:100%}.benchmark-console label{margin-left:auto}}@media(prefers-reduced-motion:reduce){.benchmark-health--active .benchmark-health__dot,.benchmark-progress-fill--active{animation:none}.benchmark-progress-fill{transition:none}}
 .manual-benchmark-backdrop{background:var(--color-overlay);display:grid;inset:0;overflow-y:auto;padding:1rem;place-items:center;position:fixed;z-index:1100}.manual-benchmark-dialog{background:var(--color-surface-raised);border:1px solid var(--color-border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-md);display:grid;gap:1rem;padding:1.25rem;width:min(100%,38rem)}.manual-benchmark-dialog h2{font-size:1rem;margin:0}.manual-benchmark-dialog p{color:var(--color-text-muted);font-size:.72rem;margin:.25rem 0 0}.manual-benchmark-grid{display:grid;gap:.8rem;grid-template-columns:repeat(2,minmax(0,1fr))}.manual-benchmark-wide{grid-column:1/-1}.manual-benchmark-actions{display:flex;gap:.6rem;justify-content:flex-end}@media(max-width:32rem){.manual-benchmark-grid{grid-template-columns:1fr}.manual-benchmark-wide{grid-column:auto}}
+.version-settings-grid{align-items:start;display:grid;gap:1rem;grid-template-columns:repeat(2,minmax(0,1fr))}.dockerfile-preview{border-top:1px solid var(--color-border);padding-top:.75rem}.dockerfile-preview summary{cursor:pointer;font-size:.73rem;font-weight:650}.dockerfile-preview[open] summary{margin-bottom:.75rem}@media(max-width:64rem){.version-settings-grid{grid-template-columns:1fr}}
 </style>

@@ -26,6 +26,7 @@ RUN rm -rf \
         /usr/local/lib/python3.13/site-packages/llvmlite/tests \
     && strip --strip-unneeded /usr/local/lib/python3.13/site-packages/llvmlite/binding/libllvmlite.so \
     && sed -i "/import sys/a os.environ.setdefault('NUMBA_CPU_NAME', 'haswell')" numba_engine_PRE_NNUE_clean.py \
+    && sed -i "/import sys/a os.environ.setdefault('NUMBA_CACHE_LOCATOR_CLASSES', 'InTreeCacheLocatorFsAgnostic')" numba_engine_PRE_NNUE_clean.py \
     && pyinstaller \
         --onedir \
         --noconfirm \
@@ -35,14 +36,24 @@ RUN rm -rf \
         --collect-all numba \
         --collect-all llvmlite \
         numba_engine_PRE_NNUE_clean.py \
-    && mv dist/numbengine/numbengine dist/numbengine/engine \
-    && cp -a numba_engine_PRE_NNUE_clean.py dist/numbengine/ \
-    && cd dist/numbengine \
-    && ./engine --warmup \
-    && cd /build \
+    && cp -a numba_engine_PRE_NNUE_clean.py dist/numbengine/
+
+RUN cd dist/numbengine \
+    && ./numbengine --warmup
+
+RUN printf '%s\n' \
+        '#!/bin/sh' \
+        'engine_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)' \
+        'runtime_dir="${TMPDIR:-/tmp}/numbengine-${engine_dir##*/}"' \
+        'mkdir -p "$runtime_dir"' \
+        'cp -R "$engine_dir/__pycache__" "$runtime_dir/"' \
+        'cp "$engine_dir/numba_engine_PRE_NNUE_clean.py" "$runtime_dir/"' \
+        'cd "$runtime_dir" || exit 1' \
+        'exec "$engine_dir/numbengine" "$@"' \
+        > dist/numbengine/engine \
     && find dist/numbengine -type d -exec chmod 755 {} + \
     && find dist/numbengine -type f -exec chmod 644 {} + \
-    && chmod 755 dist/numbengine/engine \
+    && chmod 755 dist/numbengine/engine dist/numbengine/numbengine \
     && mkdir /opt/cope \
     && cp -aL dist/numbengine/. /opt/cope/
 
