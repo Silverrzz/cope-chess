@@ -259,10 +259,14 @@ def list_rating_rows(
     rows = connection.execute(
         """
         SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+               artifact.artifact_sha256, artifact.artifact_size,
+               artifact.artifact_format, artifact.entrypoint,
+               artifact.platform, artifact.storage_key,
                ratings.elo, ratings.games_played, ratings.updated_at
         FROM rating_list_ratings ratings
         JOIN engine_versions version ON version.id = ratings.engine_id
         JOIN engines engine ON engine.id = version.engine_id
+        LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
         WHERE ratings.rating_list_id = ?
         ORDER BY ratings.elo DESC, engine.name, version.version
         """,
