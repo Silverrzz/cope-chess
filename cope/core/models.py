@@ -6,8 +6,15 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 12
+PROTOCOL_VERSION = 13
+ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 256
+WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
+
+
+def worker_memory_capacity_mb(total_ram_mb: int) -> int:
+    reserve = max(WORKER_MEMORY_RESERVE_MIN_MB, total_ram_mb // 10)
+    return max(1, total_ram_mb - reserve)
 
 
 class StrictModel(BaseModel):
@@ -609,7 +616,7 @@ class BenchmarkFailed(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[12] = PROTOCOL_VERSION
+    v: Literal[13] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

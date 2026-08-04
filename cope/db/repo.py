@@ -17,6 +17,7 @@ from cope.core.models import (
     OpeningLine,
     TournamentConfig,
     WorkerResources,
+    worker_memory_capacity_mb,
 )
 
 
@@ -161,7 +162,7 @@ class WorkerRecord:
             return None
         return WorkerResources(
             threads=min(self.hw.physical_cores, self.core_limit or self.hw.physical_cores),
-            hash_mb=self.hw.total_ram_mb,
+            hash_mb=worker_memory_capacity_mb(self.hw.total_ram_mb),
         )
 
 

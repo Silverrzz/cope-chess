@@ -31,6 +31,7 @@ from cope.core.models import (
     MovesToGoTimeControl,
     TournamentConfig,
     WorkerResources,
+    ENGINE_PROCESS_MEMORY_OVERHEAD_MB,
 )
 from cope.db import (
     GameAssignmentRecord,
@@ -910,7 +911,10 @@ def _engine_options(
 def _tournament_required_resources(tournament: TournamentRecord) -> WorkerResources:
     return WorkerResources(
         threads=tournament.config.engine_threads,
-        hash_mb=tournament.config.engine_hash_mb * 2,
+        hash_mb=(
+            tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
+        )
+        * 2,
     )
 
 

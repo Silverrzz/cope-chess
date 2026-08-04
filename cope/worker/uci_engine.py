@@ -366,7 +366,7 @@ class UciEngineProcess:
                 env=self._engine_environment(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
@@ -872,8 +872,22 @@ class UciEngineProcess:
                 raise RuntimeError(f"{self._spec.name} timed out waiting for UCI output") from exc
             if line is None:
                 process = self._process
-                code = None if process is None else process.poll()
-                raise RuntimeError(f"{self._spec.name} exited while waiting for UCI output: {code}")
+                code = None
+                if process is not None:
+                    try:
+                        code = process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        code = process.poll()
+                detail = "\n".join(lines[-20:]).strip()
+                exit_detail = (
+                    "exited before its status was available"
+                    if code is None
+                    else _process_exit_description(code)
+                )
+                raise RuntimeError(
+                    f"{self._spec.name} {exit_detail} while waiting for UCI output"
+                    + (f":\n{detail}" if detail else "")
+                )
             lines.append(line)
             if line_callback is not None and line.startswith("info"):
                 line_callback(line)

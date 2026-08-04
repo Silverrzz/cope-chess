@@ -60,8 +60,11 @@ from .uci_engine import EnginePreparationError, UciEngineProcess
 LOG = logging.getLogger("cope.worker")
 RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
-ENGINE_INFO_SEND_INTERVAL_S = 0.25
-ENGINE_CLOCK_SEND_INTERVAL_S = 0.05
+ENGINE_INFO_SEND_INTERVAL_S = 0.5
+ENGINE_CLOCK_SEND_INTERVAL_S = 0.5
+ENGINE_BENCHMARK_CONCURRENCY = 2
+TELEMETRY_BATCH_INTERVAL_S = 0.25
+TELEMETRY_BATCH_MAX_MESSAGES = 128
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,94 @@ class WorkerClientConfig:
     machine_id: str | None = None
     state_file: Path | None = None
     cpu_capacity: int | None = None
+
+
+class _EngineBenchmarkCache:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(ENGINE_BENCHMARK_CONCURRENCY)
+        self._tasks: dict[str, asyncio.Task[tuple[int, int]]] = {}
+
+    async def benchmark(
+        self,
+        engine: UciEngineProcess,
+        spec,
+        timeout_s: int,
+    ) -> tuple[int, int]:
+        key = spec.build_hash
+        async with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                task = asyncio.create_task(self._run(engine, timeout_s))
+                self._tasks[key] = task
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            async with self._lock:
+                if self._tasks.get(key) is task:
+                    self._tasks.pop(key, None)
+            raise
+
+    async def _run(
+        self,
+        engine: UciEngineProcess,
+        timeout_s: int,
+    ) -> tuple[int, int]:
+        async with self._semaphore:
+            return await asyncio.to_thread(engine.benchmark, timeout_s)
+
+
+class _WorkerTelemetryBatcher:
+    def __init__(self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future) -> None:
+        self._websocket = websocket
+        self._send_lock = send_lock
+        self._pending: dict[tuple[str, int, int], dict[str, Any]] = {}
+        self._closing = False
+        self._task = asyncio.create_task(self._run(), name="worker-telemetry-batcher")
+
+        def completed(task: asyncio.Task) -> None:
+            if task.cancelled() or fatal.done() or self._closing:
+                return
+            error = task.exception()
+            if error is not None:
+                fatal.set_exception(error)
+
+        self._task.add_done_callback(completed)
+
+    def offer(self, message_type: str, data) -> None:
+        if self._closing:
+            return
+        key = (message_type, data.assignment_id, data.engine_id)
+        clock_key = ("engine_clock", data.assignment_id, data.engine_id)
+        info_key = ("engine_info", data.assignment_id, data.engine_id)
+        if message_type == "engine_info":
+            self._pending.pop(clock_key, None)
+        elif message_type == "engine_clock" and info_key in self._pending:
+            return
+        self._pending[key] = make_message(message_type, data).model_dump(mode="json")
+
+    async def close(self) -> None:
+        self._closing = True
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        await self.flush()
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(TELEMETRY_BATCH_INTERVAL_S)
+            await self.flush()
+
+    async def flush(self) -> None:
+        messages = list(self._pending.values())
+        self._pending.clear()
+        for offset in range(0, len(messages), TELEMETRY_BATCH_MAX_MESSAGES):
+            await _send_message(
+                self._websocket,
+                "worker_telemetry_batch",
+                {"messages": messages[offset : offset + TELEMETRY_BATCH_MAX_MESSAGES]},
+                lock=self._send_lock,
+            )
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
@@ -307,7 +398,9 @@ async def _serve_assignments(
     assignments: dict[int, WorkerGameAssignment] = {}
     tasks: dict[int, asyncio.Task] = {}
     send_lock = asyncio.Lock()
+    benchmark_cache = _EngineBenchmarkCache()
     fatal = asyncio.get_running_loop().create_future()
+    telemetry = _WorkerTelemetryBatcher(websocket, send_lock, fatal)
 
     def assignment_done(assignment_id: int, task: asyncio.Task) -> None:
         tasks.pop(assignment_id, None)
@@ -329,6 +422,8 @@ async def _serve_assignments(
             assignments=assignments,
             tasks=tasks,
             send_lock=send_lock,
+            benchmark_cache=benchmark_cache,
+            telemetry=telemetry,
             fatal=fatal,
             assignment_done=assignment_done,
         )
@@ -337,6 +432,8 @@ async def _serve_assignments(
         for task in active_tasks:
             task.cancel()
         await asyncio.gather(*active_tasks, return_exceptions=True)
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await telemetry.close()
         if fatal.done():
             with contextlib.suppress(Exception):
                 fatal.exception()
@@ -352,6 +449,8 @@ async def _route_assignment_messages(
     assignments: dict[int, WorkerGameAssignment],
     tasks: dict[int, asyncio.Task],
     send_lock: asyncio.Lock,
+    benchmark_cache: _EngineBenchmarkCache,
+    telemetry: _WorkerTelemetryBatcher,
     fatal: asyncio.Future,
     assignment_done,
 ) -> tuple[Path, str] | None:
@@ -403,6 +502,8 @@ async def _route_assignment_messages(
                     assignment,
                     inbox=queue,
                     send_lock=send_lock,
+                    benchmark_cache=benchmark_cache,
+                    telemetry=telemetry,
                     server_url=server_url,
                     credential=credential,
                 ),
@@ -433,6 +534,8 @@ async def _serve_assignment(
     *,
     inbox: asyncio.Queue,
     send_lock: asyncio.Lock,
+    benchmark_cache: _EngineBenchmarkCache,
+    telemetry: _WorkerTelemetryBatcher,
     server_url: str,
     credential: str,
 ) -> None:
@@ -510,8 +613,9 @@ async def _serve_assignment(
                 current=position - 1,
                 total=len(engines),
             )
-            worker_nps, elapsed_ms = await asyncio.to_thread(
-                engine.benchmark,
+            worker_nps, elapsed_ms = await benchmark_cache.benchmark(
+                engine,
+                spec,
                 assignment.benchmark_reference.timeout_s,
             )
             hardware_score = worker_nps / reference_nps
@@ -625,7 +729,7 @@ async def _serve_assignment(
             command_timer = _CommandTimer()
 
             info_publisher = (
-                _EngineInfoPublisher(websocket, command, loop, send_lock, command_timer)
+                _EngineInfoPublisher(telemetry, command, loop, command_timer)
                 if command.command.startswith("go")
                 else None
             )
@@ -633,9 +737,8 @@ async def _serve_assignment(
             clock_task = (
                 asyncio.create_task(
                     _publish_engine_clock(
-                        websocket,
                         command,
-                        send_lock,
+                        telemetry,
                         command_timer,
                     )
                 )
@@ -661,6 +764,7 @@ async def _serve_assignment(
                         assignment,
                         info_publisher,
                         clock_task,
+                        telemetry,
                     )
                     if command_result is None:
                         await info_publisher.cancel()
@@ -687,6 +791,7 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
+                await telemetry.flush()
                 if track_command_progress:
                     await progress.publish(
                         command_stage,
@@ -706,6 +811,7 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
+                await telemetry.flush()
                 failure = AssignmentFailed(
                     **assignment.assignment.message_fields(),
                     engine_id=command.engine_id,
@@ -919,6 +1025,7 @@ async def _wait_for_engine_search(
     assignment: WorkerGameAssignment,
     info_publisher: _EngineInfoPublisher,
     clock_task: asyncio.Task,
+    telemetry: _WorkerTelemetryBatcher,
 ) -> tuple[list[str], int] | None:
     while True:
         receive = asyncio.create_task(inbox.get())
@@ -952,6 +1059,7 @@ async def _wait_for_engine_search(
             await asyncio.to_thread(engine.close)
         with contextlib.suppress(Exception):
             await command_task
+        await telemetry.flush()
         return None
 
 
@@ -1058,21 +1166,18 @@ def _command_completed_detail(command: str, engine_name: str, elapsed_ms: int) -
 
 
 async def _publish_engine_clock(
-    websocket,
     command: EngineCommand,
-    send_lock: asyncio.Lock,
+    telemetry: _WorkerTelemetryBatcher,
     command_timer: _CommandTimer,
 ) -> None:
     while True:
         await asyncio.sleep(ENGINE_CLOCK_SEND_INTERVAL_S)
-        await _send_message(
-            websocket,
+        telemetry.offer(
             "engine_clock",
             EngineClock(
                 **command.model_dump(exclude={"command"}),
                 elapsed_ms=command_timer.elapsed_ms(),
             ),
-            lock=send_lock,
         )
 
 
@@ -1081,16 +1186,14 @@ class _EngineInfoPublisher:
 
     def __init__(
         self,
-        websocket,
+        telemetry: _WorkerTelemetryBatcher,
         command: EngineCommand,
         loop,
-        send_lock: asyncio.Lock | None = None,
         command_timer: _CommandTimer | None = None,
     ) -> None:
-        self._websocket = websocket
+        self._telemetry = telemetry
         self._command = command
         self._loop = loop
-        self._send_lock = send_lock
         self._command_timer = _CommandTimer() if command_timer is None else command_timer
         self._latest_line: str | None = None
         self._wake = asyncio.Event()
@@ -1147,11 +1250,9 @@ class _EngineInfoPublisher:
                 lines=[line],
                 elapsed_ms=self._command_timer.elapsed_ms(),
             )
-            await _send_message(
-                self._websocket,
+            self._telemetry.offer(
                 "engine_info",
                 info,
-                lock=self._send_lock,
             )
             next_send_at = self._loop.time() + ENGINE_INFO_SEND_INTERVAL_S
 
@@ -1339,6 +1440,9 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
                     cpu_ids = {int(cpu_id) for cpu_id in affinity}
                     logical_cores = len(cpu_ids)
         total_ram = psutil.virtual_memory().total
+        cgroup_limit = _linux_memory_limit_bytes()
+        if cgroup_limit is not None:
+            total_ram = min(total_ram, cgroup_limit)
         ram_mb = max(1, total_ram // (1024**2))
         ram_gb = max(1, round(total_ram / (1024**3)))
     except ImportError:
@@ -1394,6 +1498,31 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
         hw.os,
     )
     return hw
+
+
+def _linux_memory_limit_bytes() -> int | None:
+    if sys.platform != "linux":
+        return None
+    paths = (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory.limit_in_bytes"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    )
+    limits: list[int] = []
+    for path in paths:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value == "max":
+            continue
+        try:
+            limit = int(value)
+        except ValueError:
+            continue
+        if 0 < limit < 1 << 60:
+            limits.append(limit)
+    return min(limits) if limits else None
 
 
 def _process_cpu_ids() -> set[int] | None:

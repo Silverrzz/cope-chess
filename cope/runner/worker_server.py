@@ -31,6 +31,7 @@ from cope.core.models import (
     EngineCommandResult,
     EngineInfo,
     EngineStop,
+    Envelope,
     PROTOCOL_VERSION,
     WorkerResources,
     WorkerSessionHello,
@@ -38,6 +39,7 @@ from cope.core.models import (
     WorkerUpdateCommand,
     WorkerUpdateStatus,
     WorkerWelcome,
+    worker_memory_capacity_mb,
 )
 from cope.core.protocol import (
     ProtocolError,
@@ -95,6 +97,8 @@ RETIRED_ASSIGNMENT_GRACE_S = 60.0
 LATE_ASSIGNMENT_MESSAGE_TYPES = {
     "assignment_progress",
     "assignment_cleanup_complete",
+    "engine_clock",
+    "engine_info",
 }
 TRANSIENT_PLAY_PROGRESS = {
     "engine_command",
@@ -427,7 +431,7 @@ class WorkerHandshakeServer:
                 heartbeat_interval_ms=self._config.heartbeat_interval_ms,
                 capacity=WorkerResources(
                     threads=hello.hw.physical_cores,
-                    hash_mb=hello.hw.total_ram_mb,
+                    hash_mb=worker_memory_capacity_mb(hello.hw.total_ram_mb),
                 ),
                 update=update,
             )
@@ -664,51 +668,80 @@ class WorkerHandshakeServer:
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
-            assignment_id = envelope.data.get("assignment_id")
-            if not isinstance(assignment_id, int):
-                raise ProtocolValidationError(
-                    f"{envelope.type} message has no assignment id"
-                )
-            assignment_key = envelope.data.get("assignment_key")
-            game_id = envelope.data.get("game_id")
-            if not isinstance(assignment_key, str) or not isinstance(game_id, int):
-                raise ProtocolValidationError(
-                    f"{envelope.type} message has no assignment identity"
-                )
-            identity = assignment_identities.get(assignment_id)
-            if identity == (assignment_key, game_id):
-                inbox = inboxes.get(assignment_id)
-                if inbox is not None:
-                    await inbox.put(envelope)
-                    continue
-            retired = retired_assignments.get((assignment_id, assignment_key))
-            if retired is not None:
-                retired_game_id, expires_at = retired
-                if expires_at <= time.monotonic():
-                    retired_assignments.pop((assignment_id, assignment_key), None)
-                elif (
-                    game_id == retired_game_id
-                    and envelope.type in LATE_ASSIGNMENT_MESSAGE_TYPES
-                ):
-                    self._validate_late_assignment_message(envelope.type, envelope.data)
-                    LOG.info(
-                        "ignoring late worker message type=%s assignment_id=%s game_id=%s",
-                        envelope.type,
-                        assignment_id,
-                        game_id,
+            if envelope.type == "worker_telemetry_batch":
+                messages = envelope.data.get("messages")
+                if not isinstance(messages, list) or not 0 < len(messages) <= 128:
+                    raise ProtocolValidationError("worker telemetry batch has invalid size")
+                for raw in messages:
+                    try:
+                        nested = Envelope.model_validate(raw)
+                    except ValidationError as error:
+                        raise ProtocolValidationError(str(error)) from error
+                    if nested.type not in {"engine_clock", "engine_info"}:
+                        raise ProtocolValidationError(
+                            f"worker telemetry batch contains {nested.type}"
+                        )
+                    await self._route_worker_envelope(
+                        nested,
+                        inboxes,
+                        assignment_identities,
+                        retired_assignments,
                     )
-                    continue
-            raise ProtocolValidationError(
-                f"{envelope.type} references inactive assignment {assignment_id}"
+                continue
+            await self._route_worker_envelope(
+                envelope,
+                inboxes,
+                assignment_identities,
+                retired_assignments,
             )
+
+    async def _route_worker_envelope(
+        self,
+        envelope: Envelope,
+        inboxes: dict[int, asyncio.Queue],
+        assignment_identities: dict[int, tuple[str, int]],
+        retired_assignments: dict[tuple[int, str], tuple[int, float]],
+    ) -> None:
+        assignment_id = envelope.data.get("assignment_id")
+        if not isinstance(assignment_id, int):
+            raise ProtocolValidationError(f"{envelope.type} message has no assignment id")
+        assignment_key = envelope.data.get("assignment_key")
+        game_id = envelope.data.get("game_id")
+        if not isinstance(assignment_key, str) or not isinstance(game_id, int):
+            raise ProtocolValidationError(f"{envelope.type} message has no assignment identity")
+        identity = assignment_identities.get(assignment_id)
+        if identity == (assignment_key, game_id):
+            inbox = inboxes.get(assignment_id)
+            if inbox is not None:
+                await inbox.put(envelope)
+                return
+        retired = retired_assignments.get((assignment_id, assignment_key))
+        if retired is not None:
+            retired_game_id, expires_at = retired
+            if expires_at <= time.monotonic():
+                retired_assignments.pop((assignment_id, assignment_key), None)
+            elif game_id == retired_game_id and envelope.type in LATE_ASSIGNMENT_MESSAGE_TYPES:
+                self._validate_late_assignment_message(envelope.type, envelope.data)
+                LOG.info(
+                    "ignoring late worker message type=%s assignment_id=%s game_id=%s",
+                    envelope.type,
+                    assignment_id,
+                    game_id,
+                )
+                return
+        raise ProtocolValidationError(
+            f"{envelope.type} references inactive assignment {assignment_id}"
+        )
 
     @staticmethod
     def _validate_late_assignment_message(message_type: str, payload: dict) -> None:
-        model = (
-            AssignmentProgress
-            if message_type == "assignment_progress"
-            else AssignmentCleanupComplete
-        )
+        models = {
+            "assignment_progress": AssignmentProgress,
+            "assignment_cleanup_complete": AssignmentCleanupComplete,
+            "engine_clock": EngineClock,
+            "engine_info": EngineInfo,
+        }
+        model = models[message_type]
         try:
             model.model_validate(payload)
         except ValidationError as error:
