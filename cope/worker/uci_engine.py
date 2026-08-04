@@ -49,10 +49,12 @@ class UciEngineProcess:
         credential: str,
         progress_callback: Callable[[str, str, str, str], None] | None = None,
         command_timeout_s: int | None = None,
+        allow_build: bool = False,
     ):
         self._spec = spec
         self._progress_callback = progress_callback
         self._command_timeout_s = command_timeout_s
+        self._allow_build = allow_build
         self._source_dir = _engine_source_dir(spec)
         entrypoint = "engine" if spec.artifact is None else spec.artifact.entrypoint
         self._binary_path = self._source_dir / entrypoint
@@ -506,6 +508,12 @@ class UciEngineProcess:
         if self._spec.artifact is not None:
             self._ensure_downloaded_artifact()
             return
+        if not self._allow_build:
+            raise EnginePreparationError(
+                self._spec,
+                "artifact",
+                "no published worker artifact is available; run this engine's benchmark first",
+            )
         if self._prepared and self._binary_path.exists():
             LOG.info(
                 "engine artifact already prepared engine_id=%s engine=%s binary=%s",

@@ -32,8 +32,8 @@ class Target:
 
 TARGETS = (
     Target("server", "Server platform", "Docker Compose web, database, scheduler, and APIs"),
-    Target("worker", "Game worker", "Runs chess games assigned by a COPE server"),
-    Target("benchmarker", "Benchmarker", "Builds engines and records hardware benchmarks"),
+    Target("worker", "Game worker", "Runs chess games directly on this host without Docker"),
+    Target("benchmarker", "Benchmarker", "Uses Docker to build engines and records hardware benchmarks"),
 )
 
 
@@ -70,7 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         settings = _prepare_server(settings, start=not args.prepare_only)
     clients = [key for key in selected if key in {"worker", "benchmarker"}]
     if clients:
-        _prepare_clients(clients, image_ready="server" in selected)
+        if "worker" in clients:
+            _prepare_host_worker()
+        container_clients = [key for key in clients if key == "benchmarker"]
+        if container_clients:
+            _prepare_clients(container_clients, image_ready="server" in selected)
         settings = _configure_clients(
             clients,
             settings,
@@ -78,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not args.prepare_only:
             for key in clients:
-                _start_client(key, settings)
+                if key == "worker":
+                    _start_host_worker(settings)
+                else:
+                    _start_client(key, settings)
     _save_settings(settings)
     print("\nCOPE installation complete.")
     if args.prepare_only:
@@ -87,7 +94,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Server: https://{settings['domain']}")
     for key in clients:
         if not args.prepare_only:
-            print(f"{_target(key).label} log: docker logs --follow {_container_name(key)}")
+            if key == "worker":
+                print(f"{_target(key).label} log: tail -f {RUNTIME / 'worker.log'}")
+            else:
+                print(f"{_target(key).label} log: docker logs --follow {_container_name(key)}")
     return 0
 
 
@@ -320,6 +330,27 @@ def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
         )
 
 
+def _prepare_host_worker() -> None:
+    _require_command("git")
+    venv = RUNTIME / "worker-runtime" / "venv"
+    executable = _venv_executable(venv, "cope")
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    if not executable.is_file():
+        print("\nCreating the Docker-free game worker runtime...")
+        _run([sys.executable, "-m", "venv", str(venv)])
+    print("\nInstalling the game worker runtime...")
+    _run(
+        [
+            str(_venv_executable(venv, "python")),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            f"{ROOT}[worker]",
+        ]
+    )
+
+
 def _configure_clients(
     clients: list[str],
     settings: dict[str, str],
@@ -331,14 +362,80 @@ def _configure_clients(
         path = "worker" if key == "worker" else "benchmarker"
         default = settings.get(setting, "")
         if local_server:
-            port = "8702" if key == "worker" else "8703"
-            service = "worker-server" if key == "worker" else "benchmark-server"
-            default = f"ws://{service}:{port}/{path}"
+            if key == "worker":
+                default = f"wss://{settings['domain']}/{path}"
+            else:
+                default = f"ws://benchmark-server:8703/{path}"
         if not default:
             port = "8702" if key == "worker" else "8703"
             default = f"ws://127.0.0.1:{port}"
         settings[setting] = _prompt(f"{_target(key).label} server URL", default)
     return settings
+
+
+def _start_host_worker(settings: dict[str, str]) -> None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    pid_path = RUNTIME / "worker.pid"
+    current_pid = _read_pid(pid_path)
+    if current_pid is not None and _process_running(current_pid):
+        print(f"Game worker is already running as process {current_pid}.")
+        return
+    state_path = RUNTIME / "worker.json"
+    token_path = RUNTIME / "worker.token"
+    if not state_path.is_file():
+        token = _registration_token("worker", settings)
+        token_path.write_text(token + "\n", encoding="utf-8")
+        _restrict_file(token_path)
+    machine_id = _client_machine_id("worker")
+    command = [
+        str(_venv_executable(RUNTIME / "worker-runtime" / "venv", "cope")),
+        "worker",
+        "--server-url",
+        settings["worker_server_url"],
+        "--state-file",
+        str(state_path),
+        "--label-hint",
+        f"{socket.gethostname()}-worker",
+        "--machine-id",
+        machine_id,
+    ]
+    if not state_path.is_file():
+        command.extend(["--token-file", str(token_path)])
+    environment = os.environ.copy()
+    environment["COPE_BUILD_VERSION"] = _build_version()
+    environment["COPE_UPDATE_ROOT"] = str(RUNTIME / "update")
+    environment["COPE_WORKER_ENGINE_DIR"] = str(RUNTIME / "engines")
+    repository_url = _git_value("remote", "get-url", "origin")
+    if repository_url:
+        environment["COPE_UPDATE_REPOSITORY_URL"] = repository_url
+    log_path = RUNTIME / "worker.log"
+    print("Starting Docker-free game worker...")
+    with log_path.open("a", encoding="utf-8") as output:
+        process = subprocess.Popen(
+            command,
+            cwd=RUNTIME,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=os.name != "nt",
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                if os.name == "nt"
+                else 0
+            ),
+        )
+    time.sleep(1)
+    status = process.poll()
+    if status is not None:
+        detail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        raise SystemExit(
+            f"Game worker exited during startup with status {status}."
+            + (f"\n{detail}" if detail else "")
+        )
+    pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    _restrict_file(pid_path)
+    print(f"Game worker started directly on the host as process {process.pid}.")
 
 
 def _start_client(key: str, settings: dict[str, str]) -> None:
@@ -795,6 +892,36 @@ def _client_machine_id(key: str) -> str:
     if not 8 <= len(machine_id) <= 128:
         raise SystemExit(f"Invalid persisted {key} machine identity in {path}.")
     return machine_id
+
+
+def _venv_executable(venv: Path, name: str) -> Path:
+    if os.name == "nt":
+        return venv / "Scripts" / f"{name}.exe"
+    return venv / "bin" / name
+
+
+def _read_pid(path: Path) -> int | None:
+    try:
+        value = int(path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _process_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if os.name != "nt":
+        try:
+            command = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        return any(b"cope" in argument for argument in command) and b"worker" in command
+    return True
 
 
 def _container_status(name: str) -> str:

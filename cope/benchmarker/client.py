@@ -395,6 +395,7 @@ def _run_benchmark(
             credential=credential,
             progress_callback=progress_callback,
             command_timeout_s=assignment.preparation_timeout_s,
+            allow_build=True,
         )
         try:
             engine.prepare()

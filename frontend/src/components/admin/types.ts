@@ -1,5 +1,14 @@
 export type Id = number
 
+export interface EngineArtifact {
+  url: string
+  sha256: string
+  size: number
+  format: 'cope-tar-gzip-v1'
+  entrypoint: string
+  platform: 'linux-x86_64'
+}
+
 export interface Engine {
   id: Id
   engine_id: Id
@@ -14,6 +23,7 @@ export interface Engine {
   dockerfile_path: string
   dockerfile: string
   build_hash: string
+  artifact: EngineArtifact | null
   uci_options: Record<string, string | number | boolean>
   active: boolean
   benchmark_current?: boolean
@@ -34,7 +44,7 @@ export interface EngineBenchmarkJob {
   output: string
   benchmarker: { id: Id | null; label: string; status: string | null } | null
   hardware: { cpu_model: string; physical_cores: number; logical_cores: number; ram_gb: number } | null
-  result: { nps: number; elapsed_ms: number; recorded_at: string } | null
+  result: { nps: number; elapsed_ms: number; recorded_at: string; artifact_sha256: string | null } | null
 }
 
 export interface EngineFamily {

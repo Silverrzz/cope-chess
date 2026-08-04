@@ -255,7 +255,7 @@ async function create(): Promise<void> {
           <label v-if="sourceKind === 'release'" class="field"><span>Release</span><select v-model="sourceRef" class="input" required @change="chooseRelease"><option v-for="release in releases" :key="release.tag" :value="release.tag">{{ release.name }} ({{ release.tag }})</option></select></label>
           <label v-else class="field"><span>Commit hash</span><input v-model="sourceRef" class="input" required maxlength="64" placeholder="e7f92b8…"></label>
           <label class="field"><span>Version label</span><input v-model="version" class="input" required maxlength="80" placeholder="17.1"></label>
-          <div class="field form-span-full"><span>Dockerfile</span><DockerfilePicker v-model="dockerfilePath" :files="dockerfiles" @change="loadDockerfile" /><small>Managed in the repository under <code>data/engines</code>.</small></div>
+          <div class="field form-span-full"><span>Benchmarker build recipe</span><DockerfilePicker v-model="dockerfilePath" :files="dockerfiles" @change="loadDockerfile" /><small>This Dockerfile runs only on the benchmarker; game workers receive its published artifact.</small></div>
           <details v-if="dockerfileContent || loadingDockerfile" class="dockerfile-preview form-span-full">
             <summary>Preview Dockerfile</summary>
             <pre class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>

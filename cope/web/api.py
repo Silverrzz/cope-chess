@@ -265,6 +265,7 @@ def _benchmark_job_admin_payload(item) -> dict[str, Any]:
             "nps": result.nps,
             "elapsed_ms": result.elapsed_ms,
             "recorded_at": result.recorded_at,
+            "artifact_sha256": result.artifact_sha256,
         },
     }
 
@@ -2290,7 +2291,18 @@ def register_api_routes(app: FastAPI) -> None:
         def snapshot() -> dict[str, Any]:
             current = connect_database(request.app.state.db_path)
             try:
+                version = get_engine_version_record(current, version_id)
+                if version is None:
+                    return {
+                        "artifact": None,
+                        "benchmark_current": False,
+                        "active": False,
+                        "benchmarks": [],
+                    }
                 return {
+                    "artifact": jsonable_encoder(version.artifact),
+                    "benchmark_current": version.benchmark_current,
+                    "active": version.active,
                     "benchmarks": [
                         _benchmark_job_admin_payload(item)
                         for item in list_engine_benchmark_jobs(

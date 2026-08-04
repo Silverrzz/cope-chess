@@ -86,7 +86,7 @@ onMounted(load)
           </div>
           <dl class="stats">
             <div><dt>Versions</dt><dd>{{ formatNumber(engine.versions.length) }}</dd></div>
-            <div><dt>Active versions</dt><dd>{{ formatNumber(engine.versions.filter((version) => version.active).length) }}</dd></div>
+            <div><dt>Artifacts ready</dt><dd>{{ formatNumber(engine.versions.filter((version) => version.artifact).length) }}</dd></div>
             <div><dt>Total games</dt><dd>{{ formatNumber(engineGameCount(engine)) }}</dd></div>
           </dl>
           <div class="actions">

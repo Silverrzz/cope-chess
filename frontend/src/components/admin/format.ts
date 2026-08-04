@@ -29,6 +29,14 @@ export function formatNumber(value: number | null | undefined): string {
   return new Intl.NumberFormat().format(value ?? 0)
 }
 
+export function formatBytes(value: number | null | undefined): string {
+  if (!value || value < 1) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const unit = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  const amount = value / (1024 ** unit)
+  return `${amount.toLocaleString(undefined, { maximumFractionDigits: unit === 0 ? 0 : 1 })} ${units[unit]}`
+}
+
 export function formatTimeControl(control: TimeControl | undefined): string {
   if (!control) return 'Not set'
   if (control.category === 'increment') {
