@@ -161,7 +161,7 @@ class WorkerRecord:
         if self.hw is None:
             return None
         return WorkerResources(
-            threads=min(self.hw.physical_cores, self.core_limit or self.hw.physical_cores),
+            threads=min(self.hw.logical_cores, self.core_limit or self.hw.logical_cores),
             hash_mb=worker_memory_capacity_mb(self.hw.total_ram_mb),
         )
 
@@ -1875,6 +1875,70 @@ def record_game_assignment_progress(
     return cursor.lastrowid
 
 
+def record_game_assignment_progress_batch(
+    connection: sqlite3.Connection,
+    items: Iterable[tuple[AssignmentProgress, str]],
+) -> None:
+    pending = tuple(items)
+    if not pending:
+        return
+    assignment_ids = tuple(
+        dict.fromkeys(progress.assignment_id for progress, _source in pending)
+    )
+    placeholders = ", ".join("?" for _ in assignment_ids)
+    rows = connection.execute(
+        f"""
+        SELECT id, assignment_key, game_id
+        FROM game_assignments
+        WHERE id IN ({placeholders})
+        """,
+        assignment_ids,
+    )
+    assignments = {
+        int(row["id"]): (str(row["assignment_key"]), int(row["game_id"]))
+        for row in rows
+    }
+    valid = tuple(
+        (progress, source)
+        for progress, source in pending
+        if assignments.get(progress.assignment_id)
+        == (progress.assignment_key, progress.game_id)
+    )
+    if not valid:
+        return
+    occurred_at = utc_now()
+    connection.executemany(
+        """
+        INSERT INTO game_assignment_progress (
+          assignment_id, assignment_key, game_id, source,
+          stage, stage_label, stage_order, substage, status, detail,
+          engine_id, engine_name, current_value, total_value, metadata, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                progress.assignment_id,
+                progress.assignment_key,
+                progress.game_id,
+                source,
+                progress.stage,
+                progress.stage_label,
+                progress.stage_order,
+                progress.substage,
+                progress.status,
+                progress.detail,
+                progress.engine_id,
+                progress.engine_name,
+                progress.current,
+                progress.total,
+                _json_dump(progress.metadata),
+                occurred_at,
+            )
+            for progress, source in valid
+        ),
+    )
+
+
 def list_game_assignment_progress(
     connection: sqlite3.Connection,
     game_id: int,
@@ -2255,9 +2319,9 @@ def update_worker_assignment_settings(
     if core_limit is not None:
         if core_limit <= 0:
             raise ValueError("worker core limit must be positive")
-        if worker.hw is not None and core_limit > worker.hw.physical_cores:
+        if worker.hw is not None and core_limit > worker.hw.logical_cores:
             raise ValueError(
-                f"worker core limit cannot exceed its {worker.hw.physical_cores}-core capacity"
+                f"worker core limit cannot exceed its {worker.hw.logical_cores}-thread capacity"
             )
     if tournament_scope not in {"all", "selected"}:
         raise ValueError("worker tournament scope is invalid")

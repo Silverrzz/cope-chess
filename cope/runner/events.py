@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import queue
 import threading
@@ -31,6 +30,7 @@ from cope.network import (
 LOG = logging.getLogger("cope.runner.events")
 PUBLISH_FAILURE_LOG_INTERVAL_S = 30.0
 PUBLISHER_QUEUE_SIZE = 10000
+CONTROL_PUBLISHER_QUEUE_SIZE = 1024
 _last_failure_log_at = 0.0
 _last_failure_key: tuple[str, str] | None = None
 _config_lock = threading.Lock()
@@ -136,6 +136,9 @@ def publish_stream_event(
 class StreamEventPublisher:
     def __init__(self) -> None:
         self._queue: queue.Queue[StreamEnvelope] = queue.Queue(maxsize=PUBLISHER_QUEUE_SIZE)
+        self._control_queue: queue.Queue[StreamEnvelope] = queue.Queue(
+            maxsize=CONTROL_PUBLISHER_QUEUE_SIZE
+        )
         self._started = False
         self._start_lock = threading.Lock()
 
@@ -153,8 +156,13 @@ class StreamEventPublisher:
 
     def publish(self, event: StreamEnvelope) -> None:
         self.start()
+        target = (
+            self._control_queue
+            if event.topic == "workers" or event.type == "tournament.changed"
+            else self._queue
+        )
         try:
-            self._queue.put(event, timeout=1.0)
+            target.put_nowait(event)
         except queue.Full:
             _log_publish_failure(_event_publisher_config(), RuntimeError("stream queue full"))
 
@@ -214,12 +222,15 @@ class StreamEventPublisher:
                     event.type,
                 )
             except ConnectionClosed:
-                with contextlib.suppress(queue.Full):
-                    self._queue.put_nowait(event)
+                self.publish(event)
                 raise
 
     async def _next_event(self) -> StreamEnvelope:
         while True:
+            try:
+                return self._control_queue.get_nowait()
+            except queue.Empty:
+                pass
             try:
                 return self._queue.get_nowait()
             except queue.Empty:

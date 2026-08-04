@@ -627,7 +627,7 @@ CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 28)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 29)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -640,6 +640,8 @@ CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignment
 CREATE INDEX IF NOT EXISTS idx_game_assignments_game_status ON game_assignments(game_id, status);
 CREATE INDEX IF NOT EXISTS idx_game_assignment_progress_current
   ON game_assignment_progress(game_id, assignment_key, id DESC);
+CREATE INDEX IF NOT EXISTS idx_game_assignment_progress_assignment_current
+  ON game_assignment_progress(assignment_id, assignment_key, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_token_hash ON workers(token_hash) WHERE token_hash IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_session_id ON workers(session_id) WHERE session_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmarkers_token_hash ON benchmarkers(token_hash) WHERE token_hash IS NOT NULL;

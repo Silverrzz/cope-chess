@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 PROTOCOL_VERSION = 13
-ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 256
+ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
 

@@ -39,7 +39,6 @@ from cope.core.models import (
     WorkerUpdateCommand,
     WorkerUpdateStatus,
     WorkerWelcome,
-    worker_memory_capacity_mb,
 )
 from cope.core.protocol import (
     ProtocolError,
@@ -64,7 +63,7 @@ from cope.db import (
     list_workers,
     record_worker_failure,
     record_game_hardware_score,
-    record_game_assignment_progress,
+    record_game_assignment_progress_batch,
     reconcile_worker_deployment,
     set_service_endpoint,
     touch_workers_seen,
@@ -109,6 +108,8 @@ TRANSIENT_PLAY_PROGRESS = {
 }
 WORKER_SERVER_STALL_TIMEOUT_S = 60.0
 WORKER_SERVER_WATCHDOG_INTERVAL_S = 5.0
+PROGRESS_BATCH_INTERVAL_S = 0.05
+PROGRESS_BATCH_SIZE = 512
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -196,7 +197,7 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
     for tournament_id in orphaned_tournaments:
         publish_tournament_event(tournament_id)
     heartbeat_interval_s = max(config.heartbeat_interval_ms / 1000, 0.5)
-    ping_timeout_s = max(heartbeat_interval_s * 3, 15.0)
+    ping_timeout_s = max(heartbeat_interval_s * 12, 60.0)
     watchdog = EventLoopWatchdog(_worker_server_stall_timeout_s())
     watchdog.start()
     watchdog_task = asyncio.create_task(_watchdog_heartbeat(watchdog))
@@ -209,7 +210,7 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
             ping_interval=heartbeat_interval_s,
             ping_timeout=ping_timeout_s,
             close_timeout=1,
-            max_queue=32,
+            max_queue=256,
         ):
             _register_worker_endpoint(config)
             LOG.info(
@@ -282,12 +283,16 @@ class WorkerHandshakeServer:
             int, tuple[str, WebSocketServerProtocol]
         ] = {}
         self._worker_capabilities: dict[int, tuple] = {}
+        self._progress_queue: asyncio.Queue[tuple[AssignmentProgress, str]] = (
+            asyncio.Queue()
+        )
         self._background_tasks: list[asyncio.Task] = []
 
     async def start_background_tasks(self) -> None:
         self._background_tasks = [
             asyncio.create_task(self._fallback_wake_loop(), name="worker-fallback-wake"),
             asyncio.create_task(self._presence_flush_loop(), name="worker-presence-flush"),
+            asyncio.create_task(self._progress_flush_loop(), name="worker-progress-flush"),
         ]
 
     async def stop_background_tasks(self) -> None:
@@ -297,6 +302,7 @@ class WorkerHandshakeServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._background_tasks.clear()
+        await self._flush_queued_progress()
         await self._flush_worker_presence()
 
     async def _fallback_wake_loop(self) -> None:
@@ -313,6 +319,66 @@ class WorkerHandshakeServer:
                 await self._flush_worker_presence()
             except Exception:
                 LOG.exception("worker presence batch failed")
+
+    async def _progress_flush_loop(self) -> None:
+        pending: list[tuple[AssignmentProgress, str]] = []
+        try:
+            while True:
+                if not pending:
+                    pending.append(await self._progress_queue.get())
+                    await asyncio.sleep(PROGRESS_BATCH_INTERVAL_S)
+                    while len(pending) < PROGRESS_BATCH_SIZE:
+                        try:
+                            pending.append(self._progress_queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                try:
+                    persistence = asyncio.create_task(
+                        asyncio.to_thread(
+                            self._persist_assignment_progress_batch,
+                            tuple(pending),
+                        )
+                    )
+                    await asyncio.shield(persistence)
+                    pending.clear()
+                except asyncio.CancelledError:
+                    await persistence
+                    pending.clear()
+                    raise
+                except Exception:
+                    LOG.exception("assignment progress batch failed")
+                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            for item in pending:
+                self._progress_queue.put_nowait(item)
+            raise
+
+    async def _flush_queued_progress(self) -> None:
+        pending: list[tuple[AssignmentProgress, str]] = []
+        while True:
+            try:
+                pending.append(self._progress_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if pending:
+            await asyncio.to_thread(
+                self._persist_assignment_progress_batch,
+                tuple(pending),
+            )
+
+    def _persist_assignment_progress_batch(
+        self,
+        pending: tuple[tuple[AssignmentProgress, str], ...],
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            record_game_assignment_progress_batch(connection, pending)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     async def _flush_worker_presence(self) -> None:
         sessions = [
@@ -425,14 +491,14 @@ class WorkerHandshakeServer:
                 hello.app_version,
             )
 
+            capacity = worker.capacity
+            if capacity is None:
+                raise ProtocolValidationError("worker capacity is unavailable")
             welcome = WorkerWelcome(
                 worker_id=worker.id,
                 session_id=session_id,
                 heartbeat_interval_ms=self._config.heartbeat_interval_ms,
-                capacity=WorkerResources(
-                    threads=hello.hw.physical_cores,
-                    hash_mb=worker_memory_capacity_mb(hello.hw.total_ram_mb),
-                ),
+                capacity=capacity,
                 update=update,
             )
             await _send_message(websocket, "welcome", welcome)
@@ -814,7 +880,12 @@ class WorkerHandshakeServer:
                 worker,
                 ready.prepared_engine_ids,
             )
-            self._acknowledge_assignment(worker, assignment, ready)
+            await asyncio.to_thread(
+                self._acknowledge_assignment,
+                worker,
+                assignment,
+                ready,
+            )
             self._record_assignment_progress(
                 assignment,
                 stage="benchmark",
@@ -1068,12 +1139,12 @@ class WorkerHandshakeServer:
             total=total,
             metadata=metadata or {},
         )
-        connection = connect_database(self._config.db_path)
-        try:
-            record_game_assignment_progress(connection, progress, source=source)
-            connection.commit()
-        finally:
-            connection.close()
+        item = (progress, source)
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._progress_queue.put_nowait, item)
+            return
+        self._persist_assignment_progress_batch((item,))
 
     def _record_worker_progress(self, assignment, progress: AssignmentProgress) -> None:
         if not progress.matches_assignment(assignment.assignment):

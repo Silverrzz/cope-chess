@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,10 @@ class _WorkerTelemetryBatcher:
             return
         self._pending[key] = make_message(message_type, data).model_dump(mode="json")
 
+    def discard(self, assignment_id: int, engine_id: int) -> None:
+        self._pending.pop(("engine_clock", assignment_id, engine_id), None)
+        self._pending.pop(("engine_info", assignment_id, engine_id), None)
+
     async def close(self) -> None:
         self._closing = True
         self._task.cancel()
@@ -168,8 +173,20 @@ class _WorkerTelemetryBatcher:
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
+    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
+    try:
+        threading.stack_size(1024 * 1024)
+    except (RuntimeError, ValueError):
+        LOG.warning("could not reduce worker thread stack size")
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(
+            max_workers=max(32, hw.logical_cores * 2 + 8),
+            thread_name_prefix="cope-worker",
+        )
+    )
     state = _WorkerConnectionState(
         session_id=config.session_id or _read_worker_session(config.state_file),
+        hw=hw,
     )
     reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
     while True:
@@ -202,6 +219,7 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
 @dataclass
 class _WorkerConnectionState:
     session_id: str | None
+    hw: HardwareInfo
     connected: bool = False
 
 
@@ -215,8 +233,14 @@ async def _run_worker_connection(
         connection_config.server_url,
         connection_config.app_version,
     )
-    async with connect(connection_config.server_url) as websocket:
-        await _send_message(websocket, "hello", _build_hello(connection_config))
+    async with connect(
+        connection_config.server_url,
+        ping_interval=10,
+        ping_timeout=60,
+        close_timeout=5,
+        max_queue=256,
+    ) as websocket:
+        await _send_message(websocket, "hello", _build_hello(connection_config, state.hw))
         welcome = await _recv_message(websocket, "welcome", WorkerWelcome)
         state.session_id = welcome.session_id
         _write_worker_session(config.state_file, welcome.session_id)
@@ -268,6 +292,7 @@ def _restart_arguments(arguments: list[str]) -> list[str]:
 
 def _build_hello(
     config: WorkerClientConfig,
+    hw: HardwareInfo,
 ) -> WorkerTokenHello | WorkerSessionHello:
     credential_count = sum(
         value is not None
@@ -278,7 +303,6 @@ def _build_hello(
             "worker client needs exactly one of token or session_id"
         )
 
-    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
     machine_id = config.machine_id or _detect_machine_id()
 
     if config.token is not None:
@@ -690,7 +714,7 @@ async def _serve_assignment(
 
             command = EngineCommand.model_validate(envelope.data)
             _validate_assignment_message(command, assignment, "engine_command")
-            LOG.info(
+            LOG.debug(
                 "engine command received assignment_id=%s game_id=%s engine_id=%s command=%s",
                 command.assignment_id,
                 command.game_id,
@@ -791,7 +815,8 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
-                await telemetry.flush()
+                if info_publisher is not None:
+                    telemetry.discard(command.assignment_id, command.engine_id)
                 if track_command_progress:
                     await progress.publish(
                         command_stage,
@@ -811,7 +836,7 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
-                await telemetry.flush()
+                telemetry.discard(command.assignment_id, command.engine_id)
                 failure = AssignmentFailed(
                     **assignment.assignment.message_fields(),
                     engine_id=command.engine_id,
@@ -860,7 +885,7 @@ async def _serve_assignment(
                 elapsed_ms=command_elapsed_ms,
             )
             commands_handled += 1
-            LOG.info(
+            LOG.debug(
                 "engine command completed assignment_id=%s game_id=%s engine_id=%s command=%s lines=%s%s",
                 command.assignment_id,
                 command.game_id,
@@ -1059,7 +1084,7 @@ async def _wait_for_engine_search(
             await asyncio.to_thread(engine.close)
         with contextlib.suppress(Exception):
             await command_task
-        await telemetry.flush()
+        telemetry.discard(command.assignment_id, command.engine_id)
         return None
 
 
@@ -1298,7 +1323,18 @@ async def _send_message(
     *,
     lock: asyncio.Lock | None = None,
 ) -> None:
-    log = LOG.debug if message_type in {"engine_clock", "engine_info"} else LOG.info
+    log = (
+        LOG.debug
+        if message_type in {
+            "assignment_progress",
+            "engine_clock",
+            "engine_command_result",
+            "engine_command_started",
+            "engine_info",
+            "worker_telemetry_batch",
+        }
+        else LOG.info
+    )
     log(
         "sending runner message type=%s %s",
         message_type,
@@ -1463,19 +1499,22 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
             ),
         )
     cpu_quota = _linux_cpu_quota()
-    usable_cores = (
+    usable_physical_cores = (
         detected_physical_cores
         if cpu_quota is None
         else min(detected_physical_cores, cpu_quota)
     )
-    physical_cores = usable_cores
+    if cpu_quota is not None:
+        logical_cores = min(logical_cores, cpu_quota)
+    physical_cores = min(usable_physical_cores, logical_cores)
     if cpu_capacity is not None:
-        if cpu_capacity > usable_cores:
+        if cpu_capacity > logical_cores:
             raise ValueError(
                 "worker CPU capacity cannot exceed the detected usable "
-                f"physical-core count ({usable_cores})"
+                f"logical-thread count ({logical_cores})"
             )
-        physical_cores = cpu_capacity
+        logical_cores = cpu_capacity
+        physical_cores = min(physical_cores, logical_cores)
 
     hw = HardwareInfo(
         cpu_model=_detect_cpu_model(),
@@ -1493,7 +1532,7 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
         hw.cpu_model,
         f"{detected_physical_cores}P/{hw.logical_cores}T",
         cpu_quota if cpu_quota is not None else "unlimited",
-        hw.physical_cores,
+        hw.logical_cores,
         f"{hw.ram_gb}GB",
         hw.os,
     )

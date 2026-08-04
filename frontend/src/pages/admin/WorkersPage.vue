@@ -61,6 +61,9 @@ const revoking = ref<number | null>(null)
 const forgettingBenchmarker = ref<number | null>(null)
 let source: EventSource | null = null
 let refreshTimer: number | undefined
+let refreshDelay: number | undefined
+let fallbackTimer: number | undefined
+let loadPromise: Promise<void> | null = null
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalWorkers.value / perPage)))
 
@@ -73,31 +76,52 @@ function applySnapshot(snapshot: WorkerSnapshot): void {
   connectedBenchmarkers.value = snapshot.connected_benchmarkers ?? 0
 }
 
-async function load(silent = false): Promise<void> {
+function load(silent = false): Promise<void> {
+  if (loadPromise) return loadPromise
   if (!silent) loading.value = true
-  try {
-    applySnapshot(await api.get<WorkerSnapshot>(`/api/admin/workers?page=${page.value}&per_page=${perPage}`))
-  } catch (cause) {
-    error.value = errorText(cause)
-  } finally {
-    if (!silent) loading.value = false
-  }
+  loadPromise = (async () => {
+    try {
+      applySnapshot(await api.get<WorkerSnapshot>(`/api/admin/workers?page=${page.value}&per_page=${perPage}`))
+      error.value = ''
+    } catch (cause) {
+      error.value = errorText(cause)
+    } finally {
+      if (!silent) loading.value = false
+      loadPromise = null
+    }
+  })()
+  return loadPromise
+}
+
+function scheduleLoad(): void {
+  if (refreshDelay !== undefined) window.clearTimeout(refreshDelay)
+  refreshDelay = window.setTimeout(() => {
+    refreshDelay = undefined
+    void load(true)
+  }, 100)
 }
 
 function connectStream(): void {
   source?.close()
   source = new EventSource(`/admin/workers/events?page=${page.value}`)
   source.addEventListener('open', () => { streamConnected.value = true })
-  source.addEventListener('error', () => { streamConnected.value = false })
+  source.addEventListener('error', () => {
+    streamConnected.value = false
+    if (loading.value) void load()
+  })
   source.addEventListener('workers.snapshot', (event) => {
     try {
       const envelope = JSON.parse((event as MessageEvent).data)
-      if (Array.isArray(envelope.data?.workers)) applySnapshot(envelope.data)
+      if (Array.isArray(envelope.data?.workers)) {
+        applySnapshot(envelope.data)
+        loading.value = false
+        error.value = ''
+      }
     } catch {
       return
     }
   })
-  source.addEventListener('workers.changed', () => { void load(true) })
+  source.addEventListener('workers.changed', scheduleLoad)
 }
 
 async function changePage(nextPage: number): Promise<void> {
@@ -175,14 +199,21 @@ function shortVersion(value?: string | null): string {
   return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value
 }
 
-onMounted(async () => {
-  await load()
+onMounted(() => {
   connectStream()
-  refreshTimer = window.setInterval(() => { void load(true) }, 10_000)
+  fallbackTimer = window.setTimeout(() => {
+    fallbackTimer = undefined
+    if (loading.value) void load()
+  }, 1_500)
+  refreshTimer = window.setInterval(() => {
+    if (!streamConnected.value) void load(true)
+  }, 30_000)
 })
 onBeforeUnmount(() => {
   source?.close()
   if (refreshTimer !== undefined) window.clearInterval(refreshTimer)
+  if (refreshDelay !== undefined) window.clearTimeout(refreshDelay)
+  if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer)
 })
 </script>
 

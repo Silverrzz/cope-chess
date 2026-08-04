@@ -13,7 +13,7 @@ import type { Worker, WorkerRow } from '@/components/admin/types'
 
 interface WorkerFailure { id: number; worker_id: number | null; worker_label: string; machine_id: string | null; assignment_id: number | null; game_id: number | null; engine_id: number | null; engine_name: string; stage: string; error: string; occurred_at: string }
 interface WorkerTournament { id: number; name: string; status: string }
-interface WorkerSettings { core_limit: number | null; effective_cores: number | null; tournament_scope: 'all' | 'selected'; tournament_ids: number[]; tournaments: WorkerTournament[] }
+interface WorkerSettings { core_limit: number | null; effective_cores: number | null; effective_memory_mb: number | null; tournament_scope: 'all' | 'selected'; tournament_ids: number[]; tournaments: WorkerTournament[] }
 interface Response { row: WorkerRow; worker: Worker; settings: WorkerSettings; worker_launch_command?: string | null; failures: WorkerFailure[] }
 interface Minted { token: string; expires_at: string; start_command?: string; message: string }
 interface WorkerTokenBindings { token: string; expiresAt: string; startCommand?: string }
@@ -37,7 +37,7 @@ const copied = ref(false)
 const streamConnected = ref(false)
 let source: EventSource | null = null
 
-const detectedCoreCount = computed(() => data.value?.worker.hw?.physical_cores ?? null)
+const detectedCoreCount = computed(() => data.value?.worker.hw?.logical_cores ?? null)
 const settingsKey = computed(() => JSON.stringify({
   core_limit: coreLimit.value === '' ? null : Number(coreLimit.value),
   tournament_scope: tournamentScope.value,
@@ -109,11 +109,11 @@ function clearTournaments(): void {
 async function saveSettings(): Promise<void> {
   const parsedCoreLimit = coreLimit.value === '' ? null : Number(coreLimit.value)
   if (parsedCoreLimit !== null && (!Number.isInteger(parsedCoreLimit) || parsedCoreLimit < 1)) {
-    error.value = 'Core limit must be a positive whole number.'
+    error.value = 'CPU thread limit must be a positive whole number.'
     return
   }
   if (parsedCoreLimit !== null && detectedCoreCount.value !== null && parsedCoreLimit > detectedCoreCount.value) {
-    error.value = `Core limit cannot exceed the detected ${detectedCoreCount.value} cores.`
+    error.value = `CPU thread limit cannot exceed the detected ${detectedCoreCount.value} threads.`
     return
   }
   const availableTournamentIds = new Set(data.value?.settings.tournaments.map((tournament) => tournament.id) ?? [])
@@ -215,22 +215,22 @@ onBeforeUnmount(() => source?.close())
       <div class="worker-grid">
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Identity</h2></div><form class="rename-form" @submit.prevent="rename"><label><span>Worker label</span><input v-model="label" class="input" required maxlength="80"></label><button class="button button--primary button--small" type="submit" :disabled="pending === 'label'">{{ pending === 'label' ? 'Saving…' : 'Save label' }}</button></form></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Connection state</h2></div><dl class="fact-list"><div><dt>Overall</dt><dd><StatusBadge :status="data.row.status" /></dd></div><div><dt>Machine</dt><dd>{{ data.row.machine?.label ?? 'Unknown' }}<small>{{ data.row.machine?.detail }}</small></dd></div><div><dt>Session</dt><dd>{{ data.row.session?.label ?? 'None' }}<small>{{ data.row.session?.detail }}</small></dd></div><div><dt>Token</dt><dd>{{ data.row.token?.label ?? 'None' }}<small>{{ data.row.token?.detail }}</small></dd></div></dl></section>
-        <section class="panel detail-card"><div class="detail-card__heading"><h2>Hardware</h2></div><dl v-if="data.worker.hw" class="fact-list"><div><dt>CPU</dt><dd>{{ data.worker.hw.cpu_model }}</dd></div><div><dt>CPU access</dt><dd>{{ data.worker.hw.physical_cores }} usable physical-core slots · {{ data.worker.hw.logical_cores }} accessible threads</dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw.ram_gb }} GB</dd></div><div v-if="data.worker.hw.gpu"><dt>GPU</dt><dd>{{ data.worker.hw.gpu }}</dd></div><div v-if="data.worker.hw.bench?.nps_probe"><dt>Bench</dt><dd>{{ formatNumber(data.worker.hw.bench.nps_probe) }} NPS</dd></div></dl><p v-else class="card-empty">Not reported.</p></section>
-        <section class="panel detail-card"><div class="detail-card__heading"><h2>Dynamic capacity</h2></div><dl class="fact-list"><div><dt>CPU</dt><dd>{{ data.settings.effective_cores !== null ? `${data.settings.effective_cores} engine-thread slots` : 'Reported on first connection' }}<small v-if="data.worker.core_limit">Limited from {{ data.worker.hw?.physical_cores ?? 'unknown' }} detected slots</small></dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw ? `${formatNumber(data.worker.hw.ram_mb ?? data.worker.hw.ram_gb * 1024)} MB` : 'Reported on first connection' }}</dd></div><div><dt>Machine ID</dt><dd>{{ data.worker.machine_id ?? 'Reported on first connection' }}</dd></div></dl><p class="capacity-note">Each live game consumes its configured engine-thread count. Its two engines share that allocation because only the side to move searches. Capacity is released when the engine processes stop.</p></section>
+        <section class="panel detail-card"><div class="detail-card__heading"><h2>Hardware</h2></div><dl v-if="data.worker.hw" class="fact-list"><div><dt>CPU</dt><dd>{{ data.worker.hw.cpu_model }}</dd></div><div><dt>CPU access</dt><dd>{{ data.worker.hw.logical_cores }} accessible threads · {{ data.worker.hw.physical_cores }} physical cores</dd></div><div><dt>Memory</dt><dd>{{ data.worker.hw.ram_gb }} GB</dd></div><div v-if="data.worker.hw.gpu"><dt>GPU</dt><dd>{{ data.worker.hw.gpu }}</dd></div><div v-if="data.worker.hw.bench?.nps_probe"><dt>Bench</dt><dd>{{ formatNumber(data.worker.hw.bench.nps_probe) }} NPS</dd></div></dl><p v-else class="card-empty">Not reported.</p></section>
+        <section class="panel detail-card"><div class="detail-card__heading"><h2>Dynamic capacity</h2></div><dl class="fact-list"><div><dt>CPU</dt><dd>{{ data.settings.effective_cores !== null ? `${data.settings.effective_cores} engine-thread slots` : 'Reported on first connection' }}<small v-if="data.worker.core_limit">Limited from {{ data.worker.hw?.logical_cores ?? 'unknown' }} detected slots</small></dd></div><div><dt>Memory</dt><dd>{{ data.settings.effective_memory_mb !== null ? `${formatNumber(data.settings.effective_memory_mb)} MB scheduler budget` : 'Reported on first connection' }}<small v-if="data.worker.hw">{{ formatNumber(data.worker.hw.ram_mb ?? data.worker.hw.ram_gb * 1024) }} MB detected</small></dd></div><div><dt>Machine ID</dt><dd>{{ data.worker.machine_id ?? 'Reported on first connection' }}</dd></div></dl><p class="capacity-note">Each live game uses its configured engine threads, twice its engine hash, and process headroom. The engines share CPU slots because only the side to move searches.</p></section>
         <section class="panel detail-card"><div class="detail-card__heading"><h2>Credentials</h2></div><div class="credential-actions"><button v-if="data.worker.status !== 'revoked' && !data.worker.session_id" class="button button--primary button--small" type="button" :disabled="pending === 'token'" @click="generateToken">{{ pending === 'token' ? 'Generating…' : minted ? 'Regenerate token' : 'Generate one-time token' }}</button><button v-if="data.worker_launch_command" class="button button--secondary button--small" type="button" @click="copy(data.worker_launch_command)">{{ copied ? 'Copied' : 'Copy start command' }}</button><p v-if="data.worker.session_id">This machine worker already registered. Its existing session command can be copied without exposing a registration token.</p><p v-else>A registration token is valid for two hours and shown only until this page is left or refreshed.</p></div></section>
       </div>
 
       <section class="panel assignment-settings">
         <div class="assignment-settings__heading">
           <div><h2>Assignment limits</h2><p>Changes apply to future assignments. Active games continue normally.</p></div>
-          <span>{{ data.settings.effective_cores ?? 'Unknown' }} scheduler core slots</span>
+          <span>{{ data.settings.effective_cores ?? 'Unknown' }} scheduler thread slots</span>
         </div>
         <form @submit.prevent="saveSettings">
           <div class="assignment-settings__grid">
             <fieldset class="core-limit-field">
-              <legend>Core usage</legend>
-              <label><span>Maximum cores</span><input v-model.number="coreLimit" class="input" type="number" min="1" :max="detectedCoreCount ?? undefined" step="1" placeholder="Use detected capacity"></label>
-              <p>Leave blank to use all {{ detectedCoreCount ?? 'detected' }} available physical-core slots.</p>
+              <legend>CPU thread usage</legend>
+              <label><span>Maximum threads</span><input v-model.number="coreLimit" class="input" type="number" min="1" :max="detectedCoreCount ?? undefined" step="1" placeholder="Use detected capacity"></label>
+              <p>Leave blank to use all {{ detectedCoreCount ?? 'detected' }} available CPU-thread slots.</p>
             </fieldset>
             <fieldset class="tournament-limit-field">
               <legend>Tournament access</legend>

@@ -181,7 +181,7 @@ class UciEngineProcess:
         line_callback: Callable[[str], None] | None = None,
     ) -> list[str]:
         with self._io_lock:
-            LOG.info(
+            LOG.debug(
                 "engine command handling engine_id=%s engine=%s command=%s",
                 self._spec.engine_id,
                 self._spec.name,

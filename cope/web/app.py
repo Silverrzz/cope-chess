@@ -1294,11 +1294,14 @@ def _worker_admin_rows(
     workers: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     engines = _engine_names(connection)
-    activities = list_worker_activities(connection)
     rows: list[dict[str, Any]] = []
     source = workers if workers is not None else list_workers(connection)
     if limit is not None:
         source = source[:limit]
+    activities = list_worker_activities(
+        connection,
+        worker_ids=(worker.id for worker in source),
+    )
     for worker in source:
         try:
             rows.append(
@@ -1360,15 +1363,15 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
         effective_cores = worker.capacity.threads if worker.capacity is not None else 0
         limit_detail = (
             f" · limited to {effective_cores} engine-thread slots"
-            if effective_cores < worker.hw.physical_cores
+            if effective_cores < worker.hw.logical_cores
             else ""
         )
         hardware = {
             "reported": True,
             "summary": _worker_resource_summary(effective_cores),
             "detail": (
-                f"{worker.hw.physical_cores} usable physical-core slots / "
-                f"{worker.hw.logical_cores} accessible threads · {worker.hw.ram_gb}GB RAM"
+                f"{worker.hw.logical_cores} accessible CPU threads / "
+                f"{worker.hw.physical_cores} physical cores / {worker.hw.ram_gb}GB RAM"
                 f"{limit_detail}"
             ),
             "cores": str(effective_cores),
@@ -1528,6 +1531,9 @@ def _worker_admin_api_payload(
             "core_limit": worker.core_limit,
             "effective_cores": (
                 worker.capacity.threads if worker.capacity is not None else None
+            ),
+            "effective_memory_mb": (
+                worker.capacity.hash_mb if worker.capacity is not None else None
             ),
             "tournament_scope": worker.tournament_scope,
             "tournament_ids": tournament_ids,

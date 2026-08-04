@@ -21,10 +21,11 @@ from cope.engine_dockerfiles import (
 
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 DEFAULT_DATABASE_LOCK_TIMEOUT_MS = 5_000
 DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS = 120_000
 DEFAULT_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS = 30_000
+DEFAULT_DATABASE_POOL_TIMEOUT_S = 60.0
 
 _PLACEHOLDER = re.compile(r"\?")
 _pools: dict[tuple[str, str | None], ConnectionPool] = {}
@@ -62,6 +63,20 @@ def _database_options() -> str:
         f"-c statement_timeout={statement_timeout_ms} "
         f"-c idle_in_transaction_session_timeout={idle_transaction_timeout_ms}"
     )
+
+
+def _database_pool_timeout_s() -> float:
+    raw = os.environ.get(
+        "COPE_DATABASE_POOL_TIMEOUT_S",
+        str(DEFAULT_DATABASE_POOL_TIMEOUT_S),
+    )
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("COPE_DATABASE_POOL_TIMEOUT_S must be a number") from exc
+    if value <= 0:
+        raise ValueError("COPE_DATABASE_POOL_TIMEOUT_S must be positive")
+    return value
 
 
 def default_database_url() -> str:
@@ -112,7 +127,7 @@ def _pool(database_url: str) -> ConnectionPool:
                 conninfo=database_url,
                 min_size=min_size,
                 max_size=max_size,
-                timeout=10,
+                timeout=_database_pool_timeout_s(),
                 kwargs=kwargs,
                 open=True,
             )

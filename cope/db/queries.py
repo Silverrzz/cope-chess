@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from cope.core.models import EngineSpec, HardwareInfo
@@ -347,104 +348,77 @@ def get_worker_activity(
     connection: sqlite3.Connection,
     worker_id: int,
 ) -> WorkerActivityRecord | None:
-    row = connection.execute(
-        """
-        SELECT
-          game_assignments.status AS assignment_status,
-          games.id AS game_id,
-          games.round,
-          games.white_engine_id,
-          games.black_engine_id,
-          tournaments.id AS tournament_id,
-          tournaments.name AS tournament_name,
-          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies,
-          (
-            SELECT stage_label FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_stage,
-          (
-            SELECT detail FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_detail,
-          COUNT(*) OVER () AS active_assignment_count
-        FROM game_assignments
-        JOIN games ON games.id = game_assignments.game_id
-        JOIN tournaments ON tournaments.id = games.tournament_id
-        WHERE game_assignments.worker_id = ?
-          AND game_assignments.status IN ('assigned', 'acked', 'live')
-          AND games.status IN ('assigned', 'live', 'finished')
-        ORDER BY game_assignments.sent_at DESC, game_assignments.id DESC
-        LIMIT 1
-        """,
-        (worker_id,),
-    ).fetchone()
-    if row is None:
-        return None
-
-    return WorkerActivityRecord(
-        assignment_status=row["assignment_status"],
-        game_id=row["game_id"],
-        round=row["round"],
-        white_engine_id=row["white_engine_id"],
-        black_engine_id=row["black_engine_id"],
-        tournament_id=row["tournament_id"],
-        tournament_name=row["tournament_name"],
-        plies=row["plies"],
-        active_assignment_count=row["active_assignment_count"],
-        progress_stage=row["progress_stage"],
-        progress_detail=row["progress_detail"],
-    )
+    return list_worker_activities(connection, worker_ids=(worker_id,)).get(worker_id)
 
 
 def list_worker_activities(
     connection: sqlite3.Connection,
+    *,
+    worker_ids: Iterable[int] | None = None,
 ) -> dict[int, WorkerActivityRecord]:
+    selected_ids = None
+    if worker_ids is not None:
+        selected_ids = tuple(dict.fromkeys(int(worker_id) for worker_id in worker_ids))
+        if not selected_ids:
+            return {}
+    worker_filter = ""
+    parameters: tuple[int, ...] = ()
+    if selected_ids is not None:
+        placeholders = ", ".join("?" for _ in selected_ids)
+        worker_filter = f" AND game_assignments.worker_id IN ({placeholders})"
+        parameters = selected_ids
     rows = connection.execute(
-        """
+        f"""
+        WITH active AS (
+          SELECT
+            game_assignments.id AS assignment_id,
+            game_assignments.assignment_key,
+            game_assignments.worker_id,
+            game_assignments.status AS assignment_status,
+            game_assignments.sent_at,
+            games.id AS game_id,
+            games.round,
+            games.white_engine_id,
+            games.black_engine_id,
+            tournaments.id AS tournament_id,
+            tournaments.name AS tournament_name,
+            COUNT(*) OVER (
+              PARTITION BY game_assignments.worker_id
+            ) AS active_assignment_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY game_assignments.worker_id
+              ORDER BY game_assignments.sent_at DESC, game_assignments.id DESC
+            ) AS assignment_rank
+          FROM game_assignments
+          JOIN games ON games.id = game_assignments.game_id
+          JOIN tournaments ON tournaments.id = games.tournament_id
+          WHERE game_assignments.worker_id IS NOT NULL
+            AND game_assignments.status IN ('assigned', 'acked', 'live')
+            AND games.status IN ('assigned', 'live', 'finished')
+            {worker_filter}
+        )
         SELECT
-          game_assignments.worker_id,
-          game_assignments.status AS assignment_status,
-          games.id AS game_id,
-          games.round,
-          games.white_engine_id,
-          games.black_engine_id,
-          tournaments.id AS tournament_id,
-          tournaments.name AS tournament_name,
-          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies,
-          (
-            SELECT stage_label FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_stage,
-          (
-            SELECT detail FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_detail,
-          COUNT(*) OVER (
-            PARTITION BY game_assignments.worker_id
-          ) AS active_assignment_count
-        FROM game_assignments
-        JOIN games ON games.id = game_assignments.game_id
-        JOIN tournaments ON tournaments.id = games.tournament_id
-        WHERE game_assignments.worker_id IS NOT NULL
-          AND game_assignments.status IN ('assigned', 'acked', 'live')
-          AND games.status IN ('assigned', 'live', 'finished')
-        ORDER BY game_assignments.worker_id, game_assignments.sent_at DESC,
-                 game_assignments.id DESC
-        """
+          active.*,
+          (SELECT COUNT(*) FROM moves WHERE moves.game_id = active.game_id) AS plies,
+          progress.stage_label AS progress_stage,
+          progress.detail AS progress_detail
+        FROM active
+        LEFT JOIN LATERAL (
+          SELECT stage_label, detail
+          FROM game_assignment_progress
+          WHERE assignment_id = active.assignment_id
+            AND assignment_key = active.assignment_key
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS progress ON TRUE
+        WHERE active.assignment_rank = 1
+        ORDER BY active.worker_id
+        """,
+        parameters,
     )
     activities: dict[int, WorkerActivityRecord] = {}
     for row in rows:
         worker_id = int(row["worker_id"])
-        if worker_id in activities:
-            continue
         activities[worker_id] = WorkerActivityRecord(
             assignment_status=row["assignment_status"],
             game_id=row["game_id"],
