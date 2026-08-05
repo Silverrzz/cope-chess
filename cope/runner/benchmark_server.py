@@ -43,6 +43,7 @@ from cope.db import (
     fail_benchmark_job,
     get_benchmarker_by_session_id,
     get_benchmarker_by_token,
+    get_engine_artifact,
     reconcile_benchmarker_deployment,
     record_benchmark_progress,
     register_benchmarker_connection,
@@ -522,6 +523,18 @@ class BenchmarkServer:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            artifact = get_engine_artifact(connection, job.build_hash)
+            if artifact is None:
+                raise ProtocolValidationError("benchmark artifact is not registered")
+            descriptor = result.artifact
+            if (
+                descriptor.sha256 != artifact.artifact_sha256
+                or descriptor.size != artifact.artifact_size
+                or descriptor.format != artifact.artifact_format
+                or descriptor.entrypoint != artifact.entrypoint
+                or descriptor.platform != artifact.platform
+            ):
+                raise ProtocolValidationError("benchmark artifact descriptor mismatch")
             complete_benchmark_job(
                 connection,
                 job=job,
@@ -529,6 +542,7 @@ class BenchmarkServer:
                 nps=result.nps,
                 elapsed_ms=result.elapsed_ms,
                 output=result.output,
+                artifact_sha256=result.artifact.sha256,
             )
             connection.commit()
         except Exception:

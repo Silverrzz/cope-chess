@@ -75,6 +75,7 @@ function validate(): string {
   if (config.value.format === 'swiss' && (!('rounds' in options) || !Number.isInteger(options.rounds) || options.rounds < 1)) return 'Swiss rounds must be a whole number of at least 1.'
   if (config.value.format === 'gauntlet') {
     if (!('hero_engine_id' in options) || !config.value.participants.includes(options.hero_engine_id)) return 'Select a hero from the participating engines.'
+    if (!('cycles' in options) || !Number.isInteger(options.cycles) || options.cycles < 1) return 'Cycles must be a whole number of at least 1.'
   }
 
   const control = config.value.time_control

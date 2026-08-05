@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import os
 import queue
 import signal
@@ -8,14 +9,18 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from cope.core.benchmark import parse_benchmark_nps
 from cope.core.models import EngineSpec
 from cope.core.stream import clamp_uci_info_line
+from cope.engine_artifacts import extract_artifact_archive
 
 
 LOG = logging.getLogger("cope.worker.engine")
@@ -44,13 +49,21 @@ class UciEngineProcess:
         credential: str,
         progress_callback: Callable[[str, str, str, str], None] | None = None,
         command_timeout_s: int | None = None,
+        allow_build: bool = False,
     ):
-        del server_url, credential
         self._spec = spec
         self._progress_callback = progress_callback
         self._command_timeout_s = command_timeout_s
+        self._allow_build = allow_build
         self._source_dir = _engine_source_dir(spec)
-        self._binary_path = self._source_dir / "engine"
+        entrypoint = "engine" if spec.artifact is None else spec.artifact.entrypoint
+        self._binary_path = self._source_dir / entrypoint
+        self._download_url = (
+            None
+            if spec.artifact is None
+            else _absolute_download_url(server_url, spec.artifact.url)
+        )
+        self._credential = credential
         self._process: subprocess.Popen[str] | None = None
         self._stdout: queue.Queue[str | None] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
@@ -126,6 +139,7 @@ class UciEngineProcess:
                 completed = subprocess.run(
                     [str(self._binary_path.resolve()), "bench"],
                     cwd=self._source_dir,
+                    env=self._engine_environment(),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -150,7 +164,7 @@ class UciEngineProcess:
                 raise EnginePreparationError(
                     self._spec,
                     "benchmark",
-                    f"engine bench exited with code {completed.returncode}: {output}",
+                    f"engine bench {_process_exit_description(completed.returncode)}: {output}",
                 )
             nps = parse_benchmark_nps(output)
             if nps is None:
@@ -167,7 +181,7 @@ class UciEngineProcess:
         line_callback: Callable[[str], None] | None = None,
     ) -> list[str]:
         with self._io_lock:
-            LOG.info(
+            LOG.debug(
                 "engine command handling engine_id=%s engine=%s command=%s",
                 self._spec.engine_id,
                 self._spec.name,
@@ -325,7 +339,7 @@ class UciEngineProcess:
                 self._process.returncode,
             )
             raise RuntimeError(
-                f"{self._spec.name} exited with code {self._process.returncode}"
+                f"{self._spec.name} {_process_exit_description(self._process.returncode)}"
             )
 
         self._ensure_artifact()
@@ -349,9 +363,10 @@ class UciEngineProcess:
             self._process = subprocess.Popen(
                 [str(self._binary_path.resolve())],
                 cwd=self._source_dir,
+                env=self._engine_environment(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
@@ -379,7 +394,138 @@ class UciEngineProcess:
         self._stdout_thread.start()
         return self._process
 
+    def _engine_environment(self) -> dict[str, str]:
+        runtime_temp = self._source_dir.parent / ".runtime" / self._source_dir.name
+        runtime_temp.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        runtime_temp_value = str(runtime_temp.resolve())
+        environment["TMPDIR"] = runtime_temp_value
+        environment["TMP"] = runtime_temp_value
+        environment["TEMP"] = runtime_temp_value
+        return environment
+
+    def _ensure_downloaded_artifact(self) -> None:
+        artifact = self._spec.artifact
+        if artifact is None or self._download_url is None:
+            raise EnginePreparationError(self._spec, "download", "engine artifact is unavailable")
+        if self._prepared and self._binary_path.exists():
+            return
+        artifact_key = artifact.sha256
+        cache_root = self._source_dir.parent
+        cache_name = self._source_dir.name
+        lock_path = cache_root / ".locks" / f"{cache_name}.lock"
+        failure_path = cache_root / ".failures" / f"{cache_name}.txt"
+        self.report_progress(
+            "engines",
+            "cache_lock",
+            "running",
+            f"Waiting for the machine cache lock for {self._spec.name}",
+        )
+        with _exclusive_artifact_lock(lock_path):
+            self.report_progress(
+                "engines",
+                "cache_lookup",
+                "running",
+                f"Checking the machine cache for {self._spec.name}",
+            )
+            if _artifact_is_ready(self._source_dir, self._binary_path, artifact_key):
+                self._prepared = True
+                self.report_progress(
+                    "engines",
+                    "cache_lookup",
+                    "completed",
+                    f"Using the cached {self._spec.name} artifact",
+                )
+                return
+            cached_failure = _recent_artifact_failure(failure_path)
+            if cached_failure is not None:
+                stage, detail = cached_failure
+                raise EnginePreparationError(
+                    self._spec,
+                    stage,
+                    "a recent machine-wide download attempt failed; retry is temporarily "
+                    f"suppressed:\n{detail}",
+                )
+            temporary = cache_root / ".tmp" / cache_name
+            archive_path = cache_root / ".tmp" / f"{cache_name}.tar.gz"
+            stage = "cache"
+            try:
+                if self._source_dir.exists():
+                    shutil.rmtree(self._source_dir)
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+                archive_path.unlink(missing_ok=True)
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                stage = "download"
+                self.report_progress(
+                    "engines",
+                    "artifact_download",
+                    "running",
+                    f"Downloading the {self._spec.name} engine artifact",
+                )
+                _download_artifact(
+                    self._download_url,
+                    archive_path,
+                    credential=self._credential,
+                    expected_size=artifact.size,
+                    expected_sha256=artifact.sha256,
+                )
+                self.report_progress(
+                    "engines",
+                    "artifact_download",
+                    "completed",
+                    f"Downloaded the {self._spec.name} engine artifact",
+                )
+                stage = "verify"
+                self.report_progress(
+                    "engines",
+                    "artifact_verify",
+                    "running",
+                    f"Verifying the {self._spec.name} engine artifact",
+                )
+                extract_artifact_archive(
+                    archive_path,
+                    temporary,
+                    expected_build_hash=self._spec.build_hash,
+                    expected_entrypoint=artifact.entrypoint,
+                )
+                temporary_binary = temporary / artifact.entrypoint
+                if not temporary_binary.is_file() or temporary_binary.stat().st_size <= 0:
+                    raise RuntimeError("engine artifact does not contain its entrypoint")
+                if os.name == "posix" and not os.access(temporary_binary, os.X_OK):
+                    raise RuntimeError("engine artifact entrypoint is not executable")
+                (temporary / ".cope-artifact").write_text(artifact_key, encoding="utf-8")
+                os.replace(temporary, self._source_dir)
+                failure_path.unlink(missing_ok=True)
+                self.report_progress(
+                    "engines",
+                    "artifact_verify",
+                    "completed",
+                    f"Verified and cached the {self._spec.name} engine artifact",
+                )
+            except Exception as exc:
+                error = EnginePreparationError(self._spec, stage, str(exc))
+                _record_artifact_failure(failure_path, error.stage, error.detail)
+                raise error from exc
+            finally:
+                archive_path.unlink(missing_ok=True)
+                if temporary.exists():
+                    try:
+                        shutil.rmtree(temporary)
+                    except OSError:
+                        LOG.exception("could not remove temporary engine artifact %s", temporary)
+            self._prepared = True
+
     def _ensure_artifact(self) -> None:
+        if self._spec.artifact is not None:
+            self._ensure_downloaded_artifact()
+            return
+        if not self._allow_build:
+            raise EnginePreparationError(
+                self._spec,
+                "artifact",
+                "no published worker artifact is available; run this engine's benchmark first",
+            )
         if self._prepared and self._binary_path.exists():
             LOG.info(
                 "engine artifact already prepared engine_id=%s engine=%s binary=%s",
@@ -726,8 +872,22 @@ class UciEngineProcess:
                 raise RuntimeError(f"{self._spec.name} timed out waiting for UCI output") from exc
             if line is None:
                 process = self._process
-                code = None if process is None else process.poll()
-                raise RuntimeError(f"{self._spec.name} exited while waiting for UCI output: {code}")
+                code = None
+                if process is not None:
+                    try:
+                        code = process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        code = process.poll()
+                detail = "\n".join(lines[-20:]).strip()
+                exit_detail = (
+                    "exited before its status was available"
+                    if code is None
+                    else _process_exit_description(code)
+                )
+                raise RuntimeError(
+                    f"{self._spec.name} {exit_detail} while waiting for UCI output"
+                    + (f":\n{detail}" if detail else "")
+                )
             lines.append(line)
             if line_callback is not None and line.startswith("info"):
                 line_callback(line)
@@ -758,7 +918,11 @@ class UciEngineProcess:
             if line is None:
                 process = self._process
                 code = None if process is None else process.poll()
-                raise RuntimeError(f"{self._spec.name} exited: {code}")
+                raise RuntimeError(
+                    f"{self._spec.name} {_process_exit_description(code)}"
+                    if code is not None
+                    else f"{self._spec.name} exited"
+                )
             lines.append(line)
 
 
@@ -768,7 +932,20 @@ def _engine_source_dir(spec: EngineSpec) -> Path:
         cache_root = Path(configured_cache_root).expanduser().resolve()
     else:
         cache_root = (_effective_home_dir() / ".cope-worker" / "engines").resolve()
-    return cache_root / f"build-{spec.build_hash}"
+    cache_key = spec.build_hash if spec.artifact is None else spec.artifact.sha256
+    prefix = "build" if spec.artifact is None else "artifact"
+    return cache_root / f"{prefix}-{cache_key}"
+
+
+def _process_exit_description(return_code: int) -> str:
+    signal_number = -return_code if return_code < 0 else return_code - 128
+    if 0 < signal_number < 64:
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        return f"was terminated by {signal_name} (exit code {return_code})"
+    return f"exited with code {return_code}"
 
 
 def _effective_home_dir() -> Path:
@@ -838,6 +1015,62 @@ def _exclusive_artifact_lock(path: Path) -> Iterator[None]:
                     import fcntl
 
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _absolute_download_url(server_url: str, path: str) -> str:
+    if path.startswith(("https://", "http://")):
+        return path
+    parsed = urlsplit(server_url)
+    scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
+    origin = urlunsplit((scheme, parsed.netloc, "/", "", ""))
+    return urljoin(origin, path.lstrip("/"))
+
+
+def _download_artifact(
+    url: str,
+    destination: Path,
+    *,
+    credential: str,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {credential}",
+            "Accept": "application/gzip",
+        },
+    )
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            declared = response.headers.get("Content-Length")
+            if declared and int(declared) != expected_size:
+                raise RuntimeError("server reported an unexpected artifact size")
+            with destination.open("xb") as output:
+                while True:
+                    chunk = response.read(min(1024 * 1024, expected_size - received + 1))
+                    if not chunk:
+                        break
+                    received += len(chunk)
+                    if received > expected_size:
+                        raise RuntimeError("server sent more artifact data than registered")
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"artifact server returned HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"could not reach artifact server: {exc.reason}") from exc
+    if received != expected_size:
+        raise RuntimeError("downloaded artifact size does not match the descriptor")
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"artifact SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
 
 
 def _run_checked(

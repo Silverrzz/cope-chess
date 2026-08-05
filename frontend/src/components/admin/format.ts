@@ -29,6 +29,14 @@ export function formatNumber(value: number | null | undefined): string {
   return new Intl.NumberFormat().format(value ?? 0)
 }
 
+export function formatBytes(value: number | null | undefined): string {
+  if (!value || value < 1) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const unit = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  const amount = value / (1024 ** unit)
+  return `${amount.toLocaleString(undefined, { maximumFractionDigits: unit === 0 ? 0 : 1 })} ${units[unit]}`
+}
+
 export function formatTimeControl(control: TimeControl | undefined): string {
   if (!control) return 'Not set'
   if (control.category === 'increment') {
@@ -82,7 +90,10 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
       ? { rounds: positiveInt(rawOptions.rounds, 7) }
       : value.format === 'knockout'
         ? { tiebreak: 'extra_pair' }
-        : { hero_engine_id: positiveInt(rawOptions.hero_engine_id, 0) }
+        : {
+            hero_engine_id: positiveInt(rawOptions.hero_engine_id, 0),
+            cycles: positiveInt(rawOptions.cycles, 1),
+          }
   return {
     ...defaults,
     ...cloneData(value),
@@ -111,6 +122,33 @@ export function configFromSeed(seed: FormSeed): TournamentConfig {
   return normalizeConfig(seed.config)
 }
 
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return 'Unknown'
+  const totalMinutes = Math.max(0, Math.round(seconds / 60))
+  const days = Math.floor(totalMinutes / 1_440)
+  const hours = Math.floor((totalMinutes % 1_440) / 60)
+  const minutes = totalMinutes % 60
+  const parts: string[] = []
+  if (days) parts.push(`${days}d`)
+  if (hours) parts.push(`${hours}h`)
+  if (minutes || !parts.length) parts.push(`${minutes}m`)
+  return parts.slice(0, 2).join(' ')
+}
+
+export function formatRelativeDate(value: string | null | undefined, now = Date.now()): string {
+  if (!value) return ''
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return ''
+  const seconds = Math.round((timestamp - now) / 1000)
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  if (Math.abs(seconds) < 90) return formatter.format(seconds, 'second')
+  const minutes = Math.round(seconds / 60)
+  if (Math.abs(minutes) < 90) return formatter.format(minutes, 'minute')
+  const hours = Math.round(minutes / 60)
+  if (Math.abs(hours) < 36) return formatter.format(hours, 'hour')
+  return formatter.format(Math.round(hours / 24), 'day')
+}
+
 function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {
   const normalized = normalizeSettings(config)
   return {
@@ -133,7 +171,7 @@ export function estimatePairs(format: TournamentFormat, options: TournamentSetti
   if (format === 'knockout') {
     return players - 1
   }
-  return players - 1
+  return (players - 1) * ('cycles' in options ? options.cycles : 0)
 }
 
 export function estimateGames(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {

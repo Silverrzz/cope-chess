@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from cope.core.models import (
     EngineStop,
     HardwareInfo,
     WorkerGameAssignment,
+    WorkerResourceTelemetry,
     WorkerSessionHello,
     WorkerTokenHello,
     WorkerUpdateCommand,
@@ -60,8 +62,12 @@ from .uci_engine import EnginePreparationError, UciEngineProcess
 LOG = logging.getLogger("cope.worker")
 RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
-ENGINE_INFO_SEND_INTERVAL_S = 0.25
-ENGINE_CLOCK_SEND_INTERVAL_S = 0.05
+ENGINE_INFO_SEND_INTERVAL_S = 0.5
+ENGINE_CLOCK_SEND_INTERVAL_S = 0.5
+ENGINE_BENCHMARK_CONCURRENCY = 2
+TELEMETRY_BATCH_INTERVAL_S = 0.25
+TELEMETRY_BATCH_MAX_MESSAGES = 128
+RESOURCE_TELEMETRY_INTERVAL_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -76,9 +82,225 @@ class WorkerClientConfig:
     cpu_capacity: int | None = None
 
 
+class _EngineBenchmarkCache:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(ENGINE_BENCHMARK_CONCURRENCY)
+        self._tasks: dict[str, asyncio.Task[tuple[int, int]]] = {}
+
+    async def benchmark(
+        self,
+        engine: UciEngineProcess,
+        spec,
+        timeout_s: int,
+    ) -> tuple[int, int]:
+        key = spec.build_hash
+        async with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                task = asyncio.create_task(self._run(engine, timeout_s))
+                self._tasks[key] = task
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            async with self._lock:
+                if self._tasks.get(key) is task:
+                    self._tasks.pop(key, None)
+            raise
+
+    async def _run(
+        self,
+        engine: UciEngineProcess,
+        timeout_s: int,
+    ) -> tuple[int, int]:
+        async with self._semaphore:
+            return await asyncio.to_thread(engine.benchmark, timeout_s)
+
+
+class _WorkerTelemetryBatcher:
+    def __init__(self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future) -> None:
+        self._websocket = websocket
+        self._send_lock = send_lock
+        self._pending: dict[tuple[str, int, int], dict[str, Any]] = {}
+        self._closing = False
+        self._task = asyncio.create_task(self._run(), name="worker-telemetry-batcher")
+
+        def completed(task: asyncio.Task) -> None:
+            if task.cancelled() or fatal.done() or self._closing:
+                return
+            error = task.exception()
+            if error is not None:
+                fatal.set_exception(error)
+
+        self._task.add_done_callback(completed)
+
+    def offer(self, message_type: str, data) -> None:
+        if self._closing:
+            return
+        key = (message_type, data.assignment_id, data.engine_id)
+        clock_key = ("engine_clock", data.assignment_id, data.engine_id)
+        info_key = ("engine_info", data.assignment_id, data.engine_id)
+        if message_type == "engine_info":
+            self._pending.pop(clock_key, None)
+        elif message_type == "engine_clock" and info_key in self._pending:
+            return
+        self._pending[key] = make_message(message_type, data).model_dump(mode="json")
+
+    def discard(self, assignment_id: int, engine_id: int) -> None:
+        self._pending.pop(("engine_clock", assignment_id, engine_id), None)
+        self._pending.pop(("engine_info", assignment_id, engine_id), None)
+
+    async def close(self) -> None:
+        self._closing = True
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        await self.flush()
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(TELEMETRY_BATCH_INTERVAL_S)
+            await self.flush()
+
+    async def flush(self) -> None:
+        messages = list(self._pending.values())
+        self._pending.clear()
+        for offset in range(0, len(messages), TELEMETRY_BATCH_MAX_MESSAGES):
+            await _send_message(
+                self._websocket,
+                "worker_telemetry_batch",
+                {"messages": messages[offset : offset + TELEMETRY_BATCH_MAX_MESSAGES]},
+                lock=self._send_lock,
+            )
+
+
+class _WorkerResourceSampler:
+    def __init__(self) -> None:
+        import psutil
+
+        self._psutil = psutil
+        self._process = psutil.Process()
+        self._children: dict[int, Any] = {}
+        self._cpu_ids = _process_cpu_ids()
+        psutil.cpu_percent(percpu=True)
+        self._process.cpu_percent()
+
+    def sample(self) -> WorkerResourceTelemetry:
+        per_cpu = self._psutil.cpu_percent(percpu=True)
+        visible_cpu = [
+            value
+            for index, value in enumerate(per_cpu)
+            if self._cpu_ids is None or index in self._cpu_ids
+        ]
+        cpu_percent = sum(visible_cpu) / len(visible_cpu) if visible_cpu else 0.0
+
+        virtual_memory = self._psutil.virtual_memory()
+        memory_total = float(virtual_memory.total)
+        memory_used = float(virtual_memory.used)
+        memory_available = float(virtual_memory.available)
+        cgroup_limit = _linux_memory_limit_bytes()
+        cgroup_used = _linux_memory_used_bytes()
+        if (
+            cgroup_limit is not None
+            and cgroup_used is not None
+            and cgroup_limit < memory_total
+        ):
+            memory_total = float(cgroup_limit)
+            memory_used = float(min(cgroup_used, cgroup_limit))
+            memory_available = max(0.0, memory_total - memory_used)
+
+        active_children = {}
+        with contextlib.suppress(Exception):
+            for child in self._process.children(recursive=True):
+                process = self._children.get(child.pid, child)
+                active_children[child.pid] = process
+        self._children = active_children
+
+        coordinator_cpu = 0.0
+        coordinator_memory = 0.0
+        with contextlib.suppress(Exception):
+            coordinator_cpu = self._process.cpu_percent() / 100.0
+            coordinator_memory = float(self._process.memory_info().rss)
+
+        engine_cpu = 0.0
+        engine_memory = 0.0
+        for child in self._children.values():
+            with contextlib.suppress(Exception):
+                engine_cpu += child.cpu_percent() / 100.0
+                engine_memory += float(child.memory_info().rss)
+
+        disk = self._psutil.disk_usage(str(Path.cwd()))
+        mb = float(1024**2)
+        return WorkerResourceTelemetry(
+            cpu_percent=round(cpu_percent, 3),
+            memory_used_mb=round(memory_used / mb, 3),
+            memory_total_mb=round(memory_total / mb, 3),
+            memory_available_mb=round(memory_available / mb, 3),
+            coordinator_cpu_cores=round(coordinator_cpu, 4),
+            coordinator_memory_mb=round(coordinator_memory / mb, 3),
+            engine_cpu_cores=round(engine_cpu, 4),
+            engine_memory_mb=round(engine_memory / mb, 3),
+            disk_used_mb=round(float(disk.used) / mb, 3),
+            disk_free_mb=round(float(disk.free) / mb, 3),
+            disk_total_mb=round(float(disk.total) / mb, 3),
+        )
+
+
+class _WorkerResourceTelemetryPublisher:
+    def __init__(self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future) -> None:
+        self._websocket = websocket
+        self._send_lock = send_lock
+        self._sampler = _WorkerResourceSampler()
+        self._closing = False
+        self._task = asyncio.create_task(self._run(), name="worker-resource-telemetry")
+
+        def completed(task: asyncio.Task) -> None:
+            if task.cancelled() or fatal.done() or self._closing:
+                return
+            error = task.exception()
+            if error is not None:
+                fatal.set_exception(error)
+
+        self._task.add_done_callback(completed)
+
+    async def close(self) -> None:
+        self._closing = True
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                telemetry = await asyncio.to_thread(self._sampler.sample)
+            except Exception as error:
+                LOG.warning("worker resource sampling failed: %s", error)
+                await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
+                continue
+            await _send_message(
+                self._websocket,
+                "worker_resource_telemetry",
+                telemetry,
+                lock=self._send_lock,
+            )
+            await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
+
+
 async def run_worker_client(config: WorkerClientConfig) -> None:
+    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
+    try:
+        threading.stack_size(1024 * 1024)
+    except (RuntimeError, ValueError):
+        LOG.warning("could not reduce worker thread stack size")
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(
+            max_workers=max(32, hw.logical_cores * 2 + 8),
+            thread_name_prefix="cope-worker",
+        )
+    )
     state = _WorkerConnectionState(
         session_id=config.session_id or _read_worker_session(config.state_file),
+        hw=hw,
     )
     reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
     while True:
@@ -97,6 +319,8 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
             _log_connection_closed(error)
         except (OSError, asyncio.TimeoutError, InvalidHandshake) as error:
             LOG.warning("runner connection failed: %s", error)
+        except ProtocolValidationError as error:
+            LOG.warning("runner protocol error; reconnecting: %s", error)
         except Exception:
             LOG.exception("worker client failed")
             raise
@@ -111,6 +335,7 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
 @dataclass
 class _WorkerConnectionState:
     session_id: str | None
+    hw: HardwareInfo
     connected: bool = False
 
 
@@ -124,8 +349,14 @@ async def _run_worker_connection(
         connection_config.server_url,
         connection_config.app_version,
     )
-    async with connect(connection_config.server_url) as websocket:
-        await _send_message(websocket, "hello", _build_hello(connection_config))
+    async with connect(
+        connection_config.server_url,
+        ping_interval=10,
+        ping_timeout=60,
+        close_timeout=5,
+        max_queue=256,
+    ) as websocket:
+        await _send_message(websocket, "hello", _build_hello(connection_config, state.hw))
         welcome = await _recv_message(websocket, "welcome", WorkerWelcome)
         state.session_id = welcome.session_id
         _write_worker_session(config.state_file, welcome.session_id)
@@ -177,6 +408,7 @@ def _restart_arguments(arguments: list[str]) -> list[str]:
 
 def _build_hello(
     config: WorkerClientConfig,
+    hw: HardwareInfo,
 ) -> WorkerTokenHello | WorkerSessionHello:
     credential_count = sum(
         value is not None
@@ -187,7 +419,6 @@ def _build_hello(
             "worker client needs exactly one of token or session_id"
         )
 
-    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
     machine_id = config.machine_id or _detect_machine_id()
 
     if config.token is not None:
@@ -307,7 +538,18 @@ async def _serve_assignments(
     assignments: dict[int, WorkerGameAssignment] = {}
     tasks: dict[int, asyncio.Task] = {}
     send_lock = asyncio.Lock()
+    benchmark_cache = _EngineBenchmarkCache()
     fatal = asyncio.get_running_loop().create_future()
+    telemetry = _WorkerTelemetryBatcher(websocket, send_lock, fatal)
+    resource_telemetry: _WorkerResourceTelemetryPublisher | None = None
+    try:
+        resource_telemetry = _WorkerResourceTelemetryPublisher(
+            websocket,
+            send_lock,
+            fatal,
+        )
+    except Exception as error:
+        LOG.warning("worker resource telemetry is unavailable: %s", error)
 
     def assignment_done(assignment_id: int, task: asyncio.Task) -> None:
         tasks.pop(assignment_id, None)
@@ -329,6 +571,8 @@ async def _serve_assignments(
             assignments=assignments,
             tasks=tasks,
             send_lock=send_lock,
+            benchmark_cache=benchmark_cache,
+            telemetry=telemetry,
             fatal=fatal,
             assignment_done=assignment_done,
         )
@@ -337,6 +581,11 @@ async def _serve_assignments(
         for task in active_tasks:
             task.cancel()
         await asyncio.gather(*active_tasks, return_exceptions=True)
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await telemetry.close()
+        if resource_telemetry is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await resource_telemetry.close()
         if fatal.done():
             with contextlib.suppress(Exception):
                 fatal.exception()
@@ -352,6 +601,8 @@ async def _route_assignment_messages(
     assignments: dict[int, WorkerGameAssignment],
     tasks: dict[int, asyncio.Task],
     send_lock: asyncio.Lock,
+    benchmark_cache: _EngineBenchmarkCache,
+    telemetry: _WorkerTelemetryBatcher,
     fatal: asyncio.Future,
     assignment_done,
 ) -> tuple[Path, str] | None:
@@ -377,9 +628,23 @@ async def _route_assignment_messages(
             assignment = WorkerGameAssignment.model_validate(envelope.data)
             assignment_id = assignment.assignment.assignment_id
             if assignment_id in tasks:
-                raise ProtocolValidationError(
-                    f"duplicate assignment {assignment_id}"
+                current = assignments[assignment_id]
+                duplicate_identity = (
+                    current.assignment.assignment_key
+                    == assignment.assignment.assignment_key
+                    and current.assignment.game_id == assignment.assignment.game_id
                 )
+                reason = (
+                    f"duplicate assignment {assignment_id}"
+                    if duplicate_identity
+                    else f"conflicting assignment reuse {assignment_id}"
+                )
+                LOG.warning(
+                    "%s; reconnecting without stopping the worker process",
+                    reason,
+                )
+                await websocket.close(code=4000, reason=reason)
+                return None
             used_threads = sum(
                 item.required_resources.threads for item in assignments.values()
             )
@@ -403,6 +668,8 @@ async def _route_assignment_messages(
                     assignment,
                     inbox=queue,
                     send_lock=send_lock,
+                    benchmark_cache=benchmark_cache,
+                    telemetry=telemetry,
                     server_url=server_url,
                     credential=credential,
                 ),
@@ -433,6 +700,8 @@ async def _serve_assignment(
     *,
     inbox: asyncio.Queue,
     send_lock: asyncio.Lock,
+    benchmark_cache: _EngineBenchmarkCache,
+    telemetry: _WorkerTelemetryBatcher,
     server_url: str,
     credential: str,
 ) -> None:
@@ -510,8 +779,9 @@ async def _serve_assignment(
                 current=position - 1,
                 total=len(engines),
             )
-            worker_nps, elapsed_ms = await asyncio.to_thread(
-                engine.benchmark,
+            worker_nps, elapsed_ms = await benchmark_cache.benchmark(
+                engine,
+                spec,
                 assignment.benchmark_reference.timeout_s,
             )
             hardware_score = worker_nps / reference_nps
@@ -586,7 +856,7 @@ async def _serve_assignment(
 
             command = EngineCommand.model_validate(envelope.data)
             _validate_assignment_message(command, assignment, "engine_command")
-            LOG.info(
+            LOG.debug(
                 "engine command received assignment_id=%s game_id=%s engine_id=%s command=%s",
                 command.assignment_id,
                 command.game_id,
@@ -625,7 +895,7 @@ async def _serve_assignment(
             command_timer = _CommandTimer()
 
             info_publisher = (
-                _EngineInfoPublisher(websocket, command, loop, send_lock, command_timer)
+                _EngineInfoPublisher(telemetry, command, loop, command_timer)
                 if command.command.startswith("go")
                 else None
             )
@@ -633,9 +903,8 @@ async def _serve_assignment(
             clock_task = (
                 asyncio.create_task(
                     _publish_engine_clock(
-                        websocket,
                         command,
-                        send_lock,
+                        telemetry,
                         command_timer,
                     )
                 )
@@ -661,6 +930,7 @@ async def _serve_assignment(
                         assignment,
                         info_publisher,
                         clock_task,
+                        telemetry,
                     )
                     if command_result is None:
                         await info_publisher.cancel()
@@ -687,6 +957,8 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
+                if info_publisher is not None:
+                    telemetry.discard(command.assignment_id, command.engine_id)
                 if track_command_progress:
                     await progress.publish(
                         command_stage,
@@ -706,6 +978,7 @@ async def _serve_assignment(
                     clock_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await clock_task
+                telemetry.discard(command.assignment_id, command.engine_id)
                 failure = AssignmentFailed(
                     **assignment.assignment.message_fields(),
                     engine_id=command.engine_id,
@@ -754,7 +1027,7 @@ async def _serve_assignment(
                 elapsed_ms=command_elapsed_ms,
             )
             commands_handled += 1
-            LOG.info(
+            LOG.debug(
                 "engine command completed assignment_id=%s game_id=%s engine_id=%s command=%s lines=%s%s",
                 command.assignment_id,
                 command.game_id,
@@ -919,6 +1192,7 @@ async def _wait_for_engine_search(
     assignment: WorkerGameAssignment,
     info_publisher: _EngineInfoPublisher,
     clock_task: asyncio.Task,
+    telemetry: _WorkerTelemetryBatcher,
 ) -> tuple[list[str], int] | None:
     while True:
         receive = asyncio.create_task(inbox.get())
@@ -952,6 +1226,7 @@ async def _wait_for_engine_search(
             await asyncio.to_thread(engine.close)
         with contextlib.suppress(Exception):
             await command_task
+        telemetry.discard(command.assignment_id, command.engine_id)
         return None
 
 
@@ -1058,21 +1333,18 @@ def _command_completed_detail(command: str, engine_name: str, elapsed_ms: int) -
 
 
 async def _publish_engine_clock(
-    websocket,
     command: EngineCommand,
-    send_lock: asyncio.Lock,
+    telemetry: _WorkerTelemetryBatcher,
     command_timer: _CommandTimer,
 ) -> None:
     while True:
         await asyncio.sleep(ENGINE_CLOCK_SEND_INTERVAL_S)
-        await _send_message(
-            websocket,
+        telemetry.offer(
             "engine_clock",
             EngineClock(
                 **command.model_dump(exclude={"command"}),
                 elapsed_ms=command_timer.elapsed_ms(),
             ),
-            lock=send_lock,
         )
 
 
@@ -1081,16 +1353,14 @@ class _EngineInfoPublisher:
 
     def __init__(
         self,
-        websocket,
+        telemetry: _WorkerTelemetryBatcher,
         command: EngineCommand,
         loop,
-        send_lock: asyncio.Lock | None = None,
         command_timer: _CommandTimer | None = None,
     ) -> None:
-        self._websocket = websocket
+        self._telemetry = telemetry
         self._command = command
         self._loop = loop
-        self._send_lock = send_lock
         self._command_timer = _CommandTimer() if command_timer is None else command_timer
         self._latest_line: str | None = None
         self._wake = asyncio.Event()
@@ -1147,11 +1417,9 @@ class _EngineInfoPublisher:
                 lines=[line],
                 elapsed_ms=self._command_timer.elapsed_ms(),
             )
-            await _send_message(
-                self._websocket,
+            self._telemetry.offer(
                 "engine_info",
                 info,
-                lock=self._send_lock,
             )
             next_send_at = self._loop.time() + ENGINE_INFO_SEND_INTERVAL_S
 
@@ -1197,7 +1465,19 @@ async def _send_message(
     *,
     lock: asyncio.Lock | None = None,
 ) -> None:
-    log = LOG.debug if message_type in {"engine_clock", "engine_info"} else LOG.info
+    log = (
+        LOG.debug
+        if message_type in {
+            "assignment_progress",
+            "engine_clock",
+            "engine_command_result",
+            "engine_command_started",
+            "engine_info",
+            "worker_telemetry_batch",
+            "worker_resource_telemetry",
+        }
+        else LOG.info
+    )
     log(
         "sending runner message type=%s %s",
         message_type,
@@ -1339,6 +1619,9 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
                     cpu_ids = {int(cpu_id) for cpu_id in affinity}
                     logical_cores = len(cpu_ids)
         total_ram = psutil.virtual_memory().total
+        cgroup_limit = _linux_memory_limit_bytes()
+        if cgroup_limit is not None:
+            total_ram = min(total_ram, cgroup_limit)
         ram_mb = max(1, total_ram // (1024**2))
         ram_gb = max(1, round(total_ram / (1024**3)))
     except ImportError:
@@ -1359,19 +1642,22 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
             ),
         )
     cpu_quota = _linux_cpu_quota()
-    usable_cores = (
+    usable_physical_cores = (
         detected_physical_cores
         if cpu_quota is None
         else min(detected_physical_cores, cpu_quota)
     )
-    physical_cores = usable_cores
+    if cpu_quota is not None:
+        logical_cores = min(logical_cores, cpu_quota)
+    physical_cores = min(usable_physical_cores, logical_cores)
     if cpu_capacity is not None:
-        if cpu_capacity > usable_cores:
+        if cpu_capacity > logical_cores:
             raise ValueError(
                 "worker CPU capacity cannot exceed the detected usable "
-                f"physical-core count ({usable_cores})"
+                f"logical-thread count ({logical_cores})"
             )
-        physical_cores = cpu_capacity
+        logical_cores = cpu_capacity
+        physical_cores = min(physical_cores, logical_cores)
 
     hw = HardwareInfo(
         cpu_model=_detect_cpu_model(),
@@ -1389,11 +1675,54 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
         hw.cpu_model,
         f"{detected_physical_cores}P/{hw.logical_cores}T",
         cpu_quota if cpu_quota is not None else "unlimited",
-        hw.physical_cores,
+        hw.logical_cores,
         f"{hw.ram_gb}GB",
         hw.os,
     )
     return hw
+
+
+def _linux_memory_limit_bytes() -> int | None:
+    if sys.platform != "linux":
+        return None
+    paths = (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory.limit_in_bytes"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    )
+    limits: list[int] = []
+    for path in paths:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value == "max":
+            continue
+        try:
+            limit = int(value)
+        except ValueError:
+            continue
+        if 0 < limit < 1 << 60:
+            limits.append(limit)
+    return min(limits) if limits else None
+
+
+def _linux_memory_used_bytes() -> int | None:
+    if sys.platform != "linux":
+        return None
+    paths = (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory.usage_in_bytes"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    )
+    for path in paths:
+        try:
+            value = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return None
 
 
 def _process_cpu_ids() -> set[int] | None:

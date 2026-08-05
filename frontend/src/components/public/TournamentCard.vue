@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import type { TournamentSummary } from './types'
+import { formatDate } from './format'
 import ProgressBar from './ProgressBar.vue'
 import StatusPill from './StatusPill.vue'
 
@@ -15,6 +16,15 @@ const total = computed(() => props.item.summary.total || 0)
 const progress = computed(() => props.item.progress_percent ?? (total.value ? Math.round(finished.value / total.value * 100) : 0))
 const participants = computed(() => props.item.participant_preview || props.item.participant_names?.slice(0, 6) || [])
 const overflow = computed(() => props.item.participant_overflow ?? Math.max(0, (props.item.participant_count || participants.value.length) - participants.value.length))
+const scheduleFact = computed(() => {
+  if (props.item.record.status === 'scheduled' && props.item.record.scheduled_start_at) {
+    return { label: 'Starts', value: formatDate(props.item.record.scheduled_start_at, true) }
+  }
+  if (props.item.record.status === 'running' && props.item.estimate?.estimated_finish_at) {
+    return { label: 'Est. finish', value: formatDate(props.item.estimate.estimated_finish_at, true) }
+  }
+  return null
+})
 </script>
 
 <template>
@@ -47,6 +57,10 @@ const overflow = computed(() => props.item.participant_overflow ?? Math.max(0, (
       <div v-if="item.record.current_round">
         <dt>Round</dt>
         <dd>{{ item.record.current_round }}</dd>
+      </div>
+      <div v-if="scheduleFact" class="tournament-card__schedule">
+        <dt>{{ scheduleFact.label }}</dt>
+        <dd>{{ scheduleFact.value }}</dd>
       </div>
     </dl>
 
@@ -133,6 +147,10 @@ const overflow = computed(() => props.item.participant_overflow ?? Math.max(0, (
 .tournament-card__facts div {
   min-width: 3.5rem;
 }
+
+.tournament-card__facts .tournament-card__schedule { min-width: 9rem; }
+
+.tournament-card__schedule dd { font-size: .76rem; }
 
 .tournament-card__facts dt {
   color: var(--color-text-muted, #607080);

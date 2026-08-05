@@ -31,8 +31,10 @@ from cope.core.models import (
     EngineCommandResult,
     EngineInfo,
     EngineStop,
+    Envelope,
     PROTOCOL_VERSION,
     WorkerResources,
+    WorkerResourceTelemetry,
     WorkerSessionHello,
     WorkerTokenHello,
     WorkerUpdateCommand,
@@ -61,8 +63,9 @@ from cope.db import (
     get_worker_by_token,
     list_workers,
     record_worker_failure,
+    record_worker_resource_sample,
     record_game_hardware_score,
-    record_game_assignment_progress,
+    record_game_assignment_progress_batch,
     reconcile_worker_deployment,
     set_service_endpoint,
     touch_workers_seen,
@@ -95,6 +98,8 @@ RETIRED_ASSIGNMENT_GRACE_S = 60.0
 LATE_ASSIGNMENT_MESSAGE_TYPES = {
     "assignment_progress",
     "assignment_cleanup_complete",
+    "engine_clock",
+    "engine_info",
 }
 TRANSIENT_PLAY_PROGRESS = {
     "engine_command",
@@ -105,6 +110,8 @@ TRANSIENT_PLAY_PROGRESS = {
 }
 WORKER_SERVER_STALL_TIMEOUT_S = 60.0
 WORKER_SERVER_WATCHDOG_INTERVAL_S = 5.0
+PROGRESS_BATCH_INTERVAL_S = 0.05
+PROGRESS_BATCH_SIZE = 512
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -192,7 +199,7 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
     for tournament_id in orphaned_tournaments:
         publish_tournament_event(tournament_id)
     heartbeat_interval_s = max(config.heartbeat_interval_ms / 1000, 0.5)
-    ping_timeout_s = max(heartbeat_interval_s * 3, 15.0)
+    ping_timeout_s = max(heartbeat_interval_s * 12, 60.0)
     watchdog = EventLoopWatchdog(_worker_server_stall_timeout_s())
     watchdog.start()
     watchdog_task = asyncio.create_task(_watchdog_heartbeat(watchdog))
@@ -205,7 +212,7 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
             ping_interval=heartbeat_interval_s,
             ping_timeout=ping_timeout_s,
             close_timeout=1,
-            max_queue=32,
+            max_queue=256,
         ):
             _register_worker_endpoint(config)
             LOG.info(
@@ -278,12 +285,16 @@ class WorkerHandshakeServer:
             int, tuple[str, WebSocketServerProtocol]
         ] = {}
         self._worker_capabilities: dict[int, tuple] = {}
+        self._progress_queue: asyncio.Queue[tuple[AssignmentProgress, str]] = (
+            asyncio.Queue()
+        )
         self._background_tasks: list[asyncio.Task] = []
 
     async def start_background_tasks(self) -> None:
         self._background_tasks = [
             asyncio.create_task(self._fallback_wake_loop(), name="worker-fallback-wake"),
             asyncio.create_task(self._presence_flush_loop(), name="worker-presence-flush"),
+            asyncio.create_task(self._progress_flush_loop(), name="worker-progress-flush"),
         ]
 
     async def stop_background_tasks(self) -> None:
@@ -293,6 +304,7 @@ class WorkerHandshakeServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._background_tasks.clear()
+        await self._flush_queued_progress()
         await self._flush_worker_presence()
 
     async def _fallback_wake_loop(self) -> None:
@@ -309,6 +321,66 @@ class WorkerHandshakeServer:
                 await self._flush_worker_presence()
             except Exception:
                 LOG.exception("worker presence batch failed")
+
+    async def _progress_flush_loop(self) -> None:
+        pending: list[tuple[AssignmentProgress, str]] = []
+        try:
+            while True:
+                if not pending:
+                    pending.append(await self._progress_queue.get())
+                    await asyncio.sleep(PROGRESS_BATCH_INTERVAL_S)
+                    while len(pending) < PROGRESS_BATCH_SIZE:
+                        try:
+                            pending.append(self._progress_queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+                try:
+                    persistence = asyncio.create_task(
+                        asyncio.to_thread(
+                            self._persist_assignment_progress_batch,
+                            tuple(pending),
+                        )
+                    )
+                    await asyncio.shield(persistence)
+                    pending.clear()
+                except asyncio.CancelledError:
+                    await persistence
+                    pending.clear()
+                    raise
+                except Exception:
+                    LOG.exception("assignment progress batch failed")
+                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            for item in pending:
+                self._progress_queue.put_nowait(item)
+            raise
+
+    async def _flush_queued_progress(self) -> None:
+        pending: list[tuple[AssignmentProgress, str]] = []
+        while True:
+            try:
+                pending.append(self._progress_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if pending:
+            await asyncio.to_thread(
+                self._persist_assignment_progress_batch,
+                tuple(pending),
+            )
+
+    def _persist_assignment_progress_batch(
+        self,
+        pending: tuple[tuple[AssignmentProgress, str], ...],
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            record_game_assignment_progress_batch(connection, pending)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     async def _flush_worker_presence(self) -> None:
         sessions = [
@@ -400,13 +472,7 @@ class WorkerHandshakeServer:
                 self._authenticate_worker,
                 hello,
             )
-            session_id = (
-                authenticated_worker.session_id
-                if isinstance(hello, WorkerSessionHello)
-                else _new_session_id()
-            )
-            if not session_id:
-                raise ProtocolValidationError("worker session is unavailable")
+            session_id = _new_session_id()
             label = _worker_label(authenticated_worker, hello)
             worker = await asyncio.to_thread(
                 self._record_connection,
@@ -421,14 +487,14 @@ class WorkerHandshakeServer:
                 hello.app_version,
             )
 
+            capacity = worker.capacity
+            if capacity is None:
+                raise ProtocolValidationError("worker capacity is unavailable")
             welcome = WorkerWelcome(
                 worker_id=worker.id,
                 session_id=session_id,
                 heartbeat_interval_ms=self._config.heartbeat_interval_ms,
-                capacity=WorkerResources(
-                    threads=hello.hw.physical_cores,
-                    hash_mb=hello.hw.total_ram_mb,
-                ),
+                capacity=capacity,
                 update=update,
             )
             await _send_message(websocket, "welcome", welcome)
@@ -487,6 +553,7 @@ class WorkerHandshakeServer:
         receiver = asyncio.create_task(
             self._route_worker_messages(
                 websocket,
+                worker,
                 inboxes,
                 assignment_identities,
                 retired_assignments,
@@ -514,6 +581,9 @@ class WorkerHandshakeServer:
                                 resources.hash_mb
                                 for resources in assignment_resources.values()
                             ),
+                        ),
+                        active_game_ids=frozenset(
+                            identity[1] for identity in assignment_identities.values()
                         ),
                     )
                     if assignment is None:
@@ -658,57 +728,102 @@ class WorkerHandshakeServer:
     async def _route_worker_messages(
         self,
         websocket: WebSocketServerProtocol,
+        worker: WorkerRecord,
         inboxes: dict[int, asyncio.Queue],
         assignment_identities: dict[int, tuple[str, int]],
         retired_assignments: dict[tuple[int, str], tuple[int, float]],
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
-            assignment_id = envelope.data.get("assignment_id")
-            if not isinstance(assignment_id, int):
-                raise ProtocolValidationError(
-                    f"{envelope.type} message has no assignment id"
+            if envelope.type == "worker_resource_telemetry":
+                try:
+                    telemetry = WorkerResourceTelemetry.model_validate(envelope.data)
+                except ValidationError as error:
+                    raise ProtocolValidationError(str(error)) from error
+                recorded = await asyncio.to_thread(
+                    self._record_worker_resource_telemetry,
+                    worker,
+                    telemetry,
                 )
-            assignment_key = envelope.data.get("assignment_key")
-            game_id = envelope.data.get("game_id")
-            if not isinstance(assignment_key, str) or not isinstance(game_id, int):
-                raise ProtocolValidationError(
-                    f"{envelope.type} message has no assignment identity"
-                )
-            identity = assignment_identities.get(assignment_id)
-            if identity == (assignment_key, game_id):
-                inbox = inboxes.get(assignment_id)
-                if inbox is not None:
-                    await inbox.put(envelope)
-                    continue
-            retired = retired_assignments.get((assignment_id, assignment_key))
-            if retired is not None:
-                retired_game_id, expires_at = retired
-                if expires_at <= time.monotonic():
-                    retired_assignments.pop((assignment_id, assignment_key), None)
-                elif (
-                    game_id == retired_game_id
-                    and envelope.type in LATE_ASSIGNMENT_MESSAGE_TYPES
-                ):
-                    self._validate_late_assignment_message(envelope.type, envelope.data)
-                    LOG.info(
-                        "ignoring late worker message type=%s assignment_id=%s game_id=%s",
-                        envelope.type,
-                        assignment_id,
-                        game_id,
+                if not recorded:
+                    raise WorkerConnectionInactive(
+                        "worker session is no longer current"
                     )
-                    continue
-            raise ProtocolValidationError(
-                f"{envelope.type} references inactive assignment {assignment_id}"
+                continue
+            if envelope.type == "worker_telemetry_batch":
+                messages = envelope.data.get("messages")
+                if not isinstance(messages, list) or not 0 < len(messages) <= 128:
+                    raise ProtocolValidationError("worker telemetry batch has invalid size")
+                for raw in messages:
+                    try:
+                        nested = Envelope.model_validate(raw)
+                    except ValidationError as error:
+                        raise ProtocolValidationError(str(error)) from error
+                    if nested.type not in {"engine_clock", "engine_info"}:
+                        raise ProtocolValidationError(
+                            f"worker telemetry batch contains {nested.type}"
+                        )
+                    await self._route_worker_envelope(
+                        nested,
+                        inboxes,
+                        assignment_identities,
+                        retired_assignments,
+                    )
+                continue
+            await self._route_worker_envelope(
+                envelope,
+                inboxes,
+                assignment_identities,
+                retired_assignments,
             )
+
+    async def _route_worker_envelope(
+        self,
+        envelope: Envelope,
+        inboxes: dict[int, asyncio.Queue],
+        assignment_identities: dict[int, tuple[str, int]],
+        retired_assignments: dict[tuple[int, str], tuple[int, float]],
+    ) -> None:
+        assignment_id = envelope.data.get("assignment_id")
+        if not isinstance(assignment_id, int):
+            raise ProtocolValidationError(f"{envelope.type} message has no assignment id")
+        assignment_key = envelope.data.get("assignment_key")
+        game_id = envelope.data.get("game_id")
+        if not isinstance(assignment_key, str) or not isinstance(game_id, int):
+            raise ProtocolValidationError(f"{envelope.type} message has no assignment identity")
+        identity = assignment_identities.get(assignment_id)
+        if identity == (assignment_key, game_id):
+            inbox = inboxes.get(assignment_id)
+            if inbox is not None:
+                await inbox.put(envelope)
+                return
+        retired = retired_assignments.get((assignment_id, assignment_key))
+        if retired is not None:
+            retired_game_id, expires_at = retired
+            if expires_at <= time.monotonic():
+                retired_assignments.pop((assignment_id, assignment_key), None)
+            elif game_id == retired_game_id and envelope.type in LATE_ASSIGNMENT_MESSAGE_TYPES:
+                self._validate_late_assignment_message(envelope.type, envelope.data)
+                LOG.info(
+                    "ignoring late worker message type=%s assignment_id=%s game_id=%s",
+                    envelope.type,
+                    assignment_id,
+                    game_id,
+                )
+                return
+        raise ProtocolValidationError(
+            f"{envelope.type} references inactive assignment {assignment_id}"
+        )
 
     @staticmethod
     def _validate_late_assignment_message(message_type: str, payload: dict) -> None:
-        model = (
-            AssignmentProgress
-            if message_type == "assignment_progress"
-            else AssignmentCleanupComplete
-        )
+        models = {
+            "assignment_progress": AssignmentProgress,
+            "assignment_cleanup_complete": AssignmentCleanupComplete,
+            "engine_clock": EngineClock,
+            "engine_info": EngineInfo,
+        }
+        model = models[message_type]
         try:
             model.model_validate(payload)
         except ValidationError as error:
@@ -781,7 +896,12 @@ class WorkerHandshakeServer:
                 worker,
                 ready.prepared_engine_ids,
             )
-            self._acknowledge_assignment(worker, assignment, ready)
+            await asyncio.to_thread(
+                self._acknowledge_assignment,
+                worker,
+                assignment,
+                ready,
+            )
             self._record_assignment_progress(
                 assignment,
                 stage="benchmark",
@@ -1035,12 +1155,12 @@ class WorkerHandshakeServer:
             total=total,
             metadata=metadata or {},
         )
-        connection = connect_database(self._config.db_path)
-        try:
-            record_game_assignment_progress(connection, progress, source=source)
-            connection.commit()
-        finally:
-            connection.close()
+        item = (progress, source)
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._progress_queue.put_nowait, item)
+            return
+        self._persist_assignment_progress_batch((item,))
 
     def _record_worker_progress(self, assignment, progress: AssignmentProgress) -> None:
         if not progress.matches_assignment(assignment.assignment):
@@ -1203,15 +1323,36 @@ class WorkerHandshakeServer:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                (f"worker:{worker.id}",),
+            )
             self._validate_worker_machine(connection, worker, hello)
+            if isinstance(hello, WorkerTokenHello):
+                current = get_worker_by_token(connection, hello.token)
+                if (
+                    current is None
+                    or current.id != worker.id
+                    or not worker_token_is_valid(current)
+                ):
+                    raise ProtocolValidationError("invalid or expired worker token")
+            else:
+                current = get_worker_by_session_id(connection, hello.session_id)
+                if (
+                    current is None
+                    or current.id != worker.id
+                    or current.status == "revoked"
+                ):
+                    raise ProtocolValidationError("worker session was replaced")
             tournament_ids = disconnect_worker(
                 connection,
-                worker.id,
+                current.id,
+                session_id=current.session_id,
                 reason="worker session replaced",
             )
             upsert_worker_connection(
                 connection,
-                worker_id=worker.id,
+                worker_id=current.id,
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
@@ -1280,6 +1421,34 @@ class WorkerHandshakeServer:
         finally:
             connection.close()
 
+    def _record_worker_resource_telemetry(
+        self,
+        worker: WorkerRecord,
+        telemetry: WorkerResourceTelemetry,
+    ) -> bool:
+        if worker.session_id is None:
+            return False
+        connection = connect_database(self._config.db_path)
+        try:
+            recorded = record_worker_resource_sample(
+                connection,
+                worker.id,
+                worker.session_id,
+                telemetry,
+            )
+            connection.commit()
+            if recorded:
+                publish_workers_changed(
+                    "worker.telemetry",
+                    {"worker_id": worker.id},
+                )
+            return recorded
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def _record_worker_disconnected(self, worker: WorkerRecord) -> tuple[int, ...]:
         connection = connect_database(self._config.db_path)
         try:
@@ -1303,6 +1472,8 @@ class WorkerHandshakeServer:
         worker: WorkerRecord,
         wake_generation: int,
         used_resources: tuple[int, int],
+        *,
+        active_game_ids: frozenset[int] = frozenset(),
     ):
         capability = self._worker_capabilities.get(
             worker.id,
@@ -1317,6 +1488,7 @@ class WorkerHandshakeServer:
                 self._claim_next_assignment_from_database,
                 worker,
                 used_resources,
+                active_game_ids,
             )
             if assignment is None:
                 self._empty_claim_generation[capability] = wake_generation
@@ -1326,6 +1498,7 @@ class WorkerHandshakeServer:
         self,
         worker: WorkerRecord,
         used_resources: tuple[int, int],
+        active_game_ids: frozenset[int] = frozenset(),
     ):
         connection = connect_database(self._config.db_path)
         try:
@@ -1340,6 +1513,7 @@ class WorkerHandshakeServer:
                     live_worker,
                     used_resources=used_resources,
                     excluded_engine_ids=blocked_engine_ids,
+                    excluded_game_ids=active_game_ids,
                 )
             )
             if assignment is not None:

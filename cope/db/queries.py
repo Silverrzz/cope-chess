@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from cope.core.models import EngineSpec, HardwareInfo
@@ -143,9 +144,14 @@ def list_upcoming_games(
 ) -> tuple[GameRecord, ...]:
     rows = connection.execute(
         """
-        SELECT * FROM games
-        WHERE status = 'pending'
-        ORDER BY id ASC
+        SELECT games.* FROM games
+        JOIN tournaments ON tournaments.id = games.tournament_id
+        WHERE games.status = 'pending'
+          AND tournaments.status IN ('scheduled', 'running')
+        ORDER BY
+          CASE WHEN tournaments.status = 'scheduled' THEN 0 ELSE 1 END,
+          tournaments.scheduled_start_at NULLS LAST,
+          games.id ASC
         LIMIT ?
         """,
         (limit,),
@@ -177,37 +183,142 @@ def list_engine_games(
     *,
     limit: int = 50,
     result_filter: str | None = None,
+    time_control_filter: str | None = None,
+    opponent_id: int | None = None,
+    side_filter: str | None = None,
 ) -> tuple[GameRecord, ...]:
     conditions = [
-        "result IS NOT NULL",
-        "(white_engine_id = ? OR black_engine_id = ?)",
+        "games.result IS NOT NULL",
+        "(games.white_engine_id = ? OR games.black_engine_id = ?)",
     ]
     parameters: list[int | str] = [engine_id, engine_id]
     if result_filter == "win":
         conditions.append(
-            "((result = '1-0' AND white_engine_id = ?) "
-            "OR (result = '0-1' AND black_engine_id = ?))"
+            "((games.result = '1-0' AND games.white_engine_id = ?) "
+            "OR (games.result = '0-1' AND games.black_engine_id = ?))"
         )
         parameters.extend((engine_id, engine_id))
     elif result_filter == "draw":
-        conditions.append("result = '1/2-1/2'")
+        conditions.append("games.result = '1/2-1/2'")
     elif result_filter == "loss":
         conditions.append(
-            "((result = '0-1' AND white_engine_id = ?) "
-            "OR (result = '1-0' AND black_engine_id = ?))"
+            "((games.result = '0-1' AND games.white_engine_id = ?) "
+            "OR (games.result = '1-0' AND games.black_engine_id = ?))"
         )
         parameters.extend((engine_id, engine_id))
-    parameters.append(limit)
+    if opponent_id is not None:
+        conditions.append(
+            "((games.white_engine_id = ? AND games.black_engine_id = ?) "
+            "OR (games.black_engine_id = ? AND games.white_engine_id = ?))"
+        )
+        parameters.extend((engine_id, opponent_id, engine_id, opponent_id))
+    if side_filter == "white":
+        conditions.append("games.white_engine_id = ?")
+        parameters.append(engine_id)
+    elif side_filter == "black":
+        conditions.append("games.black_engine_id = ?")
+        parameters.append(engine_id)
+    limit_sql = ""
+    if time_control_filter is None:
+        limit_sql = "LIMIT ?"
+        parameters.append(limit)
     rows = connection.execute(
         f"""
-        SELECT * FROM games
+        SELECT games.*, tournaments.config AS tournament_config
+        FROM games
+        JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE {" AND ".join(conditions)}
-        ORDER BY id DESC
-        LIMIT ?
+        ORDER BY games.id DESC
+        {limit_sql}
         """,
         tuple(parameters),
     )
-    return tuple(_game_from_row(row) for row in rows)
+    games: list[GameRecord] = []
+    for row in rows:
+        if time_control_filter is not None:
+            option = _time_control_option(row["tournament_config"])
+            if option is None or option["value"] != time_control_filter:
+                continue
+        games.append(_game_from_row(row))
+        if len(games) >= limit:
+            break
+    return tuple(games)
+
+
+def engine_game_filter_options(
+    connection: sqlite3.Connection,
+    engine_id: int,
+) -> dict[str, object]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT games.white_engine_id, games.black_engine_id,
+               tournaments.config AS tournament_config
+        FROM games
+        JOIN tournaments ON tournaments.id = games.tournament_id
+        WHERE games.result IS NOT NULL
+          AND (games.white_engine_id = ? OR games.black_engine_id = ?)
+        ORDER BY games.id DESC
+        """,
+        (engine_id, engine_id),
+    )
+    opponent_ids: set[int] = set()
+    time_controls: dict[str, dict[str, str]] = {}
+    for row in rows:
+        opponent_ids.add(
+            int(row["black_engine_id"])
+            if int(row["white_engine_id"]) == engine_id
+            else int(row["white_engine_id"])
+        )
+        option = _time_control_option(row["tournament_config"])
+        if option is not None:
+            time_controls[option["value"]] = option
+    return {
+        "opponent_ids": sorted(opponent_ids),
+        "time_controls": sorted(time_controls.values(), key=lambda item: item["label"]),
+    }
+
+
+def _time_control_option(config_value: str) -> dict[str, str] | None:
+    try:
+        control = json.loads(config_value).get("time_control", {})
+        category = str(control.get("category", ""))
+        if category == "increment":
+            initial = int(control["initial_ms"])
+            increment = int(control["increment_ms"])
+            return {
+                "value": f"increment:{initial}:{increment}",
+                "label": f"{_time_value_label(initial)} + {_time_value_label(increment)}",
+            }
+        if category == "movetime":
+            move_time = int(control["move_time_ms"])
+            return {
+                "value": f"movetime:{move_time}",
+                "label": f"{_time_value_label(move_time)} per move",
+            }
+        if category == "movestogo":
+            initial = int(control["initial_ms"])
+            moves = int(control["moves_to_go"])
+            return {
+                "value": f"movestogo:{initial}:{moves}",
+                "label": f"{_time_value_label(initial)} / {moves} moves",
+            }
+        if category == "movenodes":
+            nodes = int(control["nodes"])
+            return {
+                "value": f"movenodes:{nodes}",
+                "label": f"{nodes:,} nodes per move",
+            }
+    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _time_value_label(milliseconds: int) -> str:
+    if milliseconds >= 60_000 and milliseconds % 60_000 == 0:
+        return f"{milliseconds // 60_000} min"
+    if milliseconds >= 1_000:
+        return f"{milliseconds / 1_000:g} sec"
+    return f"{milliseconds} ms"
 
 
 def engine_result_summary(
@@ -253,10 +364,14 @@ def list_rating_rows(
     rows = connection.execute(
         """
         SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+               artifact.artifact_sha256, artifact.artifact_size,
+               artifact.artifact_format, artifact.entrypoint,
+               artifact.platform, artifact.storage_key,
                ratings.elo, ratings.games_played, ratings.updated_at
         FROM rating_list_ratings ratings
         JOIN engine_versions version ON version.id = ratings.engine_id
         JOIN engines engine ON engine.id = version.engine_id
+        LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
         WHERE ratings.rating_list_id = ?
         ORDER BY ratings.elo DESC, engine.name, version.version
         """,
@@ -342,104 +457,77 @@ def get_worker_activity(
     connection: sqlite3.Connection,
     worker_id: int,
 ) -> WorkerActivityRecord | None:
-    row = connection.execute(
-        """
-        SELECT
-          game_assignments.status AS assignment_status,
-          games.id AS game_id,
-          games.round,
-          games.white_engine_id,
-          games.black_engine_id,
-          tournaments.id AS tournament_id,
-          tournaments.name AS tournament_name,
-          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies,
-          (
-            SELECT stage_label FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_stage,
-          (
-            SELECT detail FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_detail,
-          COUNT(*) OVER () AS active_assignment_count
-        FROM game_assignments
-        JOIN games ON games.id = game_assignments.game_id
-        JOIN tournaments ON tournaments.id = games.tournament_id
-        WHERE game_assignments.worker_id = ?
-          AND game_assignments.status IN ('assigned', 'acked', 'live')
-          AND games.status IN ('assigned', 'live', 'finished')
-        ORDER BY game_assignments.sent_at DESC, game_assignments.id DESC
-        LIMIT 1
-        """,
-        (worker_id,),
-    ).fetchone()
-    if row is None:
-        return None
-
-    return WorkerActivityRecord(
-        assignment_status=row["assignment_status"],
-        game_id=row["game_id"],
-        round=row["round"],
-        white_engine_id=row["white_engine_id"],
-        black_engine_id=row["black_engine_id"],
-        tournament_id=row["tournament_id"],
-        tournament_name=row["tournament_name"],
-        plies=row["plies"],
-        active_assignment_count=row["active_assignment_count"],
-        progress_stage=row["progress_stage"],
-        progress_detail=row["progress_detail"],
-    )
+    return list_worker_activities(connection, worker_ids=(worker_id,)).get(worker_id)
 
 
 def list_worker_activities(
     connection: sqlite3.Connection,
+    *,
+    worker_ids: Iterable[int] | None = None,
 ) -> dict[int, WorkerActivityRecord]:
+    selected_ids = None
+    if worker_ids is not None:
+        selected_ids = tuple(dict.fromkeys(int(worker_id) for worker_id in worker_ids))
+        if not selected_ids:
+            return {}
+    worker_filter = ""
+    parameters: tuple[int, ...] = ()
+    if selected_ids is not None:
+        placeholders = ", ".join("?" for _ in selected_ids)
+        worker_filter = f" AND game_assignments.worker_id IN ({placeholders})"
+        parameters = selected_ids
     rows = connection.execute(
-        """
+        f"""
+        WITH active AS (
+          SELECT
+            game_assignments.id AS assignment_id,
+            game_assignments.assignment_key,
+            game_assignments.worker_id,
+            game_assignments.status AS assignment_status,
+            game_assignments.sent_at,
+            games.id AS game_id,
+            games.round,
+            games.white_engine_id,
+            games.black_engine_id,
+            tournaments.id AS tournament_id,
+            tournaments.name AS tournament_name,
+            COUNT(*) OVER (
+              PARTITION BY game_assignments.worker_id
+            ) AS active_assignment_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY game_assignments.worker_id
+              ORDER BY game_assignments.sent_at DESC, game_assignments.id DESC
+            ) AS assignment_rank
+          FROM game_assignments
+          JOIN games ON games.id = game_assignments.game_id
+          JOIN tournaments ON tournaments.id = games.tournament_id
+          WHERE game_assignments.worker_id IS NOT NULL
+            AND game_assignments.status IN ('assigned', 'acked', 'live')
+            AND games.status IN ('assigned', 'live', 'finished')
+            {worker_filter}
+        )
         SELECT
-          game_assignments.worker_id,
-          game_assignments.status AS assignment_status,
-          games.id AS game_id,
-          games.round,
-          games.white_engine_id,
-          games.black_engine_id,
-          tournaments.id AS tournament_id,
-          tournaments.name AS tournament_name,
-          (SELECT COUNT(*) FROM moves WHERE moves.game_id = games.id) AS plies,
-          (
-            SELECT stage_label FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_stage,
-          (
-            SELECT detail FROM game_assignment_progress
-            WHERE assignment_id = game_assignments.id
-              AND assignment_key = game_assignments.assignment_key
-            ORDER BY id DESC LIMIT 1
-          ) AS progress_detail,
-          COUNT(*) OVER (
-            PARTITION BY game_assignments.worker_id
-          ) AS active_assignment_count
-        FROM game_assignments
-        JOIN games ON games.id = game_assignments.game_id
-        JOIN tournaments ON tournaments.id = games.tournament_id
-        WHERE game_assignments.worker_id IS NOT NULL
-          AND game_assignments.status IN ('assigned', 'acked', 'live')
-          AND games.status IN ('assigned', 'live', 'finished')
-        ORDER BY game_assignments.worker_id, game_assignments.sent_at DESC,
-                 game_assignments.id DESC
-        """
+          active.*,
+          (SELECT COUNT(*) FROM moves WHERE moves.game_id = active.game_id) AS plies,
+          progress.stage_label AS progress_stage,
+          progress.detail AS progress_detail
+        FROM active
+        LEFT JOIN LATERAL (
+          SELECT stage_label, detail
+          FROM game_assignment_progress
+          WHERE assignment_id = active.assignment_id
+            AND assignment_key = active.assignment_key
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS progress ON TRUE
+        WHERE active.assignment_rank = 1
+        ORDER BY active.worker_id
+        """,
+        parameters,
     )
     activities: dict[int, WorkerActivityRecord] = {}
     for row in rows:
         worker_id = int(row["worker_id"])
-        if worker_id in activities:
-            continue
         activities[worker_id] = WorkerActivityRecord(
             assignment_status=row["assignment_status"],
             game_id=row["game_id"],

@@ -7,7 +7,6 @@ Wants=network-online.target
 Type=simple
 User=cope-worker
 Group=cope-worker
-SupplementaryGroups=docker
 EnvironmentFile=/etc/cope/worker.env
 Environment=COPE_UPDATE_ROOT=/opt/cope-worker
 WorkingDirectory=/var/lib/cope-worker

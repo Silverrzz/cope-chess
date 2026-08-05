@@ -64,11 +64,12 @@ from cope.db import (
     list_worker_tournament_ids,
     list_workers,
     list_worker_failures,
+    list_worker_resource_samples,
     list_worker_activities,
     touch_service_heartbeat,
 )
 from cope.core.san import pv_to_san
-from cope.core.models import HardwareInfo, TournamentFormat
+from cope.core.models import ENGINE_PROCESS_MEMORY_OVERHEAD_MB, HardwareInfo, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
     StreamProtocolError,
@@ -88,6 +89,7 @@ from cope.network import (
 )
 from cope.web.forms import form_value
 from cope.version import app_version
+from cope.tournament.estimates import TournamentEstimator
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -99,10 +101,9 @@ MAX_BROADCAST_SNAPSHOT_GAMES = 1000
 
 # Valid admin actions on a tournament, per current status.
 TOURNAMENT_ACTIONS: dict[str, dict[str, str]] = {
-    "draft": {"schedule": "scheduled"},
-    "scheduled": {"pause": "paused", "abort": "aborted"},
+    "scheduled": {"abort": "aborted"},
     "running": {"pause": "paused", "abort": "aborted"},
-    "paused": {"resume": "scheduled", "abort": "aborted"},
+    "paused": {"resume": "running", "abort": "aborted"},
 }
 CONNECTED_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
 WORKER_RECENT_SECONDS = 60
@@ -426,7 +427,7 @@ def create_app(
                 pass
         content_length = request.headers.get("content-length")
         if (
-            not _is_opening_import_request(request)
+            not _is_large_upload_request(request)
             and content_length
             and content_length.isdigit()
             and int(content_length) > MAX_REQUEST_BODY_BYTES
@@ -898,11 +899,11 @@ def _social_preview_document(
     return document.replace("</head>", f"    {tags}\n  </head>", 1)
 
 
-def _is_opening_import_request(request: Request) -> bool:
+def _is_large_upload_request(request: Request) -> bool:
     if request.method not in {"POST", "PUT"}:
         return False
     path = request.url.path
-    return path in {"/admin/openings", "/api/admin/openings"} or bool(
+    return bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or path in {"/admin/openings", "/api/admin/openings"} or bool(
         re.fullmatch(r"/(?:api/)?admin/openings/\d+", path)
     )
 
@@ -1296,11 +1297,14 @@ def _worker_admin_rows(
     workers: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     engines = _engine_names(connection)
-    activities = list_worker_activities(connection)
     rows: list[dict[str, Any]] = []
     source = workers if workers is not None else list_workers(connection)
     if limit is not None:
         source = source[:limit]
+    activities = list_worker_activities(
+        connection,
+        worker_ids=(worker.id for worker in source),
+    )
     for worker in source:
         try:
             rows.append(
@@ -1362,15 +1366,15 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
         effective_cores = worker.capacity.threads if worker.capacity is not None else 0
         limit_detail = (
             f" · limited to {effective_cores} engine-thread slots"
-            if effective_cores < worker.hw.physical_cores
+            if effective_cores < worker.hw.logical_cores
             else ""
         )
         hardware = {
             "reported": True,
             "summary": _worker_resource_summary(effective_cores),
             "detail": (
-                f"{worker.hw.physical_cores} usable physical-core slots / "
-                f"{worker.hw.logical_cores} accessible threads · {worker.hw.ram_gb}GB RAM"
+                f"{worker.hw.logical_cores} accessible CPU threads / "
+                f"{worker.hw.physical_cores} physical cores / {worker.hw.ram_gb}GB RAM"
                 f"{limit_detail}"
             ),
             "cores": str(effective_cores),
@@ -1494,6 +1498,82 @@ def _worker_record_payload(worker) -> dict[str, Any]:
     }
 
 
+def _worker_resource_sample_payload(sample) -> dict[str, Any]:
+    return {
+        "sampled_at": sample.sampled_at,
+        "cpu_percent": sample.cpu_percent,
+        "memory_used_mb": sample.memory_used_mb,
+        "memory_total_mb": sample.memory_total_mb,
+        "memory_available_mb": sample.memory_available_mb,
+        "coordinator_cpu_cores": sample.coordinator_cpu_cores,
+        "coordinator_memory_mb": sample.coordinator_memory_mb,
+        "engine_cpu_cores": sample.engine_cpu_cores,
+        "engine_memory_mb": sample.engine_memory_mb,
+        "disk_used_mb": sample.disk_used_mb,
+        "disk_free_mb": sample.disk_free_mb,
+        "disk_total_mb": sample.disk_total_mb,
+    }
+
+
+def _worker_allocations_payload(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+          assignment.id AS assignment_id,
+          assignment.status,
+          game.id AS game_id,
+          game.white_engine_id,
+          game.black_engine_id,
+          tournament.id AS tournament_id,
+          tournament.name AS tournament_name
+        FROM game_assignments assignment
+        JOIN games game ON game.id = assignment.game_id
+        JOIN tournaments tournament ON tournament.id = game.tournament_id
+        WHERE assignment.worker_id = ?
+          AND assignment.status IN ('assigned', 'acked', 'live')
+        ORDER BY assignment.sent_at, assignment.id
+        """,
+        (worker_id,),
+    ).fetchall()
+    engine_names = _engine_names(connection)
+    tournaments: dict[int, TournamentRecord | None] = {}
+    allocations = []
+    for row in rows:
+        tournament_id = int(row["tournament_id"])
+        if tournament_id not in tournaments:
+            tournaments[tournament_id] = get_tournament(connection, tournament_id)
+        tournament = tournaments[tournament_id]
+        if tournament is None:
+            continue
+        engine_hash_mb = tournament.config.engine_hash_mb * 2
+        process_memory_mb = ENGINE_PROCESS_MEMORY_OVERHEAD_MB * 2
+        allocations.append(
+            {
+                "assignment_id": int(row["assignment_id"]),
+                "game_id": int(row["game_id"]),
+                "status": row["status"],
+                "tournament_id": tournament_id,
+                "tournament_name": row["tournament_name"],
+                "white_engine": engine_names.get(
+                    int(row["white_engine_id"]),
+                    f"Engine {row['white_engine_id']}",
+                ),
+                "black_engine": engine_names.get(
+                    int(row["black_engine_id"]),
+                    f"Engine {row['black_engine_id']}",
+                ),
+                "threads": tournament.config.engine_threads,
+                "engine_hash_mb": engine_hash_mb,
+                "process_memory_mb": process_memory_mb,
+                "memory_mb": engine_hash_mb + process_memory_mb,
+            }
+        )
+    return allocations
+
+
 def _worker_admin_api_payload(
     row: dict[str, Any],
     *,
@@ -1516,6 +1596,7 @@ def _worker_admin_api_payload(
         for tournament_id in list_worker_tournament_ids(connection, worker.id)
         if tournament_id in available_tournament_ids
     ]
+    resource_samples = list_worker_resource_samples(connection, worker.id, limit=120)
     return {
         "row": {
             "worker": _worker_record_payload(worker),
@@ -1531,9 +1612,24 @@ def _worker_admin_api_payload(
             "effective_cores": (
                 worker.capacity.threads if worker.capacity is not None else None
             ),
+            "effective_memory_mb": (
+                worker.capacity.hash_mb if worker.capacity is not None else None
+            ),
             "tournament_scope": worker.tournament_scope,
             "tournament_ids": tournament_ids,
             "tournaments": tournaments,
+        },
+        "resources": {
+            "latest": (
+                _worker_resource_sample_payload(resource_samples[-1])
+                if resource_samples
+                else None
+            ),
+            "samples": [
+                _worker_resource_sample_payload(sample)
+                for sample in resource_samples
+            ],
+            "allocations": _worker_allocations_payload(connection, worker.id),
         },
         "worker_launch_command": _worker_launch_command(worker, worker_server_url)
         if worker_server_url is not None
@@ -1944,6 +2040,7 @@ def _home_tournament_cards(
     engines: dict[int, str],
 ) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
+    estimator = TournamentEstimator(connection)
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
             continue
@@ -1956,7 +2053,12 @@ def _home_tournament_cards(
         moves = list_moves(connection, game.id) if game is not None else ()
         cards.append(
             {
-                "tournament": _tournament_summary(connection, tournament, engines),
+                "tournament": _tournament_summary(
+                    connection,
+                    tournament,
+                    engines,
+                    estimator=estimator,
+                ),
                 "preview": None
                 if game is None
                 else {
@@ -1983,22 +2085,29 @@ def _upcoming_rows(
     engines: dict[int, str],
     *,
     limit: int,
-) -> list[dict[str, str]]:
-    pending_games = list_upcoming_games(connection, limit=limit)
-    tournament_names = _tournament_names(connection)
-    rows = [
-        {
+) -> list[dict[str, str | None]]:
+    pending_games = list_upcoming_games(connection, limit=max(limit * 16, limit))
+    tournaments = {tournament.id: tournament for tournament in list_tournaments(connection)}
+    rows: list[dict[str, str | None]] = []
+    scheduled_tournament_ids: set[int] = set()
+    for game in pending_games:
+        tournament = tournaments.get(game.tournament_id)
+        if tournament is not None and tournament.status == "scheduled":
+            if tournament.id in scheduled_tournament_ids:
+                continue
+            scheduled_tournament_ids.add(tournament.id)
+        rows.append({
             "href": f"/tournaments/{game.tournament_id}?game_id={game.id}",
-            "tournament": tournament_names.get(game.tournament_id, f"Tournament {game.tournament_id}"),
+            "tournament": tournament.name if tournament is not None else f"Tournament {game.tournament_id}",
             "round": str(game.round),
             "white": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),
             "black": engines.get(game.black_engine_id, f"Engine {game.black_engine_id}"),
-            "status": game.status,
-        }
-        for game in pending_games
-    ]
-
-    return rows[:limit]
+            "status": "scheduled" if tournament is not None and tournament.status == "scheduled" else game.status,
+            "scheduled_start_at": tournament.scheduled_start_at if tournament is not None else None,
+        })
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _tournament_viewer_game(games: tuple[GameRecord, ...]) -> GameRecord | None:
@@ -2033,6 +2142,7 @@ def _game_payload(
                 "termination": game.termination,
                 "white_engine_id": game.white_engine_id,
                 "black_engine_id": game.black_engine_id,
+                "started_at": game.started_at,
             }
         )
     return payload
@@ -2588,8 +2698,12 @@ def _tournament_summary(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
     engines: dict[int, str],
+    *,
+    estimator: TournamentEstimator | None = None,
 ) -> dict[str, Any]:
-    summary = _tournament_game_summary(connection, tournament.id)
+    games = list_games(connection, tournament.id)
+    summary = _summarize_games(games)
+    estimate = (estimator or TournamentEstimator(connection)).estimate(tournament, games)
     participant_names = [
         engines.get(engine_id, f"Engine {engine_id}")
         for engine_id in tournament.config.participants
@@ -2606,6 +2720,7 @@ def _tournament_summary(
         "progress_percent": round(finished_games / total_games * 100) if total_games else 0,
         "time_control": _time_control_label(tournament.config.time_control),
         "format": tournament.config.format.value.replace("_", " ").title(),
+        "estimate": estimate.to_dict(),
     }
 
 

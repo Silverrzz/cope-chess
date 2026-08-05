@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 import secrets
 import sqlite3
@@ -11,7 +10,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import chess
-import chess.pgn
 
 from cope.chat import (
     announce_game_finished,
@@ -32,6 +30,7 @@ from cope.core.models import (
     MovesToGoTimeControl,
     TournamentConfig,
     WorkerResources,
+    ENGINE_PROCESS_MEMORY_OVERHEAD_MB,
 )
 from cope.db import (
     GameAssignmentRecord,
@@ -45,7 +44,6 @@ from cope.db import (
     connect_database,
     finish_game,
     get_engine,
-    get_engine_name,
     get_game,
     get_game_assignment,
     get_common_benchmark_reference,
@@ -84,6 +82,7 @@ from cope.tournament.game_runner import GameRunner
 from cope.version import app_version
 from cope.tournament.game_state import GameState
 from cope.tournament.time_control import RuntimeTimeControl, TimeControlCategory
+from cope.pgn import PgnGame, render_annotated_pgn
 from cope.tournament.tournament import Game
 
 
@@ -214,6 +213,7 @@ def next_worker_assignment(
     *,
     used_resources: tuple[int, int] | None = None,
     excluded_engine_ids: frozenset[int] = frozenset(),
+    excluded_game_ids: frozenset[int] = frozenset(),
 ) -> WorkerGameAssignment | None:
     available_resources = _worker_available_resources(
         connection,
@@ -236,11 +236,7 @@ def next_worker_assignment(
         ):
             continue
 
-        games = list_games(connection, tournament.id)
-        active_games = sum(
-            game.status in {"assigned", "live"}
-            for game in games
-        )
+        active_games = _active_game_count(connection, tournament.id)
         if active_games >= tournament.config.concurrency:
             continue
 
@@ -256,9 +252,10 @@ def next_worker_assignment(
             continue
         game = _next_playable_game_for_worker(
             connection,
-            games,
+            tournament.id,
             worker,
             excluded_engine_ids=excluded_engine_ids,
+            excluded_game_ids=excluded_game_ids,
         )
         if game is None:
             continue
@@ -396,7 +393,11 @@ def run_worker_assignment_game(
     live_reporter = _LiveGameReporter(tournament.id, game_record.id, game, white, black)
     white.set_info_listener(live_reporter.publish_white_engine_info)
     black.set_info_listener(live_reporter.publish_black_engine_info)
-    runner = GameRunner(game, on_clock_sync=live_reporter.publish_clock_sync)
+    runner = GameRunner(
+        game,
+        on_clock_sync=live_reporter.publish_clock_sync,
+        lag_compensation_ms=tournament.config.lag_compensation_ms,
+    )
     progress(
         "startup",
         "runtime_create",
@@ -600,7 +601,7 @@ def run_worker_assignment_game(
             ),
         )
         if board.ply() <= 10 or board.ply() % 10 == 0:
-            LOG.info(
+            LOG.debug(
                 "recorded move game_id=%s ply=%s move=%s",
                 game_record.id,
                 board.ply(),
@@ -912,7 +913,10 @@ def _engine_options(
 def _tournament_required_resources(tournament: TournamentRecord) -> WorkerResources:
     return WorkerResources(
         threads=tournament.config.engine_threads,
-        hash_mb=tournament.config.engine_hash_mb * 2,
+        hash_mb=(
+            tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
+        )
+        * 2,
     )
 
 
@@ -943,7 +947,9 @@ def _worker_available_resources(
         for row in rows:
             config = TournamentConfig.model_validate_json(row["config"])
             used_threads += config.engine_threads
-            used_hash_mb += config.engine_hash_mb * 2
+            used_hash_mb += (
+                config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
+            ) * 2
     else:
         used_threads, used_hash_mb = used_resources
     return (
@@ -1044,22 +1050,52 @@ def _validated_tournament(
 
 def _next_playable_game_for_worker(
     connection: sqlite3.Connection,
-    games: tuple[GameRecord, ...],
+    tournament_id: int,
     worker: WorkerRecord,
     *,
     excluded_engine_ids: frozenset[int] = frozenset(),
+    excluded_game_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
-    del connection, worker
-    return next(
-        (
-            game
-            for game in _paired_game_queue(games)
-            if game.status == "pending"
-            and game.white_engine_id not in excluded_engine_ids
-            and game.black_engine_id not in excluded_engine_ids
-        ),
-        None,
-    )
+    del worker
+    conditions = "tournament_id = ? AND status = 'pending'"
+    parameters: list[int] = [tournament_id]
+    if excluded_engine_ids:
+        blocked = tuple(sorted(excluded_engine_ids))
+        placeholders = ", ".join("?" for _ in blocked)
+        conditions += (
+            f" AND white_engine_id NOT IN ({placeholders})"
+            f" AND black_engine_id NOT IN ({placeholders})"
+        )
+        parameters.extend(blocked)
+        parameters.extend(blocked)
+    if excluded_game_ids:
+        blocked_games = tuple(sorted(excluded_game_ids))
+        placeholders = ", ".join("?" for _ in blocked_games)
+        conditions += f" AND id NOT IN ({placeholders})"
+        parameters.extend(blocked_games)
+    row = connection.execute(
+        f"""
+        SELECT id
+        FROM games
+        WHERE {conditions}
+        ORDER BY ((game_number - 1) / 2), round, pair_index, game_number, id
+        LIMIT 1
+        """,
+        parameters,
+    ).fetchone()
+    return None if row is None else get_game(connection, int(row["id"]))
+
+
+def _active_game_count(connection: sqlite3.Connection, tournament_id: int) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM games
+        WHERE tournament_id = ? AND status IN ('assigned', 'live')
+        """,
+        (tournament_id,),
+    ).fetchone()
+    return 0 if row is None else int(row["count"])
 
 
 def _paired_game_queue(games: tuple[GameRecord, ...]) -> tuple[GameRecord, ...]:
@@ -1103,6 +1139,26 @@ def _finish_tournament_if_complete(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> bool:
+    if tournament.config.format in {"round_robin", "gauntlet"}:
+        counts = connection.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (
+                WHERE status NOT IN ('finished', 'abandoned')
+              ) AS unfinished
+            FROM games
+            WHERE tournament_id = ?
+            """,
+            (tournament.id,),
+        ).fetchone()
+        if (
+            counts is None
+            or int(counts["total"]) == 0
+            or int(counts["unfinished"]) > 0
+        ):
+            return False
+
     current = lock_tournament(connection, tournament.id)
     if current is None or current.status != "running":
         return False
@@ -1114,6 +1170,14 @@ def _finish_tournament_if_complete(
     if all_terminal and any(game.status == "abandoned" for game in games):
         set_tournament_status(connection, current.id, "aborted")
         return False
+
+    if current.config.format in {"round_robin", "gauntlet"}:
+        if not all_terminal:
+            return False
+        set_tournament_status(connection, current.id, "finished")
+        finished = get_tournament(connection, current.id) or current
+        announce_tournament_finished(connection, finished)
+        return True
 
     advance = advance_tournament(connection, current)
     games = list_games(connection, current.id)
@@ -1297,29 +1361,31 @@ def _build_pgn(
     result: str,
     termination: str,
 ) -> str:
-    board = _starting_board(opening)
-    pgn_game = chess.pgn.Game()
-    if board.fen() != chess.STARTING_FEN:
-        pgn_game.setup(board)
-
-    pgn_game.headers["Event"] = tournament.name
-    pgn_game.headers["Round"] = str(game.round)
-    pgn_game.headers["White"] = get_engine_name(connection, game.white_engine_id)
-    pgn_game.headers["Black"] = get_engine_name(connection, game.black_engine_id)
-    pgn_game.headers["Result"] = result
-    pgn_game.headers["Termination"] = termination
-    if opening is not None and opening.name:
-        pgn_game.headers["Opening"] = opening.name
-
-    node = pgn_game
-    for move_record in moves:
-        move = chess.Move.from_uci(move_record.uci)
-        if move not in board.legal_moves:
-            break
-        node = node.add_variation(move)
-        board.push(move)
-
-    output = io.StringIO()
-    exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
-    print(pgn_game.accept(exporter), file=output)
-    return output.getvalue().strip()
+    white = get_engine(connection, game.white_engine_id)
+    black = get_engine(connection, game.black_engine_id)
+    return render_annotated_pgn(
+        PgnGame(
+            id=game.id,
+            tournament_id=tournament.id,
+            event=tournament.name,
+            round=game.round,
+            game_number=game.game_number,
+            white=(
+                " ".join((white.name, white.version))
+                if white is not None
+                else f"Engine {game.white_engine_id}"
+            ),
+            black=(
+                " ".join((black.name, black.version))
+                if black is not None
+                else f"Engine {game.black_engine_id}"
+            ),
+            result=result,
+            termination=termination,
+            opening=opening.name if opening is not None else None,
+            start_fen=opening.start_fen if opening is not None else None,
+            started_at=game.started_at,
+            time_control=tournament.config.time_control.model_dump(mode="json"),
+            moves=moves,
+        )
+    )

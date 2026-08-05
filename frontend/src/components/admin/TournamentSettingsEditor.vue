@@ -47,7 +47,7 @@ function setFormat(format: TournamentFormat): void {
       ? { rounds: 7 }
       : format === 'knockout'
         ? { tiebreak: 'extra_pair' as const }
-        : { hero_engine_id: props.participants[0] ?? 0 }
+        : { hero_engine_id: props.participants[0] ?? 0, cycles: 1 }
   patch({ format, format_options: options })
 }
 
@@ -151,6 +151,11 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
               <option value="0" disabled>Select a participant</option>
               <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option>
             </select>
+          </label>
+          <label class="field">
+            <span class="field__label">Cycles</span>
+            <input class="input" type="number" min="1" step="1" :value="numberOption('cycles')" @input="patchFormatOption('cycles', Number(($event.target as HTMLInputElement).value))">
+            <small class="field__help">Each cycle gives the hero two games against every opponent, one with each colour.</small>
           </label>
         </template>
       </div>

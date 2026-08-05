@@ -11,11 +11,14 @@ from typing import Any, Iterable
 from cope.engine_dockerfiles import engine_build_hash
 from cope.core.models import (
     AssignmentProgress,
+    EngineArtifactSpec,
     EngineSpec,
     HardwareInfo,
     OpeningLine,
     TournamentConfig,
+    WorkerResourceTelemetry,
     WorkerResources,
+    worker_memory_capacity_mb,
 )
 
 
@@ -37,6 +40,7 @@ class TournamentRecord:
     current_round: int
     worker_profile: str | None
     created_at: str
+    scheduled_start_at: str | None
     started_at: str | None
     finished_at: str | None
 
@@ -158,8 +162,8 @@ class WorkerRecord:
         if self.hw is None:
             return None
         return WorkerResources(
-            threads=min(self.hw.physical_cores, self.core_limit or self.hw.physical_cores),
-            hash_mb=self.hw.total_ram_mb,
+            threads=min(self.hw.logical_cores, self.core_limit or self.hw.logical_cores),
+            hash_mb=worker_memory_capacity_mb(self.hw.total_ram_mb),
         )
 
 
@@ -176,6 +180,24 @@ class WorkerFailureRecord:
     stage: str
     error: str
     occurred_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerResourceSampleRecord:
+    id: int
+    worker_id: int
+    sampled_at: str
+    cpu_percent: float
+    memory_used_mb: float
+    memory_total_mb: float
+    memory_available_mb: float
+    coordinator_cpu_cores: float
+    coordinator_memory_mb: float
+    engine_cpu_cores: float
+    engine_memory_mb: float
+    disk_used_mb: float
+    disk_free_mb: float
+    disk_total_mb: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,9 +224,22 @@ class EngineVersionRecord:
     dockerfile: str
     build_hash: str
     uci_options: dict[str, Any]
+    artifact: EngineArtifactSpec | None
     active: bool
     benchmark_current: bool
     engine_active: bool
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EngineArtifactRecord:
+    build_hash: str
+    artifact_sha256: str
+    artifact_size: int
+    artifact_format: str
+    entrypoint: str
+    platform: str
+    storage_key: str
     created_at: str
 
 
@@ -342,6 +377,16 @@ def utc_now() -> str:
 
 def utc_now_datetime() -> datetime:
     return datetime.now(UTC)
+
+
+def _utc_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must be a valid ISO date and time") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def set_service_endpoint(
@@ -513,6 +558,96 @@ def update_engine_version(
     )
 
 
+def get_engine_artifact(
+    connection: sqlite3.Connection,
+    build_hash: str,
+) -> EngineArtifactRecord | None:
+    row = connection.execute(
+        "SELECT * FROM engine_artifacts WHERE build_hash = ?",
+        (build_hash,),
+    ).fetchone()
+    return None if row is None else _engine_artifact_from_row(row)
+
+
+def get_engine_artifact_by_sha256(
+    connection: sqlite3.Connection,
+    artifact_sha256: str,
+) -> EngineArtifactRecord | None:
+    row = connection.execute(
+        """SELECT * FROM engine_artifacts
+           WHERE artifact_sha256 = ?
+           ORDER BY created_at, build_hash
+           LIMIT 1""",
+        (artifact_sha256,),
+    ).fetchone()
+    return None if row is None else _engine_artifact_from_row(row)
+
+
+def register_engine_artifact(
+    connection: sqlite3.Connection,
+    *,
+    build_hash: str,
+    artifact_sha256: str,
+    artifact_size: int,
+    artifact_format: str,
+    entrypoint: str,
+    platform: str,
+    storage_key: str,
+) -> EngineArtifactRecord:
+    current = get_engine_artifact(connection, build_hash)
+    values = (
+        artifact_sha256,
+        artifact_size,
+        artifact_format,
+        entrypoint,
+        platform,
+        storage_key,
+    )
+    if current is not None:
+        existing = (
+            current.artifact_sha256,
+            current.artifact_size,
+            current.artifact_format,
+            current.entrypoint,
+            current.platform,
+            current.storage_key,
+        )
+        if existing != values:
+            raise ValueError("a different artifact is already registered for this build")
+        return current
+    connection.execute(
+        """INSERT INTO engine_artifacts (
+             build_hash, artifact_sha256, artifact_size, artifact_format,
+             entrypoint, platform, storage_key, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(build_hash) DO NOTHING""",
+        (
+            build_hash,
+            artifact_sha256,
+            artifact_size,
+            artifact_format,
+            entrypoint,
+            platform,
+            storage_key,
+            utc_now(),
+        ),
+    )
+    artifact = get_engine_artifact(connection, build_hash)
+    if artifact is None:
+        raise RuntimeError("engine artifact was not registered")
+    registered = (
+        artifact.artifact_sha256,
+        artifact.artifact_size,
+        artifact.artifact_format,
+        artifact.entrypoint,
+        artifact.platform,
+        artifact.storage_key,
+    )
+    if registered != values:
+        raise ValueError("a different artifact is already registered for this build")
+    return artifact
+
+
 def engine_game_count(connection: sqlite3.Connection, engine_id: int) -> int:
     row = connection.execute(
         "SELECT COUNT(*) AS count FROM games WHERE white_engine_id = ? OR black_engine_id = ?",
@@ -642,11 +777,17 @@ def get_engine_family(connection: sqlite3.Connection, engine_id: int) -> EngineR
 def get_engine_version_record(connection: sqlite3.Connection, version_id: int) -> EngineVersionRecord | None:
     row = connection.execute(
         """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                  artifact.artifact_sha256, artifact.artifact_size,
+                  artifact.artifact_format, artifact.entrypoint,
+                  artifact.platform, artifact.storage_key,
                   EXISTS (
                     SELECT 1 FROM engine_benchmarks benchmark
                     WHERE benchmark.build_hash = version.build_hash
+                      AND benchmark.artifact_sha256 = artifact.artifact_sha256
                   ) AS benchmark_current
-           FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+           FROM engine_versions version
+           JOIN engines engine ON engine.id = version.engine_id
+           LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
            WHERE version.id = ?""",
         (version_id,),
     ).fetchone()
@@ -667,11 +808,17 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
         _engine_version_from_row(row)
         for row in connection.execute(
             """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                      artifact.artifact_sha256, artifact.artifact_size,
+                      artifact.artifact_format, artifact.entrypoint,
+                      artifact.platform, artifact.storage_key,
                       EXISTS (
                         SELECT 1 FROM engine_benchmarks benchmark
                         WHERE benchmark.build_hash = version.build_hash
+                          AND benchmark.artifact_sha256 = artifact.artifact_sha256
                       ) AS benchmark_current
-               FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+               FROM engine_versions version
+               JOIN engines engine ON engine.id = version.engine_id
+               LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
                ORDER BY engine.name, version.created_at DESC, version.id DESC"""
         )
     )
@@ -683,8 +830,13 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
 
 def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | None:
     row = connection.execute(
-        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
-           FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id
+        """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                  artifact.artifact_sha256, artifact.artifact_size,
+                  artifact.artifact_format, artifact.entrypoint,
+                  artifact.platform, artifact.storage_key
+           FROM engine_versions version
+           JOIN engines engine ON engine.id = version.engine_id
+           LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
            WHERE version.id = ?""",
         (engine_id,),
     ).fetchone()
@@ -694,14 +846,20 @@ def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | N
 
 
 def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -> tuple[EngineSpec, ...]:
-    sql = """SELECT version.*, engine.name, engine.author, engine.active AS engine_active
-             FROM engine_versions version JOIN engines engine ON engine.id = version.engine_id"""
+    sql = """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                    artifact.artifact_sha256, artifact.artifact_size,
+                    artifact.artifact_format, artifact.entrypoint,
+                    artifact.platform, artifact.storage_key
+             FROM engine_versions version
+             JOIN engines engine ON engine.id = version.engine_id
+             LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash"""
     params: tuple[Any, ...] = ()
     if active_only:
-        sql = f"""{sql} WHERE engine.active = ?
+        sql = f"""{sql} WHERE engine.active = ? AND artifact.build_hash IS NOT NULL
                  AND EXISTS (
                    SELECT 1 FROM engine_benchmarks benchmark
                    WHERE benchmark.build_hash = version.build_hash
+                     AND benchmark.artifact_sha256 = artifact.artifact_sha256
                  )"""
         params = (1,)
     sql = f"{sql} ORDER BY version.id"
@@ -714,18 +872,24 @@ def create_tournament(
     config: TournamentConfig,
     *,
     status: str = "draft",
+    scheduled_start_at: str | None = None,
 ) -> int:
+    if status == "scheduled" and scheduled_start_at is None:
+        raise ValueError("scheduled tournaments require a start time")
+    if scheduled_start_at is not None:
+        scheduled_start_at = _utc_timestamp(scheduled_start_at)
     created_at = utc_now()
     cursor = connection.execute(
         """
-        INSERT INTO tournaments (name, config, status, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO tournaments (name, config, status, created_at, scheduled_start_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             name,
             config.model_dump_json(),
             status,
             created_at,
+            scheduled_start_at,
         ),
     )
     tournament_id = int(cursor.lastrowid)
@@ -776,6 +940,23 @@ def list_tournaments(connection: sqlite3.Connection) -> tuple[TournamentRecord, 
     )
 
 
+def list_tournaments_by_ids(
+    connection: sqlite3.Connection,
+    tournament_ids: Iterable[int],
+) -> tuple[TournamentRecord, ...]:
+    selected = tuple(dict.fromkeys(int(value) for value in tournament_ids))
+    if not selected:
+        return ()
+    placeholders = ", ".join("?" for _ in selected)
+    return tuple(
+        _tournament_from_row(row)
+        for row in connection.execute(
+            f"SELECT * FROM tournaments WHERE id IN ({placeholders}) ORDER BY id",
+            selected,
+        )
+    )
+
+
 def set_tournament_status(
     connection: sqlite3.Connection,
     tournament_id: int,
@@ -812,6 +993,72 @@ def set_tournament_current_round_at_least(
         """,
         (round_number, tournament_id, round_number),
     )
+
+
+def list_due_scheduled_tournaments(
+    connection: sqlite3.Connection,
+    now: str,
+) -> tuple[TournamentRecord, ...]:
+    return tuple(
+        _tournament_from_row(row)
+        for row in connection.execute(
+            """
+            SELECT * FROM tournaments
+            WHERE status = 'scheduled'
+              AND scheduled_start_at <= ?
+            ORDER BY scheduled_start_at, id
+            FOR UPDATE SKIP LOCKED
+            """,
+            (now,),
+        )
+    )
+
+
+def schedule_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    scheduled_start_at: str,
+) -> TournamentRecord:
+    scheduled_start_at = _utc_timestamp(scheduled_start_at)
+    cursor = connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'scheduled', scheduled_start_at = ?, finished_at = NULL
+        WHERE id = ? AND status IN ('draft', 'scheduled') AND started_at IS NULL
+        """,
+        (scheduled_start_at, tournament_id),
+    )
+    if cursor.rowcount == 0:
+        raise ValueError("only a draft or scheduled tournament can be scheduled")
+    tournament = get_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    return tournament
+
+
+def unschedule_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> TournamentRecord:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    if tournament.status != "scheduled" or tournament.started_at is not None:
+        raise ValueError("only an unstarted scheduled tournament can be returned to draft")
+    connection.execute("DELETE FROM games WHERE tournament_id = ?", (tournament_id,))
+    connection.execute("DELETE FROM tournament_matches WHERE tournament_id = ?", (tournament_id,))
+    connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'draft', scheduled_start_at = NULL, current_round = 0
+        WHERE id = ?
+        """,
+        (tournament_id,),
+    )
+    current = get_tournament(connection, tournament_id)
+    if current is None:
+        raise ValueError("tournament does not exist")
+    return current
 
 
 def set_tournament_concurrency(
@@ -1124,6 +1371,29 @@ def list_games(
             """,
             (tournament_id, status),
         )
+    return tuple(_game_from_row(row) for row in rows)
+
+
+def list_games_for_tournaments(
+    connection: sqlite3.Connection,
+    tournament_ids: Iterable[int],
+) -> tuple[GameRecord, ...]:
+    selected = tuple(dict.fromkeys(int(value) for value in tournament_ids))
+    if not selected:
+        return ()
+    placeholders = ", ".join("?" for _ in selected)
+    rows = connection.execute(
+        f"""
+        SELECT
+          id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
+          match_id, game_number, tiebreak_kind, opening_id, status, result,
+          termination, NULL::text AS pgn, started_at, finished_at
+        FROM games
+        WHERE tournament_id IN ({placeholders})
+        ORDER BY tournament_id, round, pair_index, id
+        """,
+        selected,
+    )
     return tuple(_game_from_row(row) for row in rows)
 
 
@@ -1664,6 +1934,70 @@ def record_game_assignment_progress(
     return cursor.lastrowid
 
 
+def record_game_assignment_progress_batch(
+    connection: sqlite3.Connection,
+    items: Iterable[tuple[AssignmentProgress, str]],
+) -> None:
+    pending = tuple(items)
+    if not pending:
+        return
+    assignment_ids = tuple(
+        dict.fromkeys(progress.assignment_id for progress, _source in pending)
+    )
+    placeholders = ", ".join("?" for _ in assignment_ids)
+    rows = connection.execute(
+        f"""
+        SELECT id, assignment_key, game_id
+        FROM game_assignments
+        WHERE id IN ({placeholders})
+        """,
+        assignment_ids,
+    )
+    assignments = {
+        int(row["id"]): (str(row["assignment_key"]), int(row["game_id"]))
+        for row in rows
+    }
+    valid = tuple(
+        (progress, source)
+        for progress, source in pending
+        if assignments.get(progress.assignment_id)
+        == (progress.assignment_key, progress.game_id)
+    )
+    if not valid:
+        return
+    occurred_at = utc_now()
+    connection.executemany(
+        """
+        INSERT INTO game_assignment_progress (
+          assignment_id, assignment_key, game_id, source,
+          stage, stage_label, stage_order, substage, status, detail,
+          engine_id, engine_name, current_value, total_value, metadata, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                progress.assignment_id,
+                progress.assignment_key,
+                progress.game_id,
+                source,
+                progress.stage,
+                progress.stage_label,
+                progress.stage_order,
+                progress.substage,
+                progress.status,
+                progress.detail,
+                progress.engine_id,
+                progress.engine_name,
+                progress.current,
+                progress.total,
+                _json_dump(progress.metadata),
+                occurred_at,
+            )
+            for progress, source in valid
+        ),
+    )
+
+
 def list_game_assignment_progress(
     connection: sqlite3.Connection,
     game_id: int,
@@ -2044,9 +2378,9 @@ def update_worker_assignment_settings(
     if core_limit is not None:
         if core_limit <= 0:
             raise ValueError("worker core limit must be positive")
-        if worker.hw is not None and core_limit > worker.hw.physical_cores:
+        if worker.hw is not None and core_limit > worker.hw.logical_cores:
             raise ValueError(
-                f"worker core limit cannot exceed its {worker.hw.physical_cores}-core capacity"
+                f"worker core limit cannot exceed its {worker.hw.logical_cores}-thread capacity"
             )
     if tournament_scope not in {"all", "selected"}:
         raise ValueError("worker tournament scope is invalid")
@@ -2158,6 +2492,94 @@ def list_worker_failures(
             occurred_at=row["occurred_at"],
         )
         for row in rows
+    )
+
+
+def record_worker_resource_sample(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    session_id: str,
+    telemetry: WorkerResourceTelemetry,
+) -> bool:
+    sampled_at = utc_now()
+    cursor = connection.execute(
+        """
+        INSERT INTO worker_resource_samples (
+          worker_id, sampled_at, cpu_percent, memory_used_mb, memory_total_mb,
+          memory_available_mb, coordinator_cpu_cores, coordinator_memory_mb,
+          engine_cpu_cores, engine_memory_mb, disk_used_mb, disk_free_mb,
+          disk_total_mb
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM workers
+          WHERE id = ? AND session_id = ?
+            AND status IN ('connected', 'downloading', 'ready', 'busy')
+        )
+        """,
+        (
+            worker_id,
+            sampled_at,
+            telemetry.cpu_percent,
+            telemetry.memory_used_mb,
+            telemetry.memory_total_mb,
+            telemetry.memory_available_mb,
+            telemetry.coordinator_cpu_cores,
+            telemetry.coordinator_memory_mb,
+            telemetry.engine_cpu_cores,
+            telemetry.engine_memory_mb,
+            telemetry.disk_used_mb,
+            telemetry.disk_free_mb,
+            telemetry.disk_total_mb,
+            worker_id,
+            session_id,
+        ),
+    )
+    if cursor.rowcount != 1:
+        return False
+    retention_start = (utc_now_datetime() - timedelta(hours=1)).isoformat(
+        timespec="seconds"
+    )
+    connection.execute(
+        "DELETE FROM worker_resource_samples WHERE worker_id = ? AND sampled_at < ?",
+        (worker_id, retention_start),
+    )
+    return True
+
+
+def list_worker_resource_samples(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    *,
+    limit: int = 120,
+) -> tuple[WorkerResourceSampleRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT * FROM worker_resource_samples
+        WHERE worker_id = ?
+        ORDER BY sampled_at DESC, id DESC
+        LIMIT ?
+        """,
+        (worker_id, max(1, min(limit, 720))),
+    ).fetchall()
+    return tuple(
+        WorkerResourceSampleRecord(
+            id=row["id"],
+            worker_id=row["worker_id"],
+            sampled_at=row["sampled_at"],
+            cpu_percent=float(row["cpu_percent"]),
+            memory_used_mb=float(row["memory_used_mb"]),
+            memory_total_mb=float(row["memory_total_mb"]),
+            memory_available_mb=float(row["memory_available_mb"]),
+            coordinator_cpu_cores=float(row["coordinator_cpu_cores"]),
+            coordinator_memory_mb=float(row["coordinator_memory_mb"]),
+            engine_cpu_cores=float(row["engine_cpu_cores"]),
+            engine_memory_mb=float(row["engine_memory_mb"]),
+            disk_used_mb=float(row["disk_used_mb"]),
+            disk_free_mb=float(row["disk_free_mb"]),
+            disk_total_mb=float(row["disk_total_mb"]),
+        )
+        for row in reversed(rows)
     )
 
 
@@ -3540,6 +3962,7 @@ def _engine_from_row(row: sqlite3.Row) -> EngineSpec:
         source_ref=row["source_ref"],
         dockerfile=row["dockerfile"],
         build_hash=row["build_hash"],
+        artifact=_artifact_spec_from_row(row),
         uci_options=json.loads(row["uci_options"]),
     )
 
@@ -3567,6 +3990,7 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         dockerfile=row["dockerfile"] or "",
         build_hash=row["build_hash"] or "",
         uci_options=json.loads(row["uci_options"]),
+        artifact=_artifact_spec_from_row(row),
         active=engine_active and benchmark_current,
         benchmark_current=benchmark_current,
         engine_active=engine_active,
@@ -3629,6 +4053,7 @@ def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
         current_round=row["current_round"],
         worker_profile=row["worker_profile"],
         created_at=row["created_at"],
+        scheduled_start_at=row["scheduled_start_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
     )
@@ -3756,6 +4181,33 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         core_limit=row["core_limit"],
         tournament_scope=row["tournament_scope"],
         last_seen=row["last_seen"],
+    )
+
+
+def _artifact_spec_from_row(row: sqlite3.Row) -> EngineArtifactSpec | None:
+    sha256 = row["artifact_sha256"]
+    if not sha256:
+        return None
+    return EngineArtifactSpec(
+        url=f"/api/engine-artifacts/{sha256}",
+        sha256=str(sha256),
+        size=int(row["artifact_size"]),
+        format=str(row["artifact_format"]),
+        entrypoint=str(row["entrypoint"]),
+        platform=str(row["platform"]),
+    )
+
+
+def _engine_artifact_from_row(row: sqlite3.Row) -> EngineArtifactRecord:
+    return EngineArtifactRecord(
+        build_hash=str(row["build_hash"]),
+        artifact_sha256=str(row["artifact_sha256"]),
+        artifact_size=int(row["artifact_size"]),
+        artifact_format=str(row["artifact_format"]),
+        entrypoint=str(row["entrypoint"]),
+        platform=str(row["platform"]),
+        storage_key=str(row["storage_key"]),
+        created_at=str(row["created_at"]),
     )
 
 

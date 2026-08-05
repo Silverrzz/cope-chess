@@ -10,8 +10,8 @@ import DockerfilePicker from '@/components/admin/DockerfilePicker.vue'
 import EngineOptionsEditor from '@/components/admin/EngineOptionsEditor.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StreamStatus from '@/components/ui/StreamStatus.vue'
-import { errorText, formatDate, formatNumber, humanize } from '@/components/admin/format'
-import type { Engine, EngineBenchmarkJob } from '@/components/admin/types'
+import { errorText, formatBytes, formatDate, formatNumber, humanize } from '@/components/admin/format'
+import type { Engine, EngineArtifact, EngineBenchmarkJob } from '@/components/admin/types'
 
 interface DockerfileEntry {
   path: string
@@ -72,6 +72,7 @@ const progressStages = [
   { label: 'Source', substages: ['cache_lock', 'cache_lookup', 'source_download'] },
   { label: 'Build', substages: ['container_build'] },
   { label: 'Verify', substages: ['artifact_extract', 'artifact_verify', 'artifact_prepare'] },
+  { label: 'Publish', substages: ['package', 'upload'] },
   { label: 'Benchmark', substages: ['engine_bench'] },
 ] as const
 
@@ -84,11 +85,27 @@ const progressLabels: Record<string, string> = {
   artifact_extract: 'Extracting executable',
   artifact_verify: 'Verifying executable',
   artifact_prepare: 'Preparing engine artifact',
+  package: 'Packaging worker artifact',
+  upload: 'Publishing worker artifact',
   engine_bench: 'Running engine benchmark',
 }
 
 const currentBenchmarks = computed(() => benchmarks.value.filter((benchmark) => benchmark.build_hash === version.value?.build_hash))
 const currentBenchmark = computed(() => currentBenchmarks.value[0] ?? null)
+const artifactStatus = computed(() => {
+  const artifact = version.value?.artifact
+  const benchmark = currentBenchmark.value
+  if (dockerfileDirty.value) return { tone: 'warning', label: 'Changes not published', detail: 'Save this Dockerfile selection and run a benchmark to publish its worker artifact.' }
+  if (!artifact) {
+    if (benchmark?.status === 'running') return { tone: 'working', label: 'Publishing', detail: 'The benchmarker is building and will publish the portable worker bundle before benchmarking it.' }
+    return { tone: 'missing', label: 'Not published', detail: 'Run a benchmark to build and publish the portable bundle required by Docker-free workers.' }
+  }
+  if (benchmark?.result?.artifact_sha256 === artifact.sha256) return { tone: 'ready', label: 'Published and benchmarked', detail: 'This exact bundle produced the benchmark result below and is ready for Docker-free workers.' }
+  if (benchmark?.status === 'running') return { tone: 'working', label: 'Published', detail: 'The worker bundle is stored; the current benchmark has not finished yet.' }
+  if (benchmark?.result?.artifact_sha256) return { tone: 'warning', label: 'Published', detail: 'The stored bundle is newer than the displayed benchmark. Run the benchmark again to verify this exact artifact.' }
+  if (benchmark?.result) return { tone: 'warning', label: 'Published', detail: 'The stored bundle exists, but this manual or legacy result is not tied to its digest.' }
+  return { tone: 'ready', label: 'Published', detail: 'The portable worker bundle is stored and ready; it does not have a matching benchmark result yet.' }
+})
 const currentProgress = computed(() => {
   const output = currentBenchmark.value?.output.trim() ?? ''
   if (!output) return null
@@ -163,22 +180,21 @@ const lastActivityText = computed(() => {
   const seconds = Math.max(0, Math.floor((nowMs.value - lastActivityMs.value) / 1000))
   return seconds < 2 ? 'Updated just now' : `Updated ${formatDuration(seconds)} ago`
 })
-const { state: streamState } = useEventStream<{ benchmarks: EngineBenchmarkJob[] }>(
+const { state: streamState } = useEventStream<{ artifact: EngineArtifact | null; benchmark_current: boolean; active: boolean; benchmarks: EngineBenchmarkJob[] }>(
   computed(() => `/api/admin/engine-versions/${id.value}/events`),
   {
     event: 'engine-version.snapshot',
     onMessage: (snapshot) => {
       benchmarks.value = snapshot.benchmarks
       if (version.value) {
+        version.value.artifact = snapshot.artifact
         if (dockerfileDirty.value) {
           version.value.benchmark_current = false
           version.value.active = false
           return
         }
-        version.value.benchmark_current = snapshot.benchmarks.some(
-          (benchmark) => benchmark.build_hash === version.value?.build_hash && benchmark.status === 'succeeded',
-        )
-        version.value.active = Boolean(version.value.engine_active && version.value.benchmark_current)
+        version.value.benchmark_current = snapshot.benchmark_current
+        version.value.active = snapshot.active
       }
     },
   },
@@ -340,7 +356,9 @@ async function loadDockerfile(): Promise<void> {
     version.value.benchmark_current = false
   } else {
     version.value.benchmark_current = benchmarks.value.some(
-      (benchmark) => benchmark.build_hash === version.value?.build_hash && benchmark.status === 'succeeded',
+      (benchmark) => benchmark.build_hash === version.value?.build_hash
+        && benchmark.status === 'succeeded'
+        && benchmark.result?.artifact_sha256 === version.value?.artifact?.sha256,
     )
     version.value.active = Boolean(version.value.engine_active && version.value.benchmark_current)
   }
@@ -441,7 +459,7 @@ onBeforeUnmount(() => {
     <div v-if="loading" class="panel loading-card">Loading version…</div>
     <form v-else-if="version" class="page-stack" @submit.prevent="save">
       <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Source</h2><p>COPE checks out this exact source before building on each worker.</p></div><div class="availability" :class="{ 'availability--active': version.active }"><strong>{{ version.active ? 'Active' : 'Inactive' }}</strong><small>{{ version.benchmark_current ? (version.engine_active ? 'Current build benchmarked' : 'Engine disabled') : 'Current build needs a benchmark' }}</small></div></div>
+        <div class="detail-heading"><div><h2>Source</h2><p>The benchmarker checks out this exact source to build the published worker artifact.</p></div><div class="availability" :class="{ 'availability--active': version.active }"><strong>{{ version.active ? 'Active' : 'Inactive' }}</strong><small>{{ version.benchmark_current ? (version.engine_active ? 'Current artifact benchmarked' : 'Engine disabled') : 'Current artifact needs a benchmark' }}</small></div></div>
         <div class="form-grid">
           <label class="field"><span>Version label</span><input v-model="version.version" class="input" required maxlength="80"></label>
           <div class="field"><span>Repository</span><a class="readonly-value" :href="version.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ version.repository_full_name }}</a></div>
@@ -451,17 +469,41 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Dockerfile</h2><p>Select a repository-managed file. Its contents are read-only in Cope Admin.</p></div></div>
-        <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
-        <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
-        <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
+      <section class="panel artifact-card" aria-labelledby="artifact-title">
+        <div class="detail-heading">
+          <div><h2 id="artifact-title">Worker artifact</h2><p>The portable engine bundle used by regular Docker-free Vast.ai workers.</p></div>
+          <span class="artifact-state" :class="`artifact-state--${artifactStatus.tone}`">{{ artifactStatus.label }}</span>
+        </div>
+        <div class="artifact-summary" :class="`artifact-summary--${artifactStatus.tone}`">
+          <span class="artifact-summary__dot" aria-hidden="true" />
+          <p>{{ artifactStatus.detail }}</p>
+        </div>
+        <dl v-if="version.artifact" class="artifact-facts">
+          <div class="artifact-facts__digest"><dt>SHA-256</dt><dd><code :title="version.artifact.sha256">{{ version.artifact.sha256 }}</code></dd></div>
+          <div><dt>Size</dt><dd>{{ formatBytes(version.artifact.size) }}</dd></div>
+          <div><dt>Platform</dt><dd><code>{{ version.artifact.platform }}</code></dd></div>
+          <div><dt>Entrypoint</dt><dd><code>{{ version.artifact.entrypoint }}</code></dd></div>
+          <div><dt>Format</dt><dd><code>{{ version.artifact.format }}</code></dd></div>
+          <div><dt>Benchmark binding</dt><dd>{{ currentBenchmark?.result?.artifact_sha256 === version.artifact.sha256 ? 'Exact digest match' : 'No matching result' }}</dd></div>
+        </dl>
       </section>
 
-      <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Default UCI options</h2><p>Applied whenever this version starts unless a tournament overrides them.</p></div></div>
-        <EngineOptionsEditor v-model="version.uci_options" />
-      </section>
+      <div class="version-settings-grid">
+        <section class="panel detail-card">
+          <div class="detail-heading"><div><h2>Benchmarker build recipe</h2><p>This Dockerfile runs only on the benchmarker. Game workers download the resulting artifact.</p></div></div>
+          <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
+          <details class="dockerfile-preview">
+            <summary>Preview Dockerfile</summary>
+            <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
+            <p v-else class="dockerfile-empty">The selected Dockerfile is unavailable.</p>
+          </details>
+        </section>
+
+        <section class="panel detail-card">
+          <div class="detail-heading"><div><h2>Default UCI options</h2><p>Applied whenever this version starts unless a tournament overrides them.</p></div></div>
+          <EngineOptionsEditor v-model="version.uci_options" />
+        </section>
+      </div>
 
       <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
@@ -499,7 +541,7 @@ onBeforeUnmount(() => {
             </ol>
           </section>
 
-          <dl class="benchmark-facts"><div><dt>Benchmarker</dt><dd>{{ currentBenchmark.benchmarker?.label ?? (currentBenchmark.status === 'succeeded' ? 'Manual entry' : 'Awaiting assignment') }}<small v-if="currentBenchmark.benchmarker">{{ humanize(currentBenchmark.benchmarker.status) }}</small></dd></div><div><dt>Hardware</dt><dd>{{ currentBenchmark.hardware ? `${currentBenchmark.hardware.cpu_model} · ${currentBenchmark.hardware.physical_cores} cores · ${currentBenchmark.hardware.ram_gb} GB` : 'Not reported' }}</dd></div><div><dt>Elapsed</dt><dd>{{ elapsedText }}<small>{{ lastActivityText }}</small></dd></div><div><dt>Attempts</dt><dd>{{ currentBenchmark.attempt }}</dd></div></dl>
+          <dl class="benchmark-facts"><div><dt>Benchmarker</dt><dd>{{ currentBenchmark.benchmarker?.label ?? (currentBenchmark.status === 'succeeded' ? 'Manual entry' : 'Awaiting assignment') }}<small v-if="currentBenchmark.benchmarker">{{ humanize(currentBenchmark.benchmarker.status) }}</small></dd></div><div><dt>Hardware</dt><dd>{{ currentBenchmark.hardware ? `${currentBenchmark.hardware.cpu_model} · ${currentBenchmark.hardware.physical_cores} cores · ${currentBenchmark.hardware.ram_gb} GB` : 'Not reported' }}</dd></div><div><dt>Artifact</dt><dd v-if="currentBenchmark.result?.artifact_sha256"><code :title="currentBenchmark.result.artifact_sha256">{{ currentBenchmark.result.artifact_sha256.slice(0, 16) }}…</code><small>{{ currentBenchmark.result.artifact_sha256 === version.artifact?.sha256 ? 'Matches published artifact' : 'Does not match published artifact' }}</small></dd><dd v-else>Not bound<small>Manual or legacy result</small></dd></div><div><dt>Elapsed</dt><dd>{{ elapsedText }}<small>{{ lastActivityText }}</small></dd></div><div><dt>Attempts</dt><dd>{{ currentBenchmark.attempt }}</dd></div></dl>
           <p v-if="currentBenchmark.error" class="benchmark-error">{{ currentBenchmark.error }}</p>
           <section v-if="currentBenchmark.output || currentBenchmark.status !== 'succeeded'" class="benchmark-console" aria-labelledby="benchmark-console-title">
             <header>
@@ -552,4 +594,6 @@ onBeforeUnmount(() => {
 .benchmark-console{background:#0b111b;border:1px solid #263346;border-radius:var(--radius-md);box-shadow:inset 0 1px 0 rgb(255 255 255 / 4%);min-width:0;overflow:hidden}.benchmark-console header{align-items:center;background:#121b28;border-bottom:1px solid #263346;color:#aebbd0;display:flex;font-size:.65rem;gap:.8rem;min-height:2.35rem;padding:.45rem .7rem}.benchmark-console__title{align-items:center;color:#edf4ff;display:flex;gap:.45rem}.benchmark-console__light{background:#718096;border-radius:50%;height:.5rem;width:.5rem}.benchmark-console__light--active,.benchmark-console__light--success{background:#45d483;box-shadow:0 0 .45rem rgb(69 212 131 / 65%)}.benchmark-console__light--waiting,.benchmark-console__light--warning{background:#f4c95d}.benchmark-console__light--danger{background:#ff6b78}.benchmark-console__meta{margin-left:auto}.benchmark-console label{align-items:center;cursor:pointer;display:flex;gap:.35rem;white-space:nowrap}.benchmark-console input{accent-color:#78a7ff}.benchmark-console pre{background:#0b111b;color:#d9e5f5;font-family:var(--font-mono);font-size:.68rem;line-height:1.55;margin:0;max-height:27rem;min-height:12rem;overflow:auto;padding:.85rem;scrollbar-color:#42536b #0b111b;tab-size:2;white-space:pre-wrap;word-break:break-word}.benchmark-console pre:focus{outline:2px solid var(--color-focus);outline-offset:-2px}
 @keyframes benchmark-live-pulse{50%{opacity:.45;transform:scale(.8)}}@keyframes benchmark-stripes{to{background-position:1.2rem 0}}@media(max-width:42rem){.benchmark-summary{align-items:stretch;flex-direction:column}.benchmark-health{max-width:none}.benchmark-actions{align-items:flex-end;flex-wrap:wrap}.benchmark-stage small{font-size:.56rem}.benchmark-console header{align-items:flex-start;flex-wrap:wrap}.benchmark-console__meta{margin-left:0;order:3;width:100%}.benchmark-console label{margin-left:auto}}@media(prefers-reduced-motion:reduce){.benchmark-health--active .benchmark-health__dot,.benchmark-progress-fill--active{animation:none}.benchmark-progress-fill{transition:none}}
 .manual-benchmark-backdrop{background:var(--color-overlay);display:grid;inset:0;overflow-y:auto;padding:1rem;place-items:center;position:fixed;z-index:1100}.manual-benchmark-dialog{background:var(--color-surface-raised);border:1px solid var(--color-border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-md);display:grid;gap:1rem;padding:1.25rem;width:min(100%,38rem)}.manual-benchmark-dialog h2{font-size:1rem;margin:0}.manual-benchmark-dialog p{color:var(--color-text-muted);font-size:.72rem;margin:.25rem 0 0}.manual-benchmark-grid{display:grid;gap:.8rem;grid-template-columns:repeat(2,minmax(0,1fr))}.manual-benchmark-wide{grid-column:1/-1}.manual-benchmark-actions{display:flex;gap:.6rem;justify-content:flex-end}@media(max-width:32rem){.manual-benchmark-grid{grid-template-columns:1fr}.manual-benchmark-wide{grid-column:auto}}
+.version-settings-grid{align-items:start;display:grid;gap:1rem;grid-template-columns:repeat(2,minmax(0,1fr))}.dockerfile-preview{border-top:1px solid var(--color-border);padding-top:.75rem}.dockerfile-preview summary{cursor:pointer;font-size:.73rem;font-weight:650}.dockerfile-preview[open] summary{margin-bottom:.75rem}@media(max-width:64rem){.version-settings-grid{grid-template-columns:1fr}}
+.artifact-card{display:grid;gap:1rem;padding:1rem}.artifact-state{border-radius:999px;font-size:.67rem;font-weight:700;padding:.35rem .6rem;white-space:nowrap}.artifact-state--ready{background:#dcfce7;color:#166534}.artifact-state--working{background:#dbeafe;color:#1d4ed8}.artifact-state--warning{background:#fef3c7;color:#92400e}.artifact-state--missing{background:var(--color-surface-subtle);color:var(--color-text-muted)}.artifact-summary{align-items:center;background:var(--color-surface-subtle);border:1px solid var(--color-border);border-radius:var(--radius-md);display:flex;gap:.6rem;padding:.7rem .8rem}.artifact-summary p{font-size:.73rem;line-height:1.45;margin:0}.artifact-summary__dot{background:var(--color-text-faint);border-radius:50%;flex:0 0 auto;height:.55rem;width:.55rem}.artifact-summary--ready .artifact-summary__dot{background:var(--color-success)}.artifact-summary--working .artifact-summary__dot{animation:benchmark-live-pulse 1.5s ease-in-out infinite;background:var(--color-accent)}.artifact-summary--warning .artifact-summary__dot{background:var(--color-warning)}.artifact-facts{display:grid;gap:.75rem;grid-template-columns:repeat(5,minmax(0,1fr));margin:0}.artifact-facts>div{display:grid;gap:.22rem;min-width:0}.artifact-facts__digest{grid-column:1/-1}.artifact-facts dt{color:var(--color-text-muted);font-size:.62rem;text-transform:uppercase}.artifact-facts dd{font-size:.73rem;margin:0;min-width:0}.artifact-facts code{overflow-wrap:anywhere}.benchmark-stage-list{grid-template-columns:repeat(6,minmax(0,1fr))}@media(max-width:42rem){.artifact-facts{grid-template-columns:1fr}.artifact-facts__digest{grid-column:auto}}
 </style>

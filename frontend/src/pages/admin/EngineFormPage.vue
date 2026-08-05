@@ -7,7 +7,7 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
-import { errorText, formatDate, formatNumber } from '@/components/admin/format'
+import { errorText, formatBytes, formatDate, formatNumber } from '@/components/admin/format'
 import type { Engine, EngineFamily } from '@/components/admin/types'
 
 const route = useRoute()
@@ -93,10 +93,11 @@ onMounted(load)
             <div class="version-card__heading"><div><h3>{{ version.version }}</h3><p>{{ version.repository_full_name }}</p></div><StatusBadge :status="version.active ? 'active' : 'inactive'" /></div>
             <dl>
               <div><dt>Source</dt><dd>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }} · <code>{{ version.source_ref }}</code></dd></div>
+              <div><dt>Worker artifact</dt><dd><span class="artifact-label" :class="{ 'artifact-label--ready': version.artifact }">{{ version.artifact ? 'Ready' : 'Not published' }}</span><small v-if="version.artifact">{{ formatBytes(version.artifact.size) }} · {{ version.artifact.sha256.slice(0, 12) }}…</small></dd></div>
               <div><dt>Games</dt><dd>{{ formatNumber(gameCounts[String(version.id)]) }}</dd></div>
               <div><dt>Created</dt><dd>{{ formatDate(version.created_at) }}</dd></div>
             </dl>
-            <span class="open-label">View Dockerfile and settings →</span>
+            <span class="open-label">View artifact, Dockerfile and settings →</span>
           </RouterLink>
         </div>
         <AdminEmptyState v-else title="No versions yet">
@@ -109,4 +110,5 @@ onMounted(load)
 
 <style scoped>
 .form-card{display:grid;gap:1rem;padding:clamp(1rem,2vw,1.35rem)}.form-card__heading{border-bottom:1px solid var(--color-border);padding-bottom:.8rem}.form-card__heading h2,.section-heading h2{font-size:.95rem;margin:0}.form-card__heading p,.section-heading p{color:var(--color-text-muted);font-size:.72rem;margin:.2rem 0 0}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.form-span-full{grid-column:1/-1}.field{display:grid;gap:.38rem}.field>span{font-size:.8rem;font-weight:650}.field small{color:var(--color-text-muted);font-size:.7rem}.switch-row{align-items:flex-start;cursor:pointer;display:flex;gap:.6rem}.switch-row span{display:grid}.switch-row strong{font-size:.8rem}.switch-row small{color:var(--color-text-muted);font-size:.7rem}.form-actions{display:flex;gap:.6rem;justify-content:flex-end}.version-section{display:grid;gap:.8rem}.section-heading{align-items:center;display:flex;justify-content:space-between}.version-grid{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))}.version-card{color:inherit;display:grid;gap:1rem;padding:1rem;text-decoration:none;transition:border-color var(--transition-fast),transform var(--transition-fast)}.version-card:hover{border-color:var(--color-accent);transform:translateY(-1px)}.version-card__heading{align-items:start;display:flex;gap:.75rem;justify-content:space-between}.version-card h3{font-size:.95rem;margin:0}.version-card p{color:var(--color-text-muted);font-size:.7rem;margin:.2rem 0 0}.version-card dl{display:grid;gap:.6rem;margin:0}.version-card dl div{display:grid;gap:.15rem}.version-card dt{color:var(--color-text-muted);font-size:.62rem;text-transform:uppercase}.version-card dd{font-size:.73rem;margin:0;overflow-wrap:anywhere}.open-label{color:var(--color-accent);font-size:.7rem;font-weight:650}@media(max-width:40rem){.form-grid{grid-template-columns:1fr}.form-span-full{grid-column:auto}}
+.version-card dd small{color:var(--color-text-muted);display:block;margin-top:.2rem}.artifact-label{background:var(--color-surface-subtle);border-radius:999px;color:var(--color-text-muted);display:inline-block;font-size:.65rem;font-weight:700;padding:.25rem .5rem}.artifact-label--ready{background:#dcfce7;color:#166534}
 </style>

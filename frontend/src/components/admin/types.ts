@@ -1,5 +1,14 @@
 export type Id = number
 
+export interface EngineArtifact {
+  url: string
+  sha256: string
+  size: number
+  format: 'cope-tar-gzip-v1'
+  entrypoint: string
+  platform: 'linux-x86_64'
+}
+
 export interface Engine {
   id: Id
   engine_id: Id
@@ -14,6 +23,7 @@ export interface Engine {
   dockerfile_path: string
   dockerfile: string
   build_hash: string
+  artifact: EngineArtifact | null
   uci_options: Record<string, string | number | boolean>
   active: boolean
   benchmark_current?: boolean
@@ -34,7 +44,7 @@ export interface EngineBenchmarkJob {
   output: string
   benchmarker: { id: Id | null; label: string; status: string | null } | null
   hardware: { cpu_model: string; physical_cores: number; logical_cores: number; ram_gb: number } | null
-  result: { nps: number; elapsed_ms: number; recorded_at: string } | null
+  result: { nps: number; elapsed_ms: number; recorded_at: string; artifact_sha256: string | null } | null
 }
 
 export interface EngineFamily {
@@ -59,7 +69,7 @@ export type FormatOptions =
   | { cycles: number }
   | { rounds: number }
   | { tiebreak: 'extra_pair' }
-  | { hero_engine_id: number }
+  | { hero_engine_id: number; cycles: number }
 
 export type TimeControl =
   | { category: 'increment'; initial_ms: number; increment_ms: number }
@@ -103,8 +113,22 @@ export interface Tournament {
   status: string
   current_round?: number
   created_at?: string
+  scheduled_start_at?: string | null
   started_at?: string | null
   finished_at?: string | null
+}
+
+export interface TournamentEstimate {
+  estimated_finish_at: string | null
+  estimated_remaining_seconds: number | null
+  median_game_seconds: number | null
+  sample_size: number
+  remaining_games: number
+  projected_total_games: number
+  concurrency: number
+  confidence: 'high' | 'medium' | 'low' | 'unavailable'
+  basis: 'tournament' | 'historical' | 'unavailable'
+  state: 'estimated' | 'paused' | 'complete' | 'unavailable'
 }
 
 export interface Game {

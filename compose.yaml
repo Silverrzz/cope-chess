@@ -8,6 +8,7 @@ x-cope-service: &cope-service
     COPE_DATABASE_PASSWORD_FILE: /run/secrets/cope_db_password
     COPE_DATABASE_POOL_MIN: "2"
     COPE_DATABASE_POOL_MAX: "50"
+    COPE_DATABASE_POOL_TIMEOUT_S: ${COPE_DATABASE_POOL_TIMEOUT_S:-60}
     COPE_DATABASE_LOCK_TIMEOUT_MS: ${COPE_DATABASE_LOCK_TIMEOUT_MS:-5000}
     COPE_DATABASE_STATEMENT_TIMEOUT_MS: ${COPE_DATABASE_STATEMENT_TIMEOUT_MS:-120000}
     COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: ${COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS:-30000}
@@ -17,6 +18,8 @@ x-cope-service: &cope-service
     COPE_WORKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/worker
     COPE_BENCHMARKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/benchmarker
     COPE_BENCHMARK_PREPARATION_TIMEOUT_S: ${COPE_BENCHMARK_PREPARATION_TIMEOUT_S:-1800}
+    COPE_ENGINE_ARTIFACT_DIR: /var/lib/cope/engine-artifacts
+    COPE_ENGINE_ARTIFACT_MAX_BYTES: ${COPE_ENGINE_ARTIFACT_MAX_BYTES:-1073741824}
   secrets:
     - cope_admin_token
     - cope_event_token
@@ -92,6 +95,9 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - engine-dockerfiles:/app/data/engines
+      - engine-artifacts:/var/lib/cope/engine-artifacts
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8701/health/ready', timeout=3)"]
       interval: 15s
@@ -230,3 +236,4 @@ volumes:
   caddy-data:
   caddy-config:
   engine-dockerfiles:
+  engine-artifacts:

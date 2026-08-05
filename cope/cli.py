@@ -300,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cpu-capacity",
         type=_positive_int,
         default=os.environ.get("COPE_WORKER_CPU_CAPACITY") or None,
-        help="upper limit for usable physical-core scheduling capacity",
+        help="upper limit for usable logical CPU-thread scheduling capacity",
     )
 
     benchmark_server_parser = subparsers.add_parser(

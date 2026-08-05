@@ -15,13 +15,10 @@ fi
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
-  docker.io \
-  docker-buildx \
   git \
   python3 \
   python3-pip \
   python3-venv
-docker buildx version
 
 repo_dir="$(cd "$repo_dir" && pwd)"
 repository_url="$(git -C "$repo_dir" remote get-url origin)"
@@ -32,8 +29,6 @@ if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
 fi
 
 id cope-worker >/dev/null 2>&1 || useradd --system --home-dir /var/lib/cope-worker --create-home --shell /usr/sbin/nologin cope-worker
-usermod -aG docker cope-worker
-systemctl enable --now docker
 install -d -o cope-worker -g cope-worker -m 0700 /var/lib/cope-worker
 install -d -o cope-worker -g cope-worker -m 0755 /opt/cope-worker /opt/cope-worker/releases
 install -d -o root -g root -m 0755 /etc/cope

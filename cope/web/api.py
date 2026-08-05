@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -8,16 +9,19 @@ import os
 import re
 import secrets
 import sqlite3
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
 from cope.chat import announce_tournament_finished
-from cope.core.models import HardwareInfo, OpeningLine, TournamentConfig
+from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
     append_suite_openings,
@@ -43,15 +47,18 @@ from cope.db import (
     delete_tournament,
     delete_worker,
     engine_game_count,
+    engine_game_filter_options,
     engine_build_is_benchmarked,
     engine_result_summary,
     forget_benchmarker,
     forget_engine_benchmarks,
     forget_failed_benchmark_job,
     get_benchmarker,
+    get_benchmarker_by_session_id,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
+    get_engine_artifact_by_sha256,
     get_engine_family,
     get_engine_version_record,
     get_git_host,
@@ -60,6 +67,7 @@ from cope.db import (
     get_rating_list,
     get_tournament,
     get_worker,
+    get_worker_by_session_id,
     invalidate_game_pair,
     list_deployment_jobs,
     list_deployment_targets,
@@ -90,9 +98,11 @@ from cope.db import (
     replace_suite_openings,
     replay_game,
     record_manual_benchmark,
+    register_engine_artifact,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     revoke_worker,
+    schedule_tournament,
     set_tournament_concurrency,
     set_tournament_status,
     suite_opening_count,
@@ -105,11 +115,24 @@ from cope.db import (
     update_tournament,
     update_worker_assignment_settings,
     update_worker_label,
+    unschedule_tournament,
 )
 from cope.engine_dockerfiles import (
     EngineDockerfileError,
     list_engine_dockerfiles,
     read_engine_dockerfile,
+)
+from cope.engine_artifacts import (
+    ARTIFACT_FORMAT,
+    ARTIFACT_PLATFORM,
+    sha256_file,
+    validate_artifact_archive,
+)
+from cope.pgn import (
+    PgnExportFilters,
+    iter_pgn_export,
+    pgn_export_exists,
+    safe_pgn_filename,
 )
 from cope.web.engine_sources import (
     SourceServiceError,
@@ -128,8 +151,11 @@ from cope.ratings import (
 )
 from cope.runner.scheduler import (
     add_running_tournament_participant,
+    materialize_tournament_schedule,
     remove_running_tournament_participant,
+    start_tournament,
 )
+from cope.tournament.estimates import TournamentEstimator
 
 
 LOG = logging.getLogger("cope.web.api")
@@ -156,6 +182,49 @@ ADMIN_GAME_RESULT_TYPES = frozenset(
         "draw_other",
     }
 )
+
+
+def _engine_artifact_root() -> Path:
+    return Path(
+        os.environ.get("COPE_ENGINE_ARTIFACT_DIR", "/var/lib/cope/engine-artifacts")
+    ).expanduser().resolve()
+
+
+def _engine_artifact_path(storage_key: str) -> Path:
+    return _engine_artifact_root() / f"{storage_key}.tar.gz"
+
+
+def _engine_artifact_spec(record) -> EngineArtifactSpec:
+    return EngineArtifactSpec(
+        url=f"/api/engine-artifacts/{record.artifact_sha256}",
+        sha256=record.artifact_sha256,
+        size=record.artifact_size,
+        format=record.artifact_format,
+        entrypoint=record.entrypoint,
+        platform=record.platform,
+    )
+
+
+def _bearer_credential(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    return credential if scheme.lower() == "bearer" else ""
+
+
+def _artifact_client_is_authenticated(connection, credential: str) -> bool:
+    if not credential:
+        return False
+    worker = get_worker_by_session_id(connection, credential)
+    if worker is not None and worker.status in {
+        "connected",
+        "downloading",
+        "building",
+        "ready",
+        "busy",
+    }:
+        return True
+    benchmarker = get_benchmarker_by_session_id(connection, credential)
+    return benchmarker is not None and benchmarker.status in {"connected", "busy"}
 
 
 def _load_engine_dockerfile(selected_path: str) -> str:
@@ -204,6 +273,7 @@ def _benchmark_job_admin_payload(item) -> dict[str, Any]:
             "nps": result.nps,
             "elapsed_ms": result.elapsed_ms,
             "recorded_at": result.recorded_at,
+            "artifact_sha256": result.artifact_sha256,
         },
     }
 
@@ -330,6 +400,17 @@ class RatingListPayload(BaseModel):
 
 class TournamentStatusPayload(BaseModel):
     action: str = Field(min_length=1, max_length=20)
+
+
+class TournamentSchedulePayload(BaseModel):
+    scheduled_start_at: datetime
+
+    @field_validator("scheduled_start_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("scheduled start time must include a timezone")
+        return value.astimezone(UTC)
 
 
 class EnginePayload(BaseModel):
@@ -542,6 +623,124 @@ def register_api_routes(app: FastAPI) -> None:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.put("/api/benchmarker/engine-artifacts/{build_hash}")
+    async def upload_engine_artifact(
+        build_hash: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", build_hash) is None:
+            raise HTTPException(status_code=422, detail="Build hash is invalid.")
+        credential = _bearer_credential(request)
+        benchmarker = get_benchmarker_by_session_id(connection, credential) if credential else None
+        if benchmarker is None or benchmarker.status != "busy":
+            raise HTTPException(status_code=401, detail="A busy benchmarker session is required.")
+        running = connection.execute(
+            """SELECT 1 FROM benchmark_jobs
+               WHERE benchmarker_id = ? AND build_hash = ? AND status = 'running'
+               LIMIT 1""",
+            (benchmarker.id, build_hash),
+        ).fetchone()
+        if running is None:
+            raise HTTPException(status_code=409, detail="No matching benchmark job is running.")
+        expected_sha256 = request.headers.get("x-cope-artifact-sha256", "")
+        if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise HTTPException(status_code=422, detail="Artifact SHA-256 header is invalid.")
+        maximum = int(
+            os.environ.get("COPE_ENGINE_ARTIFACT_MAX_BYTES", str(1024 * 1024 * 1024))
+        )
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > maximum:
+            raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+        root = _engine_artifact_root()
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = root / f".upload-{uuid.uuid4().hex}"
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with temporary.open("xb") as output:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > maximum:
+                        raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if size == 0:
+                raise HTTPException(status_code=422, detail="Engine artifact is empty.")
+            artifact_sha256 = digest.hexdigest()
+            if artifact_sha256 != expected_sha256:
+                raise HTTPException(status_code=422, detail="Engine artifact SHA-256 does not match.")
+            try:
+                await asyncio.to_thread(
+                    validate_artifact_archive,
+                    temporary,
+                    expected_build_hash=build_hash,
+                    expected_entrypoint="engine",
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            destination = _engine_artifact_path(artifact_sha256)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                artifact = register_engine_artifact(
+                    connection,
+                    build_hash=build_hash,
+                    artifact_sha256=artifact_sha256,
+                    artifact_size=size,
+                    artifact_format=ARTIFACT_FORMAT,
+                    entrypoint="engine",
+                    platform=ARTIFACT_PLATFORM,
+                    storage_key=artifact_sha256,
+                )
+                if destination.exists():
+                    stored_sha256 = await asyncio.to_thread(sha256_file, destination)
+                    if destination.stat().st_size != size or stored_sha256 != artifact_sha256:
+                        os.replace(temporary, destination)
+                else:
+                    os.replace(temporary, destination)
+                destination.chmod(0o600)
+                connection.commit()
+            except ValueError as exc:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except Exception:
+                connection.rollback()
+                raise
+            return _json({"artifact": _engine_artifact_spec(artifact)})
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @app.get("/api/engine-artifacts/{artifact_sha256}")
+    def download_engine_artifact(
+        artifact_sha256: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+            raise HTTPException(status_code=404, detail="Engine artifact was not found.")
+        if not _artifact_client_is_authenticated(connection, _bearer_credential(request)):
+            raise HTTPException(status_code=401, detail="A current client session is required.")
+        artifact = get_engine_artifact_by_sha256(connection, artifact_sha256)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Engine artifact was not found.")
+        path = _engine_artifact_path(artifact.storage_key)
+        if not path.is_file() or path.stat().st_size != artifact.artifact_size:
+            LOG.error("engine artifact is missing or corrupt sha256=%s path=%s", artifact_sha256, path)
+            raise HTTPException(status_code=503, detail="Engine artifact is unavailable.")
+        response = FileResponse(
+            path,
+            media_type="application/gzip",
+            filename=f"{artifact_sha256}.tar.gz",
+        )
+        response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        response.headers["X-Cope-Artifact-SHA256"] = artifact.artifact_sha256
+        response.headers["X-Cope-Artifact-Format"] = artifact.artifact_format
+        return response
+
     # ------------------------------------------------------------------
     # Public reads
     # ------------------------------------------------------------------
@@ -562,8 +761,14 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/tournaments")
     def public_tournaments(connection: sqlite3.Connection = Depends(web_app._database)):
         engines = web_app._engine_names(connection)
+        estimator = TournamentEstimator(connection)
         items = [
-            web_app._tournament_summary(connection, tournament, engines)
+            web_app._tournament_summary(
+                connection,
+                tournament,
+                engines,
+                estimator=estimator,
+            )
             for tournament in list_tournaments(connection)
             if tournament.status != "draft"
         ]
@@ -639,9 +844,14 @@ def register_api_routes(app: FastAPI) -> None:
             clocks = web_app._merge_clock_data(clocks, game_live.get("clocks"))
             if isinstance(game_live.get("clock_state"), dict):
                 clock_state = game_live["clock_state"]
+        estimate = TournamentEstimator(connection).estimate(
+            tournament,
+            list_games(connection, tournament.id),
+        )
         return _json(
             {
                 "tournament": tournament,
+                "estimate": estimate.to_dict(),
                 "games": [
                     web_app._game_payload(game, engines, live=True)
                     for game in games
@@ -712,23 +922,166 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
+    @app.get("/api/engines")
+    def public_engines(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engines = list_engine_records(connection)
+        engine_rows = [
+            {
+                "id": engine.id,
+                "engine_id": engine.engine_id,
+                "name": engine.name,
+                "author": engine.author,
+                "version": engine.version,
+                "repository_full_name": engine.repository_full_name,
+                "source_ref": engine.source_ref,
+                "source_kind": engine.source_kind,
+                "active": engine.active,
+                "created_at": engine.created_at,
+                "record": engine_result_summary(connection, engine.id),
+            }
+            for engine in engines
+        ]
+        completed_games = connection.execute(
+            "SELECT COUNT(*) AS count FROM games WHERE result IS NOT NULL"
+        ).fetchone()
+        return _json(
+            {
+                "engines": engine_rows,
+                "stats": {
+                    "families": len(list_engine_families(connection)),
+                    "versions": len(engines),
+                    "available": sum(1 for engine in engines if engine.active),
+                    "games": int(completed_games["count"]),
+                },
+            }
+        )
+
     @app.get("/api/engines/{engine_id}")
     def public_engine(
         engine_id: int,
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
+        time_control: str | None = Query(default=None, max_length=100),
+        opponent_id: int | None = Query(default=None, gt=0),
+        side: Literal["white", "black"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engine = get_engine_record(connection, engine_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
-        games = list_engine_games(connection, engine_id, result_filter=result)
+        games = list_engine_games(
+            connection,
+            engine_id,
+            result_filter=result,
+            time_control_filter=time_control,
+            opponent_id=opponent_id,
+            side_filter=side,
+        )
         return _json(
             {
                 "engine": engine,
                 "games": games,
                 "engines": web_app._engine_names(connection),
                 "record": engine_result_summary(connection, engine_id),
+                "filter_options": engine_game_filter_options(connection, engine_id),
             }
+        )
+
+    @app.get("/api/pgn")
+    def public_pgn_export(
+        request: Request,
+        game_id: int | None = Query(default=None, gt=0),
+        tournament_id: int | None = Query(default=None, gt=0),
+        engine_id: int | None = Query(default=None, gt=0),
+        opponent_id: int | None = Query(default=None, gt=0),
+        side: Literal["white", "black"] | None = Query(default=None),
+        result: Literal["win", "draw", "loss"] | None = Query(default=None),
+        time_control: str | None = Query(default=None, max_length=100),
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            filters = PgnExportFilters(
+                game_id=game_id,
+                tournament_id=tournament_id,
+                engine_id=engine_id,
+                opponent_engine_id=opponent_id,
+                color=side,
+                result=result,
+                time_control=time_control,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        tournament = None
+        if tournament_id is not None:
+            tournament = get_tournament(connection, tournament_id)
+            if tournament is None or tournament.status == "draft":
+                raise HTTPException(status_code=404, detail="Tournament not found.")
+
+        engine = None
+        if engine_id is not None:
+            engine = get_engine_record(connection, engine_id)
+            if engine is None:
+                raise HTTPException(status_code=404, detail="Engine not found.")
+        if opponent_id is not None and get_engine_record(connection, opponent_id) is None:
+            raise HTTPException(status_code=404, detail="Opponent engine not found.")
+
+        game = None
+        if game_id is not None:
+            game = get_game(connection, game_id)
+            if game is None:
+                raise HTTPException(status_code=404, detail="Game not found.")
+            game_tournament = get_tournament(connection, game.tournament_id)
+            if game_tournament is None or game_tournament.status == "draft":
+                raise HTTPException(status_code=404, detail="Game not found.")
+
+        if not pgn_export_exists(connection, filters):
+            raise HTTPException(
+                status_code=409,
+                detail="No completed games match these PGN filters.",
+            )
+
+        if game is not None:
+            filename = f"cope-game-{game.id}.pgn"
+        else:
+            filename_parts = []
+            if tournament is not None:
+                filename_parts.append(tournament.name)
+            if engine is not None:
+                filename_parts.append(f"{engine.name}-{engine.version}")
+            if result is not None:
+                filename_parts.append(
+                    {"win": "wins", "draw": "draws", "loss": "losses"}[result]
+                )
+            if opponent_id is not None:
+                filename_parts.append(f"versus-{opponent_id}")
+            if side is not None:
+                filename_parts.append(f"as-{side}")
+            if time_control is not None:
+                filename_parts.append("time-filtered")
+            filename = safe_pgn_filename(
+                "-".join(filename_parts) if filename_parts else "cope-all-games",
+                "cope-games",
+            )
+
+        database_url = request.app.state.db_path
+
+        def content():
+            export_connection = connect_database(database_url, check_same_thread=False)
+            try:
+                yield from iter_pgn_export(export_connection, filters)
+            finally:
+                export_connection.close()
+
+        return StreamingResponse(
+            content(),
+            media_type="application/x-chess-pgn; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/tournaments/{tournament_id}/chat")
@@ -753,27 +1106,6 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {"message": message},
             status_code=201,
-        )
-
-    @app.get("/api/games/{game_id}/pgn")
-    def public_game_pgn(
-        game_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        game = get_game(connection, game_id)
-        if game is None:
-            raise HTTPException(status_code=404, detail="Game not found.")
-        tournament = get_tournament(connection, game.tournament_id)
-        if tournament is None or tournament.status == "draft":
-            raise HTTPException(status_code=404, detail="Game not found.")
-        if game.status != "finished" or not game.pgn:
-            raise HTTPException(status_code=409, detail="PGN is not available until the game finishes.")
-        return Response(
-            content=game.pgn,
-            media_type="application/x-chess-pgn; charset=utf-8",
-            headers={
-                "Content-Disposition": f'attachment; filename="cope-game-{game.id}.pgn"',
-            },
         )
 
     # ------------------------------------------------------------------
@@ -1048,8 +1380,14 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engines = web_app._engine_names(connection)
+        estimator = TournamentEstimator(connection)
         items = [
-            web_app._tournament_summary(connection, tournament, engines)
+            web_app._tournament_summary(
+                connection,
+                tournament,
+                engines,
+                estimator=estimator,
+            )
             for tournament in list_tournaments(connection)
             if not status or tournament.status == status
         ]
@@ -1127,6 +1465,7 @@ def register_api_routes(app: FastAPI) -> None:
                 detail=f"Unknown game result type: {sorted(invalid_result_types)[0]}",
             )
         tournament = _require_tournament(connection, tournament_id)
+        all_games = list_games(connection, tournament.id)
         total_games = count_games(
             connection,
             tournament.id,
@@ -1151,6 +1490,10 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 tournament.id,
             ),
+            "estimate": TournamentEstimator(connection).estimate(
+                tournament,
+                all_games,
+            ).to_dict(),
             "engines": web_app._engine_names(connection),
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
@@ -1159,6 +1502,8 @@ def register_api_routes(app: FastAPI) -> None:
             "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
                 "editable": tournament.status == "draft",
+                "schedulable": tournament.status in {"draft", "scheduled"},
+                "unschedulable": tournament.status == "scheduled" and tournament.started_at is None,
                 "concurrency_editable": tournament.status in {"running", "paused"},
                 "deletable": tournament.status not in {"scheduled", "running"},
                 "can_commit_ratings": (
@@ -1245,6 +1590,99 @@ def register_api_routes(app: FastAPI) -> None:
             else "Tournament updated."
         )
         return _json({"id": tournament_id, "message": message})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/schedule")
+    @app.patch("/api/admin/tournaments/{tournament_id}/schedule")
+    def admin_schedule_tournament(
+        tournament_id: int,
+        payload: TournamentSchedulePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        tournament = _require_tournament(connection, tournament_id)
+        if tournament.status not in {"draft", "scheduled"} or tournament.started_at is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Only a draft or unstarted scheduled tournament can be scheduled.",
+            )
+        try:
+            preparation = materialize_tournament_schedule(connection, tournament)
+            scheduled = schedule_tournament(
+                connection,
+                tournament_id,
+                payload.scheduled_start_at.isoformat(timespec="seconds"),
+            )
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament scheduling failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not schedule the tournament. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "status": scheduled.status,
+                "scheduled_start_at": scheduled.scheduled_start_at,
+                "created_games": preparation.created_games,
+                "message": "Tournament scheduled.",
+            }
+        )
+
+    @app.delete("/api/admin/tournaments/{tournament_id}/schedule")
+    def admin_unschedule_tournament(
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        _require_tournament(connection, tournament_id)
+        try:
+            unschedule_tournament(connection, tournament_id)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament unscheduling failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not return the tournament to draft. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"status": "draft", "message": "Tournament returned to draft."})
+
+    @app.post("/api/admin/tournaments/{tournament_id}/start")
+    def admin_start_tournament(
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            preparation = start_tournament(connection, tournament_id)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament start failed tournament_id=%s", tournament_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not start the tournament. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "status": "running",
+                "created_games": preparation.created_games,
+                "message": "Tournament started.",
+            }
+        )
 
     @app.post("/api/admin/tournaments/{tournament_id}/participants")
     def admin_add_tournament_participant(
@@ -1479,26 +1917,6 @@ def register_api_routes(app: FastAPI) -> None:
                     else "Those rating commits are already queued or applied."
                 )
             }
-        )
-
-    @app.get("/api/admin/tournaments/{tournament_id}/pgn")
-    def admin_tournament_pgn(
-        tournament_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        tournament = _require_tournament(connection, tournament_id)
-        pgns = [
-            game.pgn.strip()
-            for game in list_games(connection, tournament_id, include_pgn=True)
-            if game.pgn
-        ]
-        if not pgns:
-            raise HTTPException(status_code=409, detail="No completed game PGNs are available.")
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", tournament.name).strip("-") or f"tournament-{tournament_id}"
-        return Response(
-            content="\n\n".join(pgns) + "\n",
-            media_type="application/x-chess-pgn; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.pgn"'},
         )
 
     @app.delete("/api/admin/tournaments/{tournament_id}")
@@ -2012,7 +2430,18 @@ def register_api_routes(app: FastAPI) -> None:
         def snapshot() -> dict[str, Any]:
             current = connect_database(request.app.state.db_path)
             try:
+                version = get_engine_version_record(current, version_id)
+                if version is None:
+                    return {
+                        "artifact": None,
+                        "benchmark_current": False,
+                        "active": False,
+                        "benchmarks": [],
+                    }
                 return {
+                    "artifact": jsonable_encoder(version.artifact),
+                    "benchmark_current": version.benchmark_current,
+                    "active": version.active,
                     "benchmarks": [
                         _benchmark_job_admin_payload(item)
                         for item in list_engine_benchmark_jobs(

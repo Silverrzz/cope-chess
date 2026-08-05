@@ -19,6 +19,7 @@ from .scheduler import (
     generate_knockout_first_round,
     generate_round_robin_games,
     generate_swiss_round,
+    materialize_tournament_schedule,
     prepare_scheduled_tournaments,
     prepare_tournament,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "generate_knockout_first_round",
     "generate_round_robin_games",
     "generate_swiss_round",
+    "materialize_tournament_schedule",
     "prepare_scheduled_tournaments",
     "prepare_tournament",
     "run_tournament_service",

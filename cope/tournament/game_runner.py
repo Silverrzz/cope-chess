@@ -13,11 +13,13 @@ class GameRunner:
         self,
         game: Game,
         clock_probe_interval: float = 0.01,
+        lag_compensation_ms: int = 0,
         on_tick: Callable[[chess.Color, int | None], None] | None = None,
         on_clock_sync: Callable[[chess.Color, bool, int | None], None] | None = None,
     ):
         self._game = game
         self._clock_probe_interval = clock_probe_interval
+        self._lag_compensation_ms = max(0, lag_compensation_ms)
         self._game_started = False
         self._on_tick = on_tick
         self._on_clock_sync = on_clock_sync
@@ -61,6 +63,11 @@ class GameRunner:
                     if engine.uses_worker_search_clock()
                     else None
                 )
+                if worker_elapsed_ms is not None:
+                    worker_elapsed_ms = max(
+                        0,
+                        worker_elapsed_ms - self._lag_compensation_ms,
+                    )
                 try:
                     remaining = clock.probe_clock(worker_elapsed_ms)
                 except TimeOutError:
@@ -102,6 +109,8 @@ class GameRunner:
                         if search is not None and engine.uses_worker_search_clock()
                         else None
                     )
+                    if elapsed_ms is not None:
+                        elapsed_ms = max(0, elapsed_ms - self._lag_compensation_ms)
                     clock.stop_clock(elapsed_ms)
                     if self._on_clock_sync is not None:
                         self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))

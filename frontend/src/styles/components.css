@@ -269,6 +269,34 @@ input[type="radio"] {
   background: var(--color-surface-sunken);
 }
 
+.cg-board {
+  background-image: repeating-conic-gradient(
+    var(--board-dark, #b58863) 0 25%,
+    var(--board-light, #f0d9b5) 0 50%
+  );
+  background-size: 25% 25%;
+}
+
+.cg-wrap cg-board {
+  background-color: transparent;
+  background-image: repeating-conic-gradient(
+    var(--board-dark, #b58863) 0 25%,
+    var(--board-light, #f0d9b5) 0 50%
+  );
+  background-size: 25% 25%;
+}
+
+.preset__swatch {
+  width: 3rem;
+  height: 3rem;
+  border-radius: var(--radius-sm);
+  background-image: repeating-conic-gradient(
+    var(--swatch-dark) 0 25%,
+    var(--swatch-light) 0 50%
+  );
+  background-size: 50% 50%;
+}
+
 @keyframes component-spin {
   to {
     transform: rotate(360deg);

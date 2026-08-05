@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useConfirm } from '@/composables/useConfirm'
@@ -10,10 +10,11 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import LiveParticipantManager from '@/components/admin/LiveParticipantManager.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import TournamentConfigForm from '@/components/admin/TournamentConfigForm.vue'
-import { errorText, formatDate, formatTimeControl, humanize } from '@/components/admin/format'
+import TournamentScheduleEditor from '@/components/admin/TournamentScheduleEditor.vue'
+import { errorText, formatDate, formatDuration, formatRelativeDate, formatTimeControl, humanize } from '@/components/admin/format'
 import { buildTournamentDetailsMarkdown } from '@/components/public/tournamentSummary'
 import AppIcon from '@/components/ui/AppIcon.vue'
-import type { Engine, FormSeed, Game, Tournament, TournamentConfig } from '@/components/admin/types'
+import type { Engine, FormSeed, Game, Tournament, TournamentConfig, TournamentEstimate } from '@/components/admin/types'
 
 interface Commit { rating_list_id: number; status: string; requested_at: string; applied_at?: string | null; error?: string | null }
 interface RatingList { id: number; name: string }
@@ -33,6 +34,8 @@ interface Response {
   game_pagination: GamePagination
   game_summary: GameSummary
   roster: LiveTournamentRoster
+  estimate: TournamentEstimate
+  capabilities: { editable: boolean; schedulable: boolean; unschedulable: boolean; concurrency_editable: boolean; deletable: boolean; can_commit_ratings: boolean }
   form?: FormSeed
 }
 
@@ -80,10 +83,13 @@ const copyingDetails = ref(false)
 const detailsCopied = ref(false)
 const concurrency = ref(1)
 const showCommit = ref(false)
+const showSchedule = ref(false)
+const clock = ref(Date.now())
 const selectedLists = ref<number[]>([])
 const selectedResultTypes = ref<string[]>([])
 const gamePage = ref(1)
 let loadSequence = 0
+let clockTimer: number | undefined
 const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => (data.value?.game_summary.finished || 0) > 0)
 const activeGames = computed(() => (
@@ -95,11 +101,21 @@ const resultsLocked = computed(() => data.value?.commits.some(
 const resultFilterLabel = computed(() => selectedResultTypes.value.length
   ? `Game result (${selectedResultTypes.value.length})`
   : 'Game result')
+const lifecycleStartAt = computed(() => data.value?.tournament.started_at ?? data.value?.tournament.scheduled_start_at)
+const lifecycleStartLabel = computed(() => data.value?.tournament.started_at ? 'Started' : 'Scheduled start')
 const settingsRows = computed(() => {
   if (!data.value?.settings) return []
   return Array.isArray(data.value.settings)
     ? data.value.settings.map((row) => Array.isArray(row) ? row : [row.label, row.value] as [string, string])
     : Object.entries(data.value.settings)
+})
+const estimateBasis = computed(() => {
+  const estimate = data.value?.estimate
+  if (!estimate?.median_game_seconds) return 'Waiting for completed games with comparable settings.'
+  const source = estimate.basis === 'historical'
+    ? `${estimate.sample_size} comparable historical game${estimate.sample_size === 1 ? '' : 's'}`
+    : `${estimate.sample_size} completed game${estimate.sample_size === 1 ? '' : 's'}`
+  return `Based on a ${formatDuration(estimate.median_game_seconds)} median across ${source} at concurrency ${estimate.concurrency}.`
 })
 const engineLabels = computed<Record<number, string>>(() => {
   if (!data.value) return {}
@@ -186,6 +202,53 @@ async function saveDraft(payload: { name: string; config: TournamentConfig }): P
   try {
     const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}`, { body: payload })
     toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function saveSchedule(scheduledStartAt: string): Promise<void> {
+  if (!data.value) return
+  pending.value = 'schedule'
+  error.value = ''
+  try {
+    const path = `/api/admin/tournaments/${id.value}/schedule`
+    const options = { body: { scheduled_start_at: scheduledStartAt } }
+    const response = data.value.tournament.status === 'scheduled'
+      ? await api.patch<{ message: string }>(path, options)
+      : await api.post<{ message: string }>(path, options)
+    toast.success(response.message)
+    showSchedule.value = false
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function startTournament(): Promise<void> {
+  pending.value = 'start'
+  error.value = ''
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/tournaments/${id.value}/start`)
+    toast.success(response.message)
+    showSchedule.value = false
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function unschedule(): Promise<void> {
+  if (!data.value) return
+  const accepted = await confirm({
+    title: 'Return tournament to draft?',
+    message: `Unschedule “${data.value.tournament.name}”? Its unplayed generated schedule will be cleared so the draft can be edited.`,
+    confirmLabel: 'Return to draft',
+  })
+  if (!accepted) return
+  pending.value = 'unschedule'
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/tournaments/${id.value}/schedule`)
+    toast.success(response.message)
+    showSchedule.value = false
     await load()
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
   finally { pending.value = '' }
@@ -341,7 +404,14 @@ async function invalidateGame(game: Game): Promise<void> {
   finally { pending.value = '' }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  clockTimer = window.setInterval(() => {
+    clock.value = Date.now()
+    if (data.value && ['scheduled', 'running', 'paused'].includes(data.value.tournament.status)) void load()
+  }, 10_000)
+})
+onBeforeUnmount(() => window.clearInterval(clockTimer))
 </script>
 
 <template>
@@ -349,7 +419,7 @@ onMounted(load)
     <div v-if="loading" class="panel detail-loading" role="status">Loading tournament…</div>
     <template v-else-if="data">
       <AdminPageHeader :title="data.tournament.name" :description="`Created ${formatDate(data.tournament.created_at)}`">
-        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><a class="button button--secondary" :href="`/api/admin/tournaments/${id}/pgn`">Download tournament PGN</a><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
+        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><a class="button button--secondary" :href="`/api/pgn?tournament_id=${encodeURIComponent(id)}`" download>Download tournament PGN</a><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
       </AdminPageHeader>
       <InlineFeedback :message="error" />
 
@@ -357,10 +427,38 @@ onMounted(load)
         <div class="control-bar__status"><span>Current state</span><StatusBadge :status="data.tournament.status" /></div>
         <div class="control-bar__actions">
           <button class="button button--secondary" type="button" :disabled="copyingDetails" @click="copyDetails"><AppIcon name="copy" :size="16" />{{ copyingDetails ? 'Copying…' : detailsCopied ? 'Copied' : 'Copy Details' }}</button>
+          <button v-if="data.capabilities.schedulable" class="button button--primary" type="button" :disabled="!!pending" @click="showSchedule = !showSchedule">{{ data.tournament.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button>
+          <button v-if="data.capabilities.unschedulable" class="button button--secondary" type="button" :disabled="!!pending" @click="unschedule">{{ pending === 'unschedule' ? 'Working…' : 'Return to draft' }}</button>
           <button v-for="(_, action) in data.actions" :key="action" class="button" :class="action === 'abort' ? 'button--danger' : 'button--primary'" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? 'Working…' : humanize(String(action)) }}</button>
           <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit">Commit ratings</button>
           <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
         </div>
+      </section>
+
+      <TournamentScheduleEditor
+        v-if="showSchedule && data.capabilities.schedulable"
+        :initial-value="data.tournament.scheduled_start_at"
+        :pending="['schedule', 'start'].includes(pending)"
+        @submit="saveSchedule"
+        @start="startTournament"
+        @cancel="showSchedule = false"
+      />
+
+      <section v-if="data.tournament.status !== 'draft'" class="panel schedule-overview">
+        <div>
+          <span>{{ lifecycleStartLabel }}</span>
+          <strong>{{ formatDate(lifecycleStartAt) }}</strong>
+          <small v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at">{{ formatRelativeDate(data.tournament.scheduled_start_at, clock) }}</small>
+        </div>
+        <div>
+          <span>{{ ['finished', 'aborted'].includes(data.tournament.status) ? 'Finished' : 'Estimated finish' }}</span>
+          <strong v-if="['finished', 'aborted'].includes(data.tournament.status)">{{ formatDate(data.tournament.finished_at) }}</strong>
+          <strong v-else-if="data.estimate.estimated_finish_at">{{ formatDate(data.estimate.estimated_finish_at) }}</strong>
+          <strong v-else-if="data.estimate.state === 'paused'">{{ formatDuration(data.estimate.estimated_remaining_seconds) }} after resume</strong>
+          <strong v-else>Calculating</strong>
+          <small v-if="data.estimate.estimated_finish_at">{{ formatRelativeDate(data.estimate.estimated_finish_at, clock) }}</small>
+        </div>
+        <p>{{ estimateBasis }}</p>
       </section>
 
       <section v-if="['running', 'paused'].includes(data.tournament.status)" class="panel concurrency-panel">
@@ -465,6 +563,12 @@ onMounted(load)
 .control-bar__status > span { color: var(--color-text-muted, #64748b); font-size: .72rem; font-weight: 650; }
 .control-bar__actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }
 .control-bar__actions .button { align-items: center; display: inline-flex; gap: .4rem; }
+.schedule-overview { align-items: stretch; display: grid; gap: 1px; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; padding: 0; }
+.schedule-overview > div { background: var(--color-surface, #fff); display: grid; gap: .22rem; padding: 1rem; }
+.schedule-overview span { color: var(--color-text-muted, #64748b); font-size: .64rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.schedule-overview strong { font-size: .9rem; }
+.schedule-overview small { color: var(--color-accent, #315fcc); font-size: .68rem; }
+.schedule-overview > p { border-top: 1px solid var(--color-border, #d9e0ea); color: var(--color-text-muted, #64748b); font-size: .7rem; grid-column: 1 / -1; margin: 0; padding: .65rem 1rem; }
 .concurrency-panel { align-items: end; display: flex; gap: 1.5rem; justify-content: space-between; padding: 1rem; }
 .concurrency-panel h2 { font-size: .92rem; margin: 0; }
 .concurrency-panel p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
@@ -506,5 +610,5 @@ onMounted(load)
 .game-actions { display: flex; gap: .4rem; }
 .pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .75rem 1rem; }
 .pagination span { color: var(--color-text-muted, #64748b); font-size: .72rem; }
-@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } .result-filter__menu { grid-template-columns: 1fr; } .result-filter__topline { grid-column: auto; } }
+@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .schedule-overview { grid-template-columns: 1fr; } .schedule-overview > p { grid-column: 1; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } .result-filter__menu { grid-template-columns: 1fr; } .result-filter__topline { grid-column: auto; } }
 </style>

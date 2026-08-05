@@ -255,8 +255,11 @@ async function create(): Promise<void> {
           <label v-if="sourceKind === 'release'" class="field"><span>Release</span><select v-model="sourceRef" class="input" required @change="chooseRelease"><option v-for="release in releases" :key="release.tag" :value="release.tag">{{ release.name }} ({{ release.tag }})</option></select></label>
           <label v-else class="field"><span>Commit hash</span><input v-model="sourceRef" class="input" required maxlength="64" placeholder="e7f92b8…"></label>
           <label class="field"><span>Version label</span><input v-model="version" class="input" required maxlength="80" placeholder="17.1"></label>
-          <div class="field form-span-full"><span>Dockerfile</span><DockerfilePicker v-model="dockerfilePath" :files="dockerfiles" @change="loadDockerfile" /><small>Managed in the repository under <code>data/engines</code>.</small></div>
-          <pre v-if="dockerfileContent || loadingDockerfile" class="dockerfile-viewer form-span-full" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
+          <div class="field form-span-full"><span>Benchmarker build recipe</span><DockerfilePicker v-model="dockerfilePath" :files="dockerfiles" @change="loadDockerfile" /><small>This Dockerfile runs only on the benchmarker; game workers receive its published artifact.</small></div>
+          <details v-if="dockerfileContent || loadingDockerfile" class="dockerfile-preview form-span-full">
+            <summary>Preview Dockerfile</summary>
+            <pre class="dockerfile-viewer" tabindex="0">{{ loadingDockerfile ? 'Loading Dockerfile…' : dockerfileContent }}</pre>
+          </details>
           <p class="activation-note">The version becomes active automatically after its current build completes a benchmark.</p>
         </div>
         <div class="form-actions"><button class="button button--primary" type="submit" :disabled="creating">{{ creating ? 'Creating…' : 'Create version' }}</button></div>
@@ -270,4 +273,5 @@ async function create(): Promise<void> {
 .host-filter{border:0;margin:0;min-width:0;padding:0}.host-filter legend{font-size:.72rem;font-weight:650;margin-bottom:.5rem;padding:0}.host-grid{display:grid;gap:.55rem;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr))}.host-grid label{align-items:center;border:1px solid var(--color-border);border-radius:var(--radius-md);cursor:pointer;display:flex;gap:.55rem;padding:.65rem .7rem}.host-grid label.selected{background:var(--color-accent-soft);border-color:var(--color-accent)}.host-grid label>span{display:grid;gap:.1rem}.host-grid strong{font-size:.73rem}.host-grid small{color:var(--color-text-muted);font-size:.63rem;text-transform:capitalize}.host-empty{grid-column:1/-1!important;margin:0!important}
 .form-span-full{grid-column:1/-1}.field small{color:var(--color-text-muted);font-size:.67rem}.dockerfile-viewer{background:#0f172a;border-radius:var(--radius-md);color:#e2e8f0;font-family:var(--font-mono);font-size:.68rem;line-height:1.5;margin:0;max-height:24rem;overflow:auto;padding:.8rem;tab-size:2;white-space:pre}
 .activation-note{color:var(--color-text-muted);font-size:.72rem;grid-column:1/-1;margin:0}
+.dockerfile-preview{border-top:1px solid var(--color-border);padding-top:.75rem}.dockerfile-preview summary{cursor:pointer;font-size:.73rem;font-weight:650}.dockerfile-preview[open] summary{margin-bottom:.75rem}
 </style>

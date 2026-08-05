@@ -5,6 +5,7 @@ import { RouterLink, RouterView, useRoute } from "vue-router";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
 import ThemeToggle from "@/components/ui/ThemeToggle.vue";
+import SettingsDrawer from "@/components/ui/SettingsDrawer.vue";
 
 const route = useRoute();
 const menuOpen = ref(false);
@@ -13,6 +14,7 @@ const compactGameLayout = computed(() => route.name === "tournament");
 const navItems = [
   { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
+  { label: "Engines", to: "/engines" },
 ] as const;
 
 function navActive(path: string): boolean {
@@ -52,6 +54,7 @@ watch(
 
         <div class="public-header__actions">
           <ThemeToggle />
+          <SettingsDrawer />
           <BaseButton class="public-header__admin" variant="ghost" size="small" to="/admin">
             Admin
           </BaseButton>
