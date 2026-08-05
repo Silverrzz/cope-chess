@@ -214,6 +214,7 @@ def next_worker_assignment(
     *,
     used_resources: tuple[int, int] | None = None,
     excluded_engine_ids: frozenset[int] = frozenset(),
+    excluded_game_ids: frozenset[int] = frozenset(),
 ) -> WorkerGameAssignment | None:
     available_resources = _worker_available_resources(
         connection,
@@ -255,6 +256,7 @@ def next_worker_assignment(
             tournament.id,
             worker,
             excluded_engine_ids=excluded_engine_ids,
+            excluded_game_ids=excluded_game_ids,
         )
         if game is None:
             continue
@@ -1052,6 +1054,7 @@ def _next_playable_game_for_worker(
     worker: WorkerRecord,
     *,
     excluded_engine_ids: frozenset[int] = frozenset(),
+    excluded_game_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
     del worker
     conditions = "tournament_id = ? AND status = 'pending'"
@@ -1065,6 +1068,11 @@ def _next_playable_game_for_worker(
         )
         parameters.extend(blocked)
         parameters.extend(blocked)
+    if excluded_game_ids:
+        blocked_games = tuple(sorted(excluded_game_ids))
+        placeholders = ", ".join("?" for _ in blocked_games)
+        conditions += f" AND id NOT IN ({placeholders})"
+        parameters.extend(blocked_games)
     row = connection.execute(
         f"""
         SELECT id

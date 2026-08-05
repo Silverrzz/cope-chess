@@ -319,6 +319,8 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
             _log_connection_closed(error)
         except (OSError, asyncio.TimeoutError, InvalidHandshake) as error:
             LOG.warning("runner connection failed: %s", error)
+        except ProtocolValidationError as error:
+            LOG.warning("runner protocol error; reconnecting: %s", error)
         except Exception:
             LOG.exception("worker client failed")
             raise
@@ -626,9 +628,23 @@ async def _route_assignment_messages(
             assignment = WorkerGameAssignment.model_validate(envelope.data)
             assignment_id = assignment.assignment.assignment_id
             if assignment_id in tasks:
-                raise ProtocolValidationError(
-                    f"duplicate assignment {assignment_id}"
+                current = assignments[assignment_id]
+                duplicate_identity = (
+                    current.assignment.assignment_key
+                    == assignment.assignment.assignment_key
+                    and current.assignment.game_id == assignment.assignment.game_id
                 )
+                reason = (
+                    f"duplicate assignment {assignment_id}"
+                    if duplicate_identity
+                    else f"conflicting assignment reuse {assignment_id}"
+                )
+                LOG.warning(
+                    "%s; reconnecting without stopping the worker process",
+                    reason,
+                )
+                await websocket.close(code=4000, reason=reason)
+                return None
             used_threads = sum(
                 item.required_resources.threads for item in assignments.values()
             )

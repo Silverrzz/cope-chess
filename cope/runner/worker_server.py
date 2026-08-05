@@ -472,13 +472,7 @@ class WorkerHandshakeServer:
                 self._authenticate_worker,
                 hello,
             )
-            session_id = (
-                authenticated_worker.session_id
-                if isinstance(hello, WorkerSessionHello)
-                else _new_session_id()
-            )
-            if not session_id:
-                raise ProtocolValidationError("worker session is unavailable")
+            session_id = _new_session_id()
             label = _worker_label(authenticated_worker, hello)
             worker = await asyncio.to_thread(
                 self._record_connection,
@@ -587,6 +581,9 @@ class WorkerHandshakeServer:
                                 resources.hash_mb
                                 for resources in assignment_resources.values()
                             ),
+                        ),
+                        active_game_ids=frozenset(
+                            identity[1] for identity in assignment_identities.values()
                         ),
                     )
                     if assignment is None:
@@ -1326,15 +1323,36 @@ class WorkerHandshakeServer:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                (f"worker:{worker.id}",),
+            )
             self._validate_worker_machine(connection, worker, hello)
+            if isinstance(hello, WorkerTokenHello):
+                current = get_worker_by_token(connection, hello.token)
+                if (
+                    current is None
+                    or current.id != worker.id
+                    or not worker_token_is_valid(current)
+                ):
+                    raise ProtocolValidationError("invalid or expired worker token")
+            else:
+                current = get_worker_by_session_id(connection, hello.session_id)
+                if (
+                    current is None
+                    or current.id != worker.id
+                    or current.status == "revoked"
+                ):
+                    raise ProtocolValidationError("worker session was replaced")
             tournament_ids = disconnect_worker(
                 connection,
-                worker.id,
+                current.id,
+                session_id=current.session_id,
                 reason="worker session replaced",
             )
             upsert_worker_connection(
                 connection,
-                worker_id=worker.id,
+                worker_id=current.id,
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
@@ -1454,6 +1472,8 @@ class WorkerHandshakeServer:
         worker: WorkerRecord,
         wake_generation: int,
         used_resources: tuple[int, int],
+        *,
+        active_game_ids: frozenset[int] = frozenset(),
     ):
         capability = self._worker_capabilities.get(
             worker.id,
@@ -1468,6 +1488,7 @@ class WorkerHandshakeServer:
                 self._claim_next_assignment_from_database,
                 worker,
                 used_resources,
+                active_game_ids,
             )
             if assignment is None:
                 self._empty_claim_generation[capability] = wake_generation
@@ -1477,6 +1498,7 @@ class WorkerHandshakeServer:
         self,
         worker: WorkerRecord,
         used_resources: tuple[int, int],
+        active_game_ids: frozenset[int] = frozenset(),
     ):
         connection = connect_database(self._config.db_path)
         try:
@@ -1491,6 +1513,7 @@ class WorkerHandshakeServer:
                     live_worker,
                     used_resources=used_resources,
                     excluded_engine_ids=blocked_engine_ids,
+                    excluded_game_ids=active_game_ids,
                 )
             )
             if assignment is not None:
