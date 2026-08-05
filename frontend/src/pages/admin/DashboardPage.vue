@@ -6,6 +6,7 @@ import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
+import WorkerTokenPanel from '@/components/admin/WorkerTokenPanel.vue'
 import { errorText, formatDate, formatNumber, humanize } from '@/components/admin/format'
 import type { Engine, Game, Tournament, WorkerRow } from '@/components/admin/types'
 
@@ -69,12 +70,24 @@ interface BenchmarkManagerData {
   engines_needing_benchmark: EngineNeedingBenchmark[]
 }
 
+interface MintedBenchmarker {
+  id: number
+  token: string
+  expires_at: string
+  start_command: string
+  message: string
+}
+
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
 const managerLoading = ref(true)
 const error = ref('')
 const managerError = ref('')
 const actionMessage = ref('')
+const showBenchmarkerCreate = ref(false)
+const benchmarkerLabel = ref('')
+const creatingBenchmarker = ref(false)
+const mintedBenchmarker = ref<MintedBenchmarker | null>(null)
 const benchmarkManager = ref<BenchmarkManagerData>({ benchmarkers: [], queue: [], failures: [], engines_needing_benchmark: [] })
 const revokingBenchmarker = ref<number | null>(null)
 const queueingEngine = ref<number | null>(null)
@@ -126,6 +139,24 @@ function benchmarkerWork(benchmarker: BenchmarkerManagerRow): string {
   const activity = benchmarker.work.activity
   if (!activity) return `Preparing ${benchmarker.work.engine_name}`
   return `${humanize(activity.stage)} · ${humanize(activity.substage)}`
+}
+
+async function createBenchmarker(): Promise<void> {
+  creatingBenchmarker.value = true
+  try {
+    const response = await api.post<MintedBenchmarker>('/api/admin/benchmarkers', {
+      body: { label: benchmarkerLabel.value.trim() || 'benchmarker', ttl_seconds: 7200 },
+    })
+    mintedBenchmarker.value = response
+    benchmarkerLabel.value = ''
+    showBenchmarkerCreate.value = false
+    actionMessage.value = response.message
+    await loadBenchmarkManager(true)
+  } catch (cause) {
+    managerError.value = errorText(cause)
+  } finally {
+    creatingBenchmarker.value = false
+  }
 }
 
 async function revokeBenchmarker(benchmarker: BenchmarkerManagerRow): Promise<void> {
@@ -188,6 +219,12 @@ onBeforeUnmount(() => {
     <InlineFeedback :message="error" />
     <InlineFeedback :message="managerError" />
     <InlineFeedback :message="actionMessage" tone="info" />
+    <WorkerTokenPanel v-if="mintedBenchmarker" :token="mintedBenchmarker.token" :expires-at="mintedBenchmarker.expires_at" :start-command="mintedBenchmarker.start_command" title="One-time benchmarker credential" warning="Copy this token or start command now. It cannot be recovered after you leave or refresh this page." />
+    <form v-if="showBenchmarkerCreate" class="panel benchmarker-create" @submit.prevent="createBenchmarker">
+      <div><h2>Register a benchmarker</h2><p>The one-time credential expires after two hours.</p></div>
+      <label><span>Benchmarker label</span><input v-model="benchmarkerLabel" class="input" maxlength="80" autofocus></label>
+      <div class="button-row"><button class="button button--ghost" type="button" @click="showBenchmarkerCreate = false">Cancel</button><button class="button button--primary" type="submit" :disabled="creatingBenchmarker">{{ creatingBenchmarker ? 'Generating…' : 'Generate credential' }}</button></div>
+    </form>
 
     <div v-if="loading" class="panel loading-panel" role="status">Loading dashboard…</div>
     <template v-else-if="data">
@@ -267,7 +304,7 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="panel dashboard-panel dashboard-panel--wide benchmark-ops">
-          <div class="panel-heading"><div><h2>Benchmark operations</h2><p>Clients, pending work, and engine coverage.</p></div><span>{{ benchmarkManager.benchmarkers.filter((item) => item.status === 'connected' || item.status === 'busy').length }} online</span></div>
+          <div class="panel-heading"><div><h2>Benchmark operations</h2><p>Clients, pending work, and engine coverage.</p></div><div class="benchmark-ops__actions"><span>{{ benchmarkManager.benchmarkers.filter((item) => item.status === 'connected' || item.status === 'busy').length }} online</span><button class="button button--primary button--small" type="button" @click="showBenchmarkerCreate = !showBenchmarkerCreate">New benchmarker</button></div></div>
           <div v-if="managerLoading" class="benchmark-ops__loading" role="status">Loading benchmark operations…</div>
           <div v-else class="benchmark-ops__grid">
             <section class="benchmark-ops__column">
@@ -328,7 +365,12 @@ onBeforeUnmount(() => {
 .dashboard-page { display: grid; gap: 1rem; }
 .loading-panel { color: var(--color-text-muted, #64748b); min-height: 12rem; padding: 2rem; }
 .benchmark-ops .panel-heading { align-items: center; padding: .7rem .9rem; }
-.benchmark-ops .panel-heading > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .65rem; padding: .25rem .5rem; }
+.benchmark-ops__actions { align-items: center; display: flex; gap: .55rem; }
+.benchmark-ops__actions > span { background: var(--color-surface-subtle, #f1f5f9); border-radius: 999px; font-size: .65rem; padding: .25rem .5rem; }
+.benchmarker-create { align-items: end; display: grid; gap: 1rem; grid-template-columns: minmax(16rem, 1.5fr) minmax(14rem, 1fr) auto; padding: 1rem; }
+.benchmarker-create h2 { font-size: .9rem; margin: 0; }
+.benchmarker-create p { color: var(--color-text-muted, #64748b); font-size: .72rem; margin: .2rem 0 0; }
+.benchmarker-create label { display: grid; font-size: .76rem; font-weight: 650; gap: .35rem; }
 .benchmark-ops__loading { color: var(--color-text-muted, #64748b); font-size: .72rem; padding: .9rem; }
 .benchmark-ops__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .benchmark-ops__column { min-width: 0; }
@@ -396,6 +438,6 @@ onBeforeUnmount(() => {
 .results-list strong { background: var(--color-surface-subtle, #f1f5f9); border-radius: .3rem; padding: .25rem .4rem; }
 .results-list small { color: var(--color-text-muted, #64748b); font-size: .68rem; }
 @media (max-width: 68rem) { .metric-grid { grid-template-columns: repeat(3, 1fr); } .benchmark-ops__grid { grid-template-columns: 1fr; } .benchmark-ops__column + .benchmark-ops__column { border-left: 0; border-top: 1px solid var(--color-border, #d9e0ea); } }
-@media (max-width: 48rem) { .dashboard-grid { grid-template-columns: 1fr; } .dashboard-panel--wide { grid-column: auto; } .metric-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 48rem) { .dashboard-grid { grid-template-columns: 1fr; } .dashboard-panel--wide { grid-column: auto; } .metric-grid { grid-template-columns: repeat(2, 1fr); } .benchmarker-create { align-items: stretch; grid-template-columns: 1fr; } }
 @media (max-width: 32rem) { .metric-grid { grid-template-columns: 1fr; } .results-list a { grid-template-columns: 1fr auto 1fr; } .results-list small { display: none; } }
 </style>

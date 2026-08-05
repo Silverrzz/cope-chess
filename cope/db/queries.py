@@ -257,7 +257,6 @@ def engine_game_filter_options(
         JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE games.result IS NOT NULL
           AND (games.white_engine_id = ? OR games.black_engine_id = ?)
-        ORDER BY games.id DESC
         """,
         (engine_id, engine_id),
     )

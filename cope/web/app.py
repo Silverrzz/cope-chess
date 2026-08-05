@@ -80,8 +80,10 @@ from cope.core.stream import (
 )
 from cope.network import (
     ADMIN_TOKEN_ENV,
+    DEFAULT_BENCHMARKER_PATH,
     LOCAL_EVENT_PUBLISHERS,
     default_admin_token,
+    default_benchmark_server_port,
     default_web_event_token,
     DEFAULT_WORKER_PATH,
     WILDCARD_HOSTS,
@@ -390,12 +392,14 @@ def create_app(
     db_path: str | Path = DEFAULT_DATABASE_URL,
     *,
     worker_server_url: str | None = None,
+    benchmarker_server_url: str | None = None,
     event_token: str | None = None,
     admin_token: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="COPE Chess")
     app.state.db_path = str(db_path)
     app.state.worker_server_url = worker_server_url
+    app.state.benchmarker_server_url = benchmarker_server_url
     app.state.event_token = event_token or default_web_event_token()
     app.state.admin_token = admin_token or default_admin_token()
     app.state.stream_hub = StreamHub()
@@ -1803,7 +1807,40 @@ def _request_worker_server_url(
     return urlunsplit((scheme, _url_authority(host, port), path, "", ""))
 
 
+def _request_benchmarker_server_url(
+    request: Request,
+    connection: sqlite3.Connection,
+) -> str:
+    configured = getattr(request.app.state, "benchmarker_server_url", None)
+    if configured:
+        return _publicize_configured_websocket_url(
+            str(configured),
+            request,
+            default_path=DEFAULT_BENCHMARKER_PATH,
+        )
+
+    endpoint = get_service_endpoint(connection, "benchmark-server")
+    port = endpoint.port if endpoint is not None else default_benchmark_server_port()
+    path = endpoint.path if endpoint is not None else DEFAULT_BENCHMARKER_PATH
+    scheme = "wss" if _request_is_secure(request) else "ws"
+    host = request.url.hostname or "localhost"
+    return urlunsplit((scheme, _url_authority(host, port), path, "", ""))
+
+
 def _publicize_configured_worker_url(url: str, request: Request) -> str:
+    return _publicize_configured_websocket_url(
+        url,
+        request,
+        default_path=DEFAULT_WORKER_PATH,
+    )
+
+
+def _publicize_configured_websocket_url(
+    url: str,
+    request: Request,
+    *,
+    default_path: str,
+) -> str:
     parsed = urlsplit(url)
     configured_host = (parsed.hostname or "").lower()
     if configured_host not in WILDCARD_HOSTS | {"127.0.0.1", "::1", "localhost"}:
@@ -1812,7 +1849,7 @@ def _publicize_configured_worker_url(url: str, request: Request) -> str:
     port = parsed.port
     authority = _url_authority(host, port) if port is not None else _url_host_only(host)
     scheme = "wss" if _request_is_secure(request) and parsed.scheme == "ws" else parsed.scheme
-    return urlunsplit((scheme, authority, parsed.path or DEFAULT_WORKER_PATH, "", ""))
+    return urlunsplit((scheme, authority, parsed.path or default_path, "", ""))
 
 
 def _url_authority(host: str, port: int) -> str:

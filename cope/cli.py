@@ -118,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     web_parser.add_argument(
+        "--benchmarker-server-url",
+        default=os.environ.get("COPE_BENCHMARKER_SERVER_URL") or None,
+        help=(
+            "public websocket URL benchmarkers should use; by default the web service "
+            "uses the benchmark server endpoint registered in the shared database"
+        ),
+    )
+    web_parser.add_argument(
         "--event-token",
         default=default_web_event_token(),
         help="shared token required for internal service streams",
@@ -542,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
             create_app(
                 args.db_path,
                 worker_server_url=args.worker_server_url,
+                benchmarker_server_url=args.benchmarker_server_url,
                 event_token=args.event_token,
                 admin_token=args.admin_token,
             ),

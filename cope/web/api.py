@@ -94,6 +94,7 @@ from cope.db import (
     list_tournaments,
     list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
+    mint_benchmarker_token,
     mint_worker_token_for_worker,
     replace_suite_openings,
     replay_game,
@@ -522,6 +523,19 @@ class WorkerPayload(BaseModel):
 
 class WorkerTokenPayload(BaseModel):
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
+
+
+class BenchmarkerPayload(BaseModel):
+    label: str = Field(default="benchmarker", min_length=1, max_length=80)
+    ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
+
+    @field_validator("label")
+    @classmethod
+    def strip_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("benchmarker label cannot be blank")
+        return value
 
 
 class WorkerSettingsPayload(BaseModel):
@@ -3035,6 +3049,37 @@ def register_api_routes(app: FastAPI) -> None:
         connection.commit()
         _publish_admin_change(web_app, request)
         return _json({"message": "Benchmarker revoked."})
+
+    @app.post("/api/admin/benchmarkers")
+    def admin_create_benchmarker(
+        payload: BenchmarkerPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        minted = mint_benchmarker_token(
+            connection,
+            label=payload.label,
+            ttl_seconds=payload.ttl_seconds,
+        )
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        command = (
+            f"cope benchmarker --server-url "
+            f"{web_app._command_arg(web_app._request_benchmarker_server_url(request, connection))} "
+            f"--token {web_app._command_arg(minted.token)}"
+        )
+        response = _json(
+            {
+                "id": minted.benchmarker_id,
+                "token": minted.token,
+                "expires_at": minted.expires_at,
+                "start_command": command,
+                "message": "One-time benchmarker token generated.",
+            },
+            status_code=201,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     # Chat moderation
 
