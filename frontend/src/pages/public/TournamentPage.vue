@@ -39,7 +39,8 @@ import type {
 
 type TabKey = 'standings' | 'games' | 'settings'
 type StreamState = 'connecting' | 'live' | 'reconnecting' | 'closed'
-type FollowState = 'off' | 'live' | 'preparing' | 'fallback' | 'waiting'
+type FollowState = 'off' | 'paused' | 'live' | 'preparing' | 'fallback' | 'waiting'
+type GameNavigationSource = 'follow' | 'manual'
 
 interface ClockRuntime {
   activeSide: 'white' | 'black' | null
@@ -93,6 +94,16 @@ const selectedPly = ref(0)
 const currentPositionFen = ref('startpos')
 const streamState = ref<StreamState>('closed')
 const rememberedFollowedEngineId = ref(readFollowedEngineId())
+const initialRouteGameId = queryValue(route.query.game_id)
+const initialTournamentId = String(route.params.id || '')
+const initialManualPauseGameId = readManualFollowPauseGameId(initialTournamentId)
+const followManuallyPaused = ref(Boolean(
+  initialRouteGameId
+  && initialRouteGameId !== readAutomaticallyFollowedGameId(initialTournamentId),
+))
+const manualFollowPauseGameId = ref(
+  initialRouteGameId === initialManualPauseGameId ? initialManualPauseGameId : '',
+)
 const clockLabels = ref<Record<'white' | 'black', string>>({ white: '--:--', black: '--:--' })
 const clockRuntime = ref<ClockRuntime | null>(null)
 const headingElement = ref<HTMLElement | null>(null)
@@ -107,6 +118,7 @@ let clockFrame: number | undefined
 let arenaFitFrame: number | undefined
 let preloadedGameNavigationId = ''
 let pendingGameNavigationId = ''
+let automaticGameNavigationId = ''
 let headingResizeObserver: ResizeObserver | null = null
 let viewportBeforeUpdate: ViewportPosition | null = null
 
@@ -136,6 +148,7 @@ const followedEngineId = computed({
 })
 const followState = computed<FollowState>(() => {
   if (!followedEngineId.value) return 'off'
+  if (followManuallyPaused.value) return 'paused'
   const current = viewerGames.value.find((game) => sameId(game.id, selectedGameId.value))
   if (!current) return viewerGames.value.length ? 'fallback' : 'waiting'
   if (!gameIncludesEngine(current, followedEngineId.value)) return 'fallback'
@@ -143,6 +156,7 @@ const followState = computed<FollowState>(() => {
 })
 const followStateLabel = computed(() => ({
   off: '',
+  paused: manualFollowPauseGameId.value ? 'Resumes after game' : 'Paused',
   live: 'Following live',
   preparing: 'Following next',
   fallback: 'Watching fallback',
@@ -154,12 +168,13 @@ const pickerGameId = computed(() => {
   const game = viewerGame.value
   return isActiveGame(game) ? String(game.id) : ''
 })
-const pgnDownloadUrl = computed(() => {
+const gamePgnDownloadUrl = computed(() => {
   const game = viewerGame.value
   return game?.status === 'finished'
-    ? `/api/games/${encodeURIComponent(String(game.id))}/pgn`
+    ? `/api/pgn?game_id=${encodeURIComponent(String(game.id))}`
     : ''
 })
+const tournamentPgnDownloadUrl = computed(() => `/api/pgn?tournament_id=${encodeURIComponent(tournamentId.value)}`)
 const moves = computed(() => data.value?.viewer_moves || [])
 const bookPlyCount = computed(() => moves.value.filter((move) => move.is_book).length)
 const opening = computed(() => data.value?.opening || { name: 'Start position', fen: 'startpos' })
@@ -216,6 +231,35 @@ const activeSide = computed<'white' | 'black' | null>(() => {
   if (isLatestPly.value && clockRuntime.value?.running) return clockRuntime.value.activeSide
   if (!viewerGame.value) return null
   return parseFen(currentPositionFen.value).turn === 'w' ? 'white' : 'black'
+})
+
+watch(tournamentId, (id) => {
+  const storedManualGameId = readManualFollowPauseGameId(id)
+  manualFollowPauseGameId.value = routeGameId.value === storedManualGameId ? storedManualGameId : ''
+  followManuallyPaused.value = Boolean(
+    routeGameId.value
+    && routeGameId.value !== readAutomaticallyFollowedGameId(id),
+  )
+})
+
+watch(routeGameId, (gameId, previousGameId) => {
+  if (!gameId || gameId === previousGameId) return
+  if (gameId === automaticGameNavigationId) {
+    automaticGameNavigationId = ''
+    manualFollowPauseGameId.value = ''
+    forgetManualFollowPauseGame()
+    return
+  }
+  if (
+    gameId === preloadedGameNavigationId
+    && sameId(data.value?.viewer_game?.id, preloadedGameNavigationId)
+  ) return
+  followManuallyPaused.value = true
+  if (manualFollowPauseGameId.value !== gameId) {
+    manualFollowPauseGameId.value = ''
+    forgetManualFollowPauseGame()
+  }
+  forgetAutomaticallyFollowedGame()
 })
 
 watch(
@@ -356,6 +400,9 @@ async function loadDetail(background: boolean): Promise<void> {
 
     if (!routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
       const preloadedGameId = String(response.viewer_game.id)
+      if (followedEngineId.value && !followManuallyPaused.value) {
+        rememberAutomaticallyFollowedGame(preloadedGameId)
+      }
       preloadedGameNavigationId = preloadedGameId
       try {
         await router.replace({ query: { ...route.query, game_id: preloadedGameId } })
@@ -397,6 +444,7 @@ function applyDetail(response: TournamentDetailResponse): void {
     stopClock()
   }
 
+  updateManualFollowPause(response.viewer_game)
   reconcileFollowedGame()
 }
 
@@ -565,7 +613,10 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   }
   if (snapshot.standings) data.value.standings = snapshot.standings
 
-  if (selectedGameLeftActiveSet) scheduleSnapshotRefresh()
+  if (selectedGameLeftActiveSet) {
+    releaseManualFollowPause(displayedGame?.id)
+    scheduleSnapshotRefresh()
+  }
   reconcileFollowedGame()
 }
 
@@ -581,7 +632,7 @@ function gameIncludesEngine(game: GameRecord, engineId: Identifier): boolean {
 }
 
 function reconcileFollowedGame(): void {
-  if (!data.value || !followedEngineId.value || pendingGameNavigationId) return
+  if (!data.value || !followedEngineId.value || followManuallyPaused.value || pendingGameNavigationId) return
   const activeGames = data.value.active_games
     .filter((game): game is GameRecord => isActiveGame(game))
     .filter((game, index, games) => games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
@@ -596,7 +647,9 @@ function reconcileFollowedGame(): void {
     targetGame = liveFollowedGame || preferredActiveGame(followedGames) || currentGame || preferredActiveGame(activeGames)
   }
 
-  if (targetGame && !sameId(targetGame.id, selectedGameId.value)) void navigateToGame(targetGame.id, true)
+  if (targetGame && !sameId(targetGame.id, selectedGameId.value)) {
+    void navigateToGame(targetGame.id, true, 'follow')
+  }
 }
 
 function preferredActiveGame(games: GameRecord[]): GameRecord | undefined {
@@ -616,9 +669,27 @@ function compareActiveGames(left: GameRecord, right: GameRecord): number {
   return String(left.id).localeCompare(String(right.id), undefined, { numeric: true })
 }
 
-async function navigateToGame(gameId: Identifier, replace: boolean): Promise<void> {
+async function navigateToGame(
+  gameId: Identifier,
+  replace: boolean,
+  source: GameNavigationSource,
+): Promise<void> {
   const targetId = String(gameId)
   if (targetId === routeGameId.value) return
+  if (source === 'manual') {
+    followManuallyPaused.value = Boolean(followedEngineId.value)
+    manualFollowPauseGameId.value = followedEngineId.value && data.value?.active_games.some(
+      (game) => isActiveGame(game) && sameId(game.id, targetId),
+    ) ? targetId : ''
+    if (manualFollowPauseGameId.value) rememberManualFollowPauseGame(targetId)
+    else forgetManualFollowPauseGame()
+    forgetAutomaticallyFollowedGame()
+  } else {
+    manualFollowPauseGameId.value = ''
+    forgetManualFollowPauseGame()
+    rememberAutomaticallyFollowedGame(targetId)
+  }
+  automaticGameNavigationId = source === 'follow' ? targetId : ''
   pendingGameNavigationId = targetId
   try {
     const location = { query: { ...route.query, game_id: targetId } }
@@ -626,7 +697,41 @@ async function navigateToGame(gameId: Identifier, replace: boolean): Promise<voi
     else await router.push(location)
   } finally {
     if (pendingGameNavigationId === targetId && routeGameId.value !== targetId) pendingGameNavigationId = ''
+    if (automaticGameNavigationId === targetId && routeGameId.value !== targetId) automaticGameNavigationId = ''
   }
+}
+
+function resumeFollowing(): void {
+  manualFollowPauseGameId.value = ''
+  forgetManualFollowPauseGame()
+  followManuallyPaused.value = false
+  if (selectedGameId.value) rememberAutomaticallyFollowedGame(selectedGameId.value)
+  reconcileFollowedGame()
+}
+
+function updateManualFollowPause(game: GameRecord | null): void {
+  if (!followManuallyPaused.value) {
+    manualFollowPauseGameId.value = ''
+    forgetManualFollowPauseGame()
+    return
+  }
+  if (!game || !sameId(game.id, selectedGameId.value)) return
+  if (game.status === 'assigned' || game.status === 'live') {
+    if (!manualFollowPauseGameId.value) {
+      manualFollowPauseGameId.value = String(game.id)
+      rememberManualFollowPauseGame(game.id)
+    }
+    return
+  }
+  releaseManualFollowPause(game.id)
+}
+
+function releaseManualFollowPause(gameId: Identifier | null | undefined): void {
+  if (gameId === null || gameId === undefined || !sameId(manualFollowPauseGameId.value, gameId)) return
+  manualFollowPauseGameId.value = ''
+  forgetManualFollowPauseGame()
+  followManuallyPaused.value = false
+  rememberAutomaticallyFollowedGame(gameId)
 }
 
 function scheduleSnapshotRefresh(): void {
@@ -741,7 +846,7 @@ function samePosition(left: string | null | undefined, right: string): boolean {
 function selectGame(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (!value || value === selectedGameId.value) return
-  void navigateToGame(value, false)
+  void navigateToGame(value, false, 'manual')
 }
 
 function gameLabel(game: GameRecord): string {
@@ -823,10 +928,73 @@ function readFollowedEngineId(): string {
 }
 
 function rememberFollowedEngine(engineId: string): void {
+  manualFollowPauseGameId.value = ''
+  forgetManualFollowPauseGame()
+  followManuallyPaused.value = false
   rememberedFollowedEngineId.value = engineId
   try {
     if (engineId) localStorage.setItem(FOLLOWED_ENGINE_STORAGE_KEY, engineId)
     else localStorage.removeItem(FOLLOWED_ENGINE_STORAGE_KEY)
+  } catch {
+    if (!engineId) forgetAutomaticallyFollowedGame()
+    else if (selectedGameId.value) rememberAutomaticallyFollowedGame(selectedGameId.value)
+    return
+  }
+  if (!engineId) forgetAutomaticallyFollowedGame()
+  else if (selectedGameId.value) rememberAutomaticallyFollowedGame(selectedGameId.value)
+}
+
+function automaticallyFollowedGameStorageKey(): string {
+  return `cope.tournament.${tournamentId.value}.automaticallyFollowedGameId`
+}
+
+function readAutomaticallyFollowedGameId(id: string): string {
+  try {
+    return sessionStorage.getItem(`cope.tournament.${id}.automaticallyFollowedGameId`) || ''
+  } catch {
+    return ''
+  }
+}
+
+function rememberAutomaticallyFollowedGame(gameId: Identifier): void {
+  try {
+    sessionStorage.setItem(automaticallyFollowedGameStorageKey(), String(gameId))
+  } catch {
+    return
+  }
+}
+
+function forgetAutomaticallyFollowedGame(): void {
+  try {
+    sessionStorage.removeItem(automaticallyFollowedGameStorageKey())
+  } catch {
+    return
+  }
+}
+
+function manualFollowPauseStorageKey(): string {
+  return `cope.tournament.${tournamentId.value}.manualFollowPauseGameId`
+}
+
+function readManualFollowPauseGameId(id: string): string {
+  try {
+    return sessionStorage.getItem(`cope.tournament.${id}.manualFollowPauseGameId`) || ''
+  } catch {
+    return ''
+  }
+}
+
+function rememberManualFollowPauseGame(gameId: Identifier): void {
+  try {
+    sessionStorage.setItem(manualFollowPauseStorageKey(), String(gameId))
+  } catch {
+    return
+  }
+}
+
+function forgetManualFollowPauseGame(): void {
+  try {
+    sessionStorage.removeItem(manualFollowPauseStorageKey())
   } catch {
     return
   }
@@ -856,14 +1024,10 @@ function rememberFollowedEngine(engineId: string): void {
         </div>
 
         <div class="tournament-heading__controls">
-          <a
-            v-if="pgnDownloadUrl"
-            class="pgn-download"
-            :href="pgnDownloadUrl"
-            download
-          >
-            Download PGN
-          </a>
+          <div v-if="gameTotal" class="pgn-downloads">
+            <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
+            <a v-if="gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
+          </div>
           <label v-if="viewerGames.length" class="game-picker">
             <span class="game-picker__heading">
               <span>Active games</span>
@@ -874,16 +1038,19 @@ function rememberFollowedEngine(engineId: string): void {
               <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
             </select>
           </label>
-          <label v-if="participantEngines.length" class="follow-engine-picker">
-            <span class="follow-engine-picker__heading">
-              <span>Follow engine</span>
-              <span v-if="followStateLabel" class="follow-engine-picker__state" :data-state="followState">{{ followStateLabel }}</span>
-            </span>
-            <select v-model="followedEngineId">
+          <div v-if="participantEngines.length" class="follow-engine-picker">
+            <div class="follow-engine-picker__heading">
+              <label for="follow-engine">Follow engine</label>
+              <span v-if="followStateLabel" class="follow-engine-picker__status">
+                <span class="follow-engine-picker__state" :data-state="followState">{{ followStateLabel }}</span>
+                <button v-if="followState === 'paused'" type="button" @click="resumeFollowing">Resume</button>
+              </span>
+            </div>
+            <select id="follow-engine" v-model="followedEngineId">
               <option value="">Don't follow</option>
               <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }}</option>
             </select>
-          </label>
+          </div>
         </div>
       </header>
 
@@ -1106,13 +1273,20 @@ function rememberFollowedEngine(engineId: string): void {
   background: color-mix(in srgb, var(--color-text, #17202a) 4%, transparent);
 }
 
-.tournament-heading__controls label {
+.tournament-heading__controls > label,
+.follow-engine-picker {
   display: grid;
   gap: 0.25rem;
   min-width: 0;
   color: var(--color-text-muted, #607080);
   font-size: 0.64rem;
   font-weight: 700;
+}
+
+.pgn-downloads {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 .game-picker {
@@ -1130,6 +1304,18 @@ function rememberFollowedEngine(engineId: string): void {
   gap: 0.6rem;
 }
 
+.follow-engine-picker__heading > label {
+  color: inherit;
+  font: inherit;
+}
+
+.follow-engine-picker__status {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
 .follow-engine-picker__state {
   overflow: hidden;
   color: var(--color-text-muted, #607080);
@@ -1145,6 +1331,22 @@ function rememberFollowedEngine(engineId: string): void {
 .follow-engine-picker__state[data-state='fallback'],
 .follow-engine-picker__state[data-state='waiting'] {
   color: var(--color-warning, #a15c00);
+}
+
+.follow-engine-picker__state[data-state='paused'] {
+  color: var(--color-text-muted, #607080);
+}
+
+.follow-engine-picker__status button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent, #2f78c4);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
 }
 
 .game-picker__heading {
@@ -1392,7 +1594,8 @@ function rememberFollowedEngine(engineId: string): void {
 @media (max-width: 58rem) {
   .tournament-heading { align-items: stretch; flex-direction: column; }
   .tournament-heading__controls { justify-content: space-between; }
-  .tournament-heading__controls label { width: auto; min-width: 0; flex: 1; }
+  .tournament-heading__controls > label,
+  .follow-engine-picker { width: auto; min-width: 0; flex: 1; }
   .arena { grid-template-columns: 1fr; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
   .engine-column .game-facts { grid-column: 1 / -1; }
@@ -1402,7 +1605,8 @@ function rememberFollowedEngine(engineId: string): void {
 
 @media (max-width: 40rem) {
   .tournament-heading__controls { align-items: stretch; flex-direction: column-reverse; }
-  .tournament-heading__controls label { width: 100%; }
+  .tournament-heading__controls > label,
+  .follow-engine-picker { width: 100%; }
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }

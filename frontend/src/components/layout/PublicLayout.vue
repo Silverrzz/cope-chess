@@ -13,6 +13,7 @@ const compactGameLayout = computed(() => route.name === "tournament");
 const navItems = [
   { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
+  { label: "Engines", to: "/engines" },
 ] as const;
 
 function navActive(path: string): boolean {

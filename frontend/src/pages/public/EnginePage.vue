@@ -4,9 +4,17 @@ import { useRoute } from 'vue-router'
 
 import { api } from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
+import EngineGameFiltersModal from '@/components/public/EngineGameFiltersModal.vue'
 import GameTable from '@/components/public/GameTable.vue'
 import { errorMessage } from '@/components/public/format'
-import type { EngineRecord, GameRecord } from '@/components/public/types'
+import type {
+  EngineGameFilterOptions,
+  EngineGameFilters,
+  EngineRecord,
+  GameRecord,
+} from '@/components/public/types'
+import AppIcon from '@/components/ui/AppIcon.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
 
 interface EngineRecordSummary {
   wins: number
@@ -20,23 +28,18 @@ interface EngineResponse {
   games: GameRecord[]
   engines: Record<string, string>
   record: EngineRecordSummary
+  filter_options: EngineGameFilterOptions
 }
 
-type GameResultFilter = '' | 'win' | 'draw' | 'loss'
-
-const gameResultFilters: Array<{ value: GameResultFilter; label: string }> = [
-  { value: '', label: 'All' },
-  { value: 'win', label: 'Win' },
-  { value: 'draw', label: 'Draw' },
-  { value: 'loss', label: 'Loss' },
-]
+type FilterKey = keyof EngineGameFilters
 
 const route = useRoute()
 const data = ref<EngineResponse | null>(null)
 const loading = ref(true)
 const gamesLoading = ref(false)
 const loadError = ref('')
-const gameResultFilter = ref<GameResultFilter>('')
+const gameFilters = ref<EngineGameFilters>(emptyFilters())
+const filterModalOpen = ref(false)
 let controller: AbortController | null = null
 
 const engineId = computed(() => String(route.params.id || ''))
@@ -45,20 +48,73 @@ const scorePercent = computed(() => {
   return Math.round(((data.value.record.wins + data.value.record.draws * 0.5) / data.value.record.games) * 100)
 })
 const uciOptions = computed(() => Object.entries(data.value?.engine.uci_options || {}))
+const activeFilterCount = computed(() => Object.values(gameFilters.value).filter(Boolean).length)
+const pgnDownloadUrl = computed(() => {
+  const parameters = new URLSearchParams({ engine_id: engineId.value })
+  if (gameFilters.value.result) parameters.set('result', gameFilters.value.result)
+  if (gameFilters.value.timeControl) parameters.set('time_control', gameFilters.value.timeControl)
+  if (gameFilters.value.opponentId) parameters.set('opponent_id', gameFilters.value.opponentId)
+  if (gameFilters.value.side) parameters.set('side', gameFilters.value.side)
+  return `/api/pgn?${parameters.toString()}`
+})
+const pgnDownloadLabel = computed(() => activeFilterCount.value ? 'Download filtered PGN' : 'Download all PGNs')
+const activeFilterChips = computed<Array<{ key: FilterKey; label: string }>>(() => {
+  const chips: Array<{ key: FilterKey; label: string }> = []
+  const filters = gameFilters.value
+  if (filters.result) {
+    const labels = { win: 'Wins', draw: 'Draws', loss: 'Losses' }
+    chips.push({ key: 'result', label: `Result: ${labels[filters.result]}` })
+  }
+  if (filters.timeControl) {
+    const label = data.value?.filter_options.time_controls.find((item) => item.value === filters.timeControl)?.label
+    chips.push({ key: 'timeControl', label: `Time: ${label || 'Selected control'}` })
+  }
+  if (filters.opponentId) {
+    const name = data.value?.engines[filters.opponentId] || `Engine ${filters.opponentId}`
+    chips.push({ key: 'opponentId', label: `Opponent: ${name}` })
+  }
+  if (filters.side) {
+    chips.push({ key: 'side', label: `Playing as ${filters.side === 'white' ? 'White' : 'Black'}` })
+  }
+  return chips
+})
+const gamesDescription = computed(() => {
+  if (!data.value) return ''
+  if (!activeFilterCount.value) {
+    return `${data.value.record.games} completed game${data.value.record.games === 1 ? '' : 's'} in the full record.`
+  }
+  const shown = data.value.games.length
+  return `${shown === 50 ? 'Showing the 50 most recent matches' : `${shown} matching game${shown === 1 ? '' : 's'}`} from ${data.value.record.games} total.`
+})
 
 watch(engineId, () => {
   data.value = null
+  gameFilters.value = emptyFilters()
+  filterModalOpen.value = false
   void load()
 }, { immediate: true })
-watch(gameResultFilter, load)
 onBeforeUnmount(() => controller?.abort())
 
-function gameResultCount(filter: GameResultFilter): number {
-  if (!data.value) return 0
-  if (filter === 'win') return data.value.record.wins
-  if (filter === 'draw') return data.value.record.draws
-  if (filter === 'loss') return data.value.record.losses
-  return data.value.record.games
+function emptyFilters(): EngineGameFilters {
+  return { result: '', timeControl: '', opponentId: '', side: '' }
+}
+
+function applyFilters(filters: EngineGameFilters): void {
+  filterModalOpen.value = false
+  if (JSON.stringify(filters) === JSON.stringify(gameFilters.value)) return
+  gameFilters.value = filters
+  void load()
+}
+
+function clearFilters(): void {
+  if (!activeFilterCount.value) return
+  gameFilters.value = emptyFilters()
+  void load()
+}
+
+function removeFilter(key: FilterKey): void {
+  gameFilters.value = { ...gameFilters.value, [key]: '' }
+  void load()
 }
 
 async function load(): Promise<void> {
@@ -70,7 +126,12 @@ async function load(): Promise<void> {
   loadError.value = ''
   try {
     const response = await api.get<EngineResponse>(`/api/engines/${encodeURIComponent(engineId.value)}`, {
-      query: { result: gameResultFilter.value || undefined },
+      query: {
+        result: gameFilters.value.result || undefined,
+        time_control: gameFilters.value.timeControl || undefined,
+        opponent_id: gameFilters.value.opponentId || undefined,
+        side: gameFilters.value.side || undefined,
+      },
       signal: requestController.signal,
     })
     if (controller === requestController) data.value = response
@@ -96,7 +157,7 @@ async function load(): Promise<void> {
     <template v-else-if="data">
       <header class="engine-heading">
         <div>
-          <RouterLink class="back-link" to="/ratings">Back to ratings</RouterLink>
+          <RouterLink class="back-link" to="/engines">Back to engines</RouterLink>
           <h1>{{ data.engine.name }}</h1>
           <p v-if="data.engine.author">By {{ data.engine.author }}</p>
         </div>
@@ -146,27 +207,68 @@ async function load(): Promise<void> {
         <header>
           <div>
             <h2 id="engine-games-title">Recent games</h2>
-            <p>{{ data.record.games }} completed game{{ data.record.games === 1 ? '' : 's' }} in the recorded result.</p>
+            <p>{{ gamesDescription }}</p>
           </div>
-          <div class="game-result-filter" role="group" aria-label="Filter games by result">
-            <button
-              v-for="filter in gameResultFilters"
-              :key="filter.value"
-              class="game-result-filter__button"
-              :class="{ 'game-result-filter__button--active': gameResultFilter === filter.value }"
-              type="button"
-              :aria-pressed="gameResultFilter === filter.value"
-              :disabled="gamesLoading"
-              @click="gameResultFilter = filter.value"
+          <div class="games-panel__actions">
+            <BaseButton
+              :href="pgnDownloadUrl"
+              size="small"
+              :disabled="!data.record.games || (Boolean(activeFilterCount) && !data.games.length)"
+              download
             >
-              <span>{{ filter.label }}</span>
-              <strong>{{ gameResultCount(filter.value) }}</strong>
-            </button>
+              <template #icon><AppIcon name="download" :size="15" /></template>
+              {{ pgnDownloadLabel }}
+            </BaseButton>
+            <BaseButton
+              class="filter-trigger"
+              size="small"
+              :disabled="gamesLoading"
+              :aria-expanded="filterModalOpen"
+              aria-haspopup="dialog"
+              @click="filterModalOpen = true"
+            >
+              <template #icon><AppIcon name="filter" :size="15" /></template>
+              Filters
+              <template v-if="activeFilterCount" #trailing>
+                <span class="filter-trigger__count">{{ activeFilterCount }}</span>
+              </template>
+            </BaseButton>
           </div>
         </header>
-        <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" :show-round="false" caption="Recent games for this engine" />
-        <ContentState v-else kind="empty" compact :title="gameResultFilter ? `No ${gameResultFilter === 'loss' ? 'losses' : `${gameResultFilter}s`} found` : 'No games yet'" />
+
+        <div v-if="activeFilterChips.length" class="active-filters" aria-label="Active game filters">
+          <span>Filtered by</span>
+          <button
+            v-for="chip in activeFilterChips"
+            :key="chip.key"
+            type="button"
+            :aria-label="`Remove ${chip.label} filter`"
+            :disabled="gamesLoading"
+            @click="removeFilter(chip.key)"
+          >
+            {{ chip.label }}
+            <AppIcon name="close" :size="12" />
+          </button>
+          <button class="active-filters__clear" type="button" :disabled="gamesLoading" @click="clearFilters">Clear all</button>
+          <span v-if="gamesLoading" class="active-filters__loading" role="status">Updating…</span>
+        </div>
+
+        <div class="games-results" :class="{ 'games-results--loading': gamesLoading }" :aria-busy="gamesLoading">
+          <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" :show-round="false" caption="Recent games for this engine" />
+          <ContentState v-else kind="empty" compact :title="activeFilterCount ? 'No games match these filters' : 'No games yet'" />
+        </div>
       </section>
+
+      <EngineGameFiltersModal
+        :open="filterModalOpen"
+        :filters="gameFilters"
+        :options="data.filter_options"
+        :engines="data.engines"
+        :engine-id="engineId"
+        :record="data.record"
+        @close="filterModalOpen = false"
+        @apply="applyFilters"
+      />
     </template>
   </div>
 </template>
@@ -286,12 +388,92 @@ async function load(): Promise<void> {
 .panel h2 { font-size: 1rem; }
 .panel header p { margin-block-start: 0.2rem; color: var(--color-text-muted, #607080); font-size: 0.72rem; }
 .options-panel header > span { color: var(--color-text-muted, #607080); font-size: 0.72rem; }
-.game-result-filter { display: flex; gap: .25rem; }
-.game-result-filter__button { align-items: center; background: transparent; border: 1px solid transparent; border-radius: .4rem; color: var(--color-text-muted, #607080); cursor: pointer; display: flex; font: inherit; font-size: .7rem; gap: .35rem; padding: .35rem .5rem; }
-.game-result-filter__button:hover { background: var(--color-surface-subtle, #f1f5f9); color: var(--color-text, #17202a); }
-.game-result-filter__button--active { background: var(--color-surface-subtle, #f1f5f9); border-color: var(--color-border, #d5dbe1); color: var(--color-text, #17202a); }
-.game-result-filter__button:disabled { cursor: wait; opacity: .65; }
-.game-result-filter__button strong { font-size: .64rem; font-variant-numeric: tabular-nums; }
+
+.games-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.filter-trigger__count {
+  min-width: 1.3rem;
+  height: 1.3rem;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 3.1rem;
+  overflow-x: auto;
+  padding: 0.55rem 1rem;
+  border-block-end: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-accent-soft) 45%, var(--color-surface));
+  scrollbar-width: thin;
+}
+
+.active-filters > span:first-child {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: 0.67rem;
+  font-weight: 700;
+}
+
+.active-filters button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, var(--color-border));
+  border-radius: 999px;
+  background: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.active-filters button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.active-filters button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.active-filters .active-filters__clear {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-accent);
+}
+
+.active-filters .active-filters__loading {
+  margin-inline-start: auto;
+  color: var(--color-text-muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.games-results {
+  min-height: 4rem;
+  transition: opacity var(--transition-fast);
+}
+
+.games-results--loading {
+  opacity: 0.52;
+  pointer-events: none;
+}
 
 .build-details {
   display: grid;
@@ -344,6 +526,6 @@ async function load(): Promise<void> {
   .build-details { grid-template-columns: 1fr 1fr; }
   .build-details .detail-wide { grid-column: span 2; }
   .games-panel > header { align-items: stretch; flex-direction: column; }
-  .game-result-filter { overflow-x: auto; }
+  .games-panel__actions { align-items: stretch; flex-direction: column; }
 }
 </style>

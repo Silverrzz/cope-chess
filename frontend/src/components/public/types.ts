@@ -44,6 +44,21 @@ export interface GameRecord {
   finished_at?: string | null
 }
 
+export type EngineGameResultFilter = '' | 'win' | 'draw' | 'loss'
+export type EngineGameSideFilter = '' | 'white' | 'black'
+
+export interface EngineGameFilters {
+  result: EngineGameResultFilter
+  timeControl: string
+  opponentId: string
+  side: EngineGameSideFilter
+}
+
+export interface EngineGameFilterOptions {
+  opponent_ids: number[]
+  time_controls: Array<{ value: string; label: string }>
+}
+
 export interface MoveRecord {
   game_id?: Identifier
   ply: number

@@ -38,6 +38,12 @@ const router = createRouter({
           meta: { title: "Ratings" },
         },
         {
+          path: "engines",
+          name: "engines",
+          component: () => import("@/pages/public/EnginesPage.vue"),
+          meta: { title: "Engines" },
+        },
+        {
           path: "engines/:id",
           name: "engine",
           component: () => import("@/pages/public/EnginePage.vue"),

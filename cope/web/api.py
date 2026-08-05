@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
@@ -47,6 +47,7 @@ from cope.db import (
     delete_tournament,
     delete_worker,
     engine_game_count,
+    engine_game_filter_options,
     engine_build_is_benchmarked,
     engine_result_summary,
     forget_benchmarker,
@@ -126,6 +127,12 @@ from cope.engine_artifacts import (
     ARTIFACT_PLATFORM,
     sha256_file,
     validate_artifact_archive,
+)
+from cope.pgn import (
+    PgnExportFilters,
+    iter_pgn_export,
+    pgn_export_exists,
+    safe_pgn_filename,
 )
 from cope.web.engine_sources import (
     SourceServiceError,
@@ -914,23 +921,166 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
+    @app.get("/api/engines")
+    def public_engines(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engines = list_engine_records(connection)
+        engine_rows = [
+            {
+                "id": engine.id,
+                "engine_id": engine.engine_id,
+                "name": engine.name,
+                "author": engine.author,
+                "version": engine.version,
+                "repository_full_name": engine.repository_full_name,
+                "source_ref": engine.source_ref,
+                "source_kind": engine.source_kind,
+                "active": engine.active,
+                "created_at": engine.created_at,
+                "record": engine_result_summary(connection, engine.id),
+            }
+            for engine in engines
+        ]
+        completed_games = connection.execute(
+            "SELECT COUNT(*) AS count FROM games WHERE result IS NOT NULL"
+        ).fetchone()
+        return _json(
+            {
+                "engines": engine_rows,
+                "stats": {
+                    "families": len(list_engine_families(connection)),
+                    "versions": len(engines),
+                    "available": sum(1 for engine in engines if engine.active),
+                    "games": int(completed_games["count"]),
+                },
+            }
+        )
+
     @app.get("/api/engines/{engine_id}")
     def public_engine(
         engine_id: int,
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
+        time_control: str | None = Query(default=None, max_length=100),
+        opponent_id: int | None = Query(default=None, gt=0),
+        side: Literal["white", "black"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engine = get_engine_record(connection, engine_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
-        games = list_engine_games(connection, engine_id, result_filter=result)
+        games = list_engine_games(
+            connection,
+            engine_id,
+            result_filter=result,
+            time_control_filter=time_control,
+            opponent_id=opponent_id,
+            side_filter=side,
+        )
         return _json(
             {
                 "engine": engine,
                 "games": games,
                 "engines": web_app._engine_names(connection),
                 "record": engine_result_summary(connection, engine_id),
+                "filter_options": engine_game_filter_options(connection, engine_id),
             }
+        )
+
+    @app.get("/api/pgn")
+    def public_pgn_export(
+        request: Request,
+        game_id: int | None = Query(default=None, gt=0),
+        tournament_id: int | None = Query(default=None, gt=0),
+        engine_id: int | None = Query(default=None, gt=0),
+        opponent_id: int | None = Query(default=None, gt=0),
+        side: Literal["white", "black"] | None = Query(default=None),
+        result: Literal["win", "draw", "loss"] | None = Query(default=None),
+        time_control: str | None = Query(default=None, max_length=100),
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            filters = PgnExportFilters(
+                game_id=game_id,
+                tournament_id=tournament_id,
+                engine_id=engine_id,
+                opponent_engine_id=opponent_id,
+                color=side,
+                result=result,
+                time_control=time_control,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        tournament = None
+        if tournament_id is not None:
+            tournament = get_tournament(connection, tournament_id)
+            if tournament is None or tournament.status == "draft":
+                raise HTTPException(status_code=404, detail="Tournament not found.")
+
+        engine = None
+        if engine_id is not None:
+            engine = get_engine_record(connection, engine_id)
+            if engine is None:
+                raise HTTPException(status_code=404, detail="Engine not found.")
+        if opponent_id is not None and get_engine_record(connection, opponent_id) is None:
+            raise HTTPException(status_code=404, detail="Opponent engine not found.")
+
+        game = None
+        if game_id is not None:
+            game = get_game(connection, game_id)
+            if game is None:
+                raise HTTPException(status_code=404, detail="Game not found.")
+            game_tournament = get_tournament(connection, game.tournament_id)
+            if game_tournament is None or game_tournament.status == "draft":
+                raise HTTPException(status_code=404, detail="Game not found.")
+
+        if not pgn_export_exists(connection, filters):
+            raise HTTPException(
+                status_code=409,
+                detail="No completed games match these PGN filters.",
+            )
+
+        if game is not None:
+            filename = f"cope-game-{game.id}.pgn"
+        else:
+            filename_parts = []
+            if tournament is not None:
+                filename_parts.append(tournament.name)
+            if engine is not None:
+                filename_parts.append(f"{engine.name}-{engine.version}")
+            if result is not None:
+                filename_parts.append(
+                    {"win": "wins", "draw": "draws", "loss": "losses"}[result]
+                )
+            if opponent_id is not None:
+                filename_parts.append(f"versus-{opponent_id}")
+            if side is not None:
+                filename_parts.append(f"as-{side}")
+            if time_control is not None:
+                filename_parts.append("time-filtered")
+            filename = safe_pgn_filename(
+                "-".join(filename_parts) if filename_parts else "cope-all-games",
+                "cope-games",
+            )
+
+        database_url = request.app.state.db_path
+
+        def content():
+            export_connection = connect_database(database_url, check_same_thread=False)
+            try:
+                yield from iter_pgn_export(export_connection, filters)
+            finally:
+                export_connection.close()
+
+        return StreamingResponse(
+            content(),
+            media_type="application/x-chess-pgn; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/tournaments/{tournament_id}/chat")
@@ -955,27 +1105,6 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {"message": message},
             status_code=201,
-        )
-
-    @app.get("/api/games/{game_id}/pgn")
-    def public_game_pgn(
-        game_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        game = get_game(connection, game_id)
-        if game is None:
-            raise HTTPException(status_code=404, detail="Game not found.")
-        tournament = get_tournament(connection, game.tournament_id)
-        if tournament is None or tournament.status == "draft":
-            raise HTTPException(status_code=404, detail="Game not found.")
-        if game.status != "finished" or not game.pgn:
-            raise HTTPException(status_code=409, detail="PGN is not available until the game finishes.")
-        return Response(
-            content=game.pgn,
-            media_type="application/x-chess-pgn; charset=utf-8",
-            headers={
-                "Content-Disposition": f'attachment; filename="cope-game-{game.id}.pgn"',
-            },
         )
 
     # ------------------------------------------------------------------
@@ -1787,26 +1916,6 @@ def register_api_routes(app: FastAPI) -> None:
                     else "Those rating commits are already queued or applied."
                 )
             }
-        )
-
-    @app.get("/api/admin/tournaments/{tournament_id}/pgn")
-    def admin_tournament_pgn(
-        tournament_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        tournament = _require_tournament(connection, tournament_id)
-        pgns = [
-            game.pgn.strip()
-            for game in list_games(connection, tournament_id, include_pgn=True)
-            if game.pgn
-        ]
-        if not pgns:
-            raise HTTPException(status_code=409, detail="No completed game PGNs are available.")
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", tournament.name).strip("-") or f"tournament-{tournament_id}"
-        return Response(
-            content="\n\n".join(pgns) + "\n",
-            media_type="application/x-chess-pgn; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}.pgn"'},
         )
 
     @app.delete("/api/admin/tournaments/{tournament_id}")

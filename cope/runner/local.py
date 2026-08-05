@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 import secrets
 import sqlite3
@@ -11,7 +10,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import chess
-import chess.pgn
 
 from cope.chat import (
     announce_game_finished,
@@ -45,7 +43,6 @@ from cope.db import (
     connect_database,
     finish_game,
     get_engine,
-    get_engine_name,
     get_game,
     get_game_assignment,
     get_common_benchmark_reference,
@@ -84,6 +81,7 @@ from cope.tournament.game_runner import GameRunner
 from cope.version import app_version
 from cope.tournament.game_state import GameState
 from cope.tournament.time_control import RuntimeTimeControl, TimeControlCategory
+from cope.pgn import PgnGame, render_annotated_pgn
 from cope.tournament.tournament import Game
 
 
@@ -1361,29 +1359,31 @@ def _build_pgn(
     result: str,
     termination: str,
 ) -> str:
-    board = _starting_board(opening)
-    pgn_game = chess.pgn.Game()
-    if board.fen() != chess.STARTING_FEN:
-        pgn_game.setup(board)
-
-    pgn_game.headers["Event"] = tournament.name
-    pgn_game.headers["Round"] = str(game.round)
-    pgn_game.headers["White"] = get_engine_name(connection, game.white_engine_id)
-    pgn_game.headers["Black"] = get_engine_name(connection, game.black_engine_id)
-    pgn_game.headers["Result"] = result
-    pgn_game.headers["Termination"] = termination
-    if opening is not None and opening.name:
-        pgn_game.headers["Opening"] = opening.name
-
-    node = pgn_game
-    for move_record in moves:
-        move = chess.Move.from_uci(move_record.uci)
-        if move not in board.legal_moves:
-            break
-        node = node.add_variation(move)
-        board.push(move)
-
-    output = io.StringIO()
-    exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
-    print(pgn_game.accept(exporter), file=output)
-    return output.getvalue().strip()
+    white = get_engine(connection, game.white_engine_id)
+    black = get_engine(connection, game.black_engine_id)
+    return render_annotated_pgn(
+        PgnGame(
+            id=game.id,
+            tournament_id=tournament.id,
+            event=tournament.name,
+            round=game.round,
+            game_number=game.game_number,
+            white=(
+                " ".join((white.name, white.version))
+                if white is not None
+                else f"Engine {game.white_engine_id}"
+            ),
+            black=(
+                " ".join((black.name, black.version))
+                if black is not None
+                else f"Engine {game.black_engine_id}"
+            ),
+            result=result,
+            termination=termination,
+            opening=opening.name if opening is not None else None,
+            start_fen=opening.start_fen if opening is not None else None,
+            started_at=game.started_at,
+            time_control=tournament.config.time_control.model_dump(mode="json"),
+            moves=moves,
+        )
+    )

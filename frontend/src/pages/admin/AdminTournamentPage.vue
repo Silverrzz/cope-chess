@@ -419,7 +419,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
     <div v-if="loading" class="panel detail-loading" role="status">Loading tournament…</div>
     <template v-else-if="data">
       <AdminPageHeader :title="data.tournament.name" :description="`Created ${formatDate(data.tournament.created_at)}`">
-        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><a class="button button--secondary" :href="`/api/admin/tournaments/${id}/pgn`">Download tournament PGN</a><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
+        <template #actions><RouterLink class="button button--ghost" to="/admin/tournaments">All tournaments</RouterLink><a class="button button--secondary" :href="`/api/pgn?tournament_id=${encodeURIComponent(id)}`" download>Download tournament PGN</a><RouterLink class="button button--secondary" :to="`/tournaments/${id}`">Public page</RouterLink></template>
       </AdminPageHeader>
       <InlineFeedback :message="error" />
 
