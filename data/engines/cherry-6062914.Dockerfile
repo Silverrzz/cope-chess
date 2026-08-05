@@ -13,7 +13,7 @@ ADD --checksum=sha256:83b0c14fa69abd7a6e473290abb40a0c5315bb1fa6976d3e618e7743f6
 COPY . .
 
 ENV CARGO_TERM_COLOR=never \
-    RUSTFLAGS="-C target-cpu=x86-64-v3"
+    RUSTFLAGS="-C target-cpu=haswell"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
