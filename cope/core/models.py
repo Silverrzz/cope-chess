@@ -630,7 +630,7 @@ class BenchmarkFailed(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[13] = PROTOCOL_VERSION
+    v: Literal[14] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)
