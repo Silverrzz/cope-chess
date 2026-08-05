@@ -515,13 +515,20 @@ function handleChatSettings(event: Event): void {
 function applySnapshot(snapshot: LiveSnapshot): void {
   if (!data.value) return
   loadError.value = ''
+  const displayedGame = data.value.viewer_game
+  const selectedGameLeftActiveSet = Boolean(
+    displayedGame
+    && isActiveGame(displayedGame)
+    && sameId(displayedGame.id, selectedGameId.value)
+    && snapshot.active_games
+    && !snapshot.active_games.some((game) => sameId(game.id, displayedGame.id)),
+  )
   if (snapshot.tournament) data.value.tournament = { ...data.value.tournament, ...snapshot.tournament }
   if (snapshot.active_games) {
     data.value.active_games = snapshot.active_games
     data.value.games = updateGames(data.value.games, snapshot.active_games)
   }
 
-  const displayedGame = data.value.viewer_game
   const displayedGameUpdate = displayedGame
     ? data.value.games.find((game) => sameId(game.id, displayedGame.id))
     : undefined
@@ -558,6 +565,7 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   }
   if (snapshot.standings) data.value.standings = snapshot.standings
 
+  if (selectedGameLeftActiveSet) scheduleSnapshotRefresh()
   followNextGame(snapshot.game)
 }
 
@@ -587,7 +595,9 @@ function followNextGame(preferredGame?: GameRecord | null): void {
   const followedEngineGame = followedEngineId.value
     ? candidates.find(includesFollowedEngine)
     : undefined
-  const nextGame = followedEngineGame || mostRecentlyStartedGame(candidates)
+  const nextGame = followedEngineId.value
+    ? followedEngineGame
+    : mostRecentlyStartedGame(candidates)
   if (nextGame) void followLiveGame(nextGame.id)
 }
 

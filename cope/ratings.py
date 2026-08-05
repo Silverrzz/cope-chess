@@ -222,8 +222,14 @@ def recalculate_ratings(
         )
         ratings[rating_list_id] = category_ratings
         games_played[rating_list_id] = category_counts
+        rated_engine_ids = category_ratings.keys()
         history_rows = []
         for tournament_id, game, history_at in category_games:
+            if (
+                game.white_engine_id not in rated_engine_ids
+                or game.black_engine_id not in rated_engine_ids
+            ):
+                continue
             white_rating = category_ratings[game.white_engine_id]
             black_rating = category_ratings[game.black_engine_id]
             white_score = _white_score(game.result)
@@ -354,6 +360,17 @@ def _calculate_ratings_together(
     anchor_engine_id: int | None,
     anchor_elo: float,
 ) -> tuple[dict[int, float], dict[int, int]]:
+    original_engine_ids = {
+        engine_id
+        for game in games
+        for engine_id in (game.white_engine_id, game.black_engine_id)
+    }
+    if not original_engine_ids:
+        return {}, {}
+    if anchor_engine_id is not None and anchor_engine_id not in original_engine_ids:
+        raise RatingCommitError("the Elo anchor must be a participant in the rated games")
+
+    games = _calculable_games(games)
     engine_ids = sorted(
         {
             engine_id
@@ -363,8 +380,6 @@ def _calculate_ratings_together(
     )
     if not engine_ids:
         return {}, {}
-    if anchor_engine_id is not None and anchor_engine_id not in engine_ids:
-        raise RatingCommitError("the Elo anchor must be a participant in the rated games")
 
     engine_indices = {engine_id: index for index, engine_id in enumerate(engine_ids)}
     ratings = [0.0] * len(engine_ids)
@@ -386,7 +401,14 @@ def _calculate_ratings_together(
         )
         pair_counts[pair] = pair_counts.get(pair, 0) + 1
 
-    fixed_index = engine_indices[anchor_engine_id] if anchor_engine_id is not None else 0
+    effective_anchor_engine_id = (
+        anchor_engine_id if anchor_engine_id in engine_indices else None
+    )
+    fixed_index = (
+        engine_indices[effective_anchor_engine_id]
+        if effective_anchor_engine_id is not None
+        else 0
+    )
     adjustable_indices = tuple(
         index for index in range(len(engine_ids)) if index != fixed_index
     )
@@ -430,7 +452,7 @@ def _calculate_ratings_together(
     else:
         raise RatingCommitError("the tournament results did not produce stable Elo ratings")
 
-    if anchor_engine_id is None:
+    if effective_anchor_engine_id is None:
         offset = DEFAULT_ELO - sum(ratings) / len(ratings)
     else:
         offset = anchor_elo - ratings[fixed_index]
@@ -444,6 +466,41 @@ def _calculate_ratings_together(
             for index, engine_id in enumerate(engine_ids)
         },
     )
+
+
+def _calculable_games(games: tuple) -> tuple:
+    remaining = games
+    while remaining:
+        scores: dict[int, float] = {}
+        game_counts: dict[int, int] = {}
+        for game in remaining:
+            white_score = _white_score(game.result)
+            scores[game.white_engine_id] = (
+                scores.get(game.white_engine_id, 0.0) + white_score
+            )
+            scores[game.black_engine_id] = (
+                scores.get(game.black_engine_id, 0.0) + 1.0 - white_score
+            )
+            game_counts[game.white_engine_id] = (
+                game_counts.get(game.white_engine_id, 0) + 1
+            )
+            game_counts[game.black_engine_id] = (
+                game_counts.get(game.black_engine_id, 0) + 1
+            )
+        excluded = {
+            engine_id
+            for engine_id, score in scores.items()
+            if score == 0.0 or score == game_counts[engine_id]
+        }
+        if not excluded:
+            return remaining
+        remaining = tuple(
+            game
+            for game in remaining
+            if game.white_engine_id not in excluded
+            and game.black_engine_id not in excluded
+        )
+    return ()
 
 
 def _history_row(
