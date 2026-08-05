@@ -23,6 +23,15 @@ interface TournamentListItem {
 }
 interface Response { tournaments: TournamentListItem[]; status_filter?: string | null; statuses: string[] }
 
+const tournamentStatusOrder: Record<string, number> = {
+  running: 0,
+  paused: 1,
+  scheduled: 2,
+  draft: 2,
+  finished: 3,
+  aborted: 3,
+}
+
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
@@ -37,11 +46,12 @@ const status = computed(() => typeof route.query.status === 'string' ? route.que
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
   const tournaments = [...(data.value?.tournaments ?? [])].sort((left, right) => {
+    const statusDifference = (tournamentStatusOrder[left.record.status] ?? Number.MAX_SAFE_INTEGER)
+      - (tournamentStatusOrder[right.record.status] ?? Number.MAX_SAFE_INTEGER)
+    if (statusDifference !== 0) return statusDifference
     if (left.record.status === 'scheduled' && right.record.status === 'scheduled') {
       return new Date(left.record.scheduled_start_at || 0).getTime() - new Date(right.record.scheduled_start_at || 0).getTime()
     }
-    if (left.record.status === 'scheduled') return -1
-    if (right.record.status === 'scheduled') return 1
     return 0
   })
   if (!needle) return tournaments

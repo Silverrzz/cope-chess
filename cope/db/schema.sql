@@ -238,12 +238,31 @@ CREATE TABLE IF NOT EXISTS worker_failures (
   occurred_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS worker_resource_samples (
+  id BIGSERIAL PRIMARY KEY,
+  worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  sampled_at TEXT NOT NULL,
+  cpu_percent REAL NOT NULL CHECK (cpu_percent >= 0 AND cpu_percent <= 100),
+  memory_used_mb REAL NOT NULL CHECK (memory_used_mb >= 0),
+  memory_total_mb REAL NOT NULL CHECK (memory_total_mb > 0),
+  memory_available_mb REAL NOT NULL CHECK (memory_available_mb >= 0),
+  coordinator_cpu_cores REAL NOT NULL CHECK (coordinator_cpu_cores >= 0),
+  coordinator_memory_mb REAL NOT NULL CHECK (coordinator_memory_mb >= 0),
+  engine_cpu_cores REAL NOT NULL CHECK (engine_cpu_cores >= 0),
+  engine_memory_mb REAL NOT NULL CHECK (engine_memory_mb >= 0),
+  disk_used_mb REAL NOT NULL CHECK (disk_used_mb >= 0),
+  disk_free_mb REAL NOT NULL CHECK (disk_free_mb >= 0),
+  disk_total_mb REAL NOT NULL CHECK (disk_total_mb > 0)
+);
+
 ALTER TABLE worker_failures DROP CONSTRAINT IF EXISTS worker_failures_stage_check;
 
 CREATE INDEX IF NOT EXISTS idx_worker_failures_worker_time
   ON worker_failures(worker_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_worker_failures_machine_time
   ON worker_failures(machine_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_resource_samples_worker_time
+  ON worker_resource_samples(worker_id, sampled_at DESC, id DESC);
 
 DO $$
 BEGIN
@@ -627,7 +646,7 @@ CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 29)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 30)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

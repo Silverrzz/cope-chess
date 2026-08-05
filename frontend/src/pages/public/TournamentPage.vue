@@ -39,6 +39,7 @@ import type {
 
 type TabKey = 'standings' | 'games' | 'settings'
 type StreamState = 'connecting' | 'live' | 'reconnecting' | 'closed'
+type FollowState = 'off' | 'live' | 'preparing' | 'fallback' | 'waiting'
 
 interface ClockRuntime {
   activeSide: 'white' | 'black' | null
@@ -104,8 +105,8 @@ let streamKey = ''
 let refreshTimer: number | undefined
 let clockFrame: number | undefined
 let arenaFitFrame: number | undefined
-let skipNextRouteLoad = false
-let awaitingNextLiveAfterGameId = ''
+let preloadedGameNavigationId = ''
+let pendingGameNavigationId = ''
 let headingResizeObserver: ResizeObserver | null = null
 let viewportBeforeUpdate: ViewportPosition | null = null
 
@@ -133,6 +134,20 @@ const followedEngineId = computed({
     : '',
   set: rememberFollowedEngine,
 })
+const followState = computed<FollowState>(() => {
+  if (!followedEngineId.value) return 'off'
+  const current = viewerGames.value.find((game) => sameId(game.id, selectedGameId.value))
+  if (!current) return viewerGames.value.length ? 'fallback' : 'waiting'
+  if (!gameIncludesEngine(current, followedEngineId.value)) return 'fallback'
+  return current.status === 'live' ? 'live' : 'preparing'
+})
+const followStateLabel = computed(() => ({
+  off: '',
+  live: 'Following live',
+  preparing: 'Following next',
+  fallback: 'Watching fallback',
+  waiting: 'Waiting for game',
+})[followState.value])
 const gameTotal = computed(() => data.value?.game_pagination.total || 0)
 const gamePages = computed(() => data.value?.game_pagination.pages || 1)
 const pickerGameId = computed(() => {
@@ -206,14 +221,17 @@ const activeSide = computed<'white' | 'black' | null>(() => {
 watch(
   () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}`,
   () => {
-    if (awaitingNextLiveAfterGameId && routeGameId.value !== awaitingNextLiveAfterGameId) {
-      awaitingNextLiveAfterGameId = ''
-    }
-    if (skipNextRouteLoad) {
-      skipNextRouteLoad = false
+    if (pendingGameNavigationId && routeGameId.value === pendingGameNavigationId) pendingGameNavigationId = ''
+    if (
+      preloadedGameNavigationId
+      && routeGameId.value === preloadedGameNavigationId
+      && sameId(data.value?.viewer_game?.id, preloadedGameNavigationId)
+    ) {
+      preloadedGameNavigationId = ''
       connectStream()
       return
     }
+    preloadedGameNavigationId = ''
     void loadDetail(false)
   },
   { immediate: true },
@@ -226,7 +244,7 @@ watch(() => data.value?.tournament.name, (name) => {
 watch(loadError, () => scheduleArenaFit(), { flush: 'post' })
 
 watch(followedEngineId, () => {
-  followNextGame()
+  reconcileFollowedGame()
 })
 
 watch(headingElement, (next, previous) => {
@@ -336,13 +354,16 @@ async function loadDetail(background: boolean): Promise<void> {
     applyDetail(response)
     loadError.value = ''
 
-    if (!routeGameId.value && response.viewer_game) {
-      skipNextRouteLoad = true
-      await router.replace({
-        query: { ...route.query, game_id: String(response.viewer_game.id) },
-      })
+    if (!routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
+      const preloadedGameId = String(response.viewer_game.id)
+      preloadedGameNavigationId = preloadedGameId
+      try {
+        await router.replace({ query: { ...route.query, game_id: preloadedGameId } })
+      } finally {
+        if (routeGameId.value !== preloadedGameId) preloadedGameNavigationId = ''
+      }
     }
-    connectStream()
+    if (!pendingGameNavigationId) connectStream()
   } catch (error) {
     if ((error as { name?: string })?.name !== 'AbortError') {
       loadError.value = errorMessage(error, 'This tournament could not be loaded.')
@@ -353,22 +374,12 @@ async function loadDetail(background: boolean): Promise<void> {
 }
 
 function applyDetail(response: TournamentDetailResponse): void {
-  const previousViewerGame = data.value?.viewer_game
-  const previousGame = previousViewerGame?.id
+  const previousGame = data.value?.viewer_game?.id
   const previousLength = data.value?.viewer_moves.length || 0
   const followedLatest = selectedPly.value >= previousLength
   const existingMessages = data.value?.chat_messages || []
   response.chat_messages = mergeMessages(response.chat_messages || [], existingMessages)
   data.value = response
-
-  if (
-    isActiveGame(previousViewerGame)
-    && response.viewer_game?.status === 'finished'
-    && sameId(previousViewerGame.id, response.viewer_game.id)
-    && sameId(previousViewerGame.id, selectedGameId.value)
-  ) {
-    startGameHandoff(previousViewerGame.id)
-  }
 
   if (String(previousGame ?? '') !== String(response.viewer_game?.id ?? '') || followedLatest) {
     selectedPly.value = response.viewer_moves.length
@@ -386,7 +397,7 @@ function applyDetail(response: TournamentDetailResponse): void {
     stopClock()
   }
 
-  followNextGame()
+  reconcileFollowedGame()
 }
 
 function connectStream(): void {
@@ -532,17 +543,6 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   const displayedGameUpdate = displayedGame
     ? data.value.games.find((game) => sameId(game.id, displayedGame.id))
     : undefined
-  const selectedGameUpdate = displayedGame && sameId(snapshot.game?.id, displayedGame.id)
-    ? snapshot.game
-    : displayedGameUpdate
-  if (
-    isActiveGame(displayedGame)
-    && selectedGameUpdate?.status === 'finished'
-    && sameId(displayedGame.id, selectedGameId.value)
-  ) {
-    startGameHandoff(displayedGame.id)
-  }
-
   if (snapshot.game && sameId(snapshot.game.id, selectedGameId.value)) {
     data.value.viewer_game = { ...(data.value.viewer_game || {}), ...snapshot.game } as GameRecord
     if (snapshot.moves) {
@@ -566,54 +566,67 @@ function applySnapshot(snapshot: LiveSnapshot): void {
   if (snapshot.standings) data.value.standings = snapshot.standings
 
   if (selectedGameLeftActiveSet) scheduleSnapshotRefresh()
-  followNextGame(snapshot.game)
+  reconcileFollowedGame()
 }
 
 function isActiveGame(game: GameRecord | null | undefined): game is GameRecord {
   return game?.status === 'assigned' || game?.status === 'live'
 }
 
-function startGameHandoff(gameId: Identifier): void {
-  awaitingNextLiveAfterGameId = String(gameId)
-}
-
-function includesFollowedEngine(game: GameRecord): boolean {
-  return Boolean(followedEngineId.value) && (
-    sameId(game.white_engine_id, followedEngineId.value)
-    || sameId(game.black_engine_id, followedEngineId.value)
+function gameIncludesEngine(game: GameRecord, engineId: Identifier): boolean {
+  return (
+    sameId(game.white_engine_id, engineId)
+    || sameId(game.black_engine_id, engineId)
   )
 }
 
-function followNextGame(preferredGame?: GameRecord | null): void {
-  if (!data.value || !awaitingNextLiveAfterGameId) return
-  if (routeGameId.value !== awaitingNextLiveAfterGameId) return
-
-  const candidates = [preferredGame, ...data.value.active_games]
+function reconcileFollowedGame(): void {
+  if (!data.value || !followedEngineId.value || pendingGameNavigationId) return
+  const activeGames = data.value.active_games
     .filter((game): game is GameRecord => isActiveGame(game))
-    .filter((game, index, games) => !sameId(game.id, awaitingNextLiveAfterGameId)
-      && games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
-  const followedEngineGame = followedEngineId.value
-    ? candidates.find(includesFollowedEngine)
-    : undefined
-  const nextGame = followedEngineId.value
-    ? followedEngineGame
-    : mostRecentlyStartedGame(candidates)
-  if (nextGame) void followLiveGame(nextGame.id)
+    .filter((game, index, games) => games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
+  const currentGame = activeGames.find((game) => sameId(game.id, selectedGameId.value))
+  const followedGames = activeGames.filter((game) => gameIncludesEngine(game, followedEngineId.value))
+  const liveFollowedGame = preferredActiveGame(followedGames.filter((game) => game.status === 'live'))
+
+  let targetGame: GameRecord | undefined
+  if (currentGame && gameIncludesEngine(currentGame, followedEngineId.value)) {
+    targetGame = currentGame.status === 'live' ? currentGame : liveFollowedGame || currentGame
+  } else {
+    targetGame = liveFollowedGame || preferredActiveGame(followedGames) || currentGame || preferredActiveGame(activeGames)
+  }
+
+  if (targetGame && !sameId(targetGame.id, selectedGameId.value)) void navigateToGame(targetGame.id, true)
 }
 
-function mostRecentlyStartedGame(games: GameRecord[]): GameRecord | undefined {
-  return games.reduce<GameRecord | undefined>((latest, game) => {
-    if (game.status !== 'live') return latest
-    const startedAt = Date.parse(game.started_at || '')
-    if (!Number.isFinite(startedAt)) return latest
-    if (!latest || startedAt > Date.parse(latest.started_at || '')) return game
-    return latest
-  }, undefined)
+function preferredActiveGame(games: GameRecord[]): GameRecord | undefined {
+  return games.reduce<GameRecord | undefined>((preferred, game) => (
+    !preferred || compareActiveGames(game, preferred) > 0 ? game : preferred
+  ), undefined)
 }
 
-async function followLiveGame(gameId: Identifier): Promise<void> {
-  awaitingNextLiveAfterGameId = ''
-  await router.replace({ query: { ...route.query, game_id: String(gameId) } })
+function compareActiveGames(left: GameRecord, right: GameRecord): number {
+  const statusDifference = Number(left.status === 'live') - Number(right.status === 'live')
+  if (statusDifference) return statusDifference
+  const leftStartedAt = Date.parse(left.started_at || '')
+  const rightStartedAt = Date.parse(right.started_at || '')
+  const timeDifference = (Number.isFinite(leftStartedAt) ? leftStartedAt : 0)
+    - (Number.isFinite(rightStartedAt) ? rightStartedAt : 0)
+  if (timeDifference) return timeDifference
+  return String(left.id).localeCompare(String(right.id), undefined, { numeric: true })
+}
+
+async function navigateToGame(gameId: Identifier, replace: boolean): Promise<void> {
+  const targetId = String(gameId)
+  if (targetId === routeGameId.value) return
+  pendingGameNavigationId = targetId
+  try {
+    const location = { query: { ...route.query, game_id: targetId } }
+    if (replace) await router.replace(location)
+    else await router.push(location)
+  } finally {
+    if (pendingGameNavigationId === targetId && routeGameId.value !== targetId) pendingGameNavigationId = ''
+  }
 }
 
 function scheduleSnapshotRefresh(): void {
@@ -728,7 +741,7 @@ function samePosition(left: string | null | undefined, right: string): boolean {
 function selectGame(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (!value || value === selectedGameId.value) return
-  void router.push({ query: { ...route.query, game_id: value } })
+  void navigateToGame(value, false)
 }
 
 function gameLabel(game: GameRecord): string {
@@ -862,9 +875,12 @@ function rememberFollowedEngine(engineId: string): void {
             </select>
           </label>
           <label v-if="participantEngines.length" class="follow-engine-picker">
-            <span>Follow Engine</span>
+            <span class="follow-engine-picker__heading">
+              <span>Follow engine</span>
+              <span v-if="followStateLabel" class="follow-engine-picker__state" :data-state="followState">{{ followStateLabel }}</span>
+            </span>
             <select v-model="followedEngineId">
-              <option value="">Dont Follow</option>
+              <option value="">Don't follow</option>
               <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }}</option>
             </select>
           </label>
@@ -1104,7 +1120,31 @@ function rememberFollowedEngine(engineId: string): void {
 }
 
 .follow-engine-picker {
-  width: clamp(10rem, 15vw, 14rem);
+  width: clamp(13rem, 19vw, 18rem);
+}
+
+.follow-engine-picker__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.follow-engine-picker__state {
+  overflow: hidden;
+  color: var(--color-text-muted, #607080);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.follow-engine-picker__state[data-state='live'] {
+  color: var(--color-success, #218739);
+}
+
+.follow-engine-picker__state[data-state='fallback'],
+.follow-engine-picker__state[data-state='waiting'] {
+  color: var(--color-warning, #a15c00);
 }
 
 .game-picker__heading {

@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 13
+PROTOCOL_VERSION = 14
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
@@ -27,6 +27,20 @@ class WorkerResources(StrictModel):
 
     def can_run(self, required: WorkerResources) -> bool:
         return self.threads >= required.threads and self.hash_mb >= required.hash_mb
+
+
+class WorkerResourceTelemetry(StrictModel):
+    cpu_percent: float = Field(ge=0, le=100, allow_inf_nan=False)
+    memory_used_mb: float = Field(ge=0, allow_inf_nan=False)
+    memory_total_mb: float = Field(gt=0, allow_inf_nan=False)
+    memory_available_mb: float = Field(ge=0, allow_inf_nan=False)
+    coordinator_cpu_cores: float = Field(ge=0, allow_inf_nan=False)
+    coordinator_memory_mb: float = Field(ge=0, allow_inf_nan=False)
+    engine_cpu_cores: float = Field(ge=0, allow_inf_nan=False)
+    engine_memory_mb: float = Field(ge=0, allow_inf_nan=False)
+    disk_used_mb: float = Field(ge=0, allow_inf_nan=False)
+    disk_free_mb: float = Field(ge=0, allow_inf_nan=False)
+    disk_total_mb: float = Field(gt=0, allow_inf_nan=False)
 
 
 class TimeControlCategory(StrEnum):

@@ -16,6 +16,7 @@ from cope.core.models import (
     HardwareInfo,
     OpeningLine,
     TournamentConfig,
+    WorkerResourceTelemetry,
     WorkerResources,
     worker_memory_capacity_mb,
 )
@@ -179,6 +180,24 @@ class WorkerFailureRecord:
     stage: str
     error: str
     occurred_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerResourceSampleRecord:
+    id: int
+    worker_id: int
+    sampled_at: str
+    cpu_percent: float
+    memory_used_mb: float
+    memory_total_mb: float
+    memory_available_mb: float
+    coordinator_cpu_cores: float
+    coordinator_memory_mb: float
+    engine_cpu_cores: float
+    engine_memory_mb: float
+    disk_used_mb: float
+    disk_free_mb: float
+    disk_total_mb: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -2473,6 +2492,94 @@ def list_worker_failures(
             occurred_at=row["occurred_at"],
         )
         for row in rows
+    )
+
+
+def record_worker_resource_sample(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    session_id: str,
+    telemetry: WorkerResourceTelemetry,
+) -> bool:
+    sampled_at = utc_now()
+    cursor = connection.execute(
+        """
+        INSERT INTO worker_resource_samples (
+          worker_id, sampled_at, cpu_percent, memory_used_mb, memory_total_mb,
+          memory_available_mb, coordinator_cpu_cores, coordinator_memory_mb,
+          engine_cpu_cores, engine_memory_mb, disk_used_mb, disk_free_mb,
+          disk_total_mb
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM workers
+          WHERE id = ? AND session_id = ?
+            AND status IN ('connected', 'downloading', 'ready', 'busy')
+        )
+        """,
+        (
+            worker_id,
+            sampled_at,
+            telemetry.cpu_percent,
+            telemetry.memory_used_mb,
+            telemetry.memory_total_mb,
+            telemetry.memory_available_mb,
+            telemetry.coordinator_cpu_cores,
+            telemetry.coordinator_memory_mb,
+            telemetry.engine_cpu_cores,
+            telemetry.engine_memory_mb,
+            telemetry.disk_used_mb,
+            telemetry.disk_free_mb,
+            telemetry.disk_total_mb,
+            worker_id,
+            session_id,
+        ),
+    )
+    if cursor.rowcount != 1:
+        return False
+    retention_start = (utc_now_datetime() - timedelta(hours=1)).isoformat(
+        timespec="seconds"
+    )
+    connection.execute(
+        "DELETE FROM worker_resource_samples WHERE worker_id = ? AND sampled_at < ?",
+        (worker_id, retention_start),
+    )
+    return True
+
+
+def list_worker_resource_samples(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    *,
+    limit: int = 120,
+) -> tuple[WorkerResourceSampleRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT * FROM worker_resource_samples
+        WHERE worker_id = ?
+        ORDER BY sampled_at DESC, id DESC
+        LIMIT ?
+        """,
+        (worker_id, max(1, min(limit, 720))),
+    ).fetchall()
+    return tuple(
+        WorkerResourceSampleRecord(
+            id=row["id"],
+            worker_id=row["worker_id"],
+            sampled_at=row["sampled_at"],
+            cpu_percent=float(row["cpu_percent"]),
+            memory_used_mb=float(row["memory_used_mb"]),
+            memory_total_mb=float(row["memory_total_mb"]),
+            memory_available_mb=float(row["memory_available_mb"]),
+            coordinator_cpu_cores=float(row["coordinator_cpu_cores"]),
+            coordinator_memory_mb=float(row["coordinator_memory_mb"]),
+            engine_cpu_cores=float(row["engine_cpu_cores"]),
+            engine_memory_mb=float(row["engine_memory_mb"]),
+            disk_used_mb=float(row["disk_used_mb"]),
+            disk_free_mb=float(row["disk_free_mb"]),
+            disk_total_mb=float(row["disk_total_mb"]),
+        )
+        for row in reversed(rows)
     )
 
 

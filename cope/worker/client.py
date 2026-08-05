@@ -35,6 +35,7 @@ from cope.core.models import (
     EngineStop,
     HardwareInfo,
     WorkerGameAssignment,
+    WorkerResourceTelemetry,
     WorkerSessionHello,
     WorkerTokenHello,
     WorkerUpdateCommand,
@@ -66,6 +67,7 @@ ENGINE_CLOCK_SEND_INTERVAL_S = 0.5
 ENGINE_BENCHMARK_CONCURRENCY = 2
 TELEMETRY_BATCH_INTERVAL_S = 0.25
 TELEMETRY_BATCH_MAX_MESSAGES = 128
+RESOURCE_TELEMETRY_INTERVAL_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,118 @@ class _WorkerTelemetryBatcher:
                 {"messages": messages[offset : offset + TELEMETRY_BATCH_MAX_MESSAGES]},
                 lock=self._send_lock,
             )
+
+
+class _WorkerResourceSampler:
+    def __init__(self) -> None:
+        import psutil
+
+        self._psutil = psutil
+        self._process = psutil.Process()
+        self._children: dict[int, Any] = {}
+        self._cpu_ids = _process_cpu_ids()
+        psutil.cpu_percent(percpu=True)
+        self._process.cpu_percent()
+
+    def sample(self) -> WorkerResourceTelemetry:
+        per_cpu = self._psutil.cpu_percent(percpu=True)
+        visible_cpu = [
+            value
+            for index, value in enumerate(per_cpu)
+            if self._cpu_ids is None or index in self._cpu_ids
+        ]
+        cpu_percent = sum(visible_cpu) / len(visible_cpu) if visible_cpu else 0.0
+
+        virtual_memory = self._psutil.virtual_memory()
+        memory_total = float(virtual_memory.total)
+        memory_used = float(virtual_memory.used)
+        memory_available = float(virtual_memory.available)
+        cgroup_limit = _linux_memory_limit_bytes()
+        cgroup_used = _linux_memory_used_bytes()
+        if (
+            cgroup_limit is not None
+            and cgroup_used is not None
+            and cgroup_limit < memory_total
+        ):
+            memory_total = float(cgroup_limit)
+            memory_used = float(min(cgroup_used, cgroup_limit))
+            memory_available = max(0.0, memory_total - memory_used)
+
+        active_children = {}
+        with contextlib.suppress(Exception):
+            for child in self._process.children(recursive=True):
+                process = self._children.get(child.pid, child)
+                active_children[child.pid] = process
+        self._children = active_children
+
+        coordinator_cpu = 0.0
+        coordinator_memory = 0.0
+        with contextlib.suppress(Exception):
+            coordinator_cpu = self._process.cpu_percent() / 100.0
+            coordinator_memory = float(self._process.memory_info().rss)
+
+        engine_cpu = 0.0
+        engine_memory = 0.0
+        for child in self._children.values():
+            with contextlib.suppress(Exception):
+                engine_cpu += child.cpu_percent() / 100.0
+                engine_memory += float(child.memory_info().rss)
+
+        disk = self._psutil.disk_usage(str(Path.cwd()))
+        mb = float(1024**2)
+        return WorkerResourceTelemetry(
+            cpu_percent=round(cpu_percent, 3),
+            memory_used_mb=round(memory_used / mb, 3),
+            memory_total_mb=round(memory_total / mb, 3),
+            memory_available_mb=round(memory_available / mb, 3),
+            coordinator_cpu_cores=round(coordinator_cpu, 4),
+            coordinator_memory_mb=round(coordinator_memory / mb, 3),
+            engine_cpu_cores=round(engine_cpu, 4),
+            engine_memory_mb=round(engine_memory / mb, 3),
+            disk_used_mb=round(float(disk.used) / mb, 3),
+            disk_free_mb=round(float(disk.free) / mb, 3),
+            disk_total_mb=round(float(disk.total) / mb, 3),
+        )
+
+
+class _WorkerResourceTelemetryPublisher:
+    def __init__(self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future) -> None:
+        self._websocket = websocket
+        self._send_lock = send_lock
+        self._sampler = _WorkerResourceSampler()
+        self._closing = False
+        self._task = asyncio.create_task(self._run(), name="worker-resource-telemetry")
+
+        def completed(task: asyncio.Task) -> None:
+            if task.cancelled() or fatal.done() or self._closing:
+                return
+            error = task.exception()
+            if error is not None:
+                fatal.set_exception(error)
+
+        self._task.add_done_callback(completed)
+
+    async def close(self) -> None:
+        self._closing = True
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                telemetry = await asyncio.to_thread(self._sampler.sample)
+            except Exception as error:
+                LOG.warning("worker resource sampling failed: %s", error)
+                await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
+                continue
+            await _send_message(
+                self._websocket,
+                "worker_resource_telemetry",
+                telemetry,
+                lock=self._send_lock,
+            )
+            await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
@@ -425,6 +539,15 @@ async def _serve_assignments(
     benchmark_cache = _EngineBenchmarkCache()
     fatal = asyncio.get_running_loop().create_future()
     telemetry = _WorkerTelemetryBatcher(websocket, send_lock, fatal)
+    resource_telemetry: _WorkerResourceTelemetryPublisher | None = None
+    try:
+        resource_telemetry = _WorkerResourceTelemetryPublisher(
+            websocket,
+            send_lock,
+            fatal,
+        )
+    except Exception as error:
+        LOG.warning("worker resource telemetry is unavailable: %s", error)
 
     def assignment_done(assignment_id: int, task: asyncio.Task) -> None:
         tasks.pop(assignment_id, None)
@@ -458,6 +581,9 @@ async def _serve_assignments(
         await asyncio.gather(*active_tasks, return_exceptions=True)
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await telemetry.close()
+        if resource_telemetry is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await resource_telemetry.close()
         if fatal.done():
             with contextlib.suppress(Exception):
                 fatal.exception()
@@ -1332,6 +1458,7 @@ async def _send_message(
             "engine_command_started",
             "engine_info",
             "worker_telemetry_batch",
+            "worker_resource_telemetry",
         }
         else LOG.info
     )
@@ -1562,6 +1689,24 @@ def _linux_memory_limit_bytes() -> int | None:
         if 0 < limit < 1 << 60:
             limits.append(limit)
     return min(limits) if limits else None
+
+
+def _linux_memory_used_bytes() -> int | None:
+    if sys.platform != "linux":
+        return None
+    paths = (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory.usage_in_bytes"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    )
+    for path in paths:
+        try:
+            value = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return None
 
 
 def _process_cpu_ids() -> set[int] | None:

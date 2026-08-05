@@ -63,10 +63,11 @@ from cope.db import (
     list_worker_tournament_ids,
     list_workers,
     list_worker_failures,
+    list_worker_resource_samples,
     list_worker_activities,
     touch_service_heartbeat,
 )
-from cope.core.models import HardwareInfo, TournamentFormat
+from cope.core.models import ENGINE_PROCESS_MEMORY_OVERHEAD_MB, HardwareInfo, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
     StreamProtocolError,
@@ -1495,6 +1496,82 @@ def _worker_record_payload(worker) -> dict[str, Any]:
     }
 
 
+def _worker_resource_sample_payload(sample) -> dict[str, Any]:
+    return {
+        "sampled_at": sample.sampled_at,
+        "cpu_percent": sample.cpu_percent,
+        "memory_used_mb": sample.memory_used_mb,
+        "memory_total_mb": sample.memory_total_mb,
+        "memory_available_mb": sample.memory_available_mb,
+        "coordinator_cpu_cores": sample.coordinator_cpu_cores,
+        "coordinator_memory_mb": sample.coordinator_memory_mb,
+        "engine_cpu_cores": sample.engine_cpu_cores,
+        "engine_memory_mb": sample.engine_memory_mb,
+        "disk_used_mb": sample.disk_used_mb,
+        "disk_free_mb": sample.disk_free_mb,
+        "disk_total_mb": sample.disk_total_mb,
+    }
+
+
+def _worker_allocations_payload(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+          assignment.id AS assignment_id,
+          assignment.status,
+          game.id AS game_id,
+          game.white_engine_id,
+          game.black_engine_id,
+          tournament.id AS tournament_id,
+          tournament.name AS tournament_name
+        FROM game_assignments assignment
+        JOIN games game ON game.id = assignment.game_id
+        JOIN tournaments tournament ON tournament.id = game.tournament_id
+        WHERE assignment.worker_id = ?
+          AND assignment.status IN ('assigned', 'acked', 'live')
+        ORDER BY assignment.sent_at, assignment.id
+        """,
+        (worker_id,),
+    ).fetchall()
+    engine_names = _engine_names(connection)
+    tournaments: dict[int, TournamentRecord | None] = {}
+    allocations = []
+    for row in rows:
+        tournament_id = int(row["tournament_id"])
+        if tournament_id not in tournaments:
+            tournaments[tournament_id] = get_tournament(connection, tournament_id)
+        tournament = tournaments[tournament_id]
+        if tournament is None:
+            continue
+        engine_hash_mb = tournament.config.engine_hash_mb * 2
+        process_memory_mb = ENGINE_PROCESS_MEMORY_OVERHEAD_MB * 2
+        allocations.append(
+            {
+                "assignment_id": int(row["assignment_id"]),
+                "game_id": int(row["game_id"]),
+                "status": row["status"],
+                "tournament_id": tournament_id,
+                "tournament_name": row["tournament_name"],
+                "white_engine": engine_names.get(
+                    int(row["white_engine_id"]),
+                    f"Engine {row['white_engine_id']}",
+                ),
+                "black_engine": engine_names.get(
+                    int(row["black_engine_id"]),
+                    f"Engine {row['black_engine_id']}",
+                ),
+                "threads": tournament.config.engine_threads,
+                "engine_hash_mb": engine_hash_mb,
+                "process_memory_mb": process_memory_mb,
+                "memory_mb": engine_hash_mb + process_memory_mb,
+            }
+        )
+    return allocations
+
+
 def _worker_admin_api_payload(
     row: dict[str, Any],
     *,
@@ -1517,6 +1594,7 @@ def _worker_admin_api_payload(
         for tournament_id in list_worker_tournament_ids(connection, worker.id)
         if tournament_id in available_tournament_ids
     ]
+    resource_samples = list_worker_resource_samples(connection, worker.id, limit=120)
     return {
         "row": {
             "worker": _worker_record_payload(worker),
@@ -1538,6 +1616,18 @@ def _worker_admin_api_payload(
             "tournament_scope": worker.tournament_scope,
             "tournament_ids": tournament_ids,
             "tournaments": tournaments,
+        },
+        "resources": {
+            "latest": (
+                _worker_resource_sample_payload(resource_samples[-1])
+                if resource_samples
+                else None
+            ),
+            "samples": [
+                _worker_resource_sample_payload(sample)
+                for sample in resource_samples
+            ],
+            "allocations": _worker_allocations_payload(connection, worker.id),
         },
         "worker_launch_command": _worker_launch_command(worker, worker_server_url)
         if worker_server_url is not None

@@ -34,6 +34,7 @@ from cope.core.models import (
     Envelope,
     PROTOCOL_VERSION,
     WorkerResources,
+    WorkerResourceTelemetry,
     WorkerSessionHello,
     WorkerTokenHello,
     WorkerUpdateCommand,
@@ -62,6 +63,7 @@ from cope.db import (
     get_worker_by_token,
     list_workers,
     record_worker_failure,
+    record_worker_resource_sample,
     record_game_hardware_score,
     record_game_assignment_progress_batch,
     reconcile_worker_deployment,
@@ -557,6 +559,7 @@ class WorkerHandshakeServer:
         receiver = asyncio.create_task(
             self._route_worker_messages(
                 websocket,
+                worker,
                 inboxes,
                 assignment_identities,
                 retired_assignments,
@@ -728,12 +731,28 @@ class WorkerHandshakeServer:
     async def _route_worker_messages(
         self,
         websocket: WebSocketServerProtocol,
+        worker: WorkerRecord,
         inboxes: dict[int, asyncio.Queue],
         assignment_identities: dict[int, tuple[str, int]],
         retired_assignments: dict[tuple[int, str], tuple[int, float]],
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
+            if envelope.type == "worker_resource_telemetry":
+                try:
+                    telemetry = WorkerResourceTelemetry.model_validate(envelope.data)
+                except ValidationError as error:
+                    raise ProtocolValidationError(str(error)) from error
+                recorded = await asyncio.to_thread(
+                    self._record_worker_resource_telemetry,
+                    worker,
+                    telemetry,
+                )
+                if not recorded:
+                    raise WorkerConnectionInactive(
+                        "worker session is no longer current"
+                    )
+                continue
             if envelope.type == "worker_telemetry_batch":
                 messages = envelope.data.get("messages")
                 if not isinstance(messages, list) or not 0 < len(messages) <= 128:
@@ -1381,6 +1400,34 @@ class WorkerHandshakeServer:
             if updated:
                 publish_workers_changed("worker.status", {"worker_id": worker_id, "status": status})
             return updated
+        finally:
+            connection.close()
+
+    def _record_worker_resource_telemetry(
+        self,
+        worker: WorkerRecord,
+        telemetry: WorkerResourceTelemetry,
+    ) -> bool:
+        if worker.session_id is None:
+            return False
+        connection = connect_database(self._config.db_path)
+        try:
+            recorded = record_worker_resource_sample(
+                connection,
+                worker.id,
+                worker.session_id,
+                telemetry,
+            )
+            connection.commit()
+            if recorded:
+                publish_workers_changed(
+                    "worker.telemetry",
+                    {"worker_id": worker.id},
+                )
+            return recorded
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
