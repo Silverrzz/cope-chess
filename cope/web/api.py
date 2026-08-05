@@ -539,6 +539,20 @@ class WorkerSettingsPayload(BaseModel):
 
 class DeploymentPayload(BaseModel):
     ref: str = Field(default="", max_length=200)
+    scope: Literal["platform", "web"] = "platform"
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str) -> str:
+        cleaned = value.strip()
+        if cleaned and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}", cleaned) is None:
+            raise ValueError("Git ref contains unsupported characters")
+        return cleaned
+
+
+class UpdatePayload(BaseModel):
+    method: Literal["platform", "web", "dockerfiles"]
+    ref: str = Field(default="", max_length=200)
 
     @field_validator("ref")
     @classmethod
@@ -1278,6 +1292,29 @@ def register_api_routes(app: FastAPI) -> None:
                 "current_version": app_version(),
                 "default_ref": os.environ.get("COPE_UPDATE_REF", "main"),
                 "updater": heartbeats.get("updater"),
+                "methods": [
+                    {
+                        "id": "web",
+                        "label": "Web application",
+                        "description": "Deploy same-schema website and API changes without touching game services.",
+                        "scope": "Web only",
+                        "impact": "Games continue",
+                    },
+                    {
+                        "id": "platform",
+                        "label": "Full platform",
+                        "description": "Update services, workers, benchmarkers, and the database.",
+                        "scope": "Entire fleet",
+                        "impact": "Waits for active work",
+                    },
+                    {
+                        "id": "dockerfiles",
+                        "label": "Engine definitions",
+                        "description": "Refresh engine Dockerfiles without restarting services.",
+                        "scope": "Engine catalog",
+                        "impact": "No restart",
+                    },
+                ],
                 "dockerfile_pull": jsonable_encoder(latest_dockerfile_pull_job(connection)),
                 "jobs": [
                     {
@@ -1302,6 +1339,7 @@ def register_api_routes(app: FastAPI) -> None:
             job_id = create_deployment_job(
                 connection,
                 requested_ref=requested_ref,
+                scope=payload.scope,
             )
             connection.commit()
         except ValueError as error:
@@ -1311,7 +1349,47 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "id": job_id,
-                "message": f"Deployment {job_id} queued for {requested_ref}.",
+                "message": (
+                    f"Web update {job_id} queued for {requested_ref}."
+                    if payload.scope == "web"
+                    else f"Platform update {job_id} queued for {requested_ref}."
+                ),
+            },
+            status_code=202,
+        )
+
+    @app.post("/api/admin/updates")
+    def admin_create_update(
+        payload: UpdatePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        try:
+            if payload.method == "dockerfiles":
+                job_id = create_dockerfile_pull_job(
+                    connection,
+                    requested_ref=requested_ref,
+                )
+                message = f"Engine definition update {job_id} queued for {requested_ref}."
+            else:
+                job_id = create_deployment_job(
+                    connection,
+                    requested_ref=requested_ref,
+                    scope=payload.method,
+                )
+                label = "Web update" if payload.method == "web" else "Platform update"
+                message = f"{label} {job_id} queued for {requested_ref}."
+            connection.commit()
+        except ValueError as error:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "id": job_id,
+                "method": payload.method,
+                "message": message,
             },
             status_code=202,
         )
@@ -1323,15 +1401,6 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
-        updater = next(
-            (item for item in list_service_heartbeats(connection) if item["service"] == "updater"),
-            None,
-        )
-        if updater is not None and updater["app_version"] != app_version():
-            raise HTTPException(
-                status_code=409,
-                detail="The updater is running an older release and must be restarted first.",
-            )
         try:
             job_id = create_dockerfile_pull_job(
                 connection,

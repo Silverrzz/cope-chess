@@ -7,9 +7,21 @@ import AdminPageHeader from "@/components/admin/AdminPageHeader.vue";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
 import { errorText, formatDate, humanize } from "@/components/admin/format";
+import AppIcon from "@/components/ui/AppIcon.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
 import BaseInput from "@/components/ui/BaseInput.vue";
 import { useConfirm } from "@/composables/useConfirm";
+import type { IconName } from "@/types/icons";
+
+type UpdateMethodId = "web" | "platform" | "dockerfiles";
+
+interface UpdateMethod {
+  id: UpdateMethodId;
+  label: string;
+  description: string;
+  scope: string;
+  impact: string;
+}
 
 interface DeploymentTarget {
   id: number;
@@ -26,6 +38,7 @@ interface DeploymentTarget {
 interface DeploymentJob {
   id: number;
   requested_ref: string;
+  scope: "platform" | "web";
   target_commit: string | null;
   status: string;
   requested_at: string;
@@ -51,15 +64,52 @@ interface DeploymentsPayload {
   current_version: string;
   default_ref: string;
   updater: { service: string; app_version: string; last_seen: string } | null;
+  methods: UpdateMethod[];
   dockerfile_pull: DockerfilePullJob | null;
   jobs: DeploymentJob[];
 }
 
+const fallbackMethods: UpdateMethod[] = [
+  {
+    id: "web",
+    label: "Web application",
+    description: "Deploy same-schema website and API changes without touching game services.",
+    scope: "Web only",
+    impact: "Games continue",
+  },
+  {
+    id: "platform",
+    label: "Full platform",
+    description: "Update services, workers, benchmarkers, and the database.",
+    scope: "Entire fleet",
+    impact: "Waits for active work",
+  },
+  {
+    id: "dockerfiles",
+    label: "Engine definitions",
+    description: "Refresh engine Dockerfiles without restarting services.",
+    scope: "Engine catalog",
+    impact: "No restart",
+  },
+];
+
+const methodIcons: Record<UpdateMethodId, IconName> = {
+  web: "server",
+  platform: "refresh",
+  dockerfiles: "engine",
+};
+
+const methodActions: Record<UpdateMethodId, string> = {
+  web: "Deploy web update",
+  platform: "Deploy full update",
+  dockerfiles: "Refresh engine definitions",
+};
+
 const data = ref<DeploymentsPayload | null>(null);
 const refName = ref("");
+const selectedMethodId = ref<UpdateMethodId>("web");
 const loading = ref(true);
 const submitting = ref(false);
-const pullingDockerfiles = ref(false);
 const error = ref("");
 const message = ref("");
 const reconnecting = ref(false);
@@ -68,6 +118,10 @@ const { confirm } = useConfirm();
 let timer: number | undefined;
 let restoredTimer: number | undefined;
 
+const methods = computed(() => data.value?.methods?.length ? data.value.methods : fallbackMethods);
+const selectedMethod = computed(() =>
+  methods.value.find((method) => method.id === selectedMethodId.value) ?? methods.value[0],
+);
 const activeJob = computed(() =>
   data.value?.jobs.find((job) => !["succeeded", "failed"].includes(job.status)) ?? null,
 );
@@ -75,19 +129,20 @@ const activeDockerfilePull = computed(() => {
   const job = data.value?.dockerfile_pull;
   return job && !["succeeded", "failed"].includes(job.status) ? job : null;
 });
-const updateBusy = computed(() => Boolean(activeJob.value || activeDockerfilePull.value));
+const activeOperation = computed(() => activeJob.value || activeDockerfilePull.value);
+const updateBusy = computed(() => Boolean(activeOperation.value));
 const updaterOnline = computed(() => {
   const lastSeen = data.value?.updater?.last_seen;
   if (!lastSeen) return false;
   const timestamp = Date.parse(lastSeen);
   return Number.isFinite(timestamp) && Date.now() - timestamp < 30_000;
 });
-const updaterOutdated = computed(() => Boolean(
+const updaterDifferentRelease = computed(() => Boolean(
   data.value?.updater && data.value.updater.app_version !== data.value.current_version,
 ));
 
 function shortVersion(value: string | null): string {
-  if (!value) return "-";
+  if (!value) return "—";
   return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value;
 }
 
@@ -102,6 +157,23 @@ function markConnectionRestored(): void {
     connectionRestored.value = false;
     restoredTimer = undefined;
   }, 5000);
+}
+
+function deploymentMethod(job: DeploymentJob): UpdateMethodId {
+  return job.scope === "web" ? "web" : "platform";
+}
+
+function deploymentLabel(job: DeploymentJob): string {
+  return job.scope === "web" ? "Web application" : "Full platform";
+}
+
+function completedTargets(job: DeploymentJob): number {
+  return job.targets.filter((target) => ["succeeded", "deferred"].includes(target.status)).length;
+}
+
+function targetKind(target: DeploymentTarget): string {
+  if (target.target_kind === "server") return target.label;
+  return target.target_kind === "benchmarker" ? "Benchmarker" : "Worker";
 }
 
 async function load(silent = false): Promise<void> {
@@ -127,20 +199,35 @@ async function load(silent = false): Promise<void> {
   }
 }
 
-async function deploy(): Promise<void> {
+async function queueUpdate(): Promise<void> {
+  const method = selectedMethod.value;
+  if (!method) return;
   const target = refName.value.trim() || data.value?.default_ref || "main";
+  const confirmation = {
+    web: {
+      title: "Deploy the web application?",
+      message: `Build ${target} and restart only the website and API. Active games and worker connections will continue uninterrupted. Releases requiring a database migration will be rejected.`,
+    },
+    platform: {
+      title: "Deploy the full platform?",
+      message: `Build ${target}, migrate the database, and update every platform service and client. Active games and benchmarks will finish before their clients restart.`,
+    },
+    dockerfiles: {
+      title: "Refresh engine definitions?",
+      message: `Replace the engine Dockerfiles with data/engines from ${target}. Running services and games will continue.`,
+    },
+  }[method.id];
   const accepted = await confirm({
-    title: "Update and rebuild the platform?",
-    message: `Deploy ${target} to the server, every registered worker, and every benchmarker. Active games and benchmarks will finish before their client restarts.${updaterOnline.value ? "" : " The updater is offline, so this deployment will remain queued until it reconnects."}`,
-    confirmLabel: "Update & rebuild",
+    ...confirmation,
+    confirmLabel: methodActions[method.id],
   });
   if (!accepted) return;
   submitting.value = true;
   error.value = "";
   message.value = "";
   try {
-    const response = await api.post<{ id: number; message: string }>("/api/admin/deployments", {
-      body: { ref: target },
+    const response = await api.post<{ id: number; message: string }>("/api/admin/updates", {
+      body: { method: method.id, ref: target },
     });
     message.value = response.message;
     await load(true);
@@ -148,30 +235,6 @@ async function deploy(): Promise<void> {
     error.value = errorText(cause);
   } finally {
     submitting.value = false;
-  }
-}
-
-async function pullDockerfiles(): Promise<void> {
-  const target = refName.value.trim() || data.value?.default_ref || "main";
-  const accepted = await confirm({
-    title: "Pull engine Dockerfiles?",
-    message: `Replace the engine Dockerfiles with data/engines from ${target}. Platform services will keep running, but changed engine builds will require fresh benchmarks.`,
-    confirmLabel: "Pull Dockerfiles",
-  });
-  if (!accepted) return;
-  pullingDockerfiles.value = true;
-  error.value = "";
-  message.value = "";
-  try {
-    const response = await api.post<{ id: number; message: string }>("/api/admin/dockerfile-pulls", {
-      body: { ref: target },
-    });
-    message.value = response.message;
-    await load(true);
-  } catch (cause) {
-    error.value = errorText(cause);
-  } finally {
-    pullingDockerfiles.value = false;
   }
 }
 
@@ -189,29 +252,88 @@ onBeforeUnmount(() => {
 <template>
   <div class="admin-page deployments-page">
     <AdminPageHeader
-      title="Updates"
-      description="Pull, rebuild, migrate, restart, and reconcile the complete platform from one place."
+      title="Release center"
+      description="Choose the smallest update scope for the change you want to ship."
     />
+
     <section v-if="reconnecting" class="connection-notice connection-notice--reconnecting" role="status" aria-live="polite">
       <span class="connection-spinner" aria-hidden="true" />
-      <span><strong>Control panel is restarting</strong><small>The deployment is still running. Reconnecting automatically…</small></span>
+      <span><strong>Web service is switching releases</strong><small>The coordinator is still tracking the update. Reconnecting automatically…</small></span>
     </section>
     <section v-else-if="connectionRestored" class="connection-notice connection-notice--restored" role="status">
-      <span class="connection-dot" aria-hidden="true" />
-      <span><strong>Control panel reconnected</strong><small>Live deployment tracking has resumed.</small></span>
+      <AppIcon name="check-circle" :size="18" />
+      <span><strong>Connection restored</strong><small>Live release tracking has resumed.</small></span>
     </section>
+
     <InlineFeedback :message="error" />
     <InlineFeedback :message="message" tone="info" />
 
-    <section v-if="loading" class="panel loading-panel" role="status">Loading deployment state…</section>
+    <section v-if="loading" class="panel loading-panel" role="status">Loading release state…</section>
     <template v-else-if="data">
-      <section class="panel update-panel">
-        <div class="version-grid">
-          <div><span>Running release</span><code>{{ shortVersion(data.current_version) }}</code></div>
-          <div><span>Updater</span><StatusBadge :status="!updaterOnline ? 'offline' : updaterOutdated ? 'outdated' : 'connected'" /></div>
-          <div><span>Last heartbeat</span><strong>{{ data.updater ? formatDate(data.updater.last_seen) : "Unavailable" }}</strong></div>
+      <section class="release-overview">
+        <article class="release-primary panel">
+          <span class="release-icon"><AppIcon name="tag" :size="20" /></span>
+          <div>
+            <span class="eyebrow">Running release</span>
+            <strong>{{ shortVersion(data.current_version) }}</strong>
+            <small>The version currently serving the control panel and public site.</small>
+          </div>
+          <StatusBadge status="active" label="Live" />
+        </article>
+        <article class="coordinator-card panel">
+          <div class="coordinator-heading">
+            <span class="release-icon release-icon--muted"><AppIcon name="activity" :size="19" /></span>
+            <div>
+              <span class="eyebrow">Update coordinator</span>
+              <strong>{{ updaterOnline ? "Online" : "Unavailable" }}</strong>
+            </div>
+            <StatusBadge :status="updaterOnline ? 'connected' : 'offline'" />
+          </div>
+          <dl>
+            <div><dt>Release</dt><dd><code>{{ shortVersion(data.updater?.app_version ?? null) }}</code></dd></div>
+            <div><dt>Last heartbeat</dt><dd>{{ data.updater ? formatDate(data.updater.last_seen) : "Not reported" }}</dd></div>
+          </dl>
+          <p v-if="updaterDifferentRelease" class="coordinator-note">
+            <AppIcon name="info" :size="15" /> The coordinator can remain on the previous release after a web-only update.
+          </p>
+        </article>
+      </section>
+
+      <section class="panel update-composer">
+        <header class="section-heading">
+          <div>
+            <span class="eyebrow">New update</span>
+            <h2>What do you want to change?</h2>
+            <p>Each method has its own rollout scope and operational impact.</p>
+          </div>
+          <span v-if="activeOperation" class="busy-lock"><AppIcon name="clock" :size="15" /> Another update is active</span>
+        </header>
+
+        <div class="method-grid" role="radiogroup" aria-label="Update method">
+          <button
+            v-for="method in methods"
+            :key="method.id"
+            type="button"
+            class="method-card"
+            :class="{ 'method-card--selected': selectedMethodId === method.id }"
+            role="radio"
+            :aria-checked="selectedMethodId === method.id"
+            @click="selectedMethodId = method.id"
+          >
+            <span class="method-card__icon"><AppIcon :name="methodIcons[method.id]" :size="21" /></span>
+            <span class="method-card__copy">
+              <strong>{{ method.label }}</strong>
+              <small>{{ method.description }}</small>
+            </span>
+            <span class="method-card__facts">
+              <span>{{ method.scope }}</span>
+              <span :class="{ safe: method.id !== 'platform' }">{{ method.impact }}</span>
+            </span>
+            <span class="method-card__check"><AppIcon name="check" :size="14" /></span>
+          </button>
         </div>
-        <form class="update-form" @submit.prevent="deploy">
+
+        <form class="update-config" @submit.prevent="queueUpdate">
           <BaseInput
             v-model="refName"
             label="Git branch, tag, or commit"
@@ -220,123 +342,211 @@ onBeforeUnmount(() => {
             spellcheck="false"
             :disabled="updateBusy"
           />
-          <div class="update-actions">
-            <BaseButton
-              type="button"
-              variant="secondary"
-              :loading="pullingDockerfiles"
-              :disabled="updateBusy || updaterOutdated"
-              @click="pullDockerfiles"
-            >
-              Pull Dockerfiles
-            </BaseButton>
-            <BaseButton
-              type="submit"
-              variant="primary"
-              :loading="submitting"
-              :disabled="updateBusy"
-            >
-              Update & rebuild
-            </BaseButton>
+          <div class="selected-impact">
+            <span :class="['impact-mark', { 'impact-mark--safe': selectedMethodId !== 'platform' }]">
+              <AppIcon :name="selectedMethodId === 'platform' ? 'clock' : 'check-circle'" :size="17" />
+            </span>
+            <span>
+              <small>Selected scope</small>
+              <strong>{{ selectedMethod?.scope }} · {{ selectedMethod?.impact }}</strong>
+            </span>
           </div>
+          <BaseButton
+            type="submit"
+            variant="primary"
+            size="large"
+            :loading="submitting"
+            :disabled="updateBusy"
+          >
+            <template #icon><AppIcon :name="methodIcons[selectedMethodId]" :size="18" /></template>
+            {{ methodActions[selectedMethodId] }}
+          </BaseButton>
         </form>
-        <p v-if="activeJob" class="active-note">
-          Deployment #{{ activeJob.id }} is {{ humanize(activeJob.status).toLowerCase() }}. The control panel may reconnect while the web service restarts.
-        </p>
-        <p v-else-if="updaterOutdated" class="active-note">
-          The updater is running an older release and must be restarted before it can pull Dockerfiles.
-        </p>
-        <p v-else-if="!updaterOnline" class="active-note">
-          The updater is offline. You can queue an update now and it will start when the updater reconnects.
-        </p>
-        <div v-if="data.dockerfile_pull" class="dockerfile-pull-status">
-          <span class="dockerfile-pull-status__copy">
-            <strong>Dockerfile pull #{{ data.dockerfile_pull.id }}</strong>
-            <small>
-              {{ data.dockerfile_pull.requested_ref }}
-              <template v-if="data.dockerfile_pull.status === 'succeeded'"> · {{ data.dockerfile_pull.files_updated }} files updated</template>
-              <template v-if="data.dockerfile_pull.error"> · {{ data.dockerfile_pull.error }}</template>
-            </small>
-          </span>
-          <StatusBadge :status="data.dockerfile_pull.status" />
-        </div>
       </section>
 
-      <section v-if="data.jobs.length" class="deployment-list">
-        <article v-for="job in data.jobs" :key="job.id" class="panel deployment-card">
-          <header>
-            <div>
-              <span class="eyebrow">Deployment #{{ job.id }}</span>
-              <h2>{{ job.requested_ref }}</h2>
-              <p>{{ formatDate(job.requested_at) }} · {{ shortVersion(job.target_commit) }}</p>
+      <section v-if="activeJob" class="panel active-rollout">
+        <div class="active-rollout__pulse"><span /></div>
+        <div class="active-rollout__main">
+          <span class="eyebrow">Update in progress</span>
+          <h2>{{ deploymentLabel(activeJob) }} <small>#{{ activeJob.id }}</small></h2>
+          <p>{{ activeJob.requested_ref }} is currently {{ humanize(activeJob.status).toLowerCase() }}.</p>
+        </div>
+        <div class="active-rollout__progress">
+          <strong>{{ completedTargets(activeJob) }} / {{ activeJob.targets.length }}</strong>
+          <small>targets complete</small>
+        </div>
+        <StatusBadge :status="activeJob.status" />
+      </section>
+
+      <section v-else-if="activeDockerfilePull" class="panel active-rollout">
+        <div class="active-rollout__pulse"><span /></div>
+        <div class="active-rollout__main">
+          <span class="eyebrow">Update in progress</span>
+          <h2>Engine definitions <small>#{{ activeDockerfilePull.id }}</small></h2>
+          <p>{{ activeDockerfilePull.requested_ref }} is currently {{ humanize(activeDockerfilePull.status).toLowerCase() }}.</p>
+        </div>
+        <StatusBadge :status="activeDockerfilePull.status" />
+      </section>
+
+      <section class="history-section">
+        <header class="section-heading history-heading">
+          <div>
+            <span class="eyebrow">Release activity</span>
+            <h2>Recent updates</h2>
+          </div>
+          <span>{{ data.jobs.length }} deployment {{ data.jobs.length === 1 ? "update" : "updates" }}</span>
+        </header>
+
+        <div v-if="data.jobs.length || data.dockerfile_pull" class="history-list">
+          <article v-if="data.dockerfile_pull" class="panel history-card">
+            <span class="history-card__icon"><AppIcon name="engine" :size="18" /></span>
+            <div class="history-card__identity">
+              <span>Engine definitions</span>
+              <strong>{{ data.dockerfile_pull.requested_ref }}</strong>
+            </div>
+            <div class="history-card__meta">
+              <span>#{{ data.dockerfile_pull.id }} · {{ formatDate(data.dockerfile_pull.requested_at) }}</span>
+              <small v-if="data.dockerfile_pull.status === 'succeeded'">{{ data.dockerfile_pull.files_updated }} files refreshed</small>
+              <small v-else-if="data.dockerfile_pull.error">{{ data.dockerfile_pull.error }}</small>
+              <small v-else>{{ shortVersion(data.dockerfile_pull.target_commit) }}</small>
+            </div>
+            <StatusBadge :status="data.dockerfile_pull.status" />
+          </article>
+
+          <article v-for="job in data.jobs" :key="job.id" class="panel history-card history-card--deployment">
+            <span class="history-card__icon"><AppIcon :name="methodIcons[deploymentMethod(job)]" :size="18" /></span>
+            <div class="history-card__identity">
+              <span>{{ deploymentLabel(job) }}</span>
+              <strong>{{ job.requested_ref }}</strong>
+            </div>
+            <div class="history-card__meta">
+              <span>#{{ job.id }} · {{ formatDate(job.requested_at) }}</span>
+              <small>{{ shortVersion(job.target_commit) }} · {{ completedTargets(job) }}/{{ job.targets.length }} targets</small>
             </div>
             <StatusBadge :status="job.status" />
-          </header>
-          <InlineFeedback v-if="job.error" :message="job.error" />
-          <div class="target-list">
-            <div v-for="target in job.targets" :key="target.id" class="target-row">
-              <span class="target-kind">{{ target.target_kind === "server" ? "Platform" : target.target_kind === "benchmarker" ? "Benchmarker" : "Worker" }}</span>
-              <span class="target-name">
-                <strong>{{ target.label }}</strong>
-                <small v-if="target.detail">{{ target.detail }}</small>
-              </span>
-              <code>{{ shortVersion(target.current_commit) }}</code>
-              <StatusBadge :status="target.status" />
+            <div v-if="job.error" class="history-card__error"><AppIcon name="alert-circle" :size="15" />{{ job.error }}</div>
+            <div v-if="job.targets.length > 1 || job.targets.some((target) => target.detail)" class="target-list">
+              <div v-for="target in job.targets" :key="target.id" class="target-row">
+                <span>{{ targetKind(target) }}</span>
+                <span><strong>{{ target.label }}</strong><small v-if="target.detail">{{ target.detail }}</small></span>
+                <code>{{ shortVersion(target.current_commit) }}</code>
+                <StatusBadge :status="target.status" />
+              </div>
             </div>
-          </div>
-        </article>
+          </article>
+        </div>
+        <AdminEmptyState v-else title="No updates yet" description="Choose an update method to create the first release activity." />
       </section>
-      <AdminEmptyState v-else title="No deployments yet" description="The first update will appear here." />
     </template>
   </div>
 </template>
 
 <style scoped>
 .deployments-page { display: grid; gap: 1rem; }
-.connection-notice { align-items: center; border: 1px solid; border-radius: var(--radius-md, .6rem); display: flex; gap: .75rem; padding: .8rem .9rem; }
-.connection-notice > span:last-child { display: grid; gap: .15rem; }
+.loading-panel { color: var(--color-text-muted); min-height: 12rem; padding: 2rem; }
+.eyebrow { color: var(--color-text-muted); font-size: .64rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+.connection-notice { align-items: center; border: 1px solid; border-radius: var(--radius-lg); display: flex; gap: .75rem; padding: .8rem 1rem; }
+.connection-notice > span:last-child { display: grid; gap: .12rem; }
 .connection-notice strong { font-size: .82rem; }
-.connection-notice small { font-size: .72rem; }
-.connection-notice--reconnecting { background: color-mix(in srgb, var(--color-accent) 8%, transparent); border-color: color-mix(in srgb, var(--color-accent) 28%, transparent); color: var(--color-accent); }
-.connection-notice--restored { background: color-mix(in srgb, var(--color-success, #15803d) 8%, transparent); border-color: color-mix(in srgb, var(--color-success, #15803d) 28%, transparent); color: var(--color-success, #15803d); }
+.connection-notice small { color: var(--color-text-muted); font-size: .72rem; }
+.connection-notice--reconnecting { background: var(--color-info-soft); border-color: color-mix(in srgb, var(--color-info) 30%, transparent); color: var(--color-info); }
+.connection-notice--restored { background: var(--color-success-soft); border-color: color-mix(in srgb, var(--color-success) 30%, transparent); color: var(--color-success); }
 .connection-spinner { animation: connection-spin .8s linear infinite; border: 2px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; border-top-color: currentColor; height: 1rem; width: 1rem; }
-.connection-dot { background: currentColor; border-radius: 50%; box-shadow: 0 0 0 .22rem color-mix(in srgb, currentColor 15%, transparent); height: .55rem; width: .55rem; }
 @keyframes connection-spin { to { transform: rotate(360deg); } }
-.loading-panel { color: var(--color-text-muted); min-height: 10rem; padding: 2rem; }
-.update-panel { display: grid; gap: 1rem; padding: 1rem; }
-.version-grid { display: grid; gap: .8rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.version-grid > div { display: grid; gap: .25rem; }
-.version-grid span { color: var(--color-text-muted); font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.version-grid code, .version-grid strong { font-size: .82rem; }
-.update-form { align-items: end; display: grid; gap: .75rem; grid-template-columns: minmax(0, 1fr) auto; }
-.update-actions { display: flex; gap: .5rem; }
-.active-note { color: var(--color-text-muted); font-size: .75rem; margin: 0; }
-.dockerfile-pull-status { align-items: center; border-top: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding-top: .8rem; }
-.dockerfile-pull-status__copy { display: grid; gap: .15rem; min-width: 0; }
-.dockerfile-pull-status__copy strong { font-size: .78rem; }
-.dockerfile-pull-status__copy small { color: var(--color-text-muted); font-size: .68rem; }
-.deployment-list { display: grid; gap: .9rem; }
-.deployment-card { overflow: hidden; padding: 0; }
-.deployment-card > header { align-items: flex-start; border-bottom: 1px solid var(--color-border); display: flex; gap: 1rem; justify-content: space-between; padding: .9rem 1rem; }
-.deployment-card h2 { font-size: .95rem; margin: .15rem 0; }
-.deployment-card header p { color: var(--color-text-muted); font-size: .7rem; margin: 0; }
-.deployment-card > .inline-feedback { margin: .8rem; }
-.eyebrow { color: var(--color-text-muted); font-size: .62rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-.target-list { display: grid; }
-.target-row { align-items: center; border-bottom: 1px solid var(--color-border); display: grid; gap: .75rem; grid-template-columns: 5rem minmax(0, 1fr) minmax(5rem, auto) auto; padding: .7rem 1rem; }
+.release-overview { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1.15fr) minmax(20rem, .85fr); }
+.release-primary { align-items: center; display: grid; gap: 1rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 8.5rem; overflow: hidden; padding: 1.25rem; position: relative; }
+.release-primary::after { background: radial-gradient(circle, color-mix(in srgb, var(--color-accent) 16%, transparent), transparent 68%); content: ""; height: 13rem; pointer-events: none; position: absolute; right: -4rem; top: -5rem; width: 13rem; }
+.release-primary > * { position: relative; z-index: 1; }
+.release-primary > div { display: grid; gap: .22rem; }
+.release-primary strong { font-family: var(--font-mono); font-size: clamp(1.15rem, 2vw, 1.55rem); }
+.release-primary small { color: var(--color-text-muted); font-size: .72rem; }
+.release-icon { align-items: center; background: var(--color-accent-soft); border-radius: .8rem; color: var(--color-accent); display: inline-flex; height: 2.75rem; justify-content: center; width: 2.75rem; }
+.release-icon--muted { background: var(--color-surface-sunken); color: var(--color-text-secondary); height: 2.5rem; width: 2.5rem; }
+.coordinator-card { display: grid; gap: .85rem; padding: 1rem; }
+.coordinator-heading { align-items: center; display: grid; gap: .75rem; grid-template-columns: auto minmax(0, 1fr) auto; }
+.coordinator-heading > div { display: grid; gap: .12rem; }
+.coordinator-heading strong { font-size: .9rem; }
+.coordinator-card dl { display: grid; gap: .5rem; grid-template-columns: 1fr 1fr; margin: 0; }
+.coordinator-card dl > div { background: var(--color-surface-sunken); border-radius: var(--radius-md); display: grid; gap: .2rem; padding: .55rem .65rem; }
+.coordinator-card dt { color: var(--color-text-muted); font-size: .62rem; text-transform: uppercase; }
+.coordinator-card dd { font-size: .7rem; margin: 0; }
+.coordinator-note { align-items: center; color: var(--color-text-muted); display: flex; font-size: .68rem; gap: .4rem; margin: 0; }
+.update-composer { display: grid; gap: 1.25rem; padding: 1.25rem; }
+.section-heading { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
+.section-heading > div { display: grid; gap: .25rem; }
+.section-heading h2 { font-size: 1rem; margin: 0; }
+.section-heading p { color: var(--color-text-muted); font-size: .74rem; margin: 0; }
+.busy-lock { align-items: center; background: var(--color-warning-soft); border-radius: 999px; color: var(--color-warning); display: flex; font-size: .68rem; font-weight: 700; gap: .35rem; padding: .4rem .6rem; }
+.method-grid { display: grid; gap: .75rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.method-card { background: var(--color-surface-sunken); border: 1px solid transparent; border-radius: var(--radius-lg); color: var(--color-text); cursor: pointer; display: grid; gap: .75rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 10.5rem; padding: 1rem; position: relative; text-align: left; transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast); }
+.method-card:hover { border-color: var(--color-border-strong); transform: translateY(-1px); }
+.method-card--selected { background: color-mix(in srgb, var(--color-accent-soft) 58%, var(--color-surface)); border-color: var(--color-accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 15%, transparent); }
+.method-card__icon { align-items: center; background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: .7rem; color: var(--color-text-secondary); display: flex; height: 2.5rem; justify-content: center; width: 2.5rem; }
+.method-card--selected .method-card__icon { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+.method-card__copy { display: grid; gap: .3rem; }
+.method-card__copy strong { font-size: .82rem; }
+.method-card__copy small { color: var(--color-text-muted); font-size: .69rem; line-height: 1.45; }
+.method-card__facts { align-self: end; display: flex; gap: .4rem; grid-column: 1 / -1; }
+.method-card__facts span { background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-text-muted); font-size: .61rem; font-weight: 700; padding: .3rem .45rem; }
+.method-card__facts .safe { color: var(--color-success); }
+.method-card__check { align-items: center; background: var(--color-accent); border-radius: 50%; color: var(--color-on-accent); display: flex; height: 1.4rem; justify-content: center; opacity: 0; position: absolute; right: .7rem; top: .7rem; transform: scale(.75); transition: opacity var(--transition-fast), transform var(--transition-fast); width: 1.4rem; }
+.method-card--selected .method-card__check { opacity: 1; transform: scale(1); }
+.update-config { align-items: end; border-top: 1px solid var(--color-border); display: grid; gap: 1rem; grid-template-columns: minmax(14rem, 1fr) minmax(15rem, auto) auto; padding-top: 1.1rem; }
+.selected-impact { align-items: center; display: flex; gap: .6rem; min-height: var(--control-height); }
+.selected-impact > span:last-child { display: grid; gap: .12rem; }
+.selected-impact small { color: var(--color-text-muted); font-size: .61rem; text-transform: uppercase; }
+.selected-impact strong { font-size: .7rem; }
+.impact-mark { align-items: center; background: var(--color-warning-soft); border-radius: 50%; color: var(--color-warning); display: flex; height: 2rem; justify-content: center; width: 2rem; }
+.impact-mark--safe { background: var(--color-success-soft); color: var(--color-success); }
+.active-rollout { align-items: center; border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); display: grid; gap: 1rem; grid-template-columns: auto minmax(0, 1fr) auto auto; padding: 1rem 1.1rem; }
+.active-rollout__pulse { align-items: center; background: var(--color-accent-soft); border-radius: 50%; display: flex; height: 2.6rem; justify-content: center; width: 2.6rem; }
+.active-rollout__pulse span { animation: status-pulse 1.5s ease-in-out infinite; background: var(--color-accent); border-radius: 50%; height: .65rem; width: .65rem; }
+@keyframes status-pulse { 50% { box-shadow: 0 0 0 .45rem color-mix(in srgb, var(--color-accent) 12%, transparent); transform: scale(.86); } }
+.active-rollout__main { display: grid; gap: .18rem; }
+.active-rollout__main h2 { font-size: .88rem; margin: 0; }
+.active-rollout__main h2 small { color: var(--color-text-muted); font-size: .68rem; font-weight: 500; }
+.active-rollout__main p { color: var(--color-text-muted); font-size: .7rem; margin: 0; }
+.active-rollout__progress { display: grid; text-align: right; }
+.active-rollout__progress strong { font-size: .85rem; }
+.active-rollout__progress small { color: var(--color-text-muted); font-size: .62rem; }
+.history-section { display: grid; gap: .75rem; padding-top: .35rem; }
+.history-heading { align-items: end; padding: 0 .1rem; }
+.history-heading > span { color: var(--color-text-muted); font-size: .67rem; }
+.history-list { display: grid; gap: .6rem; }
+.history-card { align-items: center; display: grid; gap: .85rem; grid-template-columns: auto minmax(10rem, .7fr) minmax(12rem, 1fr) auto; overflow: hidden; padding: .8rem 1rem; }
+.history-card__icon { align-items: center; background: var(--color-surface-sunken); border-radius: .6rem; color: var(--color-text-secondary); display: flex; height: 2.25rem; justify-content: center; width: 2.25rem; }
+.history-card__identity, .history-card__meta { display: grid; gap: .15rem; min-width: 0; }
+.history-card__identity span { color: var(--color-text-muted); font-size: .62rem; text-transform: uppercase; }
+.history-card__identity strong { font-size: .76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-card__meta span, .history-card__meta small { color: var(--color-text-muted); font-size: .66rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-card__error { align-items: center; background: var(--color-danger-soft); border-radius: var(--radius-sm); color: var(--color-danger); display: flex; font-size: .68rem; gap: .4rem; grid-column: 2 / -1; padding: .5rem .6rem; }
+.target-list { border-top: 1px solid var(--color-border); display: grid; grid-column: 1 / -1; margin: .1rem -1rem -.8rem; }
+.target-row { align-items: center; border-bottom: 1px solid var(--color-border); display: grid; gap: .75rem; grid-template-columns: 7rem minmax(0, 1fr) minmax(5rem, auto) auto; padding: .58rem 1rem; }
 .target-row:last-child { border-bottom: 0; }
-.target-kind { color: var(--color-text-muted); font-size: .68rem; text-transform: uppercase; }
-.target-name { display: grid; min-width: 0; }
-.target-name strong { font-size: .78rem; }
-.target-name small { color: var(--color-text-muted); font-size: .68rem; margin-top: .15rem; }
-.target-row code { font-size: .7rem; }
-@media (max-width: 48rem) {
-  .version-grid { grid-template-columns: 1fr; }
-  .target-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .target-kind, .target-row code { display: none; }
+.target-row > span:first-child { color: var(--color-text-muted); font-size: .62rem; text-transform: uppercase; }
+.target-row > span:nth-child(2) { display: grid; gap: .1rem; }
+.target-row strong { font-size: .7rem; }
+.target-row small { color: var(--color-text-muted); font-size: .62rem; }
+.target-row code { font-size: .65rem; }
+@media (max-width: 960px) {
+  .release-overview { grid-template-columns: 1fr; }
+  .method-grid { grid-template-columns: 1fr; }
+  .method-card { min-height: auto; }
+  .update-config { align-items: stretch; grid-template-columns: 1fr; }
+  .selected-impact { order: 3; }
 }
-@media (max-width: 32rem) {
-  .update-form { grid-template-columns: 1fr; }
-  .update-actions { align-items: stretch; flex-direction: column; }
+@media (max-width: 680px) {
+  .release-primary { grid-template-columns: auto minmax(0, 1fr); }
+  .release-primary > .status-badge { grid-column: 2; justify-self: start; }
+  .coordinator-card dl { grid-template-columns: 1fr; }
+  .active-rollout { grid-template-columns: auto minmax(0, 1fr); }
+  .active-rollout__progress, .active-rollout > .status-badge { grid-column: 2; justify-self: start; text-align: left; }
+  .history-card { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .history-card__meta { grid-column: 2 / -1; }
+  .target-row { grid-template-columns: 1fr auto; }
+  .target-row > span:first-child, .target-row code { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .active-rollout__pulse span, .connection-spinner { animation: none; }
 }
 </style>

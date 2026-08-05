@@ -182,7 +182,7 @@ const router = createRouter({
           path: "updates",
           name: "admin-updates",
           component: () => import("@/pages/admin/DeploymentsPage.vue"),
-          meta: { title: "Platform updates" },
+          meta: { title: "Release center" },
         },
         {
           path: "chat",

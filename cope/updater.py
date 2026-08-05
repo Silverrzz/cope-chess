@@ -21,6 +21,7 @@ from cope.db import (
     claim_dockerfile_pull_job,
     claim_deployment_job,
     connect_database,
+    database_schema_version,
     fail_interrupted_deployment_jobs,
     fail_interrupted_dockerfile_pull_jobs,
     get_benchmarker,
@@ -93,7 +94,7 @@ def run_updater(config: UpdaterConfig) -> None:
         if job is None:
             time.sleep(max(config.poll_interval_s, 0.5))
             continue
-        _run_deployment(config, source_dir, job.id, job.requested_ref)
+        _run_deployment(config, source_dir, job.id, job.requested_ref, job.scope)
 
 
 def _run_dockerfile_pull(
@@ -220,7 +221,9 @@ def _run_deployment(
     source_dir: Path,
     job_id: int,
     requested_ref: str,
+    scope: str,
 ) -> None:
+    web_only = scope == "web"
     original_commit = ""
     rollback_tag = f"cope-chess:rollback-{job_id}"
     built = False
@@ -228,6 +231,8 @@ def _run_deployment(
     restart_attempted = False
     source_changed = False
     try:
+        if scope not in {"platform", "web"}:
+            raise ValueError(f"unsupported deployment scope {scope!r}")
         repository_url = config.repository_url or _git_output(
             source_dir,
             "remote",
@@ -264,30 +269,39 @@ def _run_deployment(
         _run(["docker", "tag", "cope-chess:local", rollback_tag])
         _run(["git", "-C", str(source_dir), "checkout", "--detach", target_commit])
         source_changed = target_commit != original_commit
+        if web_only:
+            _validate_web_schema_compatibility(config, source_dir)
         _validate_compose_inputs(source_dir)
         _compose(config, source_dir, "config", "--quiet")
-        _compose(
-            config,
-            source_dir,
+        build_arguments = [
             "build",
             "--build-arg",
             f"COPE_BUILD_VERSION={target_commit}",
-        )
+        ]
+        if web_only:
+            build_arguments.append("web")
+        _compose(config, source_dir, *build_arguments)
         built = True
-        _install_engine_dockerfiles(source_dir, target_commit)
-        dockerfiles_installed = True
-        _set_job_status(config, job_id, "migrating")
-        _compose(config, source_dir, "run", "--rm", "migrate")
-        _set_job_status(config, job_id, "updating_workers")
-        _prepare_worker_targets(config, job_id)
-        _wait_for_workers(config, job_id)
-        _prepare_benchmarker_targets(config, job_id)
-        _activate_benchmarker_targets(config, job_id)
-        _wait_for_benchmarkers(config, job_id)
+        if not web_only:
+            _install_engine_dockerfiles(source_dir, target_commit)
+            dockerfiles_installed = True
+            _set_job_status(config, job_id, "migrating")
+            _compose(config, source_dir, "run", "--rm", "migrate")
+            _set_job_status(config, job_id, "updating_workers")
+            _prepare_worker_targets(config, job_id)
+            _wait_for_workers(config, job_id)
+            _prepare_benchmarker_targets(config, job_id)
+            _activate_benchmarker_targets(config, job_id)
+            _wait_for_benchmarkers(config, job_id)
         _set_job_status(config, job_id, "restarting")
         _set_server_target(config, job_id, "restarting")
         restart_started_at = datetime.now(UTC)
         restart_attempted = True
+        services = (
+            ("web",)
+            if web_only
+            else ("web", "scheduler", "worker-server", "benchmark-server")
+        )
         _compose(
             config,
             source_dir,
@@ -295,15 +309,19 @@ def _run_deployment(
             "-d",
             "--no-deps",
             "--force-recreate",
-            "web",
-            "scheduler",
-            "worker-server",
-            "benchmark-server",
+            *services,
         )
-        _reload_caddy(config, source_dir)
+        if not web_only:
+            _reload_caddy(config, source_dir)
         _set_job_status(config, job_id, "verifying")
-        _wait_for_services(config, target_commit, restart_started_at)
-        _wait_for_client_reconnections(config, job_id)
+        _wait_for_services(
+            config,
+            target_commit,
+            restart_started_at,
+            expected=set(services),
+        )
+        if not web_only:
+            _wait_for_client_reconnections(config, job_id)
         _set_server_target(
             config,
             job_id,
@@ -312,11 +330,17 @@ def _run_deployment(
         )
         _set_job_status(config, job_id, "succeeded")
         _run(["docker", "image", "rm", "--force", rollback_tag], check=False)
-        LOG.info("deployment completed job_id=%s commit=%s", job_id, target_commit)
-        try:
-            _schedule_updater_restart(config, source_dir, job_id)
-        except Exception:
-            LOG.exception("could not schedule updater self-restart job_id=%s", job_id)
+        LOG.info(
+            "deployment completed job_id=%s scope=%s commit=%s",
+            job_id,
+            scope,
+            target_commit,
+        )
+        if not web_only:
+            try:
+                _schedule_updater_restart(config, source_dir, job_id)
+            except Exception:
+                LOG.exception("could not schedule updater self-restart job_id=%s", job_id)
     except Exception as error:
         detail = (str(error).strip() or error.__class__.__name__)[:4000]
         LOG.exception("deployment failed job_id=%s", job_id)
@@ -341,6 +365,11 @@ def _run_deployment(
             try:
                 _run(["docker", "tag", rollback_tag, "cope-chess:local"])
                 if restart_attempted:
+                    services = (
+                        ("web",)
+                        if web_only
+                        else ("web", "scheduler", "worker-server", "benchmark-server")
+                    )
                     _compose(
                         config,
                         source_dir,
@@ -348,12 +377,10 @@ def _run_deployment(
                         "-d",
                         "--no-deps",
                         "--force-recreate",
-                        "web",
-                        "scheduler",
-                        "worker-server",
-                        "benchmark-server",
+                        *services,
                     )
-                    _reload_caddy(config, source_dir)
+                    if not web_only:
+                        _reload_caddy(config, source_dir)
                 rollback_detail += " Previous server image restored."
             except Exception as rollback_error:
                 rollback_detail += f" Automatic rollback failed: {rollback_error}"
@@ -387,6 +414,31 @@ def _validate_source_repository(source_dir: Path, repository_url: str) -> None:
     )
     if dirty:
         raise RuntimeError("deployment source has tracked local changes")
+
+
+def _validate_web_schema_compatibility(config: UpdaterConfig, source_dir: Path) -> None:
+    connection_source = source_dir / "cope" / "db" / "connection.py"
+    if not connection_source.is_file():
+        raise RuntimeError("target release does not declare a database schema version")
+    match = re.search(
+        r"^SCHEMA_VERSION\s*=\s*(\d+)\s*$",
+        connection_source.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise RuntimeError("target release has an invalid database schema version")
+    target_schema = int(match.group(1))
+    connection = connect_database(config.db_path)
+    try:
+        current_schema = database_schema_version(connection)
+    finally:
+        connection.close()
+    if target_schema != current_schema:
+        raise RuntimeError(
+            "web-only update requires an unchanged database schema; "
+            f"database is {current_schema}, target expects {target_schema}. "
+            "Use a full platform update."
+        )
 
 
 def _resolve_target_commit(source_dir: Path, requested_ref: str) -> str:
@@ -608,8 +660,10 @@ def _wait_for_services(
     config: UpdaterConfig,
     target_commit: str,
     restart_started_at: datetime,
+    *,
+    expected: set[str] | None = None,
 ) -> None:
-    expected = {"web", "scheduler", "worker-server", "benchmark-server"}
+    expected = expected or {"web", "scheduler", "worker-server", "benchmark-server"}
     deadline = time.monotonic() + max(config.service_wait_s, 1.0)
     while time.monotonic() < deadline:
         connection = connect_database(config.db_path)

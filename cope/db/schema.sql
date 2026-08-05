@@ -588,6 +588,7 @@ CREATE TABLE IF NOT EXISTS runner_commands (
 CREATE TABLE IF NOT EXISTS deployment_jobs (
   id BIGSERIAL PRIMARY KEY,
   requested_ref TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'platform' CHECK (scope IN ('platform', 'web')),
   target_commit TEXT CHECK (target_commit IS NULL OR target_commit ~ '^[0-9a-f]{40}$'),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN (
@@ -617,6 +618,11 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
   detail TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE deployment_jobs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'platform';
+ALTER TABLE deployment_jobs DROP CONSTRAINT IF EXISTS deployment_jobs_scope_check;
+ALTER TABLE deployment_jobs ADD CONSTRAINT deployment_jobs_scope_check
+  CHECK (scope IN ('platform', 'web'));
 
 CREATE TABLE IF NOT EXISTS dockerfile_pull_jobs (
   id BIGSERIAL PRIMARY KEY,
@@ -652,7 +658,7 @@ CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 31)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 32)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

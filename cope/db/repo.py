@@ -335,6 +335,7 @@ class RunnerCommandRecord:
 class DeploymentJobRecord:
     id: int
     requested_ref: str
+    scope: str
     target_commit: str | None
     status: str
     requested_at: str
@@ -3206,7 +3207,10 @@ def create_deployment_job(
     connection: sqlite3.Connection,
     *,
     requested_ref: str,
+    scope: str = "platform",
 ) -> int:
+    if scope not in {"platform", "web"}:
+        raise ValueError("unsupported deployment scope")
     dockerfile_pull = connection.execute(
         "SELECT id FROM dockerfile_pull_jobs WHERE status NOT IN ('succeeded', 'failed') LIMIT 1"
     ).fetchone()
@@ -3226,47 +3230,49 @@ def create_deployment_job(
     try:
         cursor = connection.execute(
             """
-            INSERT INTO deployment_jobs (requested_ref, status, requested_at)
-            VALUES (?, 'pending', ?)
+            INSERT INTO deployment_jobs (requested_ref, scope, status, requested_at)
+            VALUES (?, ?, 'pending', ?)
             """,
-            (requested_ref, now),
+            (requested_ref, scope, now),
         )
     except sqlite3.IntegrityError as error:
         raise ValueError("a deployment is already in progress") from error
     job_id = int(cursor.lastrowid)
+    server_label = "Web application" if scope == "web" else "Server platform"
     connection.execute(
         """
         INSERT INTO deployment_targets (
           job_id, target_kind, target_id, label, current_commit, status, updated_at
         )
-        VALUES (?, 'server', NULL, 'Server platform', NULL, 'pending', ?)
+        VALUES (?, 'server', NULL, ?, NULL, 'pending', ?)
         """,
-        (job_id, now),
+        (job_id, server_label, now),
     )
-    connection.execute(
-        """
-        INSERT INTO deployment_targets (
-          job_id, target_kind, target_id, label, current_commit, status, updated_at
+    if scope == "platform":
+        connection.execute(
+            """
+            INSERT INTO deployment_targets (
+              job_id, target_kind, target_id, label, current_commit, status, updated_at
+            )
+            SELECT ?, 'worker', id, label, app_commit, 'pending', ?
+            FROM workers
+            WHERE status != 'revoked'
+            ORDER BY id
+            """,
+            (job_id, now),
         )
-        SELECT ?, 'worker', id, label, app_commit, 'pending', ?
-        FROM workers
-        WHERE status != 'revoked'
-        ORDER BY id
-        """,
-        (job_id, now),
-    )
-    connection.execute(
-        """
-        INSERT INTO deployment_targets (
-          job_id, target_kind, target_id, label, current_commit, status, updated_at
+        connection.execute(
+            """
+            INSERT INTO deployment_targets (
+              job_id, target_kind, target_id, label, current_commit, status, updated_at
+            )
+            SELECT ?, 'benchmarker', id, label, app_commit, 'pending', ?
+            FROM benchmarkers
+            WHERE status != 'revoked'
+            ORDER BY id
+            """,
+            (job_id, now),
         )
-        SELECT ?, 'benchmarker', id, label, app_commit, 'pending', ?
-        FROM benchmarkers
-        WHERE status != 'revoked'
-        ORDER BY id
-        """,
-        (job_id, now),
-    )
     return job_id
 
 
@@ -3681,6 +3687,7 @@ def _deployment_job_from_row(row: sqlite3.Row) -> DeploymentJobRecord:
     return DeploymentJobRecord(
         id=row["id"],
         requested_ref=row["requested_ref"],
+        scope=row["scope"],
         target_commit=row["target_commit"],
         status=row["status"],
         requested_at=row["requested_at"],

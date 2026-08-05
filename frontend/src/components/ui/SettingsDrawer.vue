@@ -44,10 +44,6 @@ function update(key: "light" | "dark", event: Event): void {
   draft.value = { ...draft.value, [key]: (event.target as HTMLInputElement).value };
 }
 
-function apply(): void {
-  setBoardTheme(draft.value);
-  open.value = false;
-}
 </script>
 
 <template>
