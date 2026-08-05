@@ -74,6 +74,7 @@ export interface MoveRecord {
   nps?: number | null
   hashfull?: number | null
   pv?: string | null
+  pv_san?: string | null
   info_line?: string | null
   time_ms?: number | null
   clock_after_ms?: number | null
@@ -182,6 +183,7 @@ export interface EngineAnalysis {
   eval?: string | number | null
   info?: string | null
   pv?: string | null
+  pv_san?: string | null
   root_fen?: string | null
 }
 
