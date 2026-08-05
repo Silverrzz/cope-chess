@@ -760,11 +760,20 @@ def register_api_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
 
     @app.get("/api/home")
-    def public_home(connection: sqlite3.Connection = Depends(web_app._database)):
+    def public_home(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
         engines = web_app._engine_names(connection)
+        running_tournaments = web_app._home_tournament_cards(connection, engines)
+        for item in running_tournaments:
+            summary = item["tournament"]
+            summary["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
+                summary["record"].id
+            )
         return _json(
             {
-                "running_tournaments": web_app._home_tournament_cards(connection, engines),
+                "running_tournaments": running_tournaments,
                 "upcoming_rows": web_app._upcoming_rows(connection, engines, limit=16),
                 "recent_games": list_games_by_status(connection, "finished", limit=16),
                 "engines": engines,
@@ -773,7 +782,10 @@ def register_api_routes(app: FastAPI) -> None:
         )
 
     @app.get("/api/tournaments")
-    def public_tournaments(connection: sqlite3.Connection = Depends(web_app._database)):
+    def public_tournaments(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
         items = [
@@ -786,6 +798,10 @@ def register_api_routes(app: FastAPI) -> None:
             for tournament in list_tournaments(connection)
             if tournament.status != "draft"
         ]
+        for item in items:
+            item["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
+                item["record"].id
+            )
         return _json(
             {
                 "tournaments": items,
@@ -865,6 +881,9 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "tournament": tournament,
+                "spectator_count": request.app.state.stream_hub.tournament_spectator_count(
+                    tournament.id
+                ),
                 "estimate": estimate.to_dict(),
                 "games": [
                     web_app._game_payload(game, engines, live=True)

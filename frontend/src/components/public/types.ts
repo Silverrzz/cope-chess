@@ -116,6 +116,7 @@ export interface GameSummary {
 export interface TournamentSummary {
   record: TournamentRecord
   summary: GameSummary
+  spectator_count?: number
   participant_names?: string[]
   participant_preview?: string[]
   participant_overflow?: number
@@ -221,6 +222,7 @@ export interface HardwareRecord {
 
 export interface TournamentDetailResponse {
   tournament: TournamentRecord
+  spectator_count?: number
   estimate?: TournamentEstimate
   games: GameRecord[]
   active_games: GameRecord[]

@@ -7,6 +7,7 @@ import ContentState from '@/components/public/ContentState.vue'
 import TournamentCard from '@/components/public/TournamentCard.vue'
 import { errorMessage } from '@/components/public/format'
 import type { TournamentSummary } from '@/components/public/types'
+import { useTournamentSpectators } from '@/composables/useTournamentSpectators'
 
 interface TournamentStats {
   total: number
@@ -23,6 +24,7 @@ interface TournamentsResponse {
 const route = useRoute()
 const router = useRouter()
 const data = ref<TournamentsResponse | null>(null)
+const { spectatorCount } = useTournamentSpectators()
 const loading = ref(true)
 const loadError = ref('')
 let controller: AbortController | null = null
@@ -142,7 +144,12 @@ function clearFilters(): void {
         </div>
 
         <div v-if="filtered.length" class="tournament-grid">
-          <TournamentCard v-for="item in filtered" :key="item.record.id" :item="item" />
+          <TournamentCard
+            v-for="item in filtered"
+            :key="item.record.id"
+            :item="item"
+            :spectator-count="spectatorCount(item.record.id, item.spectator_count)"
+          />
         </div>
         <ContentState
           v-else

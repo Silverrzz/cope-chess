@@ -10,6 +10,7 @@ import ChatPanel from '@/components/public/ChatPanel.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EnginePanel from '@/components/public/EnginePanel.vue'
 import GameTable from '@/components/public/GameTable.vue'
+import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import StreamIndicator from '@/components/public/StreamIndicator.vue'
 import {
@@ -77,6 +78,11 @@ interface ChatDeletedEvent {
 interface ChatSettingsEvent {
   tournament_id?: Identifier
   settings?: ChatSettings
+}
+
+interface SpectatorEvent {
+  tournament_id?: Identifier
+  spectator_count?: number
 }
 
 interface ViewportPosition {
@@ -467,6 +473,7 @@ function connectStream(): void {
   eventSource.addEventListener('chat.message', handleChatMessage)
   eventSource.addEventListener('chat.deleted', handleChatDeleted)
   eventSource.addEventListener('chat.settings', handleChatSettings)
+  eventSource.addEventListener('spectators.changed', handleSpectatorsChanged)
   eventSource.addEventListener('tournament.changed', scheduleSnapshotRefresh)
   eventSource.addEventListener('tournament.live', scheduleSnapshotRefresh)
 }
@@ -569,6 +576,14 @@ function handleChatSettings(event: Event): void {
   const payload = envelope?.data
   if (!data.value || !payload?.settings || !sameId(payload.tournament_id, tournamentId.value)) return
   data.value.chat_settings = { ...data.value.chat_settings, ...payload.settings }
+}
+
+function handleSpectatorsChanged(event: Event): void {
+  const envelope = parseEnvelope<SpectatorEvent>(event)
+  const payload = envelope?.data
+  if (!data.value || !payload || !sameId(payload.tournament_id, tournamentId.value)) return
+  if (payload.spectator_count === undefined) return
+  data.value.spectator_count = payload.spectator_count
 }
 
 function applySnapshot(snapshot: LiveSnapshot): void {
@@ -1013,6 +1028,7 @@ function forgetManualFollowPauseGame(): void {
           <div class="title-line">
             <h1>{{ data.tournament.name }}<template v-if="headerTimeControl"> ({{ headerTimeControl }})</template></h1>
             <StatusPill :status="data.tournament.status" />
+            <SpectatorCount :count="data.spectator_count ?? 0" />
           </div>
           <p>
             {{ format ? statusLabel(format) : 'Tournament' }}

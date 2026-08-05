@@ -169,6 +169,40 @@ class StreamHub:
                 if not subscribers:
                     self._subscribers.pop(topic, None)
 
+    def tournament_spectator_count(self, tournament_id: int) -> int:
+        topic = f"tournament.{tournament_id}"
+        with self._lock:
+            return len(self._subscribers.get(topic, ()))
+
+    def publish_tournament_spectators(self, tournament_id: int) -> int:
+        tournament_topic = f"tournament.{tournament_id}"
+        topics = (tournament_topic, "tournament-spectators")
+        dispatches: list[tuple[StreamEnvelope, tuple[StreamSubscription, ...]]] = []
+        with self._lock:
+            spectator_count = len(self._subscribers.get(tournament_topic, ()))
+            data = {
+                "tournament_id": tournament_id,
+                "spectator_count": spectator_count,
+            }
+            for topic in topics:
+                seq = self._seq_by_topic.get(topic, 0) + 1
+                self._seq_by_topic[topic] = seq
+                event = make_stream_event(
+                    topic,
+                    "spectators.changed",
+                    data,
+                    source="web",
+                    seq=seq,
+                    event_id=f"{topic}:{seq}",
+                )
+                dispatches.append((event, tuple(self._subscribers.get(topic, ()))))
+            loop = self._loop
+        if loop is not None:
+            for event, subscribers in dispatches:
+                for subscription in subscribers:
+                    loop.call_soon_threadsafe(subscription.enqueue, event)
+        return spectator_count
+
     def register_internal_client(self) -> asyncio.Queue[StreamEnvelope | None]:
         queue: asyncio.Queue[StreamEnvelope | None] = asyncio.Queue(maxsize=self._max_queue)
         with self._lock:
@@ -549,6 +583,7 @@ def create_app(
         async def stream():
             topic = f"tournament.{tournament_id}"
             subscription = hub.subscribe(topic)
+            hub.publish_tournament_spectators(tournament_id)
             try:
                 initial_snapshot = await asyncio.to_thread(snapshot)
                 yield sse_stream_event(
@@ -576,6 +611,61 @@ def create_app(
                         and _event_game_id(event) != selected_game_id
                     ):
                         continue
+                    yield sse_stream_event(event)
+            finally:
+                hub.unsubscribe(subscription)
+                hub.publish_tournament_spectators(tournament_id)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/tournament-spectators/events")
+    async def tournament_spectator_events(request: Request):
+        hub: StreamHub = request.app.state.stream_hub
+        hub.bind_loop()
+
+        def snapshot() -> dict[str, dict[str, int]]:
+            connection = connect_database(request.app.state.db_path)
+            try:
+                counts = {
+                    str(tournament.id): hub.tournament_spectator_count(tournament.id)
+                    for tournament in list_tournaments(connection)
+                    if tournament.status != "draft"
+                }
+                return {"spectator_counts": counts}
+            finally:
+                connection.close()
+
+        async def stream():
+            topic = "tournament-spectators"
+            subscription = hub.subscribe(topic)
+            try:
+                initial_snapshot = await asyncio.to_thread(snapshot)
+                yield sse_stream_event(
+                    hub.make_private_event(
+                        topic,
+                        "spectators.snapshot",
+                        initial_snapshot,
+                        source="web",
+                    )
+                )
+                while True:
+                    try:
+                        event = await asyncio.wait_for(
+                            subscription.queue.get(),
+                            timeout=20,
+                        )
+                    except TimeoutError:
+                        yield ": keep-alive\n\n"
+                        continue
+                    if event is None:
+                        break
                     yield sse_stream_event(event)
             finally:
                 hub.unsubscribe(subscription)

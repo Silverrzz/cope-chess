@@ -4,11 +4,13 @@ import { computed } from 'vue'
 import type { TournamentSummary } from './types'
 import { formatDate } from './format'
 import ProgressBar from './ProgressBar.vue'
+import SpectatorCount from './SpectatorCount.vue'
 import StatusPill from './StatusPill.vue'
 
 const props = defineProps<{
   item: TournamentSummary
   compact?: boolean
+  spectatorCount?: number
 }>()
 
 const finished = computed(() => props.item.summary.finished || 0)
@@ -34,7 +36,10 @@ const scheduleFact = computed(() => {
         <h2><RouterLink :to="`/tournaments/${item.record.id}`">{{ item.record.name }}</RouterLink></h2>
         <p>{{ item.format || 'Tournament' }}<span aria-hidden="true"> / </span>{{ item.time_control || 'Time control not set' }}</p>
       </div>
-      <StatusPill :status="item.record.status" />
+      <div class="tournament-card__status">
+        <SpectatorCount :count="spectatorCount ?? item.spectator_count ?? 0" />
+        <StatusPill :status="item.record.status" />
+      </div>
     </header>
 
     <dl class="tournament-card__facts">
@@ -108,6 +113,12 @@ const scheduleFact = computed(() => {
 
 .tournament-card__heading {
   min-width: 0;
+}
+
+.tournament-card__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem);
 }
 
 .tournament-card h2,

@@ -6,9 +6,11 @@ import ChessBoard from '@/components/chess/ChessBoard.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import GameTable from '@/components/public/GameTable.vue'
 import ProgressBar from '@/components/public/ProgressBar.vue'
+import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import type { GameRecord, MoveRecord, OpeningRecord, TournamentSummary } from '@/components/public/types'
+import { useTournamentSpectators } from '@/composables/useTournamentSpectators'
 
 interface GamePreview {
   game: GameRecord
@@ -43,6 +45,7 @@ interface HomeResponse {
 }
 
 const data = ref<HomeResponse | null>(null)
+const { spectatorCount } = useTournamentSpectators()
 const loading = ref(true)
 const loadError = ref('')
 let controller: AbortController | null = null
@@ -110,7 +113,10 @@ function progress(item: TournamentSummary): number {
                   <h3><RouterLink :to="`/tournaments/${item.tournament.record.id}`">{{ item.tournament.record.name }}</RouterLink></h3>
                   <p>{{ item.tournament.format || 'Tournament' }} / {{ item.tournament.time_control || 'Time control not set' }}</p>
                 </div>
-                <StatusPill :status="item.tournament.record.status" />
+                <div class="live-card__status">
+                  <SpectatorCount :count="spectatorCount(item.tournament.record.id, item.tournament.spectator_count)" />
+                  <StatusPill :status="item.tournament.record.status" />
+                </div>
               </header>
 
               <div v-if="item.preview" class="live-card__preview-heading">
@@ -280,6 +286,12 @@ function progress(item: TournamentSummary): number {
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
+}
+
+.live-card__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 0.5rem);
 }
 
 .live-card h3,
