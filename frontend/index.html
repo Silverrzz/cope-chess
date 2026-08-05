@@ -14,6 +14,14 @@
         document.documentElement.dataset.theme = dark ? "dark" : "light";
         document.documentElement.style.colorScheme = dark ? "dark" : "light";
         document.querySelector('meta[name="theme-color"]').content = dark ? "#0b1017" : "#f3f6fa";
+
+        try {
+          const boardTheme = JSON.parse(localStorage.getItem("cope-board-theme") || "null");
+          if (typeof boardTheme?.light === "string" && typeof boardTheme?.dark === "string") {
+            document.documentElement.style.setProperty("--board-light", boardTheme.light);
+            document.documentElement.style.setProperty("--board-dark", boardTheme.dark);
+          }
+        } catch {}
       })();
     </script>
   </head>

@@ -32,6 +32,11 @@ function cancel(): void {
   open.value = false;
 }
 
+function toggle(): void {
+  if (open.value) cancel();
+  else open.value = true;
+}
+
 onBeforeUnmount(() => {
   if (open.value) revertBoardTheme();
 });
@@ -54,14 +59,14 @@ function update(key: "light" | "dark", event: Event): void {
     title="Settings"
     aria-label="Settings"
     :aria-expanded="open"
-    @click="open = !open"
+    @click="toggle"
   >
     <template #icon><AppIcon name="settings" :size="18" /></template>
     Settings
   </BaseButton>
 
   <Teleport to="body">
-    <div v-if="open" class="settings-dismiss" @click="open = false" />
+    <div v-if="open" class="settings-dismiss" @click="cancel" />
     <aside
       v-if="open"
       ref="panel"
@@ -69,11 +74,11 @@ function update(key: "light" | "dark", event: Event): void {
       role="dialog"
       aria-label="Viewer settings"
       tabindex="-1"
-      @keydown.esc="open = false"
+      @keydown.esc="cancel"
     >
       <header class="settings-drawer__header">
         <h2>Settings</h2>
-        <BaseButton variant="ghost" size="small" icon-only aria-label="Close settings" @click="open = false">
+        <BaseButton variant="ghost" size="small" icon-only aria-label="Close settings" @click="cancel">
           <template #icon><AppIcon name="close" :size="18" /></template>
           Close
         </BaseButton>

@@ -1,7 +1,5 @@
 import { ref } from "vue";
 
-console.log("useBoardTheme loaded", Math.random());
-
 const STORAGE_KEY = "cope-board-theme";
 
 export interface BoardTheme {
@@ -24,9 +22,7 @@ function readStored(): BoardTheme | null {
     if (typeof parsed.light === "string" && typeof parsed.dark === "string") {
       return { light: parsed.light, dark: parsed.dark };
     }
-  } catch {
-    // fall through to the default
-  }
+  } catch {}
   return null;
 }
 
@@ -46,7 +42,7 @@ export function useBoardTheme() {
   }
 
   function revertBoardTheme(): void {
-    applyBoardTheme(theme.value)
+    applyBoardTheme(theme.value);
   }
 
   function setBoardTheme(next: BoardTheme): void {
