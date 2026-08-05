@@ -921,6 +921,23 @@ def list_tournaments(connection: sqlite3.Connection) -> tuple[TournamentRecord, 
     )
 
 
+def list_tournaments_by_ids(
+    connection: sqlite3.Connection,
+    tournament_ids: Iterable[int],
+) -> tuple[TournamentRecord, ...]:
+    selected = tuple(dict.fromkeys(int(value) for value in tournament_ids))
+    if not selected:
+        return ()
+    placeholders = ", ".join("?" for _ in selected)
+    return tuple(
+        _tournament_from_row(row)
+        for row in connection.execute(
+            f"SELECT * FROM tournaments WHERE id IN ({placeholders}) ORDER BY id",
+            selected,
+        )
+    )
+
+
 def set_tournament_status(
     connection: sqlite3.Connection,
     tournament_id: int,
@@ -1335,6 +1352,29 @@ def list_games(
             """,
             (tournament_id, status),
         )
+    return tuple(_game_from_row(row) for row in rows)
+
+
+def list_games_for_tournaments(
+    connection: sqlite3.Connection,
+    tournament_ids: Iterable[int],
+) -> tuple[GameRecord, ...]:
+    selected = tuple(dict.fromkeys(int(value) for value in tournament_ids))
+    if not selected:
+        return ()
+    placeholders = ", ".join("?" for _ in selected)
+    rows = connection.execute(
+        f"""
+        SELECT
+          id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
+          match_id, game_number, tiebreak_kind, opening_id, status, result,
+          termination, NULL::text AS pgn, started_at, finished_at
+        FROM games
+        WHERE tournament_id IN ({placeholders})
+        ORDER BY tournament_id, round, pair_index, id
+        """,
+        selected,
+    )
     return tuple(_game_from_row(row) for row in rows)
 
 

@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from math import log
 from typing import Iterable
 
-from cope.db.repo import RunnerCommandRecord, get_tournament, list_games, utc_now
+from cope.db.repo import (
+    RunnerCommandRecord,
+    get_tournament,
+    list_games,
+    list_games_for_tournaments,
+    list_tournaments_by_ids,
+    utc_now,
+)
 
 
 DEFAULT_ELO = 1500.0
 ELO_SCALE = 400.0
+ELO_LOGISTIC_FACTOR = log(10.0) / ELO_SCALE
 RATING_CONVERGENCE = 0.000001
 RATING_ITERATIONS = 10000
 
@@ -168,6 +177,19 @@ def recalculate_ratings(
         selected,
     ).fetchall()
 
+    committed_tournament_ids = tuple(
+        dict.fromkeys(int(commit["tournament_id"]) for commit in commits)
+    )
+    tournaments = {
+        tournament.id: tournament
+        for tournament in list_tournaments_by_ids(connection, committed_tournament_ids)
+    }
+    games_by_tournament: dict[int, list[object]] = {
+        tournament_id: [] for tournament_id in committed_tournament_ids
+    }
+    for game in list_games_for_tournaments(connection, committed_tournament_ids):
+        games_by_tournament[game.tournament_id].append(game)
+
     games_by_list: dict[int, list[tuple[int, object, str]]] = {
         list_id: [] for list_id in selected
     }
@@ -177,10 +199,10 @@ def recalculate_ratings(
     for commit in commits:
         tournament_id = int(commit["tournament_id"])
         rating_list_id = int(commit["rating_list_id"])
-        tournament = get_tournament(connection, tournament_id)
+        tournament = tournaments.get(tournament_id)
         if tournament is None:
             raise RatingCommitError(f"committed tournament {tournament_id} no longer exists")
-        games = _committable_games(tournament, list_games(connection, tournament_id))
+        games = _committable_games(tournament, tuple(games_by_tournament[tournament_id]))
         _validate_games(tournament, games)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at
         games_by_list[rating_list_id].extend(
@@ -200,49 +222,77 @@ def recalculate_ratings(
         )
         ratings[rating_list_id] = category_ratings
         games_played[rating_list_id] = category_counts
+        history_rows = []
         for tournament_id, game, history_at in category_games:
             white_rating = category_ratings[game.white_engine_id]
             black_rating = category_ratings[game.black_engine_id]
             white_score = _white_score(game.result)
             white_expected = expected_score(white_rating, black_rating)
-            _record_history(
-                connection,
-                engine_id=game.white_engine_id,
-                opponent_engine_id=game.black_engine_id,
-                rating_list_id=rating_list_id,
-                tournament_id=tournament_id,
-                game_id=game.id,
-                elo_before=white_rating,
-                elo=white_rating,
-                score=white_score,
-                expected_score=white_expected,
-                at=history_at,
+            history_rows.append(
+                _history_row(
+                    engine_id=game.white_engine_id,
+                    opponent_engine_id=game.black_engine_id,
+                    rating_list_id=rating_list_id,
+                    tournament_id=tournament_id,
+                    game_id=game.id,
+                    elo_before=white_rating,
+                    elo=white_rating,
+                    score=white_score,
+                    expected_score=white_expected,
+                    at=history_at,
+                )
             )
-            _record_history(
-                connection,
-                engine_id=game.black_engine_id,
-                opponent_engine_id=game.white_engine_id,
-                rating_list_id=rating_list_id,
-                tournament_id=tournament_id,
-                game_id=game.id,
-                elo_before=black_rating,
-                elo=black_rating,
-                score=1.0 - white_score,
-                expected_score=1.0 - white_expected,
-                at=history_at,
+            history_rows.append(
+                _history_row(
+                    engine_id=game.black_engine_id,
+                    opponent_engine_id=game.white_engine_id,
+                    rating_list_id=rating_list_id,
+                    tournament_id=tournament_id,
+                    game_id=game.id,
+                    elo_before=black_rating,
+                    elo=black_rating,
+                    score=1.0 - white_score,
+                    expected_score=1.0 - white_expected,
+                    at=history_at,
+                )
+            )
+        if history_rows:
+            connection.executemany(
+                """
+                INSERT INTO rating_list_history (
+                  engine_id, rating_list_id, tournament_id, opponent_engine_id,
+                  elo_before, elo, elo_change, score, expected_score,
+                  hardware_score, opponent_hardware_score, game_id, at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                history_rows,
             )
 
     engines_updated = 0
+    rating_rows = []
     for rating_list_id, category_ratings in ratings.items():
         for engine_id, elo in category_ratings.items():
-            connection.execute(
-                f"""
-                INSERT INTO rating_list_ratings (engine_id, rating_list_id, elo, games_played, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (engine_id, rating_list_id, elo, games_played[rating_list_id][engine_id], applied_at),
+            rating_rows.append(
+                (
+                    engine_id,
+                    rating_list_id,
+                    elo,
+                    games_played[rating_list_id][engine_id],
+                    applied_at,
+                )
             )
             engines_updated += 1
+    if rating_rows:
+        connection.executemany(
+            """
+            INSERT INTO rating_list_ratings (
+              engine_id, rating_list_id, elo, games_played, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rating_rows,
+        )
 
     return RatingRecalculationResult(
         lists_updated=len(selected),
@@ -304,66 +354,99 @@ def _calculate_ratings_together(
     anchor_engine_id: int | None,
     anchor_elo: float,
 ) -> tuple[dict[int, float], dict[int, int]]:
-    engine_ids = {
-        engine_id
-        for game in games
-        for engine_id in (game.white_engine_id, game.black_engine_id)
-    }
+    engine_ids = sorted(
+        {
+            engine_id
+            for game in games
+            for engine_id in (game.white_engine_id, game.black_engine_id)
+        }
+    )
     if not engine_ids:
         return {}, {}
     if anchor_engine_id is not None and anchor_engine_id not in engine_ids:
         raise RatingCommitError("the Elo anchor must be a participant in the rated games")
 
-    ratings = {engine_id: 0.0 for engine_id in engine_ids}
-    scores = {engine_id: 0.0 for engine_id in engine_ids}
-    games_played = {engine_id: 0 for engine_id in engine_ids}
+    engine_indices = {engine_id: index for index, engine_id in enumerate(engine_ids)}
+    ratings = [0.0] * len(engine_ids)
+    scores = [0.0] * len(engine_ids)
+    game_counts = [0] * len(engine_ids)
+    pair_counts: dict[tuple[int, int], int] = {}
     for game in games:
+        white_index = engine_indices[game.white_engine_id]
+        black_index = engine_indices[game.black_engine_id]
         white_score = _white_score(game.result)
-        scores[game.white_engine_id] += white_score
-        scores[game.black_engine_id] += 1.0 - white_score
-        games_played[game.white_engine_id] += 1
-        games_played[game.black_engine_id] += 1
+        scores[white_index] += white_score
+        scores[black_index] += 1.0 - white_score
+        game_counts[white_index] += 1
+        game_counts[black_index] += 1
+        pair = (
+            (white_index, black_index)
+            if white_index < black_index
+            else (black_index, white_index)
+        )
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
 
-    fixed_engine_id = anchor_engine_id or min(engine_ids)
+    fixed_index = engine_indices[anchor_engine_id] if anchor_engine_id is not None else 0
+    adjustable_indices = tuple(
+        index for index in range(len(engine_ids)) if index != fixed_index
+    )
+    pairings = tuple(
+        (first_index, second_index, count)
+        for (first_index, second_index), count in pair_counts.items()
+    )
     for _ in range(RATING_ITERATIONS):
-        expected_scores = {engine_id: 0.0 for engine_id in engine_ids}
-        for game in games:
-            white_expected = expected_score(
-                ratings[game.white_engine_id],
-                ratings[game.black_engine_id],
+        expected_scores = [0.0] * len(engine_ids)
+        information = [0.0] * len(engine_ids)
+        for first_index, second_index, count in pairings:
+            first_expected = expected_score(
+                ratings[first_index],
+                ratings[second_index],
             )
-            expected_scores[game.white_engine_id] += white_expected
-            expected_scores[game.black_engine_id] += 1.0 - white_expected
+            expected_scores[first_index] += count * first_expected
+            expected_scores[second_index] += count * (1.0 - first_expected)
+            if first_index != second_index:
+                pairing_information = count * first_expected * (1.0 - first_expected)
+                information[first_index] += pairing_information
+                information[second_index] += pairing_information
 
-        adjustments = {
-            engine_id: ELO_SCALE
-            * (scores[engine_id] - expected_scores[engine_id])
-            / games_played[engine_id]
-            for engine_id in engine_ids
-            if engine_id != fixed_engine_id
-        }
-        if not adjustments or max(abs(value) for value in adjustments.values()) < RATING_CONVERGENCE:
+        residuals = [0.0] * len(engine_ids)
+        largest_adjustment = 0.0
+        for index in adjustable_indices:
+            residual = scores[index] - expected_scores[index]
+            residuals[index] = residual
+            legacy_adjustment = ELO_SCALE * residual / game_counts[index]
+            largest_adjustment = max(largest_adjustment, abs(legacy_adjustment))
+        if largest_adjustment < RATING_CONVERGENCE:
             break
-        for engine_id, adjustment in adjustments.items():
-            ratings[engine_id] += adjustment
+        for index in adjustable_indices:
+            if information[index] == 0.0:
+                continue
+            adjustment = (
+                0.5
+                * residuals[index]
+                / (ELO_LOGISTIC_FACTOR * information[index])
+            )
+            ratings[index] += max(-ELO_SCALE, min(ELO_SCALE, adjustment))
     else:
         raise RatingCommitError("the tournament results did not produce stable Elo ratings")
 
     if anchor_engine_id is None:
-        offset = DEFAULT_ELO - sum(ratings.values()) / len(ratings)
+        offset = DEFAULT_ELO - sum(ratings) / len(ratings)
     else:
-        offset = anchor_elo - ratings[anchor_engine_id]
+        offset = anchor_elo - ratings[fixed_index]
     return (
         {
-            engine_id: round(rating + offset, 6)
-            for engine_id, rating in ratings.items()
+            engine_id: round(ratings[index] + offset, 6)
+            for index, engine_id in enumerate(engine_ids)
         },
-        games_played,
+        {
+            engine_id: game_counts[index]
+            for index, engine_id in enumerate(engine_ids)
+        },
     )
 
 
-def _record_history(
-    connection: sqlite3.Connection,
+def _history_row(
     *,
     engine_id: int,
     opponent_engine_id: int,
@@ -375,31 +458,21 @@ def _record_history(
     score: float,
     expected_score: float,
     at: str,
-) -> None:
-    connection.execute(
-        f"""
-        INSERT INTO rating_list_history (
-          engine_id, rating_list_id, tournament_id, opponent_engine_id,
-          elo_before, elo, elo_change, score, expected_score,
-          hardware_score, opponent_hardware_score, game_id, at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            engine_id,
-            rating_list_id,
-            tournament_id,
-            opponent_engine_id,
-            elo_before,
-            elo,
-            round(elo - elo_before, 6),
-            score,
-            expected_score,
-            1.0,
-            1.0,
-            game_id,
-            at,
-        ),
+) -> tuple:
+    return (
+        engine_id,
+        rating_list_id,
+        tournament_id,
+        opponent_engine_id,
+        elo_before,
+        elo,
+        round(elo - elo_before, 6),
+        score,
+        expected_score,
+        1.0,
+        1.0,
+        game_id,
+        at,
     )
 
 
