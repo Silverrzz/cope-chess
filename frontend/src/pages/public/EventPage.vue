@@ -6,7 +6,7 @@ import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import StatusPill from "@/components/public/StatusPill.vue";
 import { errorMessage } from "@/components/public/format";
-import { publicEventComponent } from "@/events/registry";
+import { publicEventComponent, publicEventPresentation } from "@/events/registry";
 import type { ChatMessage, ChatSettings } from "@/components/public/types";
 import type { EventCastMember, EventContest, EventDetailResponse, EventSession } from "@/types/events";
 
@@ -19,6 +19,7 @@ let controller: AbortController | null = null;
 let stream: EventSource | null = null;
 
 const customComponent = computed(() => data.value?.handler.current ? publicEventComponent(data.value.handler.key) : null);
+const immersiveCustom = computed(() => !!data.value && publicEventPresentation(data.value.handler.key) === "immersive");
 const accent = computed(() => {
   const theme = data.value?.event.theme ?? {};
   const value = theme.accent ?? theme.accent_color;
@@ -133,6 +134,9 @@ function sessionTiming(session: EventSession): string {
     </div>
 
     <template v-if="data && !loading">
+      <component :is="customComponent" v-if="customComponent && immersiveCustom" :detail="data" />
+
+      <template v-else>
       <header class="event-hero">
         <div class="event-hero__light" aria-hidden="true"></div>
         <div class="page-container event-hero__inner">
@@ -242,6 +246,7 @@ function sessionTiming(session: EventSession): string {
           </aside>
         </div>
       </main>
+      </template>
     </template>
   </div>
 </template>
