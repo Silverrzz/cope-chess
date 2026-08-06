@@ -8,6 +8,11 @@ COPY . .
 RUN mkdir -p data/neuralNets \
     && tail -c +1005569 /tmp/caissa.exe | head -c 50331648 > data/neuralNets/eval-71.pnn \
     && echo "6629611ed2ab8ba84658fc854175356c497fa3ca3c73c57890a6cd073f7a69ca  data/neuralNets/eval-71.pnn" | sha256sum -c - \
+    && sed -i \
+        -e '/for (const char\* testPosition : testPositions)/i\    uint32_t benchmarkPosition = 0;' \
+        -e '/for (const char\* testPosition : testPositions)/,+1 s/{/{\n        if (benchmarkPosition++ == 48)\n        {\n            break;\n        }/' \
+        src/frontend/UCI.cpp \
+    && sed -i 's/searchParam.limits.maxDepth = static_cast<uint16_t>(depth);/searchParam.limits.maxDepth = static_cast<uint16_t>(depth);\n        searchParam.limits.maxNodes = 1000000;/' src/frontend/UCI.cpp \
     && make -C src -j"$(nproc)" bmi2 \
         CC=clang++ \
         EXE=caissa \
