@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
+import AppIcon from "@/components/ui/AppIcon.vue";
 import { errorText, formatDate } from "@/components/admin/format";
 import { useToast } from "@/composables/useToast";
-import type { EventDetailResponse, EventStatus } from "@/types/events";
+import type { EventDetailResponse } from "@/types/events";
 
 import type { EngineRelayPayload, RelayFixture, RelayRosterMember, RelayTeam } from "./types";
 
@@ -17,7 +18,11 @@ const payload = computed(() => props.detail.custom as EngineRelayPayload);
 const pending = ref("");
 const error = ref("");
 const showTeamCreator = ref(false);
-const visibility = reactive({ status: props.detail.event.status as EventStatus, published: !!props.detail.event.published_at });
+const activeView = ref<"overview" | "teams" | "fixtures">("overview");
+const editingTeamId = ref<number | null>(null);
+const showFixtureBuilder = ref(false);
+const showAdvancedFixture = ref(false);
+const visibility = reactive({ published: !!props.detail.event.published_at });
 const newTeam = reactive({ name: "", short_name: "", primary_color: "#315fcc", secondary_color: "#8fb3ff", profile: "", motto: "" });
 const fixtureForm = reactive({
   title: "",
@@ -37,6 +42,11 @@ const schedules = reactive<Record<number, string>>({});
 
 const readyTeams = computed(() => payload.value.teams.filter((team) => team.roster.length));
 const projectedGames = computed(() => Math.max(1, Number(fixtureForm.cycles) || 1) * 2);
+
+watch(
+  () => props.detail.event.published_at,
+  (value) => { visibility.published = !!value; },
+);
 
 function memberDraft(team: RelayTeam) {
   return memberDrafts[team.id] ??= {
@@ -183,25 +193,33 @@ function fixtureCycles(fixture: RelayFixture): number | string {
   <section class="relay-control">
     <InlineFeedback :message="error" />
 
-    <section class="panel relay-command-bar">
-      <div><span>Module</span><strong>Engine Relay v1</strong><small>Normal scheduler · unrated execution</small></div>
-      <div><span>Teams</span><strong>{{ payload.teams.length }}</strong><small>{{ payload.teams.reduce((total, team) => total + team.roster.length, 0) }} engine slots</small></div>
-      <div><span>Fixtures</span><strong>{{ payload.fixtures.length }}</strong><small>{{ payload.fixtures.reduce((total, fixture) => total + fixture.games.length, 0) }} materialised games</small></div>
-      <form class="visibility-control" @submit.prevent="saveVisibility"><label><span>Event state</span><select v-model="visibility.status"><option value="draft">Draft</option><option value="announced">Announced</option><option value="scheduled">Scheduled</option><option value="live">Live</option><option value="intermission">Intermission</option><option value="postponed">Postponed</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label><label class="publish-toggle"><input v-model="visibility.published" type="checkbox"><span>Public</span></label><button class="button button--secondary button--small" type="submit" :disabled="!!pending">{{ pending === 'visibility' ? 'Saving…' : 'Apply' }}</button></form>
+    <section class="relay-toolbar panel">
+      <nav aria-label="Event workspace">
+        <button type="button" :class="{ active: activeView === 'overview' }" @click="activeView = 'overview'"><AppIcon name="gauge" :size="17" />Overview</button>
+        <button type="button" :class="{ active: activeView === 'teams' }" @click="activeView = 'teams'"><AppIcon name="engine" :size="17" />Teams <span>{{ payload.teams.length }}</span></button>
+        <button type="button" :class="{ active: activeView === 'fixtures' }" @click="activeView = 'fixtures'"><AppIcon name="trophy" :size="17" />Fixtures <span>{{ payload.fixtures.length }}</span></button>
+      </nav>
+      <form class="visibility-control" @submit.prevent="saveVisibility"><div class="lifecycle-status"><span>Lifecycle</span><StatusBadge :status="detail.event.status" /></div><label class="publish-toggle"><input v-model="visibility.published" type="checkbox"><span>{{ visibility.published ? 'Public' : 'Private' }}</span></label><button class="button button--primary button--small" type="submit" :disabled="!!pending">{{ pending === 'visibility' ? 'Saving…' : 'Save' }}</button></form>
     </section>
 
-    <section class="relay-section">
-      <header class="relay-section__heading"><div><span>01 · Field construction</span><h2>Teams and running orders</h2><p>Set the visual identity, exact relay order, handoff length, and node allowance for every engine.</p></div><button class="button button--secondary button--small" type="button" @click="showTeamCreator = !showTeamCreator">{{ showTeamCreator ? 'Close' : 'Add team' }}</button></header>
+    <section v-if="activeView === 'overview'" class="overview-grid">
+      <button class="panel overview-card overview-card--primary" type="button" @click="activeView = 'teams'"><span class="overview-card__icon"><AppIcon name="engine" :size="20" /></span><span><small>Teams</small><strong>{{ payload.teams.length }}</strong></span><AppIcon name="arrow-right" :size="18" /></button>
+      <button class="panel overview-card" type="button" @click="activeView = 'fixtures'"><span class="overview-card__icon"><AppIcon name="trophy" :size="20" /></span><span><small>Fixtures</small><strong>{{ payload.fixtures.length }}</strong></span><AppIcon name="arrow-right" :size="18" /></button>
+      <section class="panel event-health"><header><h2>Event setup</h2><StatusBadge :status="detail.event.status" /></header><dl><div><dt>Visibility</dt><dd>{{ detail.event.published_at ? 'Public' : 'Private' }}</dd></div><div><dt>Scheduler</dt><dd>Standard</dd></div><div><dt>Ratings</dt><dd>Unrated</dd></div><div><dt>Relay module</dt><dd>v1</dd></div></dl></section>
+    </section>
+
+    <section v-show="activeView === 'teams'" class="relay-section">
+      <header class="relay-section__heading"><div><span>Teams</span><h2>Relay line-ups</h2></div><button class="button button--primary" type="button" @click="showTeamCreator = !showTeamCreator"><AppIcon :name="showTeamCreator ? 'close' : 'plus'" :size="16" />{{ showTeamCreator ? 'Cancel' : 'New team' }}</button></header>
 
       <form v-if="showTeamCreator" class="panel new-team" @submit.prevent="createTeam"><label><span>Name</span><input v-model="newTeam.name" class="input" required maxlength="120"></label><label><span>Short name</span><input v-model="newTeam.short_name" class="input" maxlength="20"></label><label><span>Primary</span><input v-model="newTeam.primary_color" type="color"></label><label><span>Secondary</span><input v-model="newTeam.secondary_color" type="color"></label><label class="new-team__wide"><span>Motto</span><input v-model="newTeam.motto" class="input" maxlength="180"></label><button class="button button--primary" type="submit" :disabled="!!pending">Create team</button></form>
 
       <div class="team-grid">
         <article v-for="team in payload.teams" :key="team.id" class="panel team-editor" :style="{ '--team-primary': team.primary_color, '--team-secondary': team.secondary_color }">
-          <header><div class="team-swatch"><i></i><i></i></div><div><span>Team #{{ team.id }}</span><h3>{{ team.name }}</h3></div><StatusBadge :status="team.locked ? 'locked' : 'active'" :label="team.locked ? 'Roster locked' : 'Editable'" /></header>
-          <form class="team-identity" @submit.prevent="saveTeam(team)"><label><span>Team name</span><input v-model="team.name" class="input" maxlength="120"></label><label><span>Short name</span><input v-model="team.short_name" class="input" maxlength="20"></label><label><span>Primary colour</span><input v-model="team.primary_color" type="color"></label><label><span>Secondary colour</span><input v-model="team.secondary_color" type="color"></label><label class="team-identity__wide"><span>Motto</span><input v-model="team.motto" class="input" maxlength="180"></label><label class="team-identity__wide"><span>Team profile</span><textarea v-model="team.profile" class="input" rows="2" maxlength="1000"></textarea></label><div class="team-actions"><button class="button button--secondary button--small" type="submit" :disabled="!!pending">{{ pending === `team-${team.id}` ? 'Saving…' : 'Save identity' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending" @click="deleteTeam(team)">Delete</button></div></form>
+          <header><div class="team-swatch"><i></i><i></i></div><div><span>{{ team.short_name || `Team ${team.id}` }}</span><h3>{{ team.name }}</h3></div><div class="team-header-actions"><StatusBadge :status="team.locked ? 'locked' : 'active'" :label="team.locked ? 'Locked' : 'Ready'" /><button class="icon-button" type="button" :aria-label="`Edit ${team.name}`" @click="editingTeamId = editingTeamId === team.id ? null : team.id"><AppIcon :name="editingTeamId === team.id ? 'close' : 'settings'" :size="16" /></button></div></header>
+          <form v-if="editingTeamId === team.id" class="team-identity" @submit.prevent="saveTeam(team)"><label><span>Team name</span><input v-model="team.name" class="input" maxlength="120"></label><label><span>Short name</span><input v-model="team.short_name" class="input" maxlength="20"></label><label><span>Primary colour</span><input v-model="team.primary_color" type="color"></label><label><span>Secondary colour</span><input v-model="team.secondary_color" type="color"></label><label class="team-identity__wide"><span>Motto</span><input v-model="team.motto" class="input" maxlength="180"></label><label class="team-identity__wide"><span>Team profile</span><textarea v-model="team.profile" class="input" rows="2" maxlength="1000"></textarea></label><div class="team-actions"><button class="button button--primary button--small" type="submit" :disabled="!!pending">{{ pending === `team-${team.id}` ? 'Saving…' : 'Save changes' }}</button><button class="button button--ghost button--small" type="button" @click="editingTeamId = null">Cancel</button><button class="button button--danger button--small" type="button" :disabled="!!pending" @click="deleteTeam(team)"><AppIcon name="trash" :size="14" />Delete</button></div></form>
 
           <section class="roster-editor">
-            <header><div><span>Relay order</span><strong>{{ team.roster.length }} engine{{ team.roster.length === 1 ? '' : 's' }}</strong></div><small v-if="team.locked">Started fixtures preserve this exact roster.</small><small v-else>Order numbers may be repeated; ties keep their registration order.</small></header>
+            <header><div><span>Relay order</span><strong>{{ team.roster.length }} engine{{ team.roster.length === 1 ? '' : 's' }}</strong></div></header>
             <div v-if="team.roster.length" class="roster-table">
               <div class="roster-table__head"><span>Order / engine</span><span>Moves per turn</span><span>Node allowance</span><span>Odds</span><span></span></div>
               <form v-for="member in team.roster" :key="member.id" @submit.prevent="saveMember(team, member)">
@@ -212,42 +230,40 @@ function fixtureCycles(fixture: RelayFixture): number | string {
                 <div class="roster-actions"><button class="button button--secondary button--small" type="submit" :disabled="!!pending || team.locked">Save</button><button class="icon-button icon-button--danger" type="button" :disabled="!!pending || team.locked" aria-label="Remove engine" @click="deleteMember(team, member)">×</button></div>
               </form>
             </div>
-            <p v-else class="roster-empty">No engines registered. Add the anchor engine first; it becomes this team’s tournament participant identity.</p>
+            <p v-else class="roster-empty">No engines</p>
             <form v-if="!team.locked" class="add-engine" @submit.prevent="addMember(team)"><label><span>Engine version</span><select v-model.number="memberDraft(team).engine_id" class="input"><option :value="0" disabled>Select an engine</option><option v-for="engine in payload.engine_options ?? []" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option></select></label><label><span>Order</span><input v-model.number="memberDraft(team).position" class="input" type="number" min="0"></label><label><span>Moves</span><input v-model.number="memberDraft(team).relay_moves" class="input" type="number" min="1"></label><label><span>Nodes</span><input v-model.number="memberDraft(team).nodes" class="input" type="number" min="1" step="1"></label><button class="button button--primary button--small" type="submit" :disabled="!!pending || !memberDraft(team).engine_id">Add to relay</button></form>
           </section>
         </article>
       </div>
     </section>
 
-    <section class="relay-section fixture-workspace">
-      <header class="relay-section__heading"><div><span>02 · Match production</span><h2>Register relay fixtures</h2><p>Each fixture is a first-class, unrated round-robin tournament with the normal opening, worker, replay, and scheduling lifecycle.</p></div><strong class="game-projection">{{ projectedGames }} games in draft</strong></header>
+    <section v-show="activeView === 'fixtures'" class="relay-section fixture-workspace">
+      <header class="relay-section__heading"><div><span>Fixtures</span><h2>Matches and schedule</h2></div><button class="button button--primary" type="button" @click="showFixtureBuilder = !showFixtureBuilder"><AppIcon :name="showFixtureBuilder ? 'close' : 'plus'" :size="16" />{{ showFixtureBuilder ? 'Cancel' : 'New fixture' }}</button></header>
 
-      <div class="fixture-layout">
-        <form class="panel fixture-builder" @submit.prevent="createFixture">
-          <header><span>New fixture</span><h3>Build the execution unit</h3></header>
-          <label class="fixture-builder__wide"><span>Tournament title</span><input v-model="fixtureForm.title" class="input" required placeholder="OpenBench Engine Clash · Heat 1"></label>
+      <div class="fixture-layout" :class="{ 'fixture-layout--building': showFixtureBuilder }">
+        <form v-if="showFixtureBuilder" class="panel fixture-builder" @submit.prevent="createFixture">
+          <header><span>New fixture</span><h3>Set up a match</h3></header>
+          <label class="fixture-builder__wide"><span>Fixture name</span><input v-model="fixtureForm.title" class="input" required placeholder="Heat 1"></label>
           <label><span>Team A</span><select v-model.number="fixtureForm.team_a_id" class="input"><option :value="0" disabled>Select team</option><option v-for="team in readyTeams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
           <label><span>Team B</span><select v-model.number="fixtureForm.team_b_id" class="input"><option :value="0" disabled>Select team</option><option v-for="team in readyTeams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
           <label><span>Round-robin cycles</span><input v-model.number="fixtureForm.cycles" class="input" type="number" min="1" max="1000"></label>
           <label><span>Opening suite</span><select v-model="fixtureForm.opening_suite_id" class="input"><option value="">No opening suite</option><option v-for="suite in payload.opening_suites ?? []" :key="suite.id" :value="String(suite.id)">{{ suite.name }}</option></select></label>
-          <label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label>
-          <label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label>
-          <label><span>Threads per active engine</span><input v-model.number="fixtureForm.engine_threads" class="input" type="number" min="1"></label>
-          <label><span>Hash per roster engine · MB</span><input v-model.number="fixtureForm.engine_hash_mb" class="input" type="number" min="1"></label>
           <label class="fixture-builder__wide"><span>Optional scheduled start</span><input v-model="fixtureForm.scheduled_start_at" class="input" type="datetime-local"></label>
-          <div class="fixture-summary"><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Rating impact</span><strong>None</strong></div><div><span>Worker mode</span><strong>Relay-aware</strong></div></div>
-          <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || fixtureForm.team_a_id === fixtureForm.team_b_id">{{ pending === 'fixture-new' ? 'Registering…' : 'Register fixture' }}</button>
+          <button class="advanced-toggle" type="button" :aria-expanded="showAdvancedFixture" @click="showAdvancedFixture = !showAdvancedFixture"><span><AppIcon name="settings" :size="15" />Advanced settings</span><AppIcon name="chevron-down" :size="15" :class="{ rotated: showAdvancedFixture }" /></button>
+          <div v-if="showAdvancedFixture" class="advanced-fields"><label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label><label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label><label><span>Threads per engine</span><input v-model.number="fixtureForm.engine_threads" class="input" type="number" min="1"></label><label><span>Hash per engine · MB</span><input v-model.number="fixtureForm.engine_hash_mb" class="input" type="number" min="1"></label></div>
+          <div class="fixture-summary"><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Rating</span><strong>Unrated</strong></div><div><span>Mode</span><strong>Relay</strong></div></div>
+          <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || fixtureForm.team_a_id === fixtureForm.team_b_id">{{ pending === 'fixture-new' ? 'Creating…' : 'Create fixture' }}</button>
         </form>
 
         <div class="fixture-list">
           <article v-for="fixture in payload.fixtures" :key="fixture.id" class="panel fixture-card">
             <header><div><span>Fixture {{ fixture.position + 1 }}</span><h3>{{ fixture.title }}</h3><p>{{ fixture.team_a_name }} vs {{ fixture.team_b_name }}</p></div><StatusBadge :status="fixture.tournament?.status ?? 'missing'" /></header>
-            <dl><div><dt>Tournament</dt><dd>#{{ fixture.tournament_id }}</dd></div><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
-            <div class="fixture-games"><RouterLink v-for="game in fixture.games" :key="game.id" :to="`/tournaments/${fixture.tournament_id}?game_id=${game.id}`"><span>G{{ game.game_number ?? game.id }}</span><strong>{{ game.result || game.status }}</strong></RouterLink><span v-if="!fixture.games.length">Games materialise when scheduled or started.</span></div>
+            <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
+            <div class="fixture-games"><RouterLink v-for="game in fixture.games" :key="game.id" :to="`/tournaments/${fixture.tournament_id}?game_id=${game.id}`"><span>G{{ game.game_number ?? game.id }}</span><strong>{{ game.result || game.status }}</strong></RouterLink><span v-if="!fixture.games.length">No games</span></div>
             <div v-if="fixture.tournament?.status === 'draft' || fixture.tournament?.status === 'scheduled'" class="fixture-schedule"><input v-model="schedules[fixture.id]" class="input" type="datetime-local"><button class="button button--secondary button--small" type="button" :disabled="!!pending || !schedules[fixture.id]" @click="scheduleFixture(fixture)">{{ fixture.tournament?.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button></div>
-            <footer><RouterLink class="button button--ghost button--small" :to="`/admin/tournaments/${fixture.tournament_id}`">Tournament controls</RouterLink><RouterLink v-if="fixture.tournament?.status !== 'draft'" class="button button--ghost button--small" :to="`/tournaments/${fixture.tournament_id}`">Public board</RouterLink><button v-if="fixture.tournament?.status === 'scheduled'" class="button button--secondary button--small" type="button" :disabled="!!pending" @click="unscheduleFixture(fixture)">Unschedule</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="button button--primary button--small" type="button" :disabled="!!pending" @click="startFixture(fixture)">Start now</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="button button--danger button--small" type="button" :disabled="!!pending" @click="deleteFixture(fixture)">Delete</button></footer>
+            <footer><RouterLink class="button button--ghost button--small" :to="`/admin/tournaments/${fixture.tournament_id}`"><AppIcon name="settings" :size="14" />Manage</RouterLink><RouterLink v-if="fixture.tournament?.status !== 'draft'" class="button button--ghost button--small" :to="`/tournaments/${fixture.tournament_id}`"><AppIcon name="external-link" :size="14" />View</RouterLink><button v-if="fixture.tournament?.status === 'scheduled'" class="button button--secondary button--small" type="button" :disabled="!!pending" @click="unscheduleFixture(fixture)">Unschedule</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="button button--primary button--small" type="button" :disabled="!!pending" @click="startFixture(fixture)"><AppIcon name="play" :size="14" />Start now</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="icon-button icon-button--danger" type="button" :disabled="!!pending" aria-label="Delete fixture" @click="deleteFixture(fixture)"><AppIcon name="trash" :size="15" /></button></footer>
           </article>
-          <div v-if="!payload.fixtures.length" class="panel fixture-empty"><strong>No relay fixtures yet</strong><p>Complete two rosters, then register the first execution unit.</p></div>
+          <div v-if="!payload.fixtures.length" class="panel fixture-empty"><span><AppIcon name="trophy" :size="24" /></span><strong>No fixtures</strong><button class="button button--primary button--small" type="button" :disabled="readyTeams.length < 2" @click="showFixtureBuilder = true">Create fixture</button></div>
         </div>
       </div>
     </section>
@@ -255,9 +271,64 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 </template>
 
 <style scoped>
-.relay-control { display: grid; gap: 1.4rem; }.relay-command-bar { display: grid; grid-template-columns: repeat(3, minmax(8rem, .5fr)) minmax(23rem, 1.3fr); padding: 0; overflow: hidden; }.relay-command-bar > div { display: grid; gap: .1rem; padding: .75rem .85rem; border-right: 1px solid var(--color-border, #d9e0ea); }.relay-command-bar span, .relay-section__heading > div > span, .fixture-builder header span, .team-editor > header > div > span { color: var(--color-text-muted, #64748b); font-size: .56rem; font-weight: 760; letter-spacing: .07em; text-transform: uppercase; }.relay-command-bar strong { font-size: .78rem; }.relay-command-bar small { color: var(--color-text-muted, #64748b); font-size: .57rem; }.visibility-control { display: flex; align-items: end; gap: .55rem; padding: .55rem .7rem; }.visibility-control label:first-child { display: grid; flex: 1; gap: .24rem; }.visibility-control select { height: 2rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .4rem; background: var(--color-surface, #fff); font-size: .68rem; }.publish-toggle { display: flex; align-items: center; gap: .35rem; min-height: 2rem; font-size: .65rem; }
+.relay-control { display: grid; gap: 1.4rem; }.relay-command-bar { display: grid; grid-template-columns: repeat(3, minmax(8rem, .5fr)) minmax(23rem, 1.3fr); padding: 0; overflow: hidden; }.relay-command-bar > div { display: grid; gap: .1rem; padding: .75rem .85rem; border-right: 1px solid var(--color-border, #d9e0ea); }.relay-command-bar span, .relay-section__heading > div > span, .fixture-builder header span, .team-editor > header > div > span { color: var(--color-text-muted, #64748b); font-size: .56rem; font-weight: 760; letter-spacing: .07em; text-transform: uppercase; }.relay-command-bar strong { font-size: .78rem; }.relay-command-bar small { color: var(--color-text-muted, #64748b); font-size: .57rem; }.visibility-control { display: flex; align-items: end; gap: .55rem; padding: .55rem .7rem; }.publish-toggle { display: flex; align-items: center; gap: .35rem; min-height: 2rem; font-size: .65rem; }
 .relay-section { display: grid; gap: .85rem; }.relay-section__heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; }.relay-section__heading h2 { margin: .16rem 0 0; font-size: 1.08rem; }.relay-section__heading p { margin: .3rem 0 0; color: var(--color-text-muted, #64748b); font-size: .7rem; }.new-team { display: grid; grid-template-columns: 1fr .5fr auto auto 1fr auto; align-items: end; gap: .7rem; padding: .8rem; }.new-team label, .team-identity label, .add-engine label, .fixture-builder label { display: grid; gap: .3rem; }.new-team label > span, .team-identity label > span, .add-engine label > span, .fixture-builder label > span, .roster-table form label > span { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 680; }.new-team input[type="color"], .team-identity input[type="color"] { width: 100%; height: 2.15rem; padding: .12rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .4rem; background: white; }.team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr)); gap: .85rem; }.team-editor { position: relative; display: grid; gap: 1rem; overflow: hidden; padding: .9rem; border-top: 4px solid var(--team-primary); }.team-editor::before { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 100% 0, color-mix(in srgb, var(--team-primary) 10%, transparent), transparent 32%); content: ""; }.team-editor > * { position: relative; }.team-editor > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; }.team-editor > header h3 { margin: .1rem 0 0; font-size: 1rem; }.team-swatch { display: flex; overflow: hidden; width: 2.3rem; height: 2.3rem; border-radius: .55rem; box-shadow: 0 0 0 1px color-mix(in srgb, var(--team-primary) 35%, transparent); }.team-swatch i { flex: 1; background: var(--team-primary); }.team-swatch i:last-child { background: var(--team-secondary); }.team-identity { display: grid; grid-template-columns: 1fr .55fr auto auto; gap: .65rem; }.team-identity__wide { grid-column: 1 / -1; }.team-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: .45rem; }.roster-editor { display: grid; gap: .6rem; padding-top: .8rem; border-top: 1px solid var(--color-border, #d9e0ea); }.roster-editor > header { display: flex; align-items: end; justify-content: space-between; gap: .7rem; }.roster-editor > header div { display: grid; gap: .1rem; }.roster-editor > header span { color: var(--team-primary); font-size: .56rem; font-weight: 760; text-transform: uppercase; }.roster-editor > header strong { font-size: .76rem; }.roster-editor > header small { color: var(--color-text-muted, #64748b); font-size: .57rem; }.roster-table { display: grid; gap: 1px; overflow: hidden; border: 1px solid var(--color-border, #d9e0ea); border-radius: .5rem; background: var(--color-border, #d9e0ea); }.roster-table__head, .roster-table form { display: grid; grid-template-columns: minmax(12rem, 1.5fr) minmax(5rem, .55fr) minmax(8rem, .8fr) 3.2rem auto; align-items: center; gap: .45rem; padding: .45rem .55rem; background: var(--color-surface, #fff); }.roster-table__head { background: var(--color-surface-subtle, #f1f5f9); color: var(--color-text-muted, #64748b); font-size: .52rem; font-weight: 730; text-transform: uppercase; }.roster-engine { display: grid; grid-template-columns: 3.2rem minmax(0, 1fr); align-items: center; gap: .45rem; min-width: 0; }.roster-engine > div { display: grid; min-width: 0; }.roster-engine strong, .roster-engine small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.roster-engine strong { font-size: .68rem; }.roster-engine small { color: var(--color-text-muted, #64748b); font-size: .56rem; }.order-input { width: 3.2rem; }.odds-chip { justify-self: start; padding: .22rem .32rem; border-radius: .3rem; background: color-mix(in srgb, var(--team-primary) 10%, transparent); color: var(--team-primary); font-size: .58rem; }.roster-actions { display: flex; gap: .3rem; }.roster-empty { margin: 0; padding: .65rem; border: 1px dashed var(--color-border-strong, #bbc5d3); border-radius: .45rem; color: var(--color-text-muted, #64748b); font-size: .65rem; }.add-engine { display: grid; grid-template-columns: minmax(10rem, 1fr) 4.5rem 5rem 8rem auto; align-items: end; gap: .45rem; padding: .55rem; border-radius: .5rem; background: color-mix(in srgb, var(--team-primary) 5%, var(--color-surface-subtle, #f1f5f9)); }
 .fixture-workspace { padding-top: .2rem; }.game-projection { padding: .35rem .55rem; border-radius: .4rem; background: var(--color-surface-subtle, #f1f5f9); color: var(--color-accent, #315fcc); font-size: .67rem; }.fixture-layout { display: grid; grid-template-columns: minmax(20rem, .7fr) minmax(0, 1.3fr); align-items: start; gap: .85rem; }.fixture-builder { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; padding: .9rem; position: sticky; top: calc(var(--app-header-height, 0px) + 1rem); }.fixture-builder header, .fixture-builder__wide, .fixture-summary, .fixture-builder > button { grid-column: 1 / -1; }.fixture-builder h3 { margin: .14rem 0 0; font-size: .92rem; }.fixture-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; overflow: hidden; border: 1px solid var(--color-border, #d9e0ea); border-radius: .45rem; background: var(--color-border, #d9e0ea); }.fixture-summary div { display: grid; gap: .15rem; padding: .55rem; background: var(--color-surface-subtle, #f1f5f9); }.fixture-summary span { color: var(--color-text-muted, #64748b); font-size: .52rem; text-transform: uppercase; }.fixture-summary strong { font-size: .66rem; }.fixture-list { display: grid; gap: .65rem; }.fixture-card { display: grid; gap: .75rem; padding: .85rem; }.fixture-card > header { display: flex; align-items: start; justify-content: space-between; gap: .7rem; }.fixture-card > header span { color: var(--color-accent, #315fcc); font-size: .54rem; font-weight: 760; text-transform: uppercase; }.fixture-card h3 { margin: .12rem 0 0; font-size: .88rem; }.fixture-card header p { margin: .18rem 0 0; color: var(--color-text-muted, #64748b); font-size: .62rem; }.fixture-card > dl { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 0; background: var(--color-border, #d9e0ea); }.fixture-card > dl div { padding: .5rem; background: var(--color-surface-subtle, #f1f5f9); }.fixture-card dt { color: var(--color-text-muted, #64748b); font-size: .5rem; text-transform: uppercase; }.fixture-card dd { margin: .13rem 0 0; font-size: .62rem; font-weight: 700; }.fixture-games { display: flex; flex-wrap: wrap; gap: .35rem; }.fixture-games a { display: flex; gap: .35rem; padding: .3rem .42rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .35rem; color: inherit; font-size: .56rem; text-decoration: none; }.fixture-games a:hover { border-color: var(--color-accent, #315fcc); }.fixture-games > span { color: var(--color-text-muted, #64748b); font-size: .6rem; }.fixture-schedule { display: grid; grid-template-columns: 1fr auto; gap: .45rem; }.fixture-card footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; padding-top: .65rem; border-top: 1px solid var(--color-border, #d9e0ea); }.fixture-empty { display: grid; min-height: 12rem; place-content: center; text-align: center; }.fixture-empty strong { font-size: .82rem; }.fixture-empty p { margin: .3rem 0 0; color: var(--color-text-muted, #64748b); font-size: .65rem; }
 @media (max-width: 78rem) { .relay-command-bar { grid-template-columns: repeat(3, 1fr); }.visibility-control { grid-column: 1 / -1; border-top: 1px solid var(--color-border, #d9e0ea); }.fixture-layout { grid-template-columns: 1fr; }.fixture-builder { position: static; }.new-team { grid-template-columns: repeat(2, 1fr); }.new-team__wide { grid-column: auto; }.roster-table { overflow-x: auto; }.roster-table__head, .roster-table form { min-width: 42rem; } }
 @media (max-width: 46rem) { .relay-command-bar { grid-template-columns: 1fr; }.relay-command-bar > div { border-right: 0; border-bottom: 1px solid var(--color-border, #d9e0ea); }.visibility-control { align-items: stretch; flex-direction: column; grid-column: auto; }.relay-section__heading { align-items: stretch; flex-direction: column; }.new-team, .team-identity, .fixture-builder { grid-template-columns: 1fr; }.team-identity__wide, .fixture-builder header, .fixture-builder__wide, .fixture-summary, .fixture-builder > button { grid-column: auto; }.team-editor > header { grid-template-columns: auto 1fr; }.team-editor > header > :last-child { grid-column: 1 / -1; }.add-engine { grid-template-columns: 1fr 1fr; }.add-engine label:first-child { grid-column: 1 / -1; }.add-engine button { grid-column: 1 / -1; }.fixture-summary { grid-template-columns: 1fr; }.fixture-card > dl { grid-template-columns: repeat(2, 1fr); } }
+.relay-control { gap: 1.25rem; }
+.relay-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .4rem; border-radius: .85rem; box-shadow: var(--shadow-xs); }
+.relay-toolbar nav { display: flex; align-items: center; gap: .2rem; }
+.relay-toolbar nav button { display: flex; align-items: center; gap: .45rem; min-height: 2.45rem; padding: 0 .8rem; border: 0; border-radius: .55rem; background: transparent; color: var(--color-text-muted); cursor: pointer; font: inherit; font-size: .72rem; font-weight: 700; transition: background var(--transition-fast), color var(--transition-fast); }
+.relay-toolbar nav button:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.relay-toolbar nav button.active { background: var(--color-accent-soft); color: var(--color-accent); }
+.relay-toolbar nav button span { min-width: 1.25rem; padding: .12rem .35rem; border-radius: 99px; background: color-mix(in srgb, currentColor 10%, transparent); font-size: .56rem; text-align: center; }
+.visibility-control { align-items: center; padding: 0; }
+.lifecycle-status { display: flex; align-items: center; gap: .45rem; }
+.lifecycle-status > span { color: var(--color-text-muted); font-size: .62rem; font-weight: 700; }
+.publish-toggle { padding: 0 .45rem; border-left: 1px solid var(--color-border); }
+.overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; }
+.overview-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .9rem; padding: 1.15rem; border: 1px solid var(--color-border); color: inherit; cursor: pointer; font: inherit; text-align: left; transition: transform var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast); }
+.overview-card:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border)); box-shadow: var(--shadow-sm); }
+.overview-card__icon { display: grid; width: 2.7rem; height: 2.7rem; place-items: center; border-radius: .75rem; background: var(--color-accent-soft); color: var(--color-accent); }
+.overview-card > span:nth-child(2) { display: grid; gap: .1rem; }
+.overview-card small { color: var(--color-text-muted); font-size: .58rem; font-style: normal; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.overview-card strong { font-size: 1.4rem; line-height: 1.1; }
+.overview-card > .app-icon { color: var(--color-text-muted); }
+.event-health h2 { margin: 0; font-size: 1rem; }
+.event-health { grid-column: 1 / -1; padding: 0; overflow: hidden; }
+.event-health header { display: flex; align-items: center; justify-content: space-between; padding: .8rem 1rem; border-bottom: 1px solid var(--color-border); }
+.event-health dl { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; }
+.event-health dl div { padding: .8rem 1rem; border-right: 1px solid var(--color-border); }
+.event-health dl div:last-child { border-right: 0; }
+.event-health dt { color: var(--color-text-muted); font-size: .56rem; text-transform: uppercase; }
+.event-health dd { margin: .2rem 0 0; font-size: .7rem; font-weight: 700; }
+.relay-section__heading { align-items: center; }
+.relay-section__heading h2 { font-size: 1.2rem; }
+.new-team { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-sm); }
+.team-editor { gap: .85rem; padding: 1rem; border-top-width: 3px; }
+.team-header-actions { display: flex; align-items: center; gap: .45rem; }
+.team-identity { padding: .8rem; border: 1px solid var(--color-border); border-radius: .6rem; background: var(--color-surface-subtle); }
+.team-actions { align-items: center; }
+.team-actions .button--danger { margin-left: auto; }
+.roster-editor { padding-top: .2rem; border-top: 0; }
+.roster-table { border-radius: .6rem; }
+.add-engine { padding: .7rem; border: 1px dashed color-mix(in srgb, var(--team-primary) 35%, var(--color-border)); }
+.fixture-layout { display: block; }
+.fixture-layout--building { display: grid; grid-template-columns: minmax(20rem, .72fr) minmax(0, 1.28fr); }
+.fixture-builder { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-sm); }
+.advanced-toggle { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; min-height: 2.35rem; padding: 0 .65rem; border: 1px solid var(--color-border); border-radius: .45rem; background: var(--color-surface-subtle); color: var(--color-text-secondary); cursor: pointer; }
+.advanced-toggle span { display: flex; align-items: center; gap: .4rem; font-size: .66rem; font-weight: 700; }
+.advanced-toggle .app-icon { transition: transform var(--transition-fast); }
+.advanced-toggle .rotated { transform: rotate(180deg); }
+.advanced-fields { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: .65rem; padding: .7rem; border-radius: .5rem; background: var(--color-surface-subtle); }
+.fixture-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); }
+.fixture-card { align-self: start; padding: 1rem; transition: border-color var(--transition-fast), box-shadow var(--transition-fast); }
+.fixture-card:hover { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-xs); }
+.fixture-card > dl { grid-template-columns: repeat(3, 1fr); overflow: hidden; border-radius: .45rem; }
+.fixture-empty { gap: .45rem; }
+.fixture-empty > span { display: grid; width: 3rem; height: 3rem; place-items: center; justify-self: center; border-radius: .8rem; background: var(--color-accent-soft); color: var(--color-accent); }
+.fixture-empty .button { justify-self: center; margin-top: .3rem; }
+@media (max-width: 78rem) { .relay-toolbar { align-items: stretch; flex-direction: column; }.visibility-control { justify-content: flex-end; padding-top: .4rem; border-top: 1px solid var(--color-border); }.fixture-layout--building { grid-template-columns: 1fr; }.fixture-builder { position: static; } }
+@media (max-width: 46rem) { .relay-toolbar nav { display: grid; grid-template-columns: repeat(3, 1fr); }.relay-toolbar nav button { justify-content: center; padding: 0 .35rem; }.visibility-control { align-items: stretch; flex-direction: column; }.lifecycle-status { justify-content: space-between; }.publish-toggle { border-left: 0; }.overview-grid { grid-template-columns: 1fr; }.event-health dl { grid-template-columns: repeat(2, 1fr); }.event-health dl div:nth-child(2) { border-right: 0; }.event-health dl div:nth-child(-n+2) { border-bottom: 1px solid var(--color-border); }.team-header-actions { grid-column: 1 / -1; justify-content: space-between; }.advanced-fields { grid-template-columns: 1fr; } }
 </style>

@@ -54,7 +54,7 @@ function messageContext(message: ChatMessage): string {
 function messageContextUrl(message: ChatMessage): string {
   if (message.event_id !== null) {
     const event = eventNames.value[String(message.event_id)]
-    return event ? `/events/${event.slug}` : '/events'
+    return event ? `/events/${event.slug}` : '/admin/events'
   }
   return `/tournaments/${message.tournament_id}`
 }

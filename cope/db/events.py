@@ -18,6 +18,13 @@ EVENT_STATUSES = (
     "completed",
     "cancelled",
 )
+CURRENT_EVENT_STATUSES = (
+    "announced",
+    "scheduled",
+    "live",
+    "intermission",
+    "postponed",
+)
 EVENT_STAGE_STATUSES = ("pending", "active", "completed", "cancelled")
 EVENT_ITEM_STATUSES = (
     "pending",
@@ -390,7 +397,13 @@ def set_event_published(
     event_id: int,
     published: bool,
 ) -> EventRecord:
-    current = _required_event(connection, event_id)
+    row = connection.execute(
+        "SELECT * FROM events WHERE id = ? FOR UPDATE",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("event does not exist")
+    current = _event_from_row(row)
     if published and current.status == "draft":
         raise ValueError("a draft event cannot be published")
     published_at = (current.published_at or utc_now()) if published else None
@@ -403,6 +416,163 @@ def set_event_published(
         (published_at, utc_now(), event_id),
     )
     return _required_event(connection, event_id)
+
+
+def reconcile_engine_relay_event(
+    connection: sqlite3.Connection,
+    event_id: int,
+) -> EventRecord:
+    row = connection.execute(
+        "SELECT * FROM events WHERE id = ? FOR UPDATE",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("event does not exist")
+    current = _event_from_row(row)
+    if current.handler_key != "engine-relay":
+        return current
+    fixtures = tuple(
+        connection.execute(
+            """
+            SELECT fixture.id AS fixture_id, tournament.id AS tournament_id,
+                   tournament.status, tournament.scheduled_start_at,
+                   tournament.started_at, tournament.finished_at
+            FROM engine_relay_fixtures fixture
+            JOIN tournaments tournament ON tournament.id = fixture.tournament_id
+            WHERE fixture.event_id = ?
+            ORDER BY fixture.position, fixture.id
+            """,
+            (event_id,),
+        )
+    )
+    statuses = {str(row["status"]) for row in fixtures}
+    if not fixtures:
+        status = "announced" if current.published_at is not None else "draft"
+    elif "running" in statuses:
+        status = "live"
+    elif "paused" in statuses:
+        status = "intermission"
+    elif statuses <= {"finished", "aborted"}:
+        status = "completed" if "finished" in statuses else "cancelled"
+    elif statuses.intersection({"finished", "aborted"}):
+        status = "intermission"
+    elif "scheduled" in statuses:
+        status = "scheduled"
+    else:
+        status = "announced"
+    scheduled_values = [
+        str(row["scheduled_start_at"])
+        for row in fixtures
+        if row["scheduled_start_at"] is not None
+    ]
+    started_values = [
+        str(row["started_at"])
+        for row in fixtures
+        if row["started_at"] is not None
+    ]
+    finished_values = [
+        str(row["finished_at"])
+        for row in fixtures
+        if row["finished_at"] is not None
+    ]
+    scheduled_start_at = min(scheduled_values) if scheduled_values else None
+    started_at = min(started_values) if started_values else None
+    finished_at = (
+        max(finished_values)
+        if finished_values and status in {"completed", "cancelled"}
+        else None
+    )
+    status_counts = {
+        name: sum(1 for row in fixtures if str(row["status"]) == name)
+        for name in ("draft", "scheduled", "running", "paused", "finished", "aborted")
+    }
+    state = {
+        **current.state,
+        "lifecycle": {
+            "version": 1,
+            "source": "engine-relay-fixtures",
+            "status": status,
+            "fixture_count": len(fixtures),
+            "status_counts": status_counts,
+            "active_fixture_ids": [
+                int(row["fixture_id"])
+                for row in fixtures
+                if str(row["status"]) in {"running", "paused"}
+            ],
+            "active_tournament_ids": [
+                int(row["tournament_id"])
+                for row in fixtures
+                if str(row["status"]) in {"running", "paused"}
+            ],
+            "scheduled_start_at": scheduled_start_at,
+            "started_at": started_at,
+            "finished_at": finished_at,
+        },
+    }
+    state_json = _json_dump(state)
+    connection.execute(
+        """
+        UPDATE events
+        SET status = ?, scheduled_start_at = ?,
+            started_at = COALESCE(started_at, ?), finished_at = ?,
+            state = ?, revision = revision + 1, updated_at = ?
+        WHERE id = ?
+          AND (
+            status IS DISTINCT FROM ?
+            OR scheduled_start_at IS DISTINCT FROM ?
+            OR started_at IS DISTINCT FROM COALESCE(started_at, ?)
+            OR finished_at IS DISTINCT FROM ?
+            OR state IS DISTINCT FROM ?
+          )
+        """,
+        (
+            status,
+            scheduled_start_at,
+            started_at,
+            finished_at,
+            state_json,
+            utc_now(),
+            event_id,
+            status,
+            scheduled_start_at,
+            started_at,
+            finished_at,
+            state_json,
+        ),
+    )
+    return _required_event(connection, event_id)
+
+
+def reconcile_engine_relay_events_for_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> tuple[EventRecord, ...]:
+    event_ids = tuple(
+        int(row["event_id"])
+        for row in connection.execute(
+            "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
+            (tournament_id,),
+        )
+    )
+    return tuple(
+        reconcile_engine_relay_event(connection, event_id)
+        for event_id in event_ids
+    )
+
+
+def reconcile_all_engine_relay_events(
+    connection: sqlite3.Connection,
+) -> tuple[EventRecord, ...]:
+    event_ids = tuple(
+        int(row["id"])
+        for row in connection.execute(
+            "SELECT id FROM events WHERE handler_key = 'engine-relay' ORDER BY id"
+        )
+    )
+    return tuple(
+        reconcile_engine_relay_event(connection, event_id)
+        for event_id in event_ids
+    )
 
 
 def create_event_stage(

@@ -33,7 +33,8 @@ async function signIn(): Promise<void> {
     sessionStore.applySession(response)
     token.value = ''
     const candidate = typeof route.query.redirect === 'string' ? route.query.redirect : typeof route.query.next === 'string' ? route.query.next : ''
-    const next = candidate.startsWith('/admin') && !candidate.startsWith('/admin/login') ? candidate : '/admin'
+    const eventTarget = /^\/events\/[a-z0-9]+(?:-[a-z0-9]+)*(?:\/arena)?(?:[?#].*)?$/.test(candidate)
+    const next = (candidate.startsWith('/admin') && !candidate.startsWith('/admin/login')) || eventTarget ? candidate : '/admin'
     await router.replace(next)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not sign in. Check the token and try again.'

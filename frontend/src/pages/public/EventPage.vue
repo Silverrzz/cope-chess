@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
-import { api } from "@/api/client";
+import { ApiError, api } from "@/api/client";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import StatusPill from "@/components/public/StatusPill.vue";
@@ -11,6 +12,8 @@ import type { ChatMessage, ChatSettings } from "@/components/public/types";
 import type { EventCastMember, EventContest, EventDetailResponse, EventSession } from "@/types/events";
 
 const props = withDefaults(defineProps<{ slug: string; arena?: boolean }>(), { arena: false });
+const route = useRoute();
+const router = useRouter();
 const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
 const loadError = ref("");
@@ -59,6 +62,10 @@ async function load(silent = false): Promise<void> {
     if (Number.isFinite(serverTime)) serverClockOffsetMs.value = serverTime - (requestedAt + receivedAt) / 2;
     data.value = response;
   } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      await router.replace({ name: "admin-login", query: { redirect: route.fullPath } });
+      return;
+    }
     if ((error as { name?: string })?.name !== "AbortError") loadError.value = errorMessage(error, "This event could not be loaded.");
   } finally {
     loading.value = false;
@@ -143,7 +150,7 @@ function sessionTiming(session: EventSession): string {
 </script>
 
 <template>
-  <div class="event-page" :style="eventStyle">
+  <div class="event-page" :class="{ 'event-page--arena': props.arena }" :style="eventStyle">
     <div class="page-container">
       <ContentState v-if="loading" kind="loading" title="Preparing the event" />
       <ContentState v-else-if="loadError" kind="error" :message="loadError" action-label="Try again" @action="load" />
@@ -159,7 +166,7 @@ function sessionTiming(session: EventSession): string {
         <div class="event-hero__light" aria-hidden="true"></div>
         <div class="page-container event-hero__inner">
           <div class="event-hero__topline">
-            <RouterLink to="/events">← All events</RouterLink>
+            <RouterLink to="/">← COPE home</RouterLink>
             <div><span v-if="connected" class="event-connected">Live updates</span><StatusPill :status="data.event.status" /></div>
           </div>
           <div class="event-hero__body">
@@ -271,6 +278,7 @@ function sessionTiming(session: EventSession): string {
 
 <style scoped>
 .event-page { margin-block-start: calc(0px - clamp(var(--space-6), 4vw, var(--space-12))); margin-block-end: -3rem; }
+.event-page--arena { height: calc(100dvh - 2.85rem); min-height: 0; overflow: hidden; margin-block: 0; background: var(--color-bg, #f3f6fa); }
 .event-hero { position: relative; isolation: isolate; overflow: hidden; border-bottom: 1px solid color-mix(in srgb, var(--event-accent) 28%, var(--color-border, #d5dbe1)); background: linear-gradient(145deg, color-mix(in srgb, var(--event-accent) 10%, var(--color-bg-subtle, #f5f7fa)), var(--color-bg, #fff) 56%); }
 .event-hero__light { position: absolute; z-index: -1; top: -16rem; right: -12rem; width: 42rem; height: 42rem; border-radius: 50%; background: color-mix(in srgb, var(--event-accent) 20%, transparent); filter: blur(5rem); }
 .event-hero__inner { display: grid; min-height: min(47rem, calc(100vh - var(--header-height, 4rem))); align-content: space-between; gap: 3rem; padding-block: 1.2rem clamp(2.5rem, 8vw, 6rem); }
@@ -301,6 +309,7 @@ function sessionTiming(session: EventSession): string {
 .about-section > div, .about-section details { padding: 1rem 1.1rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: .7rem; background: var(--color-surface, #fff); }.about-section h3 { margin: 0; font-size: .9rem; }.about-section p { margin: .55rem 0 0; color: var(--color-text-muted, #607080); font-size: .82rem; line-height: 1.7; white-space: pre-wrap; }.about-section summary { display: flex; justify-content: space-between; font-size: .84rem; font-weight: 730; cursor: pointer; }
 .sidebar-card { display: grid; gap: 1rem; padding: 1rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: .8rem; background: var(--color-surface, #fff); }.sidebar-card > header h2 { font-size: 1.25rem; }.cast-list { display: grid; gap: .8rem; }.cast-list > article { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: .7rem; }.cast-avatar { --cast-accent: var(--event-accent); display: grid; width: 2.3rem; height: 2.3rem; place-items: center; border-radius: .7rem; background: color-mix(in srgb, var(--cast-accent) 14%, var(--color-surface-subtle, #f1f4f7)); color: var(--cast-accent); font-size: .66rem; font-weight: 820; }.cast-list strong { display: block; font-size: .8rem; }.cast-list small { display: block; margin-top: .1rem; color: var(--color-text-muted, #607080); font-size: .64rem; text-transform: capitalize; }.cast-list p { margin: .35rem 0 0; color: var(--color-text-muted, #607080); font-size: .7rem; line-height: 1.45; }.cast-children { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .4rem; }.cast-children span { padding: .22rem .38rem; border-radius: .3rem; background: var(--color-surface-subtle, #f1f4f7); font-size: .61rem; }.awards-card > article { display: flex; gap: .65rem; }.awards-card > article > span { color: var(--event-accent); }.awards-card strong { font-size: .78rem; }.awards-card p { margin: .15rem 0 0; color: var(--color-text-muted, #607080); font-size: .68rem; }
 .event-sidebar :deep(.chat-panel) { min-height: 23rem; border-radius: .8rem; }
+@media (max-width: 96rem) { .event-page--arena { height: auto; min-height: calc(100dvh - 2.85rem); overflow: visible; } }
 @media (max-width: 58rem) { .event-grid { grid-template-columns: 1fr; }.event-sidebar { position: static; grid-template-columns: repeat(2, minmax(0, 1fr)); }.event-sidebar :deep(.chat-panel) { grid-column: 1 / -1; } }
 @media (max-width: 42rem) { .event-hero__facts { grid-template-columns: repeat(2, 1fr); }.event-sidebar { grid-template-columns: 1fr; }.event-sidebar :deep(.chat-panel) { grid-column: auto; }.now-card { grid-template-columns: 1fr; }.now-card > time, .now-card > strong { justify-self: start; }.contest-list article { grid-template-columns: 1fr; }.contest-cast { justify-content: start; } }
 </style>

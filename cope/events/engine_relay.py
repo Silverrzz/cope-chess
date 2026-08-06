@@ -40,6 +40,7 @@ from cope.db import (
     list_games,
     list_moves,
     list_opening_suites,
+    reconcile_engine_relay_event,
     schedule_tournament,
     set_event_published,
     set_event_status,
@@ -168,8 +169,11 @@ class RelaySchedulePayload(BaseModel):
 
 
 class RelayVisibilityPayload(BaseModel):
-    status: str = Field(pattern=r"^(draft|announced|scheduled|live|intermission|postponed|completed|cancelled)$")
     published: bool
+    status: str | None = Field(
+        default=None,
+        pattern=r"^(draft|announced|scheduled|live|intermission|postponed|completed|cancelled)$",
+    )
 
 
 def _fixture_from_row(row: Any) -> EngineRelayFixtureRecord:
@@ -619,6 +623,7 @@ def _register_api(app: FastAPI) -> None:
     @app.get("/api/events/{slug}/engine-relay")
     def public_engine_relay(
         slug: str,
+        request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         event = get_event_by_slug(connection, slug)
@@ -626,10 +631,10 @@ def _register_api(app: FastAPI) -> None:
             event is None
             or event.handler_key != MODULE_KEY
             or event.handler_version != MODULE_VERSION
-            or event.published_at is None
-            or event.status == "draft"
         ):
             raise HTTPException(status_code=404, detail="Engine relay event not found.")
+        if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
+            raise HTTPException(status_code=401, detail="Admin session required.")
         return _json(_public_payload(connection, event))
 
     @app.post("/api/events/{slug}/engine-relay/cheers")
@@ -654,10 +659,10 @@ def _register_api(app: FastAPI) -> None:
             event is None
             or event.handler_key != MODULE_KEY
             or event.handler_version != MODULE_VERSION
-            or event.published_at is None
-            or event.status == "draft"
         ):
             raise HTTPException(status_code=404, detail="Engine relay event not found.")
+        if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
+            raise HTTPException(status_code=401, detail="Admin session required.")
         team = connection.execute(
             "SELECT id FROM event_cast_members WHERE event_id = ? AND id = ? AND kind = 'team'",
             (event.id, payload.team_id),
@@ -977,6 +982,8 @@ def _register_api(app: FastAPI) -> None:
                 tournament_id,
                 payload.scheduled_start_at.isoformat(timespec="seconds"),
             )
+        else:
+            reconcile_engine_relay_event(connection, event_id)
         _touch_event(connection, event_id)
         connection.commit()
         _publish_change(request, event_id)
@@ -1091,13 +1098,24 @@ def _register_api(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         _required_event(connection, event_id)
-        if payload.published and payload.status == "draft":
-            raise HTTPException(status_code=422, detail="Choose a public event status before publishing.")
-        set_event_status(connection, event_id, payload.status)
-        set_event_published(connection, event_id, payload.published)
-        connection.commit()
+        try:
+            lifecycle = reconcile_engine_relay_event(connection, event_id)
+            if payload.published and lifecycle.status == "draft":
+                set_event_status(connection, event_id, "announced")
+            set_event_published(connection, event_id, payload.published)
+            lifecycle = reconcile_engine_relay_event(connection, event_id)
+            connection.commit()
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         _publish_change(request, event_id)
-        return _json({"message": "Event visibility updated."})
+        return _json(
+            {
+                "status": lifecycle.status,
+                "published": lifecycle.published_at is not None,
+                "message": "Event visibility updated.",
+            }
+        )
 
 
 def _provision(connection: sqlite3.Connection) -> int:

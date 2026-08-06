@@ -1,22 +1,43 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
+import { api } from "@/api/client";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
 import ThemeToggle from "@/components/ui/ThemeToggle.vue";
 import SettingsDrawer from "@/components/ui/SettingsDrawer.vue";
+import type { CurrentEventResponse } from "@/types/events";
 
 const route = useRoute();
 const menuOpen = ref(false);
+const currentEventPath = ref("");
 const compactGameLayout = computed(() => route.name === "tournament" || route.name === "event-arena");
+let eventRefreshTimer: number | undefined;
 
-const navItems = [
-  { label: "Events", to: "/events" },
+const navItems = computed(() => [
+  ...(currentEventPath.value ? [{ label: "Events", to: currentEventPath.value }] : []),
   { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
   { label: "Engines", to: "/engines" },
-] as const;
+]);
+
+onMounted(() => {
+  void refreshCurrentEvent();
+  eventRefreshTimer = window.setInterval(refreshCurrentEvent, 30_000);
+});
+onBeforeUnmount(() => {
+  if (eventRefreshTimer !== undefined) window.clearInterval(eventRefreshTimer);
+});
+
+async function refreshCurrentEvent(): Promise<void> {
+  try {
+    const response = await api.get<CurrentEventResponse>("/api/events/current");
+    currentEventPath.value = response.event ? `/events/${response.event.record.slug}` : "";
+  } catch {
+    currentEventPath.value = "";
+  }
+}
 
 function navActive(path: string): boolean {
   return path === "/" ? route.path === path : route.path === path || route.path.startsWith(`${path}/`);

@@ -110,7 +110,7 @@ async function request<T>(method: string, path: string, options: RequestOptions 
   headers.set("Accept", "application/json");
 
   let body: BodyInit | undefined;
-  if (options.body instanceof FormData || options.body instanceof URLSearchParams || typeof options.body === "string") {
+  if (options.body instanceof FormData || options.body instanceof URLSearchParams || options.body instanceof Blob || options.body instanceof ArrayBuffer || typeof options.body === "string") {
     body = options.body;
   } else if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");

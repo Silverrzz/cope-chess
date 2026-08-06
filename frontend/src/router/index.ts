@@ -19,12 +19,6 @@ const router = createRouter({
           meta: { title: "Home" },
         },
         {
-          path: "events",
-          name: "events",
-          component: () => import("@/pages/public/EventsPage.vue"),
-          meta: { title: "Events" },
-        },
-        {
           path: "events/:slug/arena",
           name: "event-arena",
           component: () => import("@/pages/public/EventPage.vue"),

@@ -23,6 +23,7 @@ from starlette.datastructures import UploadFile
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
 from cope.db import (
+    CURRENT_EVENT_STATUSES,
     ChatSettingsRecord,
     EventRecord,
     append_suite_openings,
@@ -52,7 +53,6 @@ from cope.db import (
     engine_game_filter_options,
     engine_build_is_benchmarked,
     engine_result_summary,
-    event_public_stats,
     event_resource_counts,
     forget_benchmarker,
     forget_engine_benchmarks,
@@ -226,6 +226,82 @@ def _engine_artifact_spec(record) -> EngineArtifactSpec:
         entrypoint=record.entrypoint,
         platform=record.platform,
     )
+
+
+async def _store_engine_artifact_upload(
+    request: Request,
+    connection: sqlite3.Connection,
+    *,
+    build_hash: str,
+    expected_sha256: str | None = None,
+):
+    maximum = int(
+        os.environ.get("COPE_ENGINE_ARTIFACT_MAX_BYTES", str(1024 * 1024 * 1024))
+    )
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > maximum:
+        raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+    root = _engine_artifact_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = root / f".upload-{uuid.uuid4().hex}"
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with temporary.open("xb") as output:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > maximum:
+                    raise HTTPException(status_code=413, detail="Engine artifact is too large.")
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if size == 0:
+            raise HTTPException(status_code=422, detail="Engine artifact is empty.")
+        artifact_sha256 = digest.hexdigest()
+        if expected_sha256 is not None and artifact_sha256 != expected_sha256:
+            raise HTTPException(status_code=422, detail="Engine artifact SHA-256 does not match.")
+        try:
+            await asyncio.to_thread(
+                validate_artifact_archive,
+                temporary,
+                expected_build_hash=build_hash,
+                expected_entrypoint="engine",
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        destination = _engine_artifact_path(artifact_sha256)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            artifact = register_engine_artifact(
+                connection,
+                build_hash=build_hash,
+                artifact_sha256=artifact_sha256,
+                artifact_size=size,
+                artifact_format=ARTIFACT_FORMAT,
+                entrypoint="engine",
+                platform=ARTIFACT_PLATFORM,
+                storage_key=artifact_sha256,
+            )
+            if destination.exists():
+                stored_sha256 = await asyncio.to_thread(sha256_file, destination)
+                if destination.stat().st_size != size or stored_sha256 != artifact_sha256:
+                    os.replace(temporary, destination)
+            else:
+                os.replace(temporary, destination)
+            destination.chmod(0o600)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception:
+            connection.rollback()
+            raise
+        return artifact
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _bearer_credential(request: Request) -> str:
@@ -696,73 +772,13 @@ def register_api_routes(app: FastAPI) -> None:
         expected_sha256 = request.headers.get("x-cope-artifact-sha256", "")
         if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
             raise HTTPException(status_code=422, detail="Artifact SHA-256 header is invalid.")
-        maximum = int(
-            os.environ.get("COPE_ENGINE_ARTIFACT_MAX_BYTES", str(1024 * 1024 * 1024))
+        artifact = await _store_engine_artifact_upload(
+            request,
+            connection,
+            build_hash=build_hash,
+            expected_sha256=expected_sha256,
         )
-        declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > maximum:
-            raise HTTPException(status_code=413, detail="Engine artifact is too large.")
-        root = _engine_artifact_root()
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = root / f".upload-{uuid.uuid4().hex}"
-        digest = hashlib.sha256()
-        size = 0
-        try:
-            with temporary.open("xb") as output:
-                async for chunk in request.stream():
-                    if not chunk:
-                        continue
-                    size += len(chunk)
-                    if size > maximum:
-                        raise HTTPException(status_code=413, detail="Engine artifact is too large.")
-                    digest.update(chunk)
-                    output.write(chunk)
-                output.flush()
-                os.fsync(output.fileno())
-            if size == 0:
-                raise HTTPException(status_code=422, detail="Engine artifact is empty.")
-            artifact_sha256 = digest.hexdigest()
-            if artifact_sha256 != expected_sha256:
-                raise HTTPException(status_code=422, detail="Engine artifact SHA-256 does not match.")
-            try:
-                await asyncio.to_thread(
-                    validate_artifact_archive,
-                    temporary,
-                    expected_build_hash=build_hash,
-                    expected_entrypoint="engine",
-                )
-            except (OSError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            destination = _engine_artifact_path(artifact_sha256)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                artifact = register_engine_artifact(
-                    connection,
-                    build_hash=build_hash,
-                    artifact_sha256=artifact_sha256,
-                    artifact_size=size,
-                    artifact_format=ARTIFACT_FORMAT,
-                    entrypoint="engine",
-                    platform=ARTIFACT_PLATFORM,
-                    storage_key=artifact_sha256,
-                )
-                if destination.exists():
-                    stored_sha256 = await asyncio.to_thread(sha256_file, destination)
-                    if destination.stat().st_size != size or stored_sha256 != artifact_sha256:
-                        os.replace(temporary, destination)
-                else:
-                    os.replace(temporary, destination)
-                destination.chmod(0o600)
-                connection.commit()
-            except ValueError as exc:
-                connection.rollback()
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            except Exception:
-                connection.rollback()
-                raise
-            return _json({"artifact": _engine_artifact_spec(artifact)})
-        finally:
-            temporary.unlink(missing_ok=True)
+        return _json({"artifact": _engine_artifact_spec(artifact)})
 
     @app.get("/api/engine-artifacts/{artifact_sha256}")
     def download_engine_artifact(
@@ -845,25 +861,31 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
-    @app.get("/api/events")
-    def public_events(connection: sqlite3.Connection = Depends(web_app._database)):
-        events = list_events(connection, public_only=True)
-        return _json(
-            {
-                "events": [
-                    _event_summary_payload(connection, event, admin=False)
-                    for event in events
-                ],
-                "event_stats": event_public_stats(connection),
-            }
+    @app.get("/api/events/current")
+    def current_public_event(connection: sqlite3.Connection = Depends(web_app._database)):
+        event = next(
+            (
+                item
+                for item in list_events(connection, public_only=True)
+                if item.status in CURRENT_EVENT_STATUSES
+            ),
+            None,
         )
+        return _json({
+            "event": (
+                _event_summary_payload(connection, event, admin=False)
+                if event is not None
+                else None
+            ),
+        })
 
     @app.get("/api/events/{slug}")
     def public_event(
         slug: str,
+        request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _require_public_event(connection, slug)
+        event = _require_viewable_event(connection, slug, request)
         return _json(_event_detail_payload(connection, event, admin=False))
 
     @app.post("/api/events/{slug}/chat")
@@ -872,7 +894,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _require_public_event(connection, slug)
+        event = _require_viewable_event(connection, slug, request)
         form = await read_form(request)
         settings = get_event_chat_settings(
             connection,
@@ -2746,6 +2768,37 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"id": version_id, "message": "Engine version updated."})
 
+    @app.put("/api/admin/engine-versions/{version_id}/artifact")
+    async def admin_upload_engine_artifact(
+        version_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        version = get_engine_version_record(connection, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        if not version.dockerfile_path:
+            raise HTTPException(
+                status_code=409,
+                detail="Select and save a Dockerfile before uploading an artifact.",
+            )
+        dockerfile = _load_engine_dockerfile(version.dockerfile_path)
+        if dockerfile != version.dockerfile:
+            raise HTTPException(
+                status_code=409,
+                detail="The selected Dockerfile changed in data/engines. Save the version before uploading an artifact.",
+            )
+        artifact = await _store_engine_artifact_upload(
+            request,
+            connection,
+            build_hash=version.build_hash,
+        )
+        _publish_admin_change(web_app, request)
+        return _json({
+            "artifact": _engine_artifact_spec(artifact),
+            "message": "Engine artifact uploaded.",
+        })
+
     @app.get("/api/admin/engine-versions/{version_id}/events")
     async def admin_engine_version_events(version_id: int, request: Request):
         """Stream benchmark state without replacing or reloading the edit form."""
@@ -3366,10 +3419,20 @@ def register_api_routes(app: FastAPI) -> None:
     register_event_api_routes(app)
 
 
-def _require_public_event(connection: sqlite3.Connection, slug: str) -> EventRecord:
+def _require_viewable_event(
+    connection: sqlite3.Connection,
+    slug: str,
+    request: Request,
+) -> EventRecord:
+    from cope.web import app as web_app
+
     event = get_event_by_slug(connection, slug)
-    if event is None or event.published_at is None or event.status == "draft":
+    if event is None:
         raise HTTPException(status_code=404, detail="Event not found.")
+    if web_app._event_is_public(event):
+        return event
+    if not web_app._admin_request_authenticated(request):
+        raise HTTPException(status_code=401, detail="Admin session required.")
     return event
 
 

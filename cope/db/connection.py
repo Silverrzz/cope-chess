@@ -21,7 +21,7 @@ from cope.engine_dockerfiles import (
 
 
 DEFAULT_DATABASE_URL = "postgresql://cope@127.0.0.1:5432/cope"
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 DEFAULT_DATABASE_LOCK_TIMEOUT_MS = 5_000
 DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS = 120_000
 DEFAULT_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS = 30_000
@@ -290,6 +290,9 @@ def initialize_connection(connection: DatabaseConnection) -> None:
         connection._connection().execute(schema)
     except psycopg.Error as exc:
         raise sqlite3.DatabaseError(str(exc)) from exc
+    from .events import reconcile_all_engine_relay_events
+
+    reconcile_all_engine_relay_events(connection)
     sync_engine_dockerfiles(connection)
 
 

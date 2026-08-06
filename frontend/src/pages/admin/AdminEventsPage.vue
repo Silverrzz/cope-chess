@@ -80,9 +80,7 @@ async function provision(moduleKey: string): Promise<void> {
 
 <template>
   <div class="admin-page events-admin page-stack">
-    <AdminPageHeader title="Events" description="The launchpad for bespoke exhibitions. Event creation and format-specific controls are supplied by code modules.">
-      <template #actions><RouterLink class="button button--secondary" to="/events">View public events</RouterLink></template>
-    </AdminPageHeader>
+    <AdminPageHeader title="Events" description="The launchpad for bespoke exhibitions. Event creation and format-specific controls are supplied by code modules." />
     <InlineFeedback :message="error" />
 
     <div v-if="loading" class="panel loading-panel" role="status">Loading events…</div>

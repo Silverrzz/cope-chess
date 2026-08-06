@@ -312,6 +312,14 @@ class StreamHub:
             )
             self._record_live_event(event)
             subscribers = tuple(self._subscribers.get(topic, ()))
+            linked_event_ids: tuple[int, ...] = ()
+            linked_tournament_id: int | None = None
+            if event_type in {"tournament.changed", "tournament.snapshot"}:
+                linked_tournament_id = _event_tournament_id(event)
+                if linked_tournament_id is not None:
+                    linked_event_ids = tuple(
+                        self._tournament_events.get(linked_tournament_id, ())
+                    )
             loop = self._loop
         if loop is None:
             return event
@@ -320,6 +328,16 @@ class StreamHub:
             return event
         for subscription in subscribers:
             loop.call_soon_threadsafe(subscription.enqueue, event)
+        for event_id in linked_event_ids:
+            self.publish(
+                f"event.{event_id}",
+                "event.changed",
+                {
+                    "event_id": event_id,
+                    "tournament_id": linked_tournament_id,
+                },
+                source=source,
+            )
         return event
 
     def allow_ephemeral(self, key: str, *, rate: float, burst: int) -> bool:
@@ -589,9 +607,13 @@ def create_app(
                 request, "chat", limit=12, window_s=60
             ):
                 return JSONResponse({"detail": "Chat rate limit exceeded."}, status_code=429)
+        private_event_page = (
+            request.method == "GET"
+            and await asyncio.to_thread(_private_event_page, app, path)
+        )
         admin_api = path.startswith("/api/admin")
         admin_page = path.startswith("/admin") and path != "/admin/login"
-        protected = admin_api or admin_page
+        protected = admin_api or admin_page or private_event_page
         token = _admin_token(request) if protected else None
 
         if protected:
@@ -805,9 +827,11 @@ def create_app(
     async def public_event_stream(slug: str, request: Request):
         hub: StreamHub = request.app.state.stream_hub
         hub.bind_loop()
-        event = await asyncio.to_thread(_public_event_by_slug, request.app, slug)
+        event = await asyncio.to_thread(_event_by_slug, request.app, slug)
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
+        if not _event_is_public(event) and not _admin_request_authenticated(request):
+            raise HTTPException(status_code=401, detail="Admin session required.")
         tournament_ids = await asyncio.to_thread(_event_tournament_ids, request.app, event.id)
         hub.link_event_tournaments(event.id, tournament_ids)
 
@@ -1065,15 +1089,36 @@ def _public_tournament_exists(app: FastAPI, tournament_id: int) -> bool:
         connection.close()
 
 
-def _public_event_by_slug(app: FastAPI, slug: str) -> EventRecord | None:
+def _event_by_slug(app: FastAPI, slug: str) -> EventRecord | None:
     connection = connect_database(app.state.db_path)
     try:
-        event = get_event_by_slug(connection, slug)
-        if event is None or event.published_at is None or event.status == "draft":
-            return None
-        return event
+        return get_event_by_slug(connection, slug)
     finally:
         connection.close()
+
+
+def _event_is_public(event: EventRecord) -> bool:
+    return event.published_at is not None and event.status != "draft"
+
+
+def _admin_request_authenticated(request: Request) -> bool:
+    token = _admin_token(request)
+    return bool(
+        token
+        and _request_is_secure_or_local(request)
+        and _admin_session_valid(request, token)
+    )
+
+
+def _private_event_page(app: FastAPI, path: str) -> bool:
+    match = re.fullmatch(
+        r"/events/([a-z0-9]+(?:-[a-z0-9]+)*)(?:/arena)?/?",
+        path,
+    )
+    if match is None:
+        return False
+    event = _event_by_slug(app, match.group(1))
+    return event is not None and not _event_is_public(event)
 
 
 def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:
@@ -1233,7 +1278,9 @@ def _is_large_upload_request(request: Request) -> bool:
     if request.method not in {"POST", "PUT"}:
         return False
     path = request.url.path
-    return bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or path in {"/admin/openings", "/api/admin/openings"} or bool(
+    return bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or bool(
+        re.fullmatch(r"/api/admin/engine-versions/\d+/artifact", path)
+    ) or path in {"/admin/openings", "/api/admin/openings"} or bool(
         re.fullmatch(r"/(?:api/)?admin/openings/\d+", path)
     )
 

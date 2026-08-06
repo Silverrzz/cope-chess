@@ -382,6 +382,15 @@ def utc_now_datetime() -> datetime:
     return datetime.now(UTC)
 
 
+def _reconcile_engine_relay_events_for_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> None:
+    from .events import reconcile_engine_relay_events_for_tournament
+
+    reconcile_engine_relay_events_for_tournament(connection, tournament_id)
+
+
 def _utc_timestamp(value: str) -> str:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -981,6 +990,8 @@ def set_tournament_status(
     )
     if status == "aborted" and cursor.rowcount > 0:
         _abandon_tournament_games(connection, tournament_id, now)
+    if cursor.rowcount > 0:
+        _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
 
 
 def set_tournament_current_round_at_least(
@@ -1036,6 +1047,7 @@ def schedule_tournament(
     tournament = get_tournament(connection, tournament_id)
     if tournament is None:
         raise ValueError("tournament does not exist")
+    _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
     return tournament
 
 
@@ -1061,6 +1073,7 @@ def unschedule_tournament(
     current = get_tournament(connection, tournament_id)
     if current is None:
         raise ValueError("tournament does not exist")
+    _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
     return current
 
 
@@ -1235,7 +1248,19 @@ def delete_tournament(connection: sqlite3.Connection, tournament_id: int) -> Non
             raise ValueError("tournament results are already part of the ratings")
         if rating_commit.status in {"pending", "claimed"}:
             raise ValueError("tournament has a rating commit in progress")
+    event_ids = tuple(
+        int(row["event_id"])
+        for row in connection.execute(
+            "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
+            (tournament_id,),
+        )
+    )
     connection.execute("DELETE FROM tournaments WHERE id = ?", (tournament_id,))
+    if event_ids:
+        from .events import reconcile_engine_relay_event
+
+        for event_id in event_ids:
+            reconcile_engine_relay_event(connection, event_id)
 
 
 def create_game(
@@ -1594,6 +1619,8 @@ def replay_game(
         """,
         (tournament_id,),
     ).rowcount > 0
+    if reopened:
+        _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
     return reopened
 
 

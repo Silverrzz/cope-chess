@@ -2,18 +2,22 @@
 import { nextTick, ref, watch, onBeforeUnmount } from "vue";
 
 import { useBoardTheme, type BoardTheme } from "@/composables/useBoardTheme";
+import { useViewerSettings } from "@/composables/useViewerSettings";
 import AppIcon from "./AppIcon.vue";
 import BaseButton from "./BaseButton.vue";
 
 const { theme, boardPresets, previewBoardTheme, revertBoardTheme, setBoardTheme } = useBoardTheme();
+const { confettiEnabled, setConfettiEnabled } = useViewerSettings();
 
 const open = ref(false);
 const panel = ref<HTMLElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
+const draftConfettiEnabled = ref(confettiEnabled.value);
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
   draft.value = { ...theme.value };
+  draftConfettiEnabled.value = confettiEnabled.value;
   await nextTick();
   panel.value?.focus();
 });
@@ -24,6 +28,7 @@ watch(draft, (next) => {
 
 function save(): void {
   setBoardTheme(draft.value);
+  setConfettiEnabled(draftConfettiEnabled.value);
   open.value = false;
 }
 
@@ -47,6 +52,11 @@ function isActive(preset: BoardTheme): boolean {
 
 function update(key: "light" | "dark", event: Event): void {
   draft.value = { ...draft.value, [key]: (event.target as HTMLInputElement).value };
+}
+
+function reset(): void {
+  draft.value = { ...boardPresets.brown! };
+  draftConfettiEnabled.value = true;
 }
 
 </script>
@@ -114,10 +124,16 @@ function update(key: "light" | "dark", event: Event): void {
           <input type="color" :value="draft.dark" @input="update('dark', $event)" />
           <code>{{ draft.dark }}</code>
         </label>
+
+        <h3>Celebrations</h3>
+        <label class="setting-toggle">
+          <input v-model="draftConfettiEnabled" type="checkbox" />
+          <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
+        </label>
       </div>
 
       <footer class="settings-drawer__footer">
-        <BaseButton variant="ghost" size="small" @click="draft = { ...boardPresets.brown! }">Reset</BaseButton>
+        <BaseButton variant="ghost" size="small" @click="reset">Reset</BaseButton>
         <div class="settings-drawer__actions">
           <BaseButton variant="secondary" size="small" @click="cancel">Cancel</BaseButton>
           <BaseButton variant="primary" size="small" @click="save">Save</BaseButton>
@@ -251,4 +267,28 @@ function update(key: "light" | "dark", event: Event): void {
   background: none;
   cursor: pointer;
 }
+
+.setting-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.setting-toggle input {
+  inline-size: 1rem;
+  block-size: 1rem;
+  margin-block-start: 0.15rem;
+}
+
+.setting-toggle span {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.setting-toggle strong { font-size: 0.8125rem; }
+.setting-toggle small { color: var(--color-text-muted); font-size: 0.75rem; line-height: 1.4; }
 </style>

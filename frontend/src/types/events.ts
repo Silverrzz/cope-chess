@@ -180,14 +180,8 @@ export interface EventDetailResponse {
   spectator_count?: number;
 }
 
-export interface EventListResponse {
-  events: EventSummary[];
-  event_stats: {
-    total: number;
-    live: number;
-    upcoming: number;
-    completed: number;
-  };
+export interface CurrentEventResponse {
+  event: EventSummary | null;
 }
 
 export interface AdminEventListResponse {

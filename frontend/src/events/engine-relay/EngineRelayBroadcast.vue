@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter, type RouteLocationRaw } from "vue-router";
 
 import { api } from "@/api/client";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
@@ -7,9 +8,11 @@ import MoveList from "@/components/chess/MoveList.vue";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
+import GameTable from "@/components/public/GameTable.vue";
 import StreamIndicator from "@/components/public/StreamIndicator.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import { clockLabel, errorMessage, resultLabel, statusLabel } from "@/components/public/format";
+import { useViewerSettings } from "@/composables/useViewerSettings";
+import { clockLabel, errorMessage, resultLabel, scorePercentLabel, statusLabel } from "@/components/public/format";
 import type {
   ClockState,
   EngineAnalysis,
@@ -21,7 +24,33 @@ import type { EventDetailResponse } from "@/types/events";
 
 import type { EngineRelayPayload, RelayRosterMember, RelayTeam } from "./types";
 
+type TabKey = "standings" | "games" | "settings";
+
+interface CheerPiece {
+  id: number;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  rotation: number;
+  delay: number;
+  duration: number;
+  size: number;
+}
+
+interface CheerBurst {
+  id: string;
+  color: string;
+  side: "left" | "right";
+  x: number;
+  y: number;
+  pieces: CheerPiece[];
+}
+
 const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: "event" | "arena" }>(), { clockOffsetMs: 0, view: "event" });
+const { confettiEnabled } = useViewerSettings();
+const route = useRoute();
+const router = useRouter();
 
 const payload = computed(() => props.detail.custom as EngineRelayPayload);
 const fixtureId = ref<number | null>(null);
@@ -36,15 +65,18 @@ const nowMs = ref(Date.now() + props.clockOffsetMs);
 const countdownFinished = ref(false);
 const countdownBeat = ref(-1);
 const soundState = ref<"armed" | "loading" | "playing" | "blocked" | "unavailable" | "finished">("loading");
-const cheerBursts = ref<Array<{ id: string; color: string; side: "left" | "right"; x: number; y: number; pieces: number[] }>>([]);
+const soundRequested = ref(false);
+const cheerBursts = ref<CheerBurst[]>([]);
 
 let controller: AbortController | null = null;
 let stream: EventSource | null = null;
+let streamKey = "";
 let refreshTimer: number | undefined;
 let countdownTimer: number | undefined;
+let countdownFrame: number | undefined;
 let countdownAudio: HTMLAudioElement | null = null;
 let audioPlayPending = false;
-let soundPrimed = false;
+const soundPrimed = ref(false);
 let lastCheerRequestAt = 0;
 const seenCheerIds = new Set<string>();
 const cheerTimers = new Set<number>();
@@ -90,12 +122,14 @@ const countdownVisible = computed(() => targetTime.value !== null && remainingMs
 const finalMinuteActive = computed(() => countdownVisible.value && remainingMs.value <= countdownAudioLengthMs);
 const countdown = computed(() => {
   const totalSeconds = Math.ceil(remainingMs.value / 1000);
-  return [
+  const parts = [
     { label: "Days", value: Math.floor(totalSeconds / 86400) },
     { label: "Hours", value: Math.floor((totalSeconds % 86400) / 3600) },
     { label: "Minutes", value: Math.floor((totalSeconds % 3600) / 60) },
     { label: "Seconds", value: totalSeconds % 60 },
   ];
+  const firstVisible = parts.findIndex((part) => part.value > 0);
+  return parts.slice(firstVisible < 0 ? parts.length - 1 : firstVisible);
 });
 const scheduleLabel = computed(() => {
   if (isLive.value) return "The relay is live now";
@@ -121,6 +155,20 @@ const showcaseTeams = computed(() => payload.value.teams.map((team) => {
     current: side !== null,
   };
 }).slice(0, 4));
+const gamePage = computed(() => Math.max(1, Number(queryValue(route.query.page)) || 1));
+const gameTotal = computed(() => gameData.value?.game_pagination.total || 0);
+const gamePages = computed(() => gameData.value?.game_pagination.pages || 1);
+const activeTab = computed<TabKey>(() => {
+  const tab = queryValue(route.query.tab);
+  return ["standings", "games", "settings"].includes(tab) ? tab as TabKey : "standings";
+});
+const format = computed(() => {
+  const value = gameData.value?.tournament.config?.format;
+  return typeof value === "string" ? value : value?.value || "";
+});
+const settingsRows = computed(() => (gameData.value?.settings || []).map((row) => Array.isArray(row)
+  ? { label: String(row[0]), value: String(row[1]) }
+  : { label: String(row.label), value: String(row.value) }));
 
 onMounted(() => {
   selectInitial();
@@ -146,6 +194,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   closeStream();
   if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
   document.removeEventListener("visibilitychange", handleCountdownResume);
   window.removeEventListener("focus", handleCountdownResume);
   window.removeEventListener("pageshow", handleCountdownResume);
@@ -163,7 +212,10 @@ onBeforeUnmount(() => {
 
 watch(() => payload.value.fixtures, () => selectInitial(), { deep: true });
 watch([fixtureId, gameId], () => { void loadGame(); });
-watch(targetTime, () => syncCountdown());
+watch(gamePage, () => { void loadGame(); });
+watch(targetTime, (value, previous) => {
+  if (value !== previous) resetCountdownForTarget();
+});
 watch(headingElement, (next, previous) => {
   if (previous) headingResizeObserver?.unobserve(previous);
   if (next) headingResizeObserver?.observe(next);
@@ -189,8 +241,9 @@ async function fitArenaToViewport(): Promise<void> {
   const board = viewer?.querySelector<HTMLElement>(".board-mount");
   if (!viewer || !board) return;
   const viewport = window.visualViewport;
-  const viewportBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
-  const availableHeight = Math.floor(viewportBottom - arena.getBoundingClientRect().top - 8);
+  const viewportHeight = viewport?.height ?? window.innerHeight;
+  const arenaDocumentTop = arena.getBoundingClientRect().top + window.scrollY;
+  const availableHeight = Math.floor(viewportHeight - arenaDocumentTop - 8);
   if (availableHeight <= 0) return;
   const chrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height);
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
@@ -240,9 +293,9 @@ function selectGame(value: string): void {
 
 async function loadGame(silent = false): Promise<void> {
   if (props.view !== "arena") return;
-  closeStream();
   controller?.abort();
   if (!fixture.value || !gameId.value || fixture.value.tournament?.status === "draft") {
+    closeStream();
     gameData.value = null;
     loading.value = false;
     return;
@@ -252,7 +305,7 @@ async function loadGame(silent = false): Promise<void> {
   loadError.value = "";
   try {
     const response = await api.get<TournamentDetailResponse>(`/api/tournaments/${fixture.value.tournament_id}`, {
-      query: { game_id: gameId.value },
+      query: { game_id: gameId.value, page: gamePage.value },
       signal: controller.signal,
     });
     const wasLatest = selectedPly.value >= (gameData.value?.viewer_moves.length ?? 0);
@@ -269,6 +322,10 @@ async function loadGame(silent = false): Promise<void> {
 
 function connectStream(): void {
   if (!fixture.value || !gameId.value || typeof EventSource === "undefined") return;
+  const nextKey = `${fixture.value.tournament_id}:${gameId.value}`;
+  if (stream && streamKey === nextKey) return;
+  closeStream();
+  streamKey = nextKey;
   stream = new EventSource(`/tournaments/${fixture.value.tournament_id}/events?game_id=${encodeURIComponent(gameId.value)}&spectator=0`);
   streamState.value = "connecting";
   stream.onopen = () => { streamState.value = "live"; };
@@ -277,13 +334,13 @@ function connectStream(): void {
   stream.addEventListener("engine.info", handleEngineInfo);
   stream.addEventListener("clock.sync", handleClock);
   stream.addEventListener("spectators.changed", handleSpectators);
-  stream.addEventListener("tournament.snapshot", scheduleRefresh);
   stream.addEventListener("tournament.changed", scheduleRefresh);
 }
 
 function closeStream(): void {
   stream?.close();
   stream = null;
+  streamKey = "";
   streamState.value = "closed";
   if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
   refreshTimer = undefined;
@@ -347,6 +404,19 @@ function handleSpectators(event: Event): void {
   gameData.value.spectator_count = data.spectator_count;
 }
 
+function queryValue(value: unknown): string {
+  return Array.isArray(value) ? String(value[0] || "") : typeof value === "string" ? value : "";
+}
+
+function tabTarget(tab: TabKey): RouteLocationRaw {
+  return { query: { ...route.query, tab } };
+}
+
+function setGamePage(page: number): void {
+  if (page < 1 || page > gamePages.value || page === gamePage.value) return;
+  void router.push({ query: { ...route.query, page: String(page), tab: "games" } });
+}
+
 async function cheer(team: RelayTeam | null): Promise<void> {
   if (!team) return;
   const now = Date.now();
@@ -374,21 +444,37 @@ function handleCheerEvent(event: Event): void {
 
 function launchCheer(teamId: number, cheerId: string): void {
   const team = payload.value.teams.find((item) => item.id === teamId);
-  if (!team || cheerBursts.value.length >= 6) return;
+  if (!team || !confettiEnabled.value || cheerBursts.value.length >= 6) return;
   const side = team.id === blackTeam.value?.id ? "right" : "left";
-  const burst: { id: string; color: string; side: "left" | "right"; x: number; y: number; pieces: number[] } = {
+  const teamCard = document.querySelector<HTMLElement>(`[data-relay-team-id="${teamId}"]`);
+  const cardBounds = teamCard?.getBoundingClientRect();
+  const burst: CheerBurst = {
     id: cheerId,
     color: team.primary_color,
     side,
-    x: side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13,
-    y: 18 + Math.random() * 65,
-    pieces: Array.from({ length: 7 }, (_, index) => index),
+    x: cardBounds
+      ? ((cardBounds.left + cardBounds.width * (.38 + Math.random() * .24)) / window.innerWidth) * 100
+      : side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13,
+    y: cardBounds
+      ? ((cardBounds.top + cardBounds.height * (.32 + Math.random() * .28)) / window.innerHeight) * 100
+      : 18 + Math.random() * 65,
+    pieces: Array.from({ length: 12 }, (_, index) => ({
+      id: index,
+      startX: -1.4 + Math.random() * 2.8,
+      startY: -.7 + Math.random() * 1.4,
+      endX: -5.8 + Math.random() * 11.6,
+      endY: -3.2 - Math.random() * 5.6,
+      rotation: -260 + Math.random() * 520,
+      delay: Math.random() * 140,
+      duration: 720 + Math.random() * 330,
+      size: .18 + Math.random() * .2,
+    })),
   };
   cheerBursts.value.push(burst);
   const timer = window.setTimeout(() => {
     cheerTimers.delete(timer);
     cheerBursts.value = cheerBursts.value.filter((item) => item.id !== burst.id);
-  }, 900);
+  }, 1_250);
   cheerTimers.add(timer);
 }
 
@@ -440,7 +526,7 @@ function nodeStyle(node: { color: string; secondary: string }): Record<string, s
 }
 
 function countdownCompletionKey(): string {
-  return `cope.event.${props.detail.event.id}.countdown-finished`;
+  return `cope.event.${props.detail.event.id}.countdown-finished.${targetTime.value ?? "unscheduled"}`;
 }
 
 function authoritativeNow(): number {
@@ -454,6 +540,23 @@ function restoreCountdownCompletion(): void {
     countdownFinished.value = false;
   }
   if (!countdownFinished.value && targetTime.value !== null && targetTime.value <= authoritativeNow()) finishCountdown();
+}
+
+function resetCountdownForTarget(): void {
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  countdownFrame = undefined;
+  releaseCountdownAudio();
+  countdownFinished.value = false;
+  countdownBeat.value = -1;
+  soundRequested.value = false;
+  soundPrimed.value = false;
+  soundState.value = "loading";
+  nowMs.value = authoritativeNow();
+  if (props.view !== "event") return;
+  restoreCountdownCompletion();
+  if (countdownFinished.value || targetTime.value === null) return;
+  prepareCountdownAudio();
+  syncCountdown(true);
 }
 
 function prepareCountdownAudio(force = false): void {
@@ -473,7 +576,10 @@ function prepareCountdownAudio(force = false): void {
   audio.addEventListener("playing", () => {
     if (countdownAudio !== audio || countdownFinished.value) return;
     const expected = expectedCountdownAudioTime();
-    if (expected !== null) seekCountdownAudio(audio, expected, true);
+    if (expected === null) return;
+    audio.loop = false;
+    audio.volume = 1;
+    seekCountdownAudio(audio, expected, true);
     soundState.value = "playing";
   });
   audio.addEventListener("error", () => {
@@ -499,7 +605,7 @@ function expectedCountdownAudioTime(): number | null {
 function seekCountdownAudio(audio: HTMLAudioElement, expected: number, force = false): void {
   const maximum = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - .015) : 60;
   const position = Math.min(expected, maximum);
-  if (!force && Math.abs(audio.currentTime - position) <= .12) return;
+  if (!force && Math.abs(audio.currentTime - position) <= .035) return;
   try {
     audio.currentTime = position;
   } catch {
@@ -512,12 +618,16 @@ async function playCountdownAudio(expected: number, force = false): Promise<void
   const audio = countdownAudio;
   if (!audio || audioPlayPending || countdownFinished.value) return;
   if (!force && soundState.value === "blocked") return;
+  audio.loop = false;
+  audio.volume = 1;
   seekCountdownAudio(audio, expected, true);
+  audio.playbackRate = 1;
   audioPlayPending = true;
   try {
     await audio.play();
     const corrected = expectedCountdownAudioTime();
     if (corrected !== null) seekCountdownAudio(audio, corrected, true);
+    soundPrimed.value = true;
     soundState.value = "playing";
   } catch (cause) {
     const name = (cause as { name?: string })?.name;
@@ -528,6 +638,7 @@ async function playCountdownAudio(expected: number, force = false): Promise<void
 }
 
 function syncCountdown(forceAudio = false): void {
+  if (props.view !== "event") return;
   nowMs.value = authoritativeNow();
   if (countdownFinished.value || targetTime.value === null) return;
   if (targetTime.value <= nowMs.value) {
@@ -535,16 +646,21 @@ function syncCountdown(forceAudio = false): void {
     return;
   }
   if (!finalMinuteActive.value) {
+    if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+    countdownFrame = undefined;
     countdownBeat.value = -1;
-    if (countdownAudio && !countdownAudio.paused) countdownAudio.pause();
+    if (countdownAudio && !countdownAudio.paused && !soundPrimed.value) countdownAudio.pause();
     if (soundState.value === "playing") soundState.value = "armed";
     return;
   }
   const expected = expectedCountdownAudioTime();
   if (expected === null) return;
+  scheduleCountdownFrame();
   const beat = Math.floor(expected + .025);
   if (beat !== countdownBeat.value) countdownBeat.value = beat;
   if (countdownAudio && !countdownAudio.paused) {
+    countdownAudio.loop = false;
+    countdownAudio.volume = 1;
     seekCountdownAudio(countdownAudio, expected);
     soundState.value = "playing";
     return;
@@ -552,9 +668,19 @@ function syncCountdown(forceAudio = false): void {
   void playCountdownAudio(expected, forceAudio);
 }
 
+function scheduleCountdownFrame(): void {
+  if (countdownFrame !== undefined || countdownFinished.value || !finalMinuteActive.value) return;
+  countdownFrame = window.requestAnimationFrame(() => {
+    countdownFrame = undefined;
+    syncCountdown();
+  });
+}
+
 function finishCountdown(): void {
   if (countdownFinished.value) return;
   countdownFinished.value = true;
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  countdownFrame = undefined;
   countdownBeat.value = -1;
   soundState.value = "finished";
   try {
@@ -565,7 +691,8 @@ function finishCountdown(): void {
   releaseCountdownAudio();
 }
 
-async function enableCountdownSound(): Promise<void> {
+async function enableCountdownSound(dismiss = false): Promise<void> {
+  if (dismiss) soundRequested.value = true;
   if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
   prepareCountdownAudio(soundState.value === "unavailable");
   const expected = expectedCountdownAudioTime();
@@ -574,18 +701,20 @@ async function enableCountdownSound(): Promise<void> {
     return;
   }
   const audio = countdownAudio;
-  if (!audio || soundPrimed) return;
-  audio.muted = true;
+  if (!audio || soundPrimed.value) return;
+  audio.loop = true;
+  audio.volume = 0;
+  audioPlayPending = true;
   try {
     await audio.play();
-    audio.pause();
-    audio.currentTime = 0;
-    soundPrimed = true;
+    soundPrimed.value = true;
     soundState.value = "armed";
   } catch {
+    audio.loop = false;
     soundState.value = "blocked";
   } finally {
-    audio.muted = false;
+    audioPlayPending = false;
+    if (!soundPrimed.value) audio.volume = 1;
   }
 }
 
@@ -596,16 +725,16 @@ function handleCountdownResume(): void {
 
 function handleUserActivation(): void {
   if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
-  if (!soundPrimed || finalMinuteActive.value || ["blocked", "unavailable"].includes(soundState.value)) void enableCountdownSound();
+  if (!soundPrimed.value || finalMinuteActive.value || ["blocked", "unavailable"].includes(soundState.value)) void enableCountdownSound();
 }
 
 </script>
 
 <template>
-  <div class="engine-clash-page" :class="{ 'engine-clash-page--final-minute': finalMinuteActive }">
-    <div class="cheer-layer" aria-hidden="true">
+  <div class="engine-clash-page" :class="{ 'engine-clash-page--final-minute': finalMinuteActive, 'engine-clash-page--arena': props.view === 'arena' }">
+    <div v-if="confettiEnabled" class="cheer-layer" aria-hidden="true">
       <span v-for="burst in cheerBursts" :key="burst.id" class="cheer-burst" :class="`cheer-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%`, '--cheer-color': burst.color }">
-        <i v-for="piece in burst.pieces" :key="piece" :style="{ '--piece': piece }"></i>
+        <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--cheer-start-x': `${piece.startX}rem`, '--cheer-start-y': `${piece.startY}rem`, '--cheer-end-x': `${piece.endX}rem`, '--cheer-end-y': `${piece.endY}rem`, '--cheer-rotation': `${piece.rotation}deg`, '--cheer-delay': `${piece.delay}ms`, '--cheer-duration': `${piece.duration}ms`, '--cheer-size': `${piece.size}rem` }"></i>
       </span>
     </div>
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
@@ -632,10 +761,11 @@ function handleUserActivation(): void {
           </div>
         </div>
         <p v-if="countdownVisible" class="clash-schedule"><AppIcon name="clock" :size="18" /> {{ scheduleLabel }}</p>
+        <button v-if="countdownVisible && !soundRequested && !soundPrimed && soundState !== 'playing' && soundState !== 'finished'" class="countdown-sound" type="button" @pointerdown.stop @click="enableCountdownSound(true)"><AppIcon name="radio" :size="16" />{{ soundState === 'blocked' ? 'Enable countdown sound' : 'Arm countdown sound' }}</button>
 
         <div class="clash-orbit" :class="`clash-orbit--${Math.min(showcaseTeams.length, 4)}`">
           <div class="clash-orbit__rings" aria-hidden="true"><span></span><span></span><span></span></div>
-          <article v-for="(team, index) in showcaseTeams" :key="team.id" class="clash-node" :class="[`clash-node--${index + 1}`, { 'clash-node--thinking': team.thinking }]" :style="nodeStyle(team)">
+          <article v-for="(team, index) in showcaseTeams" :key="team.id" class="clash-node" :class="[`clash-node--${index + 1}`, { 'clash-node--thinking': team.thinking }]" :style="nodeStyle(team)" :data-relay-team-id="team.id">
             <div class="clash-node__beacon"><span><AppIcon name="trophy" :size="31" /></span></div>
             <div class="clash-node__card">
               <strong>{{ team.name }}</strong>
@@ -646,14 +776,13 @@ function handleUserActivation(): void {
           <p v-if="!showcaseTeams.length" class="clash-orbit__empty">Teams will join the circuit when the lineup is locked.</p>
         </div>
 
-        <div class="clash-actions">
+        <div v-if="isLive" class="clash-actions">
           <RouterLink :to="{ name: 'event-arena', params: { slug: detail.event.slug } }" class="clash-primary-action"><AppIcon name="trophy" :size="19" /> Enter arena <AppIcon name="arrow-right" :size="18" /></RouterLink>
         </div>
       </div>
 
-      <div v-if="whiteTeam || blackTeam" class="clash-cheer-rail" aria-label="Cheer for a relay team">
-        <button v-if="whiteTeam" type="button" class="clash-cheer-action" :style="teamStyle(whiteTeam)" @click="cheer(whiteTeam)"><span><AppIcon name="trophy" :size="18" /></span><span><small>Cheer for</small><strong>{{ whiteTeam.short_name || whiteTeam.name }}</strong></span></button>
-        <button v-if="blackTeam" type="button" class="clash-cheer-action" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)"><span><AppIcon name="trophy" :size="18" /></span><span><small>Cheer for</small><strong>{{ blackTeam.short_name || blackTeam.name }}</strong></span></button>
+      <div v-if="payload.teams.length" class="clash-cheer-rail" aria-label="Cheer for a relay team">
+        <button v-for="team in payload.teams" :key="team.id" type="button" class="clash-cheer-action" :style="teamStyle(team)" :data-relay-team-id="team.id" @click="cheer(team)"><span><AppIcon name="trophy" :size="18" /></span><span><small>Cheer for</small><strong>{{ team.short_name || team.name }}</strong></span></button>
       </div>
 
       <aside class="clash-status-card clash-status-card--systems">
@@ -690,11 +819,17 @@ function handleUserActivation(): void {
 
     <section v-else-if="gameData && viewerGame" ref="arenaElement" class="arena" :aria-label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'}`">
       <div class="engine-column">
-        <div class="relay-engine-slot" :style="teamStyle(blackTeam)"><EnginePanel side="black" :name="blackMember?.display_name || blackTeam?.name || ''" :engine-id="blackMember?.engine_id ?? null" :clock="`${(blackMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" /></div>
-        <div class="relay-engine-slot" :style="teamStyle(whiteTeam)"><EnginePanel side="white" :name="whiteMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteMember?.engine_id ?? null" :clock="`${(whiteMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" /></div>
+        <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
+          <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><span v-for="member in blackTeam?.roster ?? []" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></div>
+          <EnginePanel side="black" :name="blackMember?.display_name || blackTeam?.name || ''" :engine-id="blackMember?.engine_id ?? null" :clock="`${(blackMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
+        </div>
+        <div class="relay-engine-slot" :style="teamStyle(whiteTeam)" :data-relay-team-id="whiteTeam?.id">
+          <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><span v-for="member in whiteTeam?.roster ?? []" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></div>
+          <EnginePanel side="white" :name="whiteMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteMember?.engine_id ?? null" :clock="`${(whiteMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
+        </div>
         <dl class="game-facts">
-          <div :style="teamStyle(blackTeam)"><dt>Black team</dt><dd>{{ blackTeam?.name ?? '-' }} <button v-if="blackTeam" type="button" @click="cheer(blackTeam)">Cheer</button></dd></div>
-          <div :style="teamStyle(whiteTeam)"><dt>White team</dt><dd>{{ whiteTeam?.name ?? '-' }} <button v-if="whiteTeam" type="button" @click="cheer(whiteTeam)">Cheer</button></dd></div>
+          <div :style="teamStyle(blackTeam)"><dt>Black team</dt><dd><span>{{ blackTeam?.name ?? '-' }}</span><button v-if="blackTeam" type="button" class="cheer-button cheer-button--arena" @click="cheer(blackTeam)"><AppIcon name="trophy" :size="12" /> Cheer</button></dd></div>
+          <div :style="teamStyle(whiteTeam)"><dt>White team</dt><dd><span>{{ whiteTeam?.name ?? '-' }}</span><button v-if="whiteTeam" type="button" class="cheer-button cheer-button--arena" @click="cheer(whiteTeam)"><AppIcon name="trophy" :size="12" /> Cheer</button></dd></div>
           <div><dt>Status</dt><dd>{{ statusLabel(gameStatus) }}</dd></div>
           <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
         </dl>
@@ -706,6 +841,72 @@ function handleUserActivation(): void {
         <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
         <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="appendChat" />
       </aside>
+    </section>
+
+    <section v-if="gameData" class="tournament-data">
+      <nav class="data-tabs" aria-label="Tournament information">
+        <RouterLink :to="tabTarget('standings')" :aria-current="activeTab === 'standings' ? 'page' : undefined">Standings <span>{{ gameData.standings?.length || 0 }}</span></RouterLink>
+        <RouterLink :to="tabTarget('games')" :aria-current="activeTab === 'games' ? 'page' : undefined">Games <span>{{ gameTotal }}</span></RouterLink>
+        <RouterLink :to="tabTarget('settings')" :aria-current="activeTab === 'settings' ? 'page' : undefined">Settings</RouterLink>
+      </nav>
+
+      <section v-if="activeTab === 'standings'" class="data-panel" aria-labelledby="standings-title">
+        <header><div><h2 id="standings-title">Standings</h2></div></header>
+        <div v-if="gameData.standings?.length" class="table-wrap">
+          <table>
+            <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
+            <tbody>
+              <tr v-for="(standing, index) in gameData.standings" :key="standing.engine_id">
+                <td class="rank-cell">{{ index + 1 }}</td>
+                <td><RouterLink :to="`/engines/${standing.engine_id}`">{{ standing.name }}</RouterLink></td>
+                <td class="number-cell">{{ standing.points }}</td>
+                <td class="number-cell">{{ scorePercentLabel(standing.score_percent) }}</td>
+                <td class="number-cell">{{ standing.played }}</td>
+                <td v-if="format === 'swiss'" class="number-cell">{{ standing.buchholz ?? 0 }}</td>
+                <td v-if="format === 'knockout'" class="number-cell">{{ standing.stage ?? 0 }}</td>
+                <td class="action-cell"><RouterLink :to="`/engines/${standing.engine_id}`" :aria-label="`View ${standing.name}`">View</RouterLink></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <ContentState v-else kind="empty" compact title="No standings yet" />
+      </section>
+
+      <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
+        <header><div><h2 id="games-title">Finished games</h2></div></header>
+        <GameTable v-if="gameData.games.length" :games="gameData.games" :engines="gameData.engines" caption="Finished tournament games" />
+        <ContentState v-else kind="empty" compact title="No finished games yet" />
+        <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
+          <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
+          <span>Page {{ gamePage.toLocaleString() }} of {{ gamePages.toLocaleString() }}</span>
+          <button type="button" :disabled="gamePage >= gamePages" @click="setGamePage(gamePage + 1)">Next</button>
+        </nav>
+      </section>
+
+      <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
+        <header><div><h2 id="settings-title">Settings</h2></div></header>
+        <dl v-if="settingsRows.length" class="settings-list">
+          <div v-for="row in settingsRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
+        </dl>
+        <ContentState v-else kind="empty" compact title="No settings recorded" />
+
+        <div v-if="gameData.engine_hardware?.length" class="hardware-section">
+          <h3>Engine hardware</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Engine</th><th>Hash</th><th>Threads</th><th>Active hardware</th></tr></thead>
+              <tbody>
+                <tr v-for="row in gameData.engine_hardware" :key="row.engine_id">
+                  <td><RouterLink :to="`/engines/${row.engine_id}`">{{ row.name }}</RouterLink></td>
+                  <td>{{ row.hash || '-' }}</td>
+                  <td>{{ row.threads || '-' }}</td>
+                  <td>{{ row.hardware || 'Not reported' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </section>
     </section>
 
@@ -720,16 +921,17 @@ function handleUserActivation(): void {
   background: #f5f8fe;
   color: var(--clash-ink);
 }
+.engine-clash-page--arena { min-height: calc(100dvh - 2.85rem); margin-block-end: 0; background: var(--color-bg, #f3f6fa); }
 
 .cheer-layer { position: fixed; z-index: 46; inset: 0; overflow: hidden; pointer-events: none; }
 .cheer-burst { position: absolute; width: 1px; height: 1px; }
-.cheer-burst i { --angle: calc(var(--piece) * 51deg - 150deg); position: absolute; width: .28rem; height: .5rem; border-radius: .08rem; background: var(--cheer-color); opacity: 0; transform: rotate(var(--angle)) translateY(0); animation: cheer-pop .82s ease-out forwards; animation-delay: calc(var(--piece) * 12ms); }
-.cheer-burst i:nth-child(even) { width: .22rem; height: .22rem; border-radius: 50%; filter: brightness(1.22); }
-.cheer-button { min-height: 2.2rem; padding: 0 .85rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 55%, white); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 13%, white); color: color-mix(in srgb, var(--relay-primary) 82%, #071426); cursor: pointer; font-size: .65rem; font-weight: 800; }
-.cheer-button:hover { background: color-mix(in srgb, var(--relay-primary) 22%, white); }
+.cheer-burst i { position: absolute; width: var(--cheer-size); height: calc(var(--cheer-size) * 1.6); border-radius: .08rem; background: var(--cheer-color); opacity: 0; transform: translate(var(--cheer-start-x), var(--cheer-start-y)); animation: cheer-pop var(--cheer-duration) cubic-bezier(.16, .72, .28, 1) forwards; animation-delay: var(--cheer-delay); }
+.cheer-burst i:nth-child(even) { height: var(--cheer-size); border-radius: 50%; filter: brightness(1.22); }
+.cheer-button { display: inline-flex; min-height: 2.2rem; align-items: center; justify-content: center; gap: .3rem; padding: 0 .85rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 55%, white); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 13%, white); color: color-mix(in srgb, var(--relay-primary) 82%, #071426); cursor: pointer; font-size: .65rem; font-weight: 800; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--relay-primary) 14%, transparent); }
+.cheer-button:hover { border-color: color-mix(in srgb, var(--relay-primary) 78%, white); background: color-mix(in srgb, var(--relay-primary) 22%, white); box-shadow: 0 .3rem .75rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
 .cheer-button:active { transform: scale(.96); }
-.cheer-button--arena { min-height: 1.75rem; padding-inline: .65rem; font-size: .57rem; }
-@keyframes cheer-pop { 0% { opacity: 0; transform: rotate(var(--angle)) translateY(0) scale(.5); } 14% { opacity: .95; } 100% { opacity: 0; transform: rotate(var(--angle)) translateY(-3.4rem) scale(1); } }
+.cheer-button--arena { min-width: 4.5rem; min-height: 1.85rem; padding-inline: .7rem; font-size: .59rem; }
+@keyframes cheer-pop { 0% { opacity: 0; transform: translate(var(--cheer-start-x), var(--cheer-start-y)) rotate(0) scale(.5); } 13% { opacity: .95; } 100% { opacity: 0; transform: translate(var(--cheer-end-x), var(--cheer-end-y)) rotate(var(--cheer-rotation)) scale(1); } }
 
 @media (prefers-reduced-motion: reduce) { .cheer-burst i { animation-duration: .18s; } }
 
@@ -880,6 +1082,8 @@ function handleUserActivation(): void {
 }
 
 .clash-schedule { display: flex; align-items: center; gap: .45rem; margin: .75rem 0 0; color: #70809a; font-size: .78rem; }
+.countdown-sound { display: inline-flex; align-items: center; gap: .4rem; min-height: 2.15rem; margin-top: .65rem; padding: 0 .8rem; border: 1px solid rgb(57 111 201 / 28%); border-radius: 999px; background: rgb(255 255 255 / 68%); color: #2f63ad; cursor: pointer; font: inherit; font-size: .66rem; font-weight: 760; }
+.countdown-sound:hover { border-color: #3974c8; background: white; }
 
 .clash-orbit {
   position: relative;
@@ -995,8 +1199,11 @@ function handleUserActivation(): void {
   bottom: 1.35rem;
   left: 50%;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: .65rem;
+  width: min(calc(100% - 2rem), 52rem);
   padding: .45rem;
   border: 1px solid rgb(255 255 255 / 72%);
   border-radius: .85rem;
@@ -1065,7 +1272,7 @@ function handleUserActivation(): void {
   width: 100%;
   gap: var(--space-md, 1rem);
   padding: .55rem clamp(.75rem, 1.5vw, 1.75rem) 3rem;
-  background: var(--color-background, #f7f9fd);
+  background: var(--color-bg, #f3f6fa);
   color: var(--color-text, #17202a);
 }
 .tournament-heading { display: flex; align-items: end; justify-content: space-between; gap: var(--space-xl, 2rem); padding-block-end: .55rem; border-block-end: 1px solid var(--color-border, #d5dbe1); }
@@ -1083,17 +1290,55 @@ function handleUserActivation(): void {
 .arena { display: grid; grid-template-columns: minmax(25rem, 29rem) var(--arena-board-size) minmax(28rem, 1fr); gap: clamp(.7rem, 1.5vw, 1.2rem); align-items: start; height: var(--arena-content-height); min-height: 0; }
 .engine-column, .activity-column { display: grid; min-height: 0; gap: var(--space-sm, .5rem); }
 .engine-column { grid-template-rows: repeat(2, minmax(0, 1fr)) auto; height: var(--arena-content-height); }
-.relay-engine-slot { min-width: 0; min-height: 0; }
-.relay-engine-slot :deep(.engine-panel) { --side-color: var(--relay-primary); min-height: 0; border-color: color-mix(in srgb, var(--relay-primary) 30%, var(--color-border, #d5dbe1)); }
-.relay-engine-slot :deep(.engine-panel--active) { box-shadow: 0 0 0 1px var(--relay-primary), 0 0 1.4rem color-mix(in srgb, var(--relay-primary) 20%, transparent); }
+.relay-engine-slot { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: .3rem; min-width: 0; min-height: 0; padding: .25rem; border-radius: calc(var(--radius-md, .5rem) + .25rem); background: color-mix(in srgb, var(--relay-primary) 5%, transparent); box-shadow: 0 0 1.35rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
+.relay-engine-slot :deep(.engine-panel) { min-height: 0; border-color: var(--color-border, #d5dbe1); }
+.relay-engine-slot :deep(.engine-panel--active) { border-color: var(--color-border-strong, #99a8bb); box-shadow: 0 0 0 1px var(--color-border-strong, #99a8bb); }
+.relay-team-strip { display: flex; align-items: center; gap: .3rem; min-width: 0; min-height: 1.75rem; overflow: hidden; padding-inline: .35rem; }
+.relay-team-strip strong { flex: 0 0 auto; margin-right: .15rem; color: var(--relay-primary); font-size: .62rem; }
+.relay-team-strip span { overflow: hidden; min-width: 0; padding: .2rem .38rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; background: var(--color-surface, #fff); color: var(--color-text-muted, #607080); font-size: .52rem; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.relay-team-strip span.current { border-color: var(--relay-primary); background: color-mix(in srgb, var(--relay-primary) 12%, var(--color-surface, #fff)); color: var(--color-text, #17202a); }
 .board-column { width: var(--arena-board-size); min-width: 0; justify-self: center; }
 .activity-column { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); height: var(--arena-content-height); }
 .activity-column > * { min-width: 0; min-height: 0; height: 100%; }
 .game-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 1px; height: 6.35rem; overflow: hidden; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-md, .5rem); background: var(--color-border, #d5dbe1); }
 .game-facts div { min-width: 0; padding: .65rem .75rem; background: var(--color-surface, #fff); }
 .game-facts dt { color: var(--color-text-muted, #607080); font-size: .59rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
-.game-facts dd { display: flex; align-items: center; justify-content: space-between; gap: .35rem; overflow: hidden; margin: .18rem 0 0; font-size: .75rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.game-facts button { padding: .15rem .45rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 50%, var(--color-border, #d5dbe1)); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 10%, var(--color-surface, #fff)); color: var(--relay-primary); cursor: pointer; font: inherit; font-size: .58rem; }
+.game-facts dd { display: flex; align-items: center; justify-content: space-between; gap: .7rem; overflow: hidden; margin: .18rem 0 0; font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.game-facts dd > span { overflow: hidden; min-width: 0; text-overflow: ellipsis; }
+
+.tournament-data { display: grid; gap: var(--space-sm, .5rem); margin-block-start: var(--space-md, 1rem); }
+.data-tabs { display: flex; gap: .3rem; overflow-x: auto; }
+.data-tabs a { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .45rem; padding-inline: .85rem; border: 1px solid transparent; border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted, #607080); font-size: .78rem; font-weight: 730; text-decoration: none; white-space: nowrap; }
+.data-tabs a:hover { color: var(--color-text, #17202a); background: color-mix(in srgb, var(--color-text, #17202a) 5%, transparent); }
+.data-tabs a[aria-current="page"] { border-color: color-mix(in srgb, var(--color-accent, #2f78c4) 24%, transparent); background: color-mix(in srgb, var(--color-accent, #2f78c4) 9%, var(--color-surface, #fff)); color: var(--color-accent, #2f78c4); }
+.data-tabs a span { color: inherit; font-size: .64rem; opacity: .75; }
+.data-panel { overflow: hidden; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-lg, .75rem); background: var(--color-surface, #fff); }
+.data-panel > header { padding: var(--space-md, 1rem); border-block-end: 1px solid var(--color-border, #d5dbe1); }
+.data-panel h2, .data-panel header p, .hardware-section h3 { margin: 0; }
+.data-panel h2 { font-size: 1rem; }
+.data-panel header p { margin-block-start: .18rem; color: var(--color-text-muted, #607080); font-size: .7rem; }
+.table-wrap { overflow-x: auto; }
+.data-panel table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.data-panel th, .data-panel td { padding: .72rem .85rem; border-block-end: 1px solid var(--color-border, #d5dbe1); text-align: start; }
+.data-panel th { color: var(--color-text-muted, #607080); font-size: .63rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.data-panel tbody tr:last-child td { border-block-end: 0; }
+.data-panel tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
+.data-panel td a { color: inherit; font-weight: 700; text-decoration: none; }
+.data-panel td a:hover { color: var(--color-accent, #2f78c4); text-decoration: underline; text-underline-offset: .16em; }
+.pagination { display: flex; align-items: center; justify-content: flex-end; gap: .75rem; padding: .75rem .85rem; border-top: 1px solid var(--color-border, #d5dbe1); }
+.pagination button { padding: .4rem .65rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: .35rem; background: var(--color-surface, #fff); color: inherit; cursor: pointer; font: inherit; }
+.pagination button:disabled { cursor: default; opacity: .45; }
+.pagination span { color: var(--color-text-muted, #607080); font-size: .72rem; }
+.rank-cell { width: 4rem; color: var(--color-text-muted, #607080); font-variant-numeric: tabular-nums; }
+.number-cell { width: 6rem; font-weight: 730; font-variant-numeric: tabular-nums; }
+.action-cell { width: 4rem; text-align: end !important; }
+.action-cell a { color: var(--color-accent, #2f78c4) !important; font-size: .72rem; }
+.settings-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 1px; margin: 0; background: var(--color-border, #d5dbe1); }
+.settings-list div { min-width: 0; padding: .85rem 1rem; background: var(--color-surface, #fff); }
+.settings-list dt { color: var(--color-text-muted, #607080); font-size: .62rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.settings-list dd { margin: .22rem 0 0; font-size: .8rem; font-weight: 650; overflow-wrap: anywhere; }
+.hardware-section { border-block-start: 1px solid var(--color-border, #d5dbe1); }
+.hardware-section h3 { padding: .85rem 1rem; border-block-end: 1px solid var(--color-border, #d5dbe1); font-size: .88rem; }
 
 @media (max-width: 96rem) {
   .arena { grid-template-columns: minmax(25rem, 1fr) var(--arena-board-size); height: auto; }
@@ -1116,6 +1361,7 @@ function handleUserActivation(): void {
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
+  .settings-list { grid-template-columns: 1fr; }
 }
 
 .relay-showcase { scroll-margin-top: var(--header-height, 4rem); background: linear-gradient(180deg, #f7f9fd, #eef3fa); }
@@ -1139,7 +1385,7 @@ function handleUserActivation(): void {
 @media (max-width: 88rem) { .relay-arena { grid-template-columns: minmax(14rem, .55fr) minmax(22rem, 1fr); }.relay-engines { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; }.relay-activity { min-height: 34rem; } }
 @media (max-width: 60rem) { .clash-hero__content { align-content: start; }.clash-orbit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; height: auto; margin-top: 1.2rem; }.clash-orbit__rings { display: none; }.clash-node { position: relative; inset: auto; width: auto; }.clash-node__card { width: min(100%, 12rem); }.clash-actions { margin-top: 1.5rem; }.relay-showcase__heading { align-items: start; flex-direction: column; }.relay-broadcast__bar { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors { flex-wrap: wrap; }.relay-arena { grid-template-columns: 1fr; }.relay-board { grid-row: 1; }.relay-activity { min-height: 26rem; }.relay-engines { grid-template-columns: 1fr; }.handoff-strip { grid-template-columns: 1fr; } }
 @media (max-width: 60rem) { .clash-orbit--2 .clash-node { inset: auto; } }
-@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.clash-cheer-rail { right: .75rem; left: .75rem; gap: .4rem; transform: none; }.clash-cheer-action { min-width: 0; flex: 1; padding-right: .5rem; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
+@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.clash-cheer-rail { right: .75rem; left: .75rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: auto; gap: .4rem; transform: none; }.clash-cheer-action { min-width: 0; width: 100%; padding-right: .5rem; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
 :global(:root[data-theme="dark"] .engine-clash-page) { --clash-ink: #f4f8ff; background: #08111e; color: #eef4ff; }
 :global(:root[data-theme="dark"] .engine-clash-page--final-minute .clash-hero) { background: radial-gradient(circle at 50% 42%, #20395e, #0d1d32 58%, #07101d); }
 :global(:root[data-theme="dark"] .relay-showcase) { background: linear-gradient(180deg, #0b1420, #0e1927); color: #eef4ff; }

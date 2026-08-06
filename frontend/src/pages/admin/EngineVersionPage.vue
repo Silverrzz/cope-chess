@@ -40,6 +40,7 @@ const loading = ref(true)
 const saving = ref(false)
 const deleting = ref(false)
 const rescheduling = ref(false)
+const uploadingArtifact = ref(false)
 const recordingManual = ref(false)
 const forgetting = ref(false)
 const dockerfileDirty = ref(false)
@@ -52,6 +53,7 @@ const benchmarks = ref<EngineBenchmarkJob[]>([])
 const nowMs = ref(Date.now())
 const lastActivityMs = ref<number | null>(null)
 const consoleRef = ref<HTMLElement | null>(null)
+const artifactInput = ref<HTMLInputElement | null>(null)
 const followConsole = ref(true)
 const manualOpen = ref(false)
 const hardwareProfiles = ref<BenchmarkHardwareProfile[]>([])
@@ -259,6 +261,33 @@ async function reschedule(): Promise<void> {
     toast.error(cause)
   } finally {
     rescheduling.value = false
+  }
+}
+
+function chooseArtifact(): void {
+  artifactInput.value?.click()
+}
+
+async function uploadArtifact(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingArtifact.value = true
+  error.value = ''
+  try {
+    const response = await api.put<{ artifact: EngineArtifact; message: string }>(`/api/admin/engine-versions/${id.value}/artifact`, {
+      body: file,
+      headers: { 'Content-Type': 'application/gzip' },
+    })
+    if (version.value) version.value.artifact = response.artifact
+    toast.success(response.message)
+    await load()
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    uploadingArtifact.value = false
+    input.value = ''
   }
 }
 
@@ -478,6 +507,11 @@ onBeforeUnmount(() => {
           <span class="artifact-summary__dot" aria-hidden="true" />
           <p>{{ artifactStatus.detail }}</p>
         </div>
+        <div class="artifact-upload">
+          <div><strong>Manual artifact</strong><small>Upload a validated Cope artifact archive for this exact build. Published builds are immutable.</small></div>
+          <input ref="artifactInput" class="artifact-upload__input" type="file" accept=".tar.gz,application/gzip,application/x-gzip" @change="uploadArtifact">
+          <button class="button button--secondary button--small" type="button" :disabled="uploadingArtifact || dockerfileDirty || !version.dockerfile_path" @click="chooseArtifact">{{ uploadingArtifact ? 'Uploadingâ€¦' : version.artifact ? 'Re-upload artifact' : 'Upload artifact' }}</button>
+        </div>
         <dl v-if="version.artifact" class="artifact-facts">
           <div class="artifact-facts__digest"><dt>SHA-256</dt><dd><code :title="version.artifact.sha256">{{ version.artifact.sha256 }}</code></dd></div>
           <div><dt>Size</dt><dd>{{ formatBytes(version.artifact.size) }}</dd></div>
@@ -596,4 +630,5 @@ onBeforeUnmount(() => {
 .manual-benchmark-backdrop{background:var(--color-overlay);display:grid;inset:0;overflow-y:auto;padding:1rem;place-items:center;position:fixed;z-index:1100}.manual-benchmark-dialog{background:var(--color-surface-raised);border:1px solid var(--color-border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-md);display:grid;gap:1rem;padding:1.25rem;width:min(100%,38rem)}.manual-benchmark-dialog h2{font-size:1rem;margin:0}.manual-benchmark-dialog p{color:var(--color-text-muted);font-size:.72rem;margin:.25rem 0 0}.manual-benchmark-grid{display:grid;gap:.8rem;grid-template-columns:repeat(2,minmax(0,1fr))}.manual-benchmark-wide{grid-column:1/-1}.manual-benchmark-actions{display:flex;gap:.6rem;justify-content:flex-end}@media(max-width:32rem){.manual-benchmark-grid{grid-template-columns:1fr}.manual-benchmark-wide{grid-column:auto}}
 .version-settings-grid{align-items:start;display:grid;gap:1rem;grid-template-columns:repeat(2,minmax(0,1fr))}.dockerfile-preview{border-top:1px solid var(--color-border);padding-top:.75rem}.dockerfile-preview summary{cursor:pointer;font-size:.73rem;font-weight:650}.dockerfile-preview[open] summary{margin-bottom:.75rem}@media(max-width:64rem){.version-settings-grid{grid-template-columns:1fr}}
 .artifact-card{display:grid;gap:1rem;padding:1rem}.artifact-state{border-radius:999px;font-size:.67rem;font-weight:700;padding:.35rem .6rem;white-space:nowrap}.artifact-state--ready{background:#dcfce7;color:#166534}.artifact-state--working{background:#dbeafe;color:#1d4ed8}.artifact-state--warning{background:#fef3c7;color:#92400e}.artifact-state--missing{background:var(--color-surface-subtle);color:var(--color-text-muted)}.artifact-summary{align-items:center;background:var(--color-surface-subtle);border:1px solid var(--color-border);border-radius:var(--radius-md);display:flex;gap:.6rem;padding:.7rem .8rem}.artifact-summary p{font-size:.73rem;line-height:1.45;margin:0}.artifact-summary__dot{background:var(--color-text-faint);border-radius:50%;flex:0 0 auto;height:.55rem;width:.55rem}.artifact-summary--ready .artifact-summary__dot{background:var(--color-success)}.artifact-summary--working .artifact-summary__dot{animation:benchmark-live-pulse 1.5s ease-in-out infinite;background:var(--color-accent)}.artifact-summary--warning .artifact-summary__dot{background:var(--color-warning)}.artifact-facts{display:grid;gap:.75rem;grid-template-columns:repeat(5,minmax(0,1fr));margin:0}.artifact-facts>div{display:grid;gap:.22rem;min-width:0}.artifact-facts__digest{grid-column:1/-1}.artifact-facts dt{color:var(--color-text-muted);font-size:.62rem;text-transform:uppercase}.artifact-facts dd{font-size:.73rem;margin:0;min-width:0}.artifact-facts code{overflow-wrap:anywhere}.benchmark-stage-list{grid-template-columns:repeat(6,minmax(0,1fr))}@media(max-width:42rem){.artifact-facts{grid-template-columns:1fr}.artifact-facts__digest{grid-column:auto}}
+.artifact-upload{align-items:center;border-top:1px solid var(--color-border);display:flex;gap:1rem;justify-content:space-between;padding-top:.9rem}.artifact-upload>div{display:grid;gap:.2rem}.artifact-upload strong{font-size:.75rem}.artifact-upload small{color:var(--color-text-muted);font-size:.67rem}.artifact-upload__input{display:none}@media(max-width:42rem){.artifact-upload{align-items:stretch;flex-direction:column}}
 </style>

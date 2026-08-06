@@ -7,6 +7,7 @@ import AdminPageHeader from "@/components/admin/AdminPageHeader.vue";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
 import { errorText, formatDate, humanize } from "@/components/admin/format";
+import AppIcon from "@/components/ui/AppIcon.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 import { adminEventComponent } from "@/events/registry";
@@ -20,12 +21,13 @@ const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
 const deleting = ref(false);
 const error = ref("");
+const showDetails = ref(false);
 const customComponent = computed(() => data.value ? adminEventComponent(data.value.handler.key) : null);
 
 onMounted(load);
 
 async function load(): Promise<void> {
-  loading.value = true;
+  loading.value = data.value === null;
   error.value = "";
   try {
     data.value = await api.get<EventDetailResponse>(`/api/admin/events/${encodeURIComponent(props.id)}`);
@@ -65,15 +67,17 @@ async function remove(): Promise<void> {
     <InlineFeedback :message="error" />
     <div v-if="loading" class="panel loading-panel" role="status">Opening control room…</div>
     <template v-else-if="data">
-      <AdminPageHeader :title="data.event.title" :description="data.event.subtitle || 'Bespoke event control room'">
-        <template #actions><StatusBadge :status="data.event.status" /><RouterLink v-if="data.event.published_at" class="button button--secondary" :to="`/events/${data.event.slug}`">View public event</RouterLink><RouterLink class="button button--ghost" to="/admin/events">Back to events</RouterLink><button class="button button--danger" type="button" :disabled="deleting" @click="remove">{{ deleting ? "Deleting…" : "Delete event" }}</button></template>
+      <AdminPageHeader :title="data.event.title">
+        <template #actions>
+          <StatusBadge :status="data.event.status" />
+          <RouterLink class="button button--secondary" :to="`/events/${data.event.slug}`"><AppIcon name="external-link" :size="15" />{{ data.event.published_at ? "View event" : "Preview" }}</RouterLink>
+          <button class="button button--ghost" type="button" :aria-expanded="showDetails" @click="showDetails = !showDetails"><AppIcon name="more-vertical" :size="16" />More</button>
+        </template>
       </AdminPageHeader>
 
-      <section class="control-strip panel">
-        <div><span>Event</span><strong>#{{ data.event.id }} · {{ data.event.slug }}</strong></div>
-        <div><span>Starts</span><strong>{{ formatDate(data.event.scheduled_start_at) }}</strong></div>
-        <div><span>Revision</span><strong>{{ data.event.revision }}</strong></div>
-        <div><span>Visibility</span><strong>{{ data.event.published_at ? "Published" : "Private" }}</strong></div>
+      <section v-if="showDetails" class="event-details panel">
+        <dl><div><dt>Event</dt><dd>#{{ data.event.id }} · {{ data.event.slug }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(data.event.scheduled_start_at) }}</dd></div><div><dt>Revision</dt><dd>{{ data.event.revision }}</dd></div><div><dt>Visibility</dt><dd>{{ data.event.published_at ? "Published" : "Private" }}</dd></div></dl>
+        <div class="event-details__actions"><RouterLink class="button button--ghost button--small" to="/admin/events"><AppIcon name="arrow-left" :size="14" />All events</RouterLink><button class="button button--danger button--small" type="button" :disabled="deleting" @click="remove"><AppIcon name="trash" :size="14" />{{ deleting ? "Deleting…" : "Delete event" }}</button></div>
       </section>
 
       <component :is="customComponent" v-if="customComponent && data.handler.current" :detail="data" @changed="load" />
@@ -95,7 +99,7 @@ async function remove(): Promise<void> {
         </dl>
       </section>
 
-      <div class="resource-grid">
+      <div v-if="!customComponent || !data.handler.current" class="resource-grid">
         <section class="panel resource-card"><header><span>Structure</span><h2>Event resources</h2></header><dl><div v-for="(value, key) in data.counts" :key="key"><dt>{{ humanize(key) }}</dt><dd>{{ value }}</dd></div></dl></section>
         <section class="panel resource-card"><header><span>Universal state</span><h2>Lifecycle</h2></header><dl><div><dt>Status</dt><dd><StatusBadge :status="data.event.status" /></dd></div><div><dt>Published</dt><dd>{{ formatDate(data.event.published_at) }}</dd></div><div><dt>Started</dt><dd>{{ formatDate(data.event.started_at) }}</dd></div><div><dt>Finished</dt><dd>{{ formatDate(data.event.finished_at) }}</dd></div></dl></section>
         <section class="panel resource-card resource-card--wide"><header><span>Shared data</span><h2>Provisioned content</h2></header><div class="content-overview"><div><strong>{{ data.stages.length }}</strong><span>Stages</span></div><div><strong>{{ data.sessions.length }}</strong><span>Sessions</span></div><div><strong>{{ data.cast.length }}</strong><span>Cast members</span></div><div><strong>{{ data.contests.length }}</strong><span>Contests</span></div><div><strong>{{ data.updates.length }}</strong><span>Updates</span></div><div><strong>{{ data.awards.length }}</strong><span>Awards</span></div></div></section>
@@ -105,9 +109,9 @@ async function remove(): Promise<void> {
 </template>
 
 <style scoped>
-.control-room { display: grid; gap: 1rem; }.loading-panel { min-height: 16rem; padding: 2rem; color: var(--color-text-muted, #64748b); }.control-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; padding: 0; }.control-strip > div { display: grid; gap: .2rem; padding: .75rem .9rem; border-right: 1px solid var(--color-border, #d9e0ea); }.control-strip > div:last-child { border-right: 0; }.control-strip span { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }.control-strip strong { overflow: hidden; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+.control-room { display: grid; gap: 1rem; }.loading-panel { min-height: 16rem; padding: 2rem; color: var(--color-text-muted, #64748b); }.event-details { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem .9rem; }.event-details dl { display: flex; flex-wrap: wrap; gap: .8rem 1.5rem; margin: 0; }.event-details dl div { display: grid; gap: .15rem; }.event-details dt { color: var(--color-text-muted); font-size: .6rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }.event-details dd { margin: 0; font-size: .72rem; font-weight: 650; }.event-details__actions { display: flex; flex: 0 0 auto; gap: .4rem; }
 .module-gate { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(15rem, .65fr); align-items: center; gap: 1.25rem; padding: 1.2rem; }.module-gate__signal { display: grid; width: 3.2rem; height: 3.2rem; place-items: center; border-radius: 1rem; background: color-mix(in srgb, var(--color-success, #15803d) 10%, transparent); color: var(--color-success, #15803d); }.module-gate__signal--warning { background: color-mix(in srgb, var(--color-warning, #9a6700) 10%, transparent); color: var(--color-warning, #9a6700); }.module-gate__signal span { width: .75rem; height: .75rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 .45rem color-mix(in srgb, currentColor 15%, transparent); }.module-gate__copy > span, .resource-card header > span { color: var(--color-accent, #315fcc); font-size: .6rem; font-weight: 780; letter-spacing: .1em; text-transform: uppercase; }.module-gate h2 { margin: .2rem 0 0; font-size: 1.1rem; }.module-gate p { max-width: 65ch; margin: .45rem 0 0; color: var(--color-text-muted, #64748b); font-size: .76rem; line-height: 1.55; }.module-gate code { font-size: .7rem; }.module-gate > dl { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; margin: 0; padding: .8rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .55rem; background: var(--color-surface-subtle, #f1f5f9); }.module-gate dt, .resource-card dt { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 680; text-transform: uppercase; }.module-gate dd, .resource-card dd { margin: .18rem 0 0; font-size: .71rem; font-weight: 680; }
 .resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }.resource-card { overflow: hidden; padding: 0; }.resource-card header { padding: .8rem .9rem; border-bottom: 1px solid var(--color-border, #d9e0ea); }.resource-card h2 { margin: .18rem 0 0; font-size: .9rem; }.resource-card dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; margin: 0; background: var(--color-border, #d9e0ea); }.resource-card dl div { padding: .75rem .9rem; background: var(--color-surface, #fff); }.resource-card--wide { grid-column: 1 / -1; }.content-overview { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; background: var(--color-border, #d9e0ea); }.content-overview div { display: grid; gap: .18rem; padding: 1rem; background: var(--color-surface, #fff); }.content-overview strong { font-size: 1.3rem; }.content-overview span { color: var(--color-text-muted, #64748b); font-size: .64rem; }
 @media (max-width: 60rem) { .module-gate { grid-template-columns: auto 1fr; }.module-gate > dl { grid-column: 1 / -1; }.content-overview { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 42rem) { .control-strip { grid-template-columns: repeat(2, 1fr); }.control-strip > div:nth-child(2) { border-right: 0; }.control-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--color-border, #d9e0ea); }.module-gate { grid-template-columns: 1fr; }.module-gate > dl { grid-column: auto; }.resource-grid { grid-template-columns: 1fr; }.resource-card--wide { grid-column: auto; } }
+@media (max-width: 42rem) { .event-details { align-items: stretch; flex-direction: column; }.event-details__actions { justify-content: space-between; }.module-gate { grid-template-columns: 1fr; }.module-gate > dl { grid-column: auto; }.resource-grid { grid-template-columns: 1fr; }.resource-card--wide { grid-column: auto; } }
 </style>

@@ -113,6 +113,12 @@ class GameState():
 
     def record_timeout(self, loser: chess.Color):
         winner = not loser
+        if self._board.has_insufficient_material(winner):
+            self._winner = None
+            self._termination = GameTermination.INSUFFICIENT_MATERIAL
+            self._result = "1/2-1/2"
+            self._details = self._termination.value
+            return
         self._set_decisive_result(winner, GameTermination.TIMEOUT)
 
     def record_illegal_move(self, loser: chess.Color, move: chess.Move):
