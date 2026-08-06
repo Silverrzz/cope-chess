@@ -25,6 +25,8 @@ RUN rm -rf \
         /usr/local/lib/python3.13/site-packages/numba/tests \
         /usr/local/lib/python3.13/site-packages/llvmlite/tests \
     && strip --strip-unneeded /usr/local/lib/python3.13/site-packages/llvmlite/binding/libllvmlite.so \
+    && grep -Fq 'tempfile.TemporaryFile(dir=path).close()' /usr/local/lib/python3.13/site-packages/numba/core/caching.py \
+    && sed -i '/tempfile.TemporaryFile(dir=path).close()/d' /usr/local/lib/python3.13/site-packages/numba/core/caching.py \
     && sed -i "/import sys/a os.environ.setdefault('NUMBA_CPU_NAME', 'haswell')" numba_engine_PRE_NNUE_clean.py \
     && sed -i "/import sys/a os.environ.setdefault('NUMBA_CACHE_LOCATOR_CLASSES', 'InTreeCacheLocatorFsAgnostic')" numba_engine_PRE_NNUE_clean.py \
     && pyinstaller \
