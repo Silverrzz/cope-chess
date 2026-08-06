@@ -32,6 +32,7 @@ RUN rm -rf \
         --noconfirm \
         --clean \
         --name numbengine \
+        --contents-directory . \
         --console \
         --collect-all numba \
         --collect-all llvmlite \
@@ -39,21 +40,13 @@ RUN rm -rf \
     && cp -a numba_engine_PRE_NNUE_clean.py dist/numbengine/
 
 RUN cd dist/numbengine \
-    && ./numbengine --warmup
+    && ./numbengine --warmup \
+    && find __pycache__ -type f \( -name '*.nbi' -o -name '*.nbc' \) -print -quit | grep -q .
 
-RUN printf '%s\n' \
-        '#!/bin/sh' \
-        'engine_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)' \
-        'runtime_dir="${TMPDIR:-/tmp}/numbengine-${engine_dir##*/}"' \
-        'mkdir -p "$runtime_dir"' \
-        'cp -R "$engine_dir/__pycache__" "$runtime_dir/"' \
-        'cp "$engine_dir/numba_engine_PRE_NNUE_clean.py" "$runtime_dir/"' \
-        'cd "$runtime_dir" || exit 1' \
-        'exec "$engine_dir/numbengine" "$@"' \
-        > dist/numbengine/engine \
+RUN mv dist/numbengine/numbengine dist/numbengine/engine \
     && find dist/numbengine -type d -exec chmod 755 {} + \
     && find dist/numbengine -type f -exec chmod 644 {} + \
-    && chmod 755 dist/numbengine/engine dist/numbengine/numbengine \
+    && chmod 755 dist/numbengine/engine \
     && mkdir /opt/cope \
     && cp -aL dist/numbengine/. /opt/cope/
 
