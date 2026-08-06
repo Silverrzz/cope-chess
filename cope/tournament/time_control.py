@@ -108,6 +108,10 @@ class TimeManager:
         return self._nodes
 
     def start_clock(self):
+        if self._time_control.get_category() is TimeControlCategory.INCREMENT:
+            self._remaining_time = round(
+                self._remaining_time + self._time_control.get_increment()
+            )
         self._chess_clock.start_clock()
 
     def probe_clock(self, elapsed_time_ms: float | None = None):
@@ -153,7 +157,7 @@ class TimeManager:
 
             self._raise_if_timed_out(self._remaining_time)
 
-            self._remaining_time = round(self._remaining_time + self._time_control.get_increment())
+            self._remaining_time = round(self._remaining_time)
             
         elif category is TimeControlCategory.MOVETIME:
             remaining_move_time = self._remaining_move_time - elapsed_time

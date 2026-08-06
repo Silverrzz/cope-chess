@@ -51,8 +51,8 @@ class GameRunner:
         move = None
         worker_clock_synced = False
 
-        engine.start_search(board, self._build_go_command(clock))
         clock.start_clock()
+        engine.start_search(board, self._build_go_command(clock))
         if self._on_clock_sync is not None:
             self._on_clock_sync(side_to_move, True, _clock_remaining_ms(clock))
 
