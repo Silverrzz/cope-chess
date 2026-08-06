@@ -21,7 +21,7 @@ import type { EventDetailResponse } from "@/types/events";
 
 import type { EngineRelayPayload, RelayRosterMember, RelayTeam } from "./types";
 
-const props = defineProps<{ detail: EventDetailResponse }>();
+const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: "event" | "arena" }>(), { clockOffsetMs: 0, view: "event" });
 
 const payload = computed(() => props.detail.custom as EngineRelayPayload);
 const fixtureId = ref<number | null>(null);
@@ -33,12 +33,22 @@ const selectedPly = ref(0);
 const currentPositionFen = ref("startpos");
 const activityTab = ref<"moves" | "chat">("moves");
 const streamState = ref<"connecting" | "live" | "reconnecting" | "closed">("closed");
-const nowMs = ref(Date.now());
+const nowMs = ref(Date.now() + props.clockOffsetMs);
+const countdownFinished = ref(false);
+const countdownBeat = ref(-1);
+const soundState = ref<"armed" | "loading" | "playing" | "blocked" | "unavailable" | "finished">("loading");
+const cheerBursts = ref<Array<{ id: string; color: string; side: "left" | "right"; x: number; y: number; pieces: number[] }>>([]);
 
 let controller: AbortController | null = null;
 let stream: EventSource | null = null;
 let refreshTimer: number | undefined;
 let countdownTimer: number | undefined;
+let countdownAudio: HTMLAudioElement | null = null;
+let audioPlayPending = false;
+let soundPrimed = false;
+
+const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
+const countdownAudioLengthMs = 60_000;
 
 const fixture = computed(() => payload.value.fixtures.find((item) => item.id === fixtureId.value) ?? payload.value.fixtures[0] ?? null);
 const selectedRelayGame = computed(() => fixture.value?.games.find((game) => String(game.id) === gameId.value) ?? null);
@@ -59,16 +69,17 @@ const gameLabel = computed(() => {
   if (viewerGame.value.result) return resultLabel(viewerGame.value.result);
   return statusLabel(viewerGame.value.status);
 });
-const engineCount = computed(() => payload.value.teams.reduce((total, team) => total + team.roster.length, 0));
 const isLive = computed(() => props.detail.event.status === "live" || gameStatus.value === "live" || fixture.value?.tournament?.status === "running");
 const targetTime = computed(() => {
   const value = fixture.value?.tournament?.scheduled_start_at ?? props.detail.event.scheduled_start_at;
   const parsed = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : null;
 });
+const remainingMs = computed(() => Math.max(0, (targetTime.value ?? nowMs.value) - nowMs.value));
+const countdownVisible = computed(() => targetTime.value !== null && remainingMs.value > 0 && !countdownFinished.value);
+const finalMinuteActive = computed(() => countdownVisible.value && remainingMs.value <= countdownAudioLengthMs);
 const countdown = computed(() => {
-  const remaining = Math.max(0, (targetTime.value ?? nowMs.value) - nowMs.value);
-  const totalSeconds = Math.floor(remaining / 1000);
+  const totalSeconds = Math.ceil(remainingMs.value / 1000);
   return [
     { label: "Days", value: Math.floor(totalSeconds / 86400) },
     { label: "Hours", value: Math.floor((totalSeconds % 86400) / 3600) },
@@ -82,46 +93,54 @@ const scheduleLabel = computed(() => {
   if (!targetTime.value) return "Start time to be announced";
   return `Counting down to ${new Intl.DateTimeFormat(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" }).format(new Date(targetTime.value))} (your local time)`;
 });
-const scheduleChip = computed(() => {
-  if (isLive.value) return "Live now";
-  if (!targetTime.value) return "Schedule TBA";
-  return new Intl.DateTimeFormat(undefined, { weekday: "long", hour: "numeric", minute: "2-digit" }).format(new Date(targetTime.value));
-});
-const heroDeck = computed(() => props.detail.event.subtitle || props.detail.event.summary || `A ${engineCount.value}-instance engine-relay event. ${engineCount.value} engines. One relay. Pure competition.`);
-const spectatorCount = computed(() => gameData.value?.spectator_count ?? 0);
+const spectatorCount = computed(() => props.detail.spectator_count ?? gameData.value?.spectator_count ?? 0);
 const systemStatus = computed(() => {
-  if (streamState.value === "live") return "Relay feed connected";
-  if (streamState.value === "reconnecting") return "Reconnecting relay feed";
-  if (isLive.value) return "Synchronising live relay";
+  if (props.detail.event.status === "completed") return "Relay concluded";
+  if (isLive.value) return "Relay live";
   return payload.value.fixtures.length ? "All systems ready" : "Relay setup in progress";
 });
-const showcaseNodes = computed(() => payload.value.teams.flatMap((team) => team.roster.map((member) => {
-  const isWhiteCurrent = whiteTeam.value?.id === team.id && String(whiteMember.value?.engine_id ?? "") === String(member.engine_id);
-  const isBlackCurrent = blackTeam.value?.id === team.id && String(blackMember.value?.engine_id ?? "") === String(member.engine_id);
-  const thinking = isWhiteCurrent && activeSide.value === "white" || isBlackCurrent && activeSide.value === "black";
+const showcaseTeams = computed(() => payload.value.teams.map((team) => {
+  const side = whiteTeam.value?.id === team.id ? "white" : blackTeam.value?.id === team.id ? "black" : null;
   return {
-    id: `${team.id}-${member.id}`,
-    name: member.label || member.name || member.display_name,
-    version: member.version,
-    team: team.short_name || team.name,
+    id: team.id,
+    name: team.name,
+    engineCount: team.roster.length,
     color: team.primary_color,
     secondary: team.secondary_color,
-    thinking,
-    current: isWhiteCurrent || isBlackCurrent,
+    thinking: side !== null && activeSide.value === side,
+    current: side !== null,
   };
-})).slice(0, 4));
+}).slice(0, 4));
 
 onMounted(() => {
   selectInitial();
-  countdownTimer = window.setInterval(() => { nowMs.value = Date.now(); }, 1000);
+  window.addEventListener("cope:event-cheer", handleCheerEvent as EventListener);
+  if (props.view === "arena") return;
+  restoreCountdownCompletion();
+  prepareCountdownAudio();
+  syncCountdown();
+  countdownTimer = window.setInterval(syncCountdown, 100);
+  document.addEventListener("visibilitychange", handleCountdownResume);
+  window.addEventListener("focus", handleCountdownResume);
+  window.addEventListener("pageshow", handleCountdownResume);
+  window.addEventListener("pointerdown", handleUserActivation, { passive: true });
+  window.addEventListener("keydown", handleUserActivation);
 });
 onBeforeUnmount(() => {
   closeStream();
   if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
+  document.removeEventListener("visibilitychange", handleCountdownResume);
+  window.removeEventListener("focus", handleCountdownResume);
+  window.removeEventListener("pageshow", handleCountdownResume);
+  window.removeEventListener("pointerdown", handleUserActivation);
+  window.removeEventListener("keydown", handleUserActivation);
+  window.removeEventListener("cope:event-cheer", handleCheerEvent as EventListener);
+  releaseCountdownAudio();
 });
 
 watch(() => payload.value.fixtures, () => selectInitial(), { deep: true });
 watch([fixtureId, gameId], () => { void loadGame(); });
+watch(targetTime, () => syncCountdown());
 
 function selectInitial(): void {
   const fixtures = payload.value.fixtures;
@@ -163,6 +182,7 @@ function selectGame(value: string): void {
 }
 
 async function loadGame(silent = false): Promise<void> {
+  if (props.view !== "arena") return;
   closeStream();
   controller?.abort();
   if (!fixture.value || !gameId.value || fixture.value.tournament?.status === "draft") {
@@ -192,7 +212,7 @@ async function loadGame(silent = false): Promise<void> {
 
 function connectStream(): void {
   if (!fixture.value || !gameId.value || typeof EventSource === "undefined") return;
-  stream = new EventSource(`/tournaments/${fixture.value.tournament_id}/events?game_id=${encodeURIComponent(gameId.value)}`);
+  stream = new EventSource(`/tournaments/${fixture.value.tournament_id}/events?game_id=${encodeURIComponent(gameId.value)}&spectator=0`);
   streamState.value = "connecting";
   stream.onopen = () => { streamState.value = "live"; };
   stream.onerror = () => { streamState.value = "reconnecting"; };
@@ -270,6 +290,38 @@ function handleSpectators(event: Event): void {
   gameData.value.spectator_count = data.spectator_count;
 }
 
+async function cheer(team: RelayTeam | null): Promise<void> {
+  if (!team) return;
+  try {
+    await api.post(`/api/events/${encodeURIComponent(props.detail.event.slug)}/engine-relay/cheers`, { body: { team_id: team.id } });
+  } catch {
+    launchCheer(team.id);
+  }
+}
+
+function handleCheerEvent(event: Event): void {
+  const teamId = Number((event as CustomEvent<{ team_id?: number }>).detail?.team_id);
+  if (Number.isFinite(teamId)) launchCheer(teamId);
+}
+
+function launchCheer(teamId: number): void {
+  const team = payload.value.teams.find((item) => item.id === teamId);
+  if (!team) return;
+  const side = team.id === blackTeam.value?.id ? "right" : "left";
+  const burst: { id: string; color: string; side: "left" | "right"; x: number; y: number; pieces: number[] } = {
+    id: `${Date.now()}-${Math.random()}`,
+    color: team.primary_color,
+    side,
+    x: side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13,
+    y: 18 + Math.random() * 65,
+    pieces: Array.from({ length: 7 }, (_, index) => index),
+  };
+  cheerBursts.value.push(burst);
+  window.setTimeout(() => {
+    cheerBursts.value = cheerBursts.value.filter((item) => item.id !== burst.id);
+  }, 900);
+}
+
 function teamForSide(side: "white" | "black"): RelayTeam | null {
   const game = selectedRelayGame.value;
   if (!game) return null;
@@ -322,14 +374,177 @@ function nodeStyle(node: { color: string; secondary: string }): Record<string, s
   return { "--node-color": node.color, "--node-secondary": node.secondary };
 }
 
-function scrollToSection(id: string): void {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+function countdownCompletionKey(): string {
+  return `cope.event.${props.detail.event.id}.countdown-finished`;
 }
+
+function authoritativeNow(): number {
+  return Date.now() + props.clockOffsetMs;
+}
+
+function restoreCountdownCompletion(): void {
+  try {
+    countdownFinished.value = window.localStorage.getItem(countdownCompletionKey()) === "1";
+  } catch {
+    countdownFinished.value = false;
+  }
+  if (!countdownFinished.value && targetTime.value !== null && targetTime.value <= authoritativeNow()) finishCountdown();
+}
+
+function prepareCountdownAudio(force = false): void {
+  if (countdownFinished.value || typeof Audio === "undefined") return;
+  if (countdownAudio && !force) return;
+  if (countdownAudio) releaseCountdownAudio();
+  const audio = new Audio();
+  countdownAudio = audio;
+  audio.preload = "auto";
+  audio.src = countdownAudioUrl;
+  soundState.value = "loading";
+  audio.addEventListener("canplay", () => {
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    if (!finalMinuteActive.value) soundState.value = "armed";
+    syncCountdown(true);
+  });
+  audio.addEventListener("playing", () => {
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    const expected = expectedCountdownAudioTime();
+    if (expected !== null) seekCountdownAudio(audio, expected, true);
+    soundState.value = "playing";
+  });
+  audio.addEventListener("error", () => {
+    if (countdownAudio === audio && !countdownFinished.value) soundState.value = "unavailable";
+  });
+  audio.load();
+}
+
+function releaseCountdownAudio(): void {
+  if (!countdownAudio) return;
+  countdownAudio.pause();
+  countdownAudio.removeAttribute("src");
+  countdownAudio.load();
+  countdownAudio = null;
+  audioPlayPending = false;
+}
+
+function expectedCountdownAudioTime(): number | null {
+  if (!finalMinuteActive.value || targetTime.value === null) return null;
+  return Math.max(0, Math.min(60, (countdownAudioLengthMs - (targetTime.value - authoritativeNow())) / 1000));
+}
+
+function seekCountdownAudio(audio: HTMLAudioElement, expected: number, force = false): void {
+  const maximum = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - .015) : 60;
+  const position = Math.min(expected, maximum);
+  if (!force && Math.abs(audio.currentTime - position) <= .12) return;
+  try {
+    audio.currentTime = position;
+  } catch {
+    soundState.value = "loading";
+  }
+}
+
+async function playCountdownAudio(expected: number, force = false): Promise<void> {
+  prepareCountdownAudio(soundState.value === "unavailable");
+  const audio = countdownAudio;
+  if (!audio || audioPlayPending || countdownFinished.value) return;
+  if (!force && soundState.value === "blocked") return;
+  seekCountdownAudio(audio, expected, true);
+  audioPlayPending = true;
+  try {
+    await audio.play();
+    const corrected = expectedCountdownAudioTime();
+    if (corrected !== null) seekCountdownAudio(audio, corrected, true);
+    soundState.value = "playing";
+  } catch (cause) {
+    const name = (cause as { name?: string })?.name;
+    soundState.value = name === "NotAllowedError" ? "blocked" : "unavailable";
+  } finally {
+    audioPlayPending = false;
+  }
+}
+
+function syncCountdown(forceAudio = false): void {
+  nowMs.value = authoritativeNow();
+  if (countdownFinished.value || targetTime.value === null) return;
+  if (targetTime.value <= nowMs.value) {
+    finishCountdown();
+    return;
+  }
+  if (!finalMinuteActive.value) {
+    countdownBeat.value = -1;
+    if (countdownAudio && !countdownAudio.paused) countdownAudio.pause();
+    if (soundState.value === "playing") soundState.value = "armed";
+    return;
+  }
+  const expected = expectedCountdownAudioTime();
+  if (expected === null) return;
+  const beat = Math.floor(expected + .025);
+  if (beat !== countdownBeat.value) countdownBeat.value = beat;
+  if (countdownAudio && !countdownAudio.paused) {
+    seekCountdownAudio(countdownAudio, expected);
+    soundState.value = "playing";
+    return;
+  }
+  void playCountdownAudio(expected, forceAudio);
+}
+
+function finishCountdown(): void {
+  if (countdownFinished.value) return;
+  countdownFinished.value = true;
+  countdownBeat.value = -1;
+  soundState.value = "finished";
+  try {
+    window.localStorage.setItem(countdownCompletionKey(), "1");
+  } catch {
+    countdownFinished.value = true;
+  }
+  releaseCountdownAudio();
+}
+
+async function enableCountdownSound(): Promise<void> {
+  if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
+  prepareCountdownAudio(soundState.value === "unavailable");
+  const expected = expectedCountdownAudioTime();
+  if (expected !== null) {
+    await playCountdownAudio(expected, true);
+    return;
+  }
+  const audio = countdownAudio;
+  if (!audio || soundPrimed) return;
+  audio.muted = true;
+  try {
+    await audio.play();
+    audio.pause();
+    audio.currentTime = 0;
+    soundPrimed = true;
+    soundState.value = "armed";
+  } catch {
+    soundState.value = "blocked";
+  } finally {
+    audio.muted = false;
+  }
+}
+
+function handleCountdownResume(): void {
+  if (document.visibilityState === "hidden") return;
+  syncCountdown();
+}
+
+function handleUserActivation(): void {
+  if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
+  if (!soundPrimed || finalMinuteActive.value || ["blocked", "unavailable"].includes(soundState.value)) void enableCountdownSound();
+}
+
 </script>
 
 <template>
-  <div class="engine-clash-page">
-    <section class="clash-hero" aria-labelledby="clash-title">
+  <div class="engine-clash-page" :class="{ 'engine-clash-page--final-minute': finalMinuteActive }">
+    <div class="cheer-layer" aria-hidden="true">
+      <span v-for="burst in cheerBursts" :key="burst.id" class="cheer-burst" :class="`cheer-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%`, '--cheer-color': burst.color }">
+        <i v-for="piece in burst.pieces" :key="piece" :style="{ '--piece': piece }"></i>
+      </span>
+    </div>
+    <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
+    <section v-if="props.view === 'event'" class="clash-hero" aria-labelledby="clash-title">
       <div class="clash-hero__wash" aria-hidden="true"></div>
       <span class="chess-piece chess-piece--king" aria-hidden="true">♚</span>
       <span class="chess-piece chess-piece--knight" aria-hidden="true">♞</span>
@@ -340,58 +555,52 @@ function scrollToSection(id: string): void {
         <header class="clash-heading">
           <span class="clash-kicker"><AppIcon name="trophy" :size="15" /> Featured showcase event</span>
           <h1 id="clash-title">{{ detail.event.title }}</h1>
-          <p>{{ heroDeck }}</p>
-          <div class="clash-facts" aria-label="Event highlights">
-            <span><AppIcon name="engine" :size="17" /> {{ engineCount }} Engines</span>
-            <span><AppIcon name="refresh" :size="17" /> Relay format</span>
-            <span><AppIcon name="clock" :size="17" /> {{ scheduleChip }}</span>
-            <span><AppIcon name="radio" :size="17" /> Live showcase</span>
-          </div>
         </header>
 
-        <div class="clash-countdown" :class="{ 'clash-countdown--live': isLive }" aria-live="polite">
+        <div v-if="countdownVisible" class="clash-countdown" aria-live="polite">
           <div v-for="part in countdown" :key="part.label">
             <strong>{{ String(part.value).padStart(2, "0") }}</strong>
             <span>{{ part.label }}</span>
           </div>
         </div>
-        <p class="clash-schedule"><AppIcon :name="isLive ? 'radio' : 'clock'" :size="18" /> {{ scheduleLabel }}</p>
+        <p v-if="countdownVisible" class="clash-schedule"><AppIcon name="clock" :size="18" /> {{ scheduleLabel }}</p>
 
-        <div class="clash-orbit" :class="`clash-orbit--${Math.min(showcaseNodes.length, 4)}`">
+        <div class="clash-orbit" :class="`clash-orbit--${Math.min(showcaseTeams.length, 4)}`">
           <div class="clash-orbit__rings" aria-hidden="true"><span></span><span></span><span></span></div>
-          <article v-for="(node, index) in showcaseNodes" :key="node.id" class="clash-node" :class="[`clash-node--${index + 1}`, { 'clash-node--thinking': node.thinking }]" :style="nodeStyle(node)">
-            <div class="clash-node__beacon"><span><AppIcon name="engine" :size="31" /></span></div>
+          <article v-for="(team, index) in showcaseTeams" :key="team.id" class="clash-node" :class="[`clash-node--${index + 1}`, { 'clash-node--thinking': team.thinking }]" :style="nodeStyle(team)">
+            <div class="clash-node__beacon"><span><AppIcon name="trophy" :size="31" /></span></div>
             <div class="clash-node__card">
-              <strong>{{ node.name }}</strong>
-              <span>{{ node.team }} · Instance {{ index + 1 }}</span>
-              <small><i></i>{{ node.thinking ? "Thinking now" : node.current ? "On relay" : isLive ? "Ready" : "Relay node" }}</small>
+              <strong>{{ team.name }}</strong>
+              <span>{{ team.engineCount }}-engine relay team</span>
+              <small><i></i>{{ team.thinking ? "Playing now" : team.current ? "On relay" : isLive ? "Ready" : "Relay team" }}</small>
             </div>
           </article>
-          <p v-if="!showcaseNodes.length" class="clash-orbit__empty">Engine instances will join the circuit when the teams are locked.</p>
+          <p v-if="!showcaseTeams.length" class="clash-orbit__empty">Teams will join the circuit when the lineup is locked.</p>
         </div>
 
         <div class="clash-actions">
-          <button type="button" class="clash-primary-action" @click="scrollToSection('relay-arena-section')"><AppIcon name="trophy" :size="19" /> Enter arena <AppIcon name="arrow-right" :size="18" /></button>
-          <button type="button" class="clash-detail-action" @click="scrollToSection('event-details')">View event details <AppIcon name="arrow-right" :size="16" /></button>
+          <RouterLink :to="{ name: 'event-arena', params: { slug: detail.event.slug } }" class="clash-primary-action"><AppIcon name="trophy" :size="19" /> Enter arena <AppIcon name="arrow-right" :size="18" /></RouterLink>
+          <button v-if="whiteTeam" type="button" class="cheer-button" :style="teamStyle(whiteTeam)" @click="cheer(whiteTeam)">Cheer {{ whiteTeam.short_name || whiteTeam.name }}</button>
+          <button v-if="blackTeam" type="button" class="cheer-button" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)">Cheer {{ blackTeam.short_name || blackTeam.name }}</button>
         </div>
       </div>
 
       <aside class="clash-status-card clash-status-card--systems">
         <span class="clash-status-card__icon"><AppIcon name="activity" :size="25" /></span>
         <div><small>Live status</small><strong>{{ systemStatus }}</strong></div>
-        <i :class="{ active: streamState === 'live' || !isLive }"></i>
+        <i :class="{ active: payload.fixtures.length > 0 && !['cancelled', 'postponed'].includes(detail.event.status) }"></i>
       </aside>
       <aside class="clash-status-card clash-status-card--audience">
         <span class="clash-status-card__icon"><AppIcon name="user" :size="25" /></span>
-        <div><small>Live audience</small><strong>{{ spectatorCount.toLocaleString() }}</strong><span>{{ spectatorCount === 1 ? "viewer" : "viewers" }}</span></div>
+        <div><small>Current spectators</small><strong>{{ spectatorCount.toLocaleString() }}</strong><span>{{ spectatorCount === 1 ? "spectator" : "spectators" }}</span></div>
       </aside>
     </section>
 
-    <section id="relay-arena-section" class="relay-showcase">
+    <section v-if="props.view === 'arena'" class="relay-showcase">
       <div class="relay-showcase__inner">
         <header class="relay-showcase__heading">
           <div><span><i></i> Live relay control</span><h2>The arena</h2><p>Every handoff, move and engine thought streamed from the relay in real time.</p></div>
-          <RouterLink to="/events" class="relay-showcase__back"><AppIcon name="arrow-left" :size="16" /> All events</RouterLink>
+          <RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="relay-showcase__back"><AppIcon name="arrow-left" :size="16" /> Event page</RouterLink>
         </header>
 
   <section class="relay-broadcast">
@@ -436,7 +645,7 @@ function scrollToSection(id: string): void {
 
         <div class="relay-engines">
           <section v-for="side in (['black', 'white'] as const)" :key="side" class="relay-team" :style="teamStyle(side === 'white' ? whiteTeam : blackTeam)">
-            <header><div><span>{{ side }} team</span><h3>{{ (side === 'white' ? whiteTeam : blackTeam)?.name }}</h3></div><strong>{{ (side === 'white' ? whiteTeam : blackTeam)?.motto }}</strong></header>
+            <header><div><span>{{ side }} team</span><h3>{{ (side === 'white' ? whiteTeam : blackTeam)?.name }}</h3></div><strong>{{ (side === 'white' ? whiteTeam : blackTeam)?.motto }}</strong><button type="button" class="cheer-button cheer-button--arena" @click="cheer(side === 'white' ? whiteTeam : blackTeam)">Cheer</button></header>
             <div class="relay-roster">
               <article v-for="(member, index) in (side === 'white' ? whiteTeam : blackTeam)?.roster ?? []" :key="member.id" :class="{ current: memberIsCurrent(side, member), thinking: memberIsCurrent(side, member) && activeSide === side }">
                 <span>{{ index + 1 }}</span><div><strong>{{ member.label || member.name }}</strong><small>{{ member.version }}</small></div><dl><div><dt>Run</dt><dd>{{ member.relay_moves }}</dd></div><div><dt>Nodes</dt><dd>{{ member.nodes.toLocaleString() }}</dd></div></dl>
@@ -451,26 +660,6 @@ function scrollToSection(id: string): void {
       </div>
     </section>
 
-    <section id="event-details" class="clash-details">
-      <div class="clash-details__inner">
-        <header><span>Inside the clash</span><h2>A relay built for spectacle</h2></header>
-        <div class="clash-details__grid">
-          <article><AppIcon name="refresh" :size="24" /><span>Format</span><h3>Engine relay</h3><p>Each team rotates through its configured engines after a fixed run of team moves, turning every handoff into part of the contest.</p></article>
-          <article><AppIcon name="engine" :size="24" /><span>Field</span><h3>{{ engineCount }} engine instances</h3><p>Every engine keeps its own identity, relay length and node-time allowance while contributing to one shared game.</p></article>
-          <article><AppIcon name="trophy" :size="24" /><span>Stakes</span><h3>Showcase, unrated</h3><p>This is a special event outside the rating circuit, designed around drama, personality and team strategy.</p></article>
-        </div>
-        <div v-if="detail.event.description || detail.event.rules" class="clash-details__notes">
-          <div v-if="detail.event.description"><span>The concept</span><p>{{ detail.event.description }}</p></div>
-          <div v-if="detail.event.rules"><span>Rules of the relay</span><p>{{ detail.event.rules }}</p></div>
-        </div>
-        <div v-if="payload.teams.length" class="clash-team-list">
-          <article v-for="team in payload.teams" :key="team.id" :style="teamStyle(team)">
-            <i></i><div><span>Relay team</span><h3>{{ team.name }}</h3><p>{{ team.profile || team.motto || `${team.roster.length} engines ready for the handoff.` }}</p></div>
-            <ul><li v-for="member in team.roster" :key="member.id"><strong>{{ member.label || member.name }}</strong><span>{{ member.relay_moves }} moves · {{ member.nodes.toLocaleString() }} nodes</span></li></ul>
-          </article>
-        </div>
-      </div>
-    </section>
   </div>
 </template>
 
@@ -481,6 +670,38 @@ function scrollToSection(id: string): void {
   margin-block-end: -3rem;
   background: #f5f8fe;
   color: var(--clash-ink);
+}
+
+.cheer-layer { position: fixed; z-index: 46; inset: 0; overflow: hidden; pointer-events: none; }
+.cheer-burst { position: absolute; width: 1px; height: 1px; }
+.cheer-burst i { --angle: calc(var(--piece) * 51deg - 150deg); position: absolute; width: .28rem; height: .5rem; border-radius: .08rem; background: var(--cheer-color); opacity: 0; transform: rotate(var(--angle)) translateY(0); animation: cheer-pop .82s ease-out forwards; animation-delay: calc(var(--piece) * 12ms); }
+.cheer-burst i:nth-child(even) { width: .22rem; height: .22rem; border-radius: 50%; filter: brightness(1.22); }
+.cheer-button { min-height: 2.2rem; padding: 0 .85rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 55%, white); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 13%, white); color: color-mix(in srgb, var(--relay-primary) 82%, #071426); cursor: pointer; font-size: .65rem; font-weight: 800; }
+.cheer-button:hover { background: color-mix(in srgb, var(--relay-primary) 22%, white); }
+.cheer-button:active { transform: scale(.96); }
+.cheer-button--arena { min-height: 1.75rem; padding-inline: .65rem; font-size: .57rem; }
+@keyframes cheer-pop { 0% { opacity: 0; transform: rotate(var(--angle)) translateY(0) scale(.5); } 14% { opacity: .95; } 100% { opacity: 0; transform: rotate(var(--angle)) translateY(-3.4rem) scale(1); } }
+
+@media (prefers-reduced-motion: reduce) { .cheer-burst i { animation-duration: .18s; } }
+
+.countdown-pulse-layer {
+  position: fixed;
+  z-index: 48;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 45%, rgb(104 173 255 / 19%), rgb(41 102 203 / 8%) 52%, transparent 78%);
+  box-shadow: inset 0 0 0 .45rem rgb(71 139 237 / 13%), inset 0 0 9rem rgb(80 151 247 / 18%);
+  animation: countdown-page-pulse .58s cubic-bezier(.12, .72, .28, 1) both;
+}
+
+.engine-clash-page--final-minute .clash-hero {
+  border-color: #a8c8f5;
+  background:
+    radial-gradient(circle at 50% 44%, rgb(255 255 255 / 98%) 0, rgb(238 247 255 / 86%) 24%, transparent 51%),
+    radial-gradient(circle at 20% 76%, rgb(88 160 255 / 26%), transparent 34%),
+    radial-gradient(circle at 82% 74%, rgb(105 173 255 / 24%), transparent 35%),
+    linear-gradient(155deg, #f5f9ff 0%, #e5f0ff 50%, #d5e6fd 100%);
 }
 
 .clash-hero {
@@ -574,51 +795,11 @@ function scrollToSection(id: string): void {
   line-height: .98;
 }
 
-.clash-heading > p {
-  max-width: 54rem;
-  margin: .9rem 0 0;
-  color: #60708b;
-  font-size: clamp(.95rem, 1.45vw, 1.18rem);
-  line-height: 1.5;
-}
-
-.clash-facts {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: .6rem;
-  margin-top: 1.2rem;
-}
-
-.clash-facts span {
-  display: inline-flex;
-  min-height: 2.15rem;
-  align-items: center;
-  gap: .45rem;
-  padding: 0 .95rem;
-  border: 1px solid rgb(255 255 255 / 84%);
-  border-radius: 999px;
-  background: rgb(255 255 255 / 66%);
-  box-shadow: 0 .4rem 1.4rem rgb(62 96 151 / 5%);
-  color: #27344b;
-  font-size: .76rem;
-  font-weight: 710;
-  backdrop-filter: blur(12px);
-}
-
-.clash-facts :deep(.app-icon) { color: #5d7fac; }
-
 .clash-countdown {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   width: min(100%, 50rem);
   margin-top: 1.1rem;
-  overflow: hidden;
-  border: 1px solid rgb(255 255 255 / 94%);
-  border-radius: 1rem;
-  background: linear-gradient(145deg, rgb(255 255 255 / 76%), rgb(239 246 255 / 58%));
-  box-shadow: inset 0 0 0 1px rgb(112 147 196 / 8%), 0 1.25rem 4rem rgb(47 81 132 / 9%);
-  backdrop-filter: blur(22px);
 }
 
 .clash-countdown > div {
@@ -627,16 +808,6 @@ function scrollToSection(id: string): void {
   justify-items: center;
   gap: .35rem;
   padding: clamp(.8rem, 2.6vh, 1.45rem) .75rem 1.2rem;
-}
-
-.clash-countdown > div + div::before {
-  position: absolute;
-  top: 18%;
-  bottom: 18%;
-  left: 0;
-  width: 1px;
-  background: #c9d7ea;
-  content: "";
 }
 
 .clash-countdown strong {
@@ -656,7 +827,6 @@ function scrollToSection(id: string): void {
   text-transform: uppercase;
 }
 
-.clash-countdown--live { box-shadow: inset 0 0 0 1px rgb(54 142 221 / 16%), 0 0 3rem rgb(65 143 230 / 14%); }
 .clash-schedule { display: flex; align-items: center; gap: .45rem; margin: .75rem 0 0; color: #70809a; font-size: .78rem; }
 
 .clash-orbit {
@@ -676,16 +846,33 @@ function scrollToSection(id: string): void {
 .clash-node {
   position: absolute;
   z-index: 2;
+  isolation: isolate;
   display: grid;
   width: 10.5rem;
   justify-items: center;
   color: var(--clash-ink);
 }
 
+.clash-node::before {
+  position: absolute;
+  z-index: -1;
+  top: -7rem;
+  left: 50%;
+  width: clamp(24rem, 34vw, 38rem);
+  height: 22rem;
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--node-color) 36%, transparent), color-mix(in srgb, var(--node-color) 16%, transparent) 35%, transparent 72%);
+  content: "";
+  filter: blur(1.35rem);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
 .clash-node--1 { top: 14%; left: 4%; }
 .clash-node--2 { bottom: 0; left: 30%; }
 .clash-node--3 { right: 30%; bottom: 0; }
 .clash-node--4 { top: 14%; right: 4%; }
+.clash-orbit--2 .clash-node--1 { top: 14%; left: 14%; }
+.clash-orbit--2 .clash-node--2 { top: 14%; right: 14%; bottom: auto; left: auto; }
 
 .clash-node__beacon {
   position: relative;
@@ -720,7 +907,7 @@ function scrollToSection(id: string): void {
   border: 3px solid white;
   border-radius: 50%;
   background: linear-gradient(145deg, color-mix(in srgb, var(--node-color) 78%, white), var(--node-color));
-  box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--node-color) 16%, transparent), 0 0 1.8rem color-mix(in srgb, var(--node-color) 55%, transparent);
+  box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--node-color) 16%, transparent), 0 0 5.5rem 1.5rem color-mix(in srgb, var(--node-color) 52%, transparent);
   color: white;
 }
 
@@ -746,10 +933,9 @@ function scrollToSection(id: string): void {
 .clash-orbit__empty { position: absolute; inset: 45% 0 auto; margin: 0; color: #6c7e99; text-align: center; }
 
 .clash-actions { z-index: 4; display: grid; justify-items: center; gap: .55rem; margin-top: -2.1rem; }
-.clash-actions button { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; font: inherit; font-weight: 730; }
+.clash-actions button, .clash-actions > a { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; font: inherit; font-weight: 730; text-decoration: none; }
 .clash-primary-action { min-height: 3.2rem; gap: .65rem; padding: 0 1.35rem; border-radius: .55rem; background: linear-gradient(135deg, #215bb9, #3a7add); box-shadow: 0 .7rem 1.6rem rgb(29 86 180 / 26%); color: white; transition: transform .18s ease, box-shadow .18s ease; }
 .clash-primary-action:hover { transform: translateY(-2px); box-shadow: 0 1rem 2rem rgb(29 86 180 / 32%); }
-.clash-detail-action { gap: .35rem; padding: .25rem; background: transparent; color: #2362be; font-size: .78rem; }
 
 .clash-status-card {
   position: absolute;
@@ -787,49 +973,53 @@ function scrollToSection(id: string): void {
 .relay-showcase__heading p { margin: .45rem 0 0; color: #65748b; font-size: .86rem; }
 .relay-showcase__back { display: inline-flex; align-items: center; gap: .4rem; color: #49627f; font-size: .73rem; font-weight: 700; text-decoration: none; }
 
-.clash-details { scroll-margin-top: var(--header-height, 4rem); background: #071426; color: #dce7f7; }
-.clash-details__inner { width: min(100%, 90rem); margin: 0 auto; padding: clamp(4rem, 8vw, 7rem) clamp(1rem, 4vw, 3rem); }
-.clash-details > .clash-details__inner > header { text-align: center; }
-.clash-details header > span { color: #70a7ff; font-size: .66rem; font-weight: 820; letter-spacing: .14em; text-transform: uppercase; }
-.clash-details header h2 { margin: .45rem 0 0; color: white; font-size: clamp(2rem, 4.5vw, 3.8rem); letter-spacing: -.055em; }
-.clash-details__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; margin-top: 2.5rem; }
-.clash-details__grid article { padding: 1.5rem; border: 1px solid #253750; border-radius: 1rem; background: linear-gradient(145deg, rgb(24 45 73 / 82%), rgb(12 28 48 / 72%)); }
-.clash-details__grid :deep(.app-icon) { color: #6ea5fb; }
-.clash-details__grid article > span { display: block; margin-top: 1.2rem; color: #7790b2; font-size: .6rem; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
-.clash-details__grid h3 { margin: .3rem 0 0; color: white; font-size: 1.2rem; }
-.clash-details__grid p { margin: .65rem 0 0; color: #9fb0c8; font-size: .78rem; line-height: 1.65; }
-.clash-details__notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
-.clash-details__notes > div { padding: 1.25rem 1.5rem; border-left: 2px solid #4f8ae4; background: rgb(18 39 65 / 65%); }
-.clash-details__notes span { color: #73a8fa; font-size: .62rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
-.clash-details__notes p { margin: .45rem 0 0; color: #adbad0; font-size: .8rem; line-height: 1.7; white-space: pre-line; }
-.clash-team-list { display: grid; gap: .8rem; margin-top: 2rem; }
-.clash-team-list > article { position: relative; display: grid; grid-template-columns: auto minmax(15rem, .75fr) minmax(20rem, 1.25fr); gap: 1.3rem; align-items: center; overflow: hidden; padding: 1.2rem 1.4rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 35%, #253750); border-radius: .9rem; background: linear-gradient(100deg, color-mix(in srgb, var(--relay-primary) 11%, #102038), #0d1c30 55%); }
-.clash-team-list > article > i { width: .55rem; height: 3.4rem; border-radius: 999px; background: var(--relay-primary); box-shadow: 0 0 1.4rem color-mix(in srgb, var(--relay-primary) 55%, transparent); }
-.clash-team-list article > div > span { color: var(--relay-primary); font-size: .57rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
-.clash-team-list h3 { margin: .15rem 0 0; color: white; font-size: 1rem; }
-.clash-team-list p { margin: .3rem 0 0; color: #94a7c2; font-size: .7rem; }
-.clash-team-list ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .45rem; margin: 0; padding: 0; list-style: none; }
-.clash-team-list li { display: grid; padding: .55rem .65rem; border: 1px solid #283c57; border-radius: .55rem; background: rgb(4 15 29 / 30%); }
-.clash-team-list li strong { color: #e5edf8; font-size: .67rem; }
-.clash-team-list li span { margin-top: .15rem; color: #7f92ae; font-size: .56rem; }
 
 .relay-broadcast { --relay-ink: #101827; display: grid; gap: .85rem; margin: 1.25rem 0 2rem; color: var(--relay-ink); }.relay-broadcast__bar { display: flex; align-items: end; justify-content: space-between; gap: 1rem; padding: .8rem .9rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .7rem; background: var(--color-surface, #fff); }.relay-broadcast__bar > div:first-child { display: grid; gap: .16rem; }.relay-broadcast__bar > div:first-child span, .relay-broadcast__selectors label > span { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }.relay-broadcast__bar strong { font-size: .92rem; }.relay-broadcast__selectors { display: flex; align-items: end; gap: .65rem; }.relay-broadcast__selectors label { display: grid; gap: .28rem; }.relay-broadcast__selectors select { min-width: 9rem; height: 2rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .4rem; background: var(--color-surface, #fff); color: var(--color-text, #172033); font-size: .69rem; }.relay-broadcast__state { display: flex; align-items: center; gap: .5rem; min-height: 2rem; padding: 0 .65rem; border-radius: .4rem; background: var(--color-surface-subtle, #f1f5f9); font-size: .65rem; font-weight: 700; }
 .handoff-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--color-border, #d9e0ea); border-radius: .65rem; background: var(--color-border, #d9e0ea); }.handoff-strip > div { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .2rem .8rem; padding: .65rem .8rem .65rem 1rem; background: linear-gradient(90deg, color-mix(in srgb, var(--relay-primary) 10%, white), white 32%); }.handoff-strip > div::before { position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--relay-primary); content: ""; }.handoff-strip span { color: var(--relay-primary); font-size: .56rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }.handoff-strip strong { overflow: hidden; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }.handoff-strip small { grid-column: 2; color: var(--color-text-muted, #64748b); font-size: .58rem; }.handoff-strip i { grid-column: 3; grid-row: 1 / 3; width: .55rem; height: .55rem; border-radius: 50%; background: var(--color-border-strong, #9ca8b8); }.handoff-strip i.live { background: var(--relay-primary); box-shadow: 0 0 0 .3rem color-mix(in srgb, var(--relay-primary) 18%, transparent); animation: relay-pulse 1.5s ease-in-out infinite; }
 .relay-arena { display: grid; grid-template-columns: minmax(15rem, .58fr) minmax(24rem, 1fr) minmax(25rem, 1.12fr); align-items: stretch; gap: .85rem; min-width: 0; }.relay-activity { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 42rem; overflow: hidden; border: 1px solid var(--color-border, #d9e0ea); border-radius: .65rem; background: var(--color-surface, #fff); }.relay-activity nav { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--color-border, #d9e0ea); }.relay-activity nav button { display: flex; align-items: center; justify-content: center; gap: .35rem; min-height: 2.45rem; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--color-text-muted, #64748b); cursor: pointer; font-size: .69rem; font-weight: 720; }.relay-activity nav button.active { border-color: var(--color-accent, #315fcc); color: var(--color-text, #172033); }.relay-activity nav span { font-size: .55rem; }.relay-activity__panel { min-height: 0; border: 0; border-radius: 0; }.relay-board { display: grid; align-content: start; gap: .55rem; min-width: 0; }.relay-board__caption { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem .65rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .45rem; background: var(--color-surface, #fff); }.relay-board__caption span { color: var(--color-text-muted, #64748b); font-size: .6rem; }.relay-board__caption strong { font-size: .7rem; }
 .relay-engines { display: grid; grid-template-rows: repeat(2, minmax(0, 1fr)); gap: .85rem; min-width: 0; }.relay-team { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: .6rem; min-width: 0; padding: .65rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 35%, var(--color-border, #d9e0ea)); border-radius: .7rem; background: linear-gradient(145deg, color-mix(in srgb, var(--relay-primary) 6%, white), white 38%); }.relay-team > header { display: flex; align-items: end; justify-content: space-between; gap: .7rem; padding: 0 .15rem; }.relay-team > header div { display: grid; gap: .08rem; }.relay-team > header span { color: var(--relay-primary); font-size: .53rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }.relay-team > header h3 { margin: 0; font-size: .82rem; }.relay-team > header > strong { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 600; }.relay-roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: .35rem; }.relay-roster article { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .25rem .5rem; min-width: 0; padding: .45rem; border: 1px solid var(--color-border, #d9e0ea); border-radius: .45rem; background: color-mix(in srgb, var(--color-surface, #fff) 94%, var(--relay-primary)); transition: border-color .16s, box-shadow .16s, transform .16s; }.relay-roster article > span { display: grid; grid-row: 1 / 3; width: 1.3rem; height: 1.3rem; place-items: center; border-radius: 50%; background: var(--color-surface-subtle, #f1f5f9); color: var(--color-text-muted, #64748b); font-size: .55rem; font-weight: 800; }.relay-roster article > div { display: grid; min-width: 0; }.relay-roster article strong, .relay-roster article small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.relay-roster article strong { font-size: .61rem; }.relay-roster article small { color: var(--color-text-muted, #64748b); font-size: .52rem; }.relay-roster article dl { grid-column: 2; display: flex; gap: .55rem; margin: .1rem 0 0; }.relay-roster article dl div { display: flex; gap: .2rem; }.relay-roster dt { color: var(--color-text-muted, #64748b); font-size: .49rem; text-transform: uppercase; }.relay-roster dd { margin: 0; font-size: .51rem; font-weight: 700; }.relay-roster article.current { border-color: var(--relay-primary); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-primary) 35%, transparent); }.relay-roster article.thinking { transform: translateY(-1px); box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-primary) 22%, transparent), 0 .35rem .8rem color-mix(in srgb, var(--relay-primary) 13%, transparent); }.relay-roster article.thinking > span { background: var(--relay-primary); color: white; }.relay-team :deep(.engine-panel) { min-height: 13.5rem; grid-template-rows: auto minmax(3rem, .5fr) minmax(5.5rem, 1fr); border-color: color-mix(in srgb, var(--relay-primary) 24%, var(--color-border, #d9e0ea)); border-inline-start-color: var(--relay-primary); }.relay-team :deep(.engine-panel--active) { box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-primary) 20%, transparent); }
 @keyframes relay-pulse { 50% { opacity: .55; transform: scale(.85); } }
-@keyframes node-thinking { 50% { transform: translateY(-3px) scale(1.04); box-shadow: 0 0 0 .3rem color-mix(in srgb, var(--node-color) 14%, transparent), 0 0 2.8rem color-mix(in srgb, var(--node-color) 75%, transparent); } }
+@keyframes node-thinking { 50% { transform: translateY(-3px) scale(1.04); box-shadow: 0 0 0 .3rem color-mix(in srgb, var(--node-color) 14%, transparent), 0 0 7rem 2.5rem color-mix(in srgb, var(--node-color) 68%, transparent); } }
+@keyframes countdown-page-pulse { 0% { opacity: 1; } 42% { opacity: .32; } 100% { opacity: 0; } }
 @media (max-width: 80rem) { .clash-status-card { display: none; }.clash-node--2 { left: 27%; }.clash-node--3 { right: 27%; } }
 @media (max-width: 88rem) { .relay-arena { grid-template-columns: minmax(14rem, .55fr) minmax(22rem, 1fr); }.relay-engines { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; }.relay-activity { min-height: 34rem; } }
-@media (max-width: 60rem) { .clash-hero__content { align-content: start; }.clash-orbit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; height: auto; margin-top: 1.2rem; }.clash-orbit__rings { display: none; }.clash-node { position: relative; inset: auto; width: auto; }.clash-node__card { width: min(100%, 12rem); }.clash-actions { margin-top: 1.5rem; }.relay-showcase__heading { align-items: start; flex-direction: column; }.clash-details__grid { grid-template-columns: 1fr; }.clash-team-list > article { grid-template-columns: auto minmax(0, 1fr); }.clash-team-list ul { grid-column: 2; }.relay-broadcast__bar { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors { flex-wrap: wrap; }.relay-arena { grid-template-columns: 1fr; }.relay-board { grid-row: 1; }.relay-activity { min-height: 26rem; }.relay-engines { grid-template-columns: 1fr; }.handoff-strip { grid-template-columns: 1fr; } }
-@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-heading > p { font-size: .85rem; }.clash-facts { gap: .4rem; }.clash-facts span { min-height: 1.85rem; padding: 0 .65rem; font-size: .65rem; }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.clash-details__notes { grid-template-columns: 1fr; }.clash-team-list > article { grid-template-columns: auto minmax(0, 1fr); }.clash-team-list ul { grid-column: 1 / -1; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
-:global(:root[data-theme="dark"]) .relay-showcase { background: linear-gradient(180deg, #0d141e, #101923); }
-:global(:root[data-theme="dark"]) .clash-hero { background: radial-gradient(circle at 50% 42%, #182843, #0d1624 58%, #09111c); }
-:global(:root[data-theme="dark"]) .clash-heading h1 { color: #f6f9ff; }
-:global(:root[data-theme="dark"]) .clash-heading > p,
-:global(:root[data-theme="dark"]) .clash-schedule { color: #a6b8d1; }
-:global(:root[data-theme="dark"]) .clash-countdown { border-color: rgb(125 166 225 / 24%); background: rgb(14 29 49 / 72%); }
-:global(:root[data-theme="dark"]) .clash-countdown strong { color: #f3f7ff; }
-:global(:root[data-theme="dark"]) .clash-facts span,
-:global(:root[data-theme="dark"]) .clash-node__card { border-color: rgb(127 165 216 / 18%); background: rgb(15 31 52 / 66%); color: #eef4ff; }
+@media (max-width: 60rem) { .clash-hero__content { align-content: start; }.clash-orbit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; height: auto; margin-top: 1.2rem; }.clash-orbit__rings { display: none; }.clash-node { position: relative; inset: auto; width: auto; }.clash-node__card { width: min(100%, 12rem); }.clash-actions { margin-top: 1.5rem; }.relay-showcase__heading { align-items: start; flex-direction: column; }.relay-broadcast__bar { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors { flex-wrap: wrap; }.relay-arena { grid-template-columns: 1fr; }.relay-board { grid-row: 1; }.relay-activity { min-height: 26rem; }.relay-engines { grid-template-columns: 1fr; }.handoff-strip { grid-template-columns: 1fr; } }
+@media (max-width: 60rem) { .clash-orbit--2 .clash-node { inset: auto; } }
+@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
+:global(:root[data-theme="dark"] .engine-clash-page) { --clash-ink: #f4f8ff; background: #08111e; color: #eef4ff; }
+:global(:root[data-theme="dark"] .engine-clash-page--final-minute .clash-hero) { background: radial-gradient(circle at 50% 42%, #20395e, #0d1d32 58%, #07101d); }
+:global(:root[data-theme="dark"] .relay-showcase) { background: linear-gradient(180deg, #0b1420, #0e1927); color: #eef4ff; }
+:global(:root[data-theme="dark"] .relay-showcase__heading p),
+:global(:root[data-theme="dark"] .relay-showcase__back) { color: #9bacbf; }
+:global(:root[data-theme="dark"] .relay-broadcast) { --relay-ink: #eef4ff; }
+:global(:root[data-theme="dark"] .handoff-strip > div) { background: linear-gradient(90deg, color-mix(in srgb, var(--relay-primary) 16%, #111b29), #111821 38%); }
+:global(:root[data-theme="dark"] .relay-team) { background: linear-gradient(145deg, color-mix(in srgb, var(--relay-primary) 10%, #111b29), #111821 42%); }
+:global(:root[data-theme="dark"] .clash-hero) {
+  border-color: #263b56;
+  background:
+    radial-gradient(circle at 50% 43%, rgb(37 65 103 / 78%) 0, rgb(17 35 58 / 58%) 26%, transparent 53%),
+    radial-gradient(circle at 20% 76%, rgb(39 94 165 / 24%), transparent 35%),
+    radial-gradient(circle at 82% 74%, rgb(49 104 176 / 22%), transparent 36%),
+    linear-gradient(155deg, #0b1625 0%, #0a1422 52%, #07101c 100%);
+}
+:global(:root[data-theme="dark"] .clash-hero::before),
+:global(:root[data-theme="dark"] .clash-hero::after) { background: rgb(50 88 139 / 20%); }
+:global(:root[data-theme="dark"] .clash-hero__wash) { opacity: .32; background-image: radial-gradient(circle, rgb(99 151 222 / 28%) 0 1px, transparent 1.4px); }
+:global(:root[data-theme="dark"] .chess-piece) { color: #6c8fbd; opacity: .13; }
+:global(:root[data-theme="dark"] .clash-kicker) { border-color: rgb(105 158 231 / 16%); background: rgb(35 67 108 / 58%); color: #8fbbff; }
+:global(:root[data-theme="dark"] .clash-heading h1),
+:global(:root[data-theme="dark"] .clash-countdown strong) { color: #f6f9ff; }
+:global(:root[data-theme="dark"] .clash-countdown span) { color: #82b1ff; }
+:global(:root[data-theme="dark"] .clash-schedule),
+:global(:root[data-theme="dark"] .clash-orbit__empty) { color: #9bacc2; }
+:global(:root[data-theme="dark"] .clash-orbit__rings span:nth-child(1)) { border-color: rgb(135 174 224 / 42%); box-shadow: 0 0 1.8rem rgb(73 123 190 / 22%); }
+:global(:root[data-theme="dark"] .clash-orbit__rings span:nth-child(2)) { border-color: rgb(125 166 222 / 30%); }
+:global(:root[data-theme="dark"] .clash-orbit__rings span:nth-child(3)) { border-color: rgb(94 139 200 / 22%); }
+:global(:root[data-theme="dark"] .clash-node__card) { border-color: rgb(127 165 216 / 20%); background: linear-gradient(rgb(15 31 52 / 52%), rgb(10 23 40 / 88%)); box-shadow: 0 .8rem 2.2rem rgb(0 0 0 / 24%); color: #eef4ff; }
+:global(:root[data-theme="dark"] .clash-node__card small) { background: color-mix(in srgb, var(--node-color) 16%, #101b2a); color: color-mix(in srgb, var(--node-color) 62%, white); }
+:global(:root[data-theme="dark"] .clash-status-card) { border-color: rgb(119 155 204 / 22%); background: rgb(12 27 46 / 74%); box-shadow: 0 .8rem 2.2rem rgb(0 0 0 / 24%); color: #eef4ff; }
+:global(:root[data-theme="dark"] .clash-status-card__icon) { background: rgb(30 55 87 / 72%); color: #84b3ff; }
+:global(:root[data-theme="dark"] .clash-status-card small),
+:global(:root[data-theme="dark"] .clash-status-card div > span) { color: #94a8c2; }
+@media (prefers-reduced-motion: reduce) { .countdown-pulse-layer { display: none; } }
 </style>

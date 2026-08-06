@@ -10,11 +10,12 @@ import { publicEventComponent, publicEventPresentation } from "@/events/registry
 import type { ChatMessage, ChatSettings } from "@/components/public/types";
 import type { EventCastMember, EventContest, EventDetailResponse, EventSession } from "@/types/events";
 
-const props = defineProps<{ slug: string }>();
+const props = withDefaults(defineProps<{ slug: string; arena?: boolean }>(), { arena: false });
 const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
 const loadError = ref("");
 const connected = ref(false);
+const serverClockOffsetMs = ref(0);
 let controller: AbortController | null = null;
 let stream: EventSource | null = null;
 
@@ -51,7 +52,12 @@ async function load(silent = false): Promise<void> {
   if (!silent) loading.value = true;
   loadError.value = "";
   try {
-    data.value = await api.get<EventDetailResponse>(`/api/events/${encodeURIComponent(props.slug)}`, { signal: controller.signal });
+    const requestedAt = Date.now();
+    const response = await api.get<EventDetailResponse>(`/api/events/${encodeURIComponent(props.slug)}`, { signal: controller.signal });
+    const receivedAt = Date.now();
+    const serverTime = Date.parse(response.server_time);
+    if (Number.isFinite(serverTime)) serverClockOffsetMs.value = serverTime - (requestedAt + receivedAt) / 2;
+    data.value = response;
   } catch (error) {
     if ((error as { name?: string })?.name !== "AbortError") loadError.value = errorMessage(error, "This event could not be loaded.");
   } finally {
@@ -66,6 +72,11 @@ function connect(): void {
   stream.onopen = () => { connected.value = true; };
   stream.onerror = () => { connected.value = false; };
   stream.addEventListener("event.changed", () => { void load(true); });
+  stream.addEventListener("event.snapshot", updateSpectators);
+  stream.addEventListener("spectators.changed", updateSpectators);
+  stream.addEventListener("event.cheer", (raw) => {
+    window.dispatchEvent(new CustomEvent("cope:event-cheer", { detail: streamData(raw) }));
+  });
   stream.addEventListener("chat.message", (raw) => {
     const message = streamData<{ message?: ChatMessage }>(raw).message;
     if (message) addMessage(message);
@@ -78,6 +89,11 @@ function connect(): void {
     const settings = streamData<{ settings?: ChatSettings }>(raw).settings;
     if (settings && data.value) data.value.chat_settings = settings;
   });
+}
+
+function updateSpectators(raw: Event): void {
+  const count = streamData<{ spectator_count?: number }>(raw).spectator_count;
+  if (count !== undefined && data.value) data.value.spectator_count = count;
 }
 
 function streamData<T>(raw: Event): T {
@@ -134,7 +150,9 @@ function sessionTiming(session: EventSession): string {
     </div>
 
     <template v-if="data && !loading">
-      <component :is="customComponent" v-if="customComponent && immersiveCustom" :detail="data" />
+      <component :is="customComponent" v-if="customComponent && props.arena" :detail="data" :clock-offset-ms="serverClockOffsetMs" view="arena" />
+
+      <component :is="customComponent" v-else-if="customComponent && immersiveCustom" :detail="data" :clock-offset-ms="serverClockOffsetMs" view="event" />
 
       <template v-else>
       <header class="event-hero">
@@ -167,7 +185,7 @@ function sessionTiming(session: EventSession): string {
           <strong v-else>On air</strong>
         </section>
 
-        <component :is="customComponent" v-if="customComponent" :detail="data" />
+        <component :is="customComponent" v-if="customComponent" :detail="data" :clock-offset-ms="serverClockOffsetMs" />
 
         <div class="event-grid">
           <div class="event-main">

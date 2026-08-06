@@ -145,8 +145,11 @@ class StreamHub:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._seq_by_topic: dict[str, int] = {}
         self._subscribers: dict[str, set[StreamSubscription]] = {}
+        self._non_spectator_subscriptions: set[StreamSubscription] = set()
         self._internal_clients: set[asyncio.Queue[StreamEnvelope | None]] = set()
         self._tournament_live: dict[int, dict[int, dict[str, Any]]] = {}
+        self._event_tournaments: dict[int, set[int]] = {}
+        self._tournament_events: dict[int, set[int]] = {}
         self._max_subscribers = max_subscribers
         self._max_queue = max_queue
 
@@ -155,7 +158,7 @@ class StreamHub:
         with self._lock:
             self._loop = loop
 
-    def subscribe(self, *topics: str) -> StreamSubscription:
+    def subscribe(self, *topics: str, spectator: bool = True) -> StreamSubscription:
         with self._lock:
             count = sum(len(items) for items in self._subscribers.values())
             if count >= self._max_subscribers:
@@ -163,11 +166,14 @@ class StreamHub:
             subscription = StreamSubscription(tuple(topics), max_queue=self._max_queue)
             for topic in topics:
                 self._subscribers.setdefault(topic, set()).add(subscription)
+            if not spectator:
+                self._non_spectator_subscriptions.add(subscription)
             return subscription
 
     def unsubscribe(self, subscription: StreamSubscription) -> None:
         with self._lock:
             subscription.closed = True
+            self._non_spectator_subscriptions.discard(subscription)
             for topic in subscription.topics:
                 subscribers = self._subscribers.get(topic)
                 if subscribers is None:
@@ -177,16 +183,65 @@ class StreamHub:
                     self._subscribers.pop(topic, None)
 
     def tournament_spectator_count(self, tournament_id: int) -> int:
-        topic = f"tournament.{tournament_id}"
         with self._lock:
-            return len(self._subscribers.get(topic, ()))
+            subscriptions = self._spectator_subscribers(f"tournament.{tournament_id}")
+            for event_id in self._tournament_events.get(tournament_id, ()):
+                subscriptions.update(self._spectator_subscribers(f"event.{event_id}"))
+                for linked_tournament_id in self._event_tournaments.get(event_id, ()):
+                    subscriptions.update(self._spectator_subscribers(f"tournament.{linked_tournament_id}"))
+            return len(subscriptions)
+
+    def link_event_tournaments(self, event_id: int, tournament_ids: tuple[int, ...]) -> None:
+        with self._lock:
+            previous = self._event_tournaments.get(event_id, set())
+            current = set(tournament_ids)
+            for tournament_id in previous - current:
+                events = self._tournament_events.get(tournament_id)
+                if events is not None:
+                    events.discard(event_id)
+                    if not events:
+                        self._tournament_events.pop(tournament_id, None)
+            self._event_tournaments[event_id] = current
+            for tournament_id in current:
+                self._tournament_events.setdefault(tournament_id, set()).add(event_id)
+
+    def event_spectator_count(self, event_id: int) -> int:
+        with self._lock:
+            subscriptions = self._spectator_subscribers(f"event.{event_id}")
+            for tournament_id in self._event_tournaments.get(event_id, ()):
+                subscriptions.update(self._spectator_subscribers(f"tournament.{tournament_id}"))
+            return len(subscriptions)
+
+    def _spectator_subscribers(self, topic: str) -> set[StreamSubscription]:
+        return self._subscribers.get(topic, set()) - self._non_spectator_subscriptions
+
+    def publish_event_spectators(self, event_id: int) -> int:
+        with self._lock:
+            tournament_ids = tuple(self._event_tournaments.get(event_id, ()))
+        count = self.event_spectator_count(event_id)
+        data = {"event_id": event_id, "spectator_count": count}
+        self.publish(f"event.{event_id}", "spectators.changed", data, source="web")
+        for tournament_id in tournament_ids:
+            self.publish(
+                f"tournament.{tournament_id}",
+                "spectators.changed",
+                {**data, "tournament_id": tournament_id},
+                source="web",
+            )
+        return count
 
     def publish_tournament_spectators(self, tournament_id: int) -> int:
         tournament_topic = f"tournament.{tournament_id}"
         topics = (tournament_topic, "tournament-spectators")
         dispatches: list[tuple[StreamEnvelope, tuple[StreamSubscription, ...]]] = []
         with self._lock:
-            spectator_count = len(self._subscribers.get(tournament_topic, ()))
+            event_ids = tuple(self._tournament_events.get(tournament_id, ()))
+            subscriptions = self._spectator_subscribers(tournament_topic)
+            for event_id in event_ids:
+                subscriptions.update(self._spectator_subscribers(f"event.{event_id}"))
+                for linked_tournament_id in self._event_tournaments.get(event_id, ()):
+                    subscriptions.update(self._spectator_subscribers(f"tournament.{linked_tournament_id}"))
+            spectator_count = len(subscriptions)
             data = {
                 "tournament_id": tournament_id,
                 "spectator_count": spectator_count,
@@ -208,6 +263,13 @@ class StreamHub:
             for event, subscribers in dispatches:
                 for subscription in subscribers:
                     loop.call_soon_threadsafe(subscription.enqueue, event)
+        for event_id in event_ids:
+            self.publish(
+                f"event.{event_id}",
+                "spectators.changed",
+                {"event_id": event_id, "tournament_id": tournament_id, "spectator_count": spectator_count},
+                source="web",
+            )
         return spectator_count
 
     def register_internal_client(self) -> asyncio.Queue[StreamEnvelope | None]:
@@ -564,7 +626,14 @@ def create_app(
     async def tournament_events(tournament_id: int, request: Request):
         hub: StreamHub = request.app.state.stream_hub
         hub.bind_loop()
+        event_ids = await asyncio.to_thread(_tournament_event_ids, request.app, tournament_id)
+        for event_id in event_ids:
+            hub.link_event_tournaments(
+                event_id,
+                await asyncio.to_thread(_event_tournament_ids, request.app, event_id),
+            )
         selected_game_id = _positive_int(request.query_params.get("game_id"))
+        counts_as_spectator = request.query_params.get("spectator", "1") != "0"
 
         if not await asyncio.to_thread(
             _public_tournament_exists,
@@ -591,8 +660,9 @@ def create_app(
 
         async def stream():
             topic = f"tournament.{tournament_id}"
-            subscription = hub.subscribe(topic)
-            hub.publish_tournament_spectators(tournament_id)
+            subscription = hub.subscribe(topic, spectator=counts_as_spectator)
+            if counts_as_spectator:
+                hub.publish_tournament_spectators(tournament_id)
             try:
                 initial_snapshot = await asyncio.to_thread(snapshot)
                 yield sse_stream_event(
@@ -623,7 +693,8 @@ def create_app(
                     yield sse_stream_event(event)
             finally:
                 hub.unsubscribe(subscription)
-                hub.publish_tournament_spectators(tournament_id)
+                if counts_as_spectator:
+                    hub.publish_tournament_spectators(tournament_id)
 
         return StreamingResponse(
             stream(),
@@ -695,10 +766,13 @@ def create_app(
         event = await asyncio.to_thread(_public_event_by_slug, request.app, slug)
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
+        tournament_ids = await asyncio.to_thread(_event_tournament_ids, request.app, event.id)
+        hub.link_event_tournaments(event.id, tournament_ids)
 
         async def stream():
             topic = f"event.{event.id}"
             subscription = hub.subscribe(topic)
+            hub.publish_event_spectators(event.id)
             try:
                 yield sse_stream_event(
                     hub.make_private_event(
@@ -708,6 +782,7 @@ def create_app(
                             "event_id": event.id,
                             "revision": event.revision,
                             "status": event.status,
+                            "spectator_count": hub.event_spectator_count(event.id),
                         },
                         source="web",
                     )
@@ -726,6 +801,7 @@ def create_app(
                     yield sse_stream_event(stream_event)
             finally:
                 hub.unsubscribe(subscription)
+                hub.publish_event_spectators(event.id)
 
         return StreamingResponse(
             stream(),
@@ -954,6 +1030,36 @@ def _public_event_by_slug(app: FastAPI, slug: str) -> EventRecord | None:
         if event is None or event.published_at is None or event.status == "draft":
             return None
         return event
+    finally:
+        connection.close()
+
+
+def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:
+    connection = connect_database(app.state.db_path)
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
+                (event_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return ()
+        return tuple(int(row["tournament_id"]) for row in rows)
+    finally:
+        connection.close()
+
+
+def _tournament_event_ids(app: FastAPI, tournament_id: int) -> tuple[int, ...]:
+    connection = connect_database(app.state.db_path)
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
+                (tournament_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return ()
+        return tuple(int(row["event_id"]) for row in rows)
     finally:
         connection.close()
 

@@ -3393,6 +3393,7 @@ def _event_detail_payload(
         contest_cast = tuple(_public_event_child(item) for item in contest_cast)
         awards = tuple(_public_event_child(item) for item in awards)
     return {
+        "server_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
         "event": event if admin else _public_event_record(event),
         "handler": {
             "key": event.handler_key,

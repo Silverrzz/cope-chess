@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -91,10 +92,14 @@ class RelayTeamPayload(BaseModel):
         return value.lower()
 
 
+class RelayCheerPayload(BaseModel):
+    team_id: int = Field(gt=0)
+
+
 class RelayMemberPayload(BaseModel):
     engine_id: int = Field(gt=0)
     relay_moves: int = Field(default=4, gt=0, le=1000)
-    nodes: int = Field(default=100000, gt=0, le=10_000_000_000)
+    nodes: int = Field(default=100000, gt=0)
     position: int = Field(default=0, ge=0, le=1000)
     label: str = Field(default="", max_length=80)
 
@@ -626,6 +631,48 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Engine relay event not found.")
         return _json(_public_payload(connection, event))
 
+    @app.post("/api/events/{slug}/engine-relay/cheers")
+    def cheer_for_team(
+        slug: str,
+        payload: RelayCheerPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = get_event_by_slug(connection, slug)
+        if (
+            event is None
+            or event.handler_key != MODULE_KEY
+            or event.handler_version != MODULE_VERSION
+            or event.published_at is None
+            or event.status == "draft"
+        ):
+            raise HTTPException(status_code=404, detail="Engine relay event not found.")
+        team = connection.execute(
+            "SELECT id FROM event_cast_members WHERE event_id = ? AND id = ? AND kind = 'team'",
+            (event.id, payload.team_id),
+        ).fetchone()
+        if team is None:
+            raise HTTPException(status_code=404, detail="Relay team not found.")
+        tournament_ids = tuple(
+            int(row["tournament_id"])
+            for row in connection.execute(
+                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
+                (event.id,),
+            ).fetchall()
+        )
+        hub = request.app.state.stream_hub
+        hub.link_event_tournaments(event.id, tournament_ids)
+        cheer = {"id": secrets.token_hex(8), "event_id": event.id, "team_id": payload.team_id}
+        hub.publish(f"event.{event.id}", "event.cheer", cheer, source="web")
+        for tournament_id in tournament_ids:
+            hub.publish(
+                f"tournament.{tournament_id}",
+                "event.cheer",
+                {**cheer, "tournament_id": tournament_id},
+                source="web",
+            )
+        return _json({"accepted": True, "cheer_id": cheer["id"]}, 202)
+
     @app.get("/api/admin/events/{event_id}/engine-relay")
     def admin_engine_relay(
         event_id: int,
@@ -731,14 +778,21 @@ def _register_api(app: FastAPI) -> None:
         engine = get_engine(connection, payload.engine_id)
         if engine is None:
             raise HTTPException(status_code=422, detail="Select an available engine version.")
-        duplicate = next(
-            (
-                item
-                for item in list_event_cast(connection, event_id)
-                if item.kind == "engine" and item.engine_version_id == payload.engine_id
-            ),
-            None,
-        )
+        duplicate = connection.execute(
+            """
+            SELECT 1
+            FROM event_cast_members member
+            JOIN event_cast_members team ON team.id = member.parent_id
+            WHERE member.event_id = ?
+              AND member.kind = 'engine'
+              AND member.engine_version_id = ?
+              AND team.event_id = member.event_id
+              AND team.kind = 'team'
+              AND team.parent_id IS NULL
+            LIMIT 1
+            """,
+            (event_id, payload.engine_id),
+        ).fetchone()
         if duplicate is not None:
             raise HTTPException(status_code=409, detail="An engine version can only belong to one relay team.")
         _validate_member_compatibility(connection, event_id, team_id, payload.engine_id)

@@ -163,6 +163,7 @@ export interface EventSummary {
 }
 
 export interface EventDetailResponse {
+  server_time: string;
   event: EventRecord;
   handler: EventHandlerState;
   stages: EventStage[];
@@ -176,6 +177,7 @@ export interface EventDetailResponse {
   chat_messages: ChatMessage[];
   chat_settings: ChatSettings;
   custom: unknown;
+  spectator_count?: number;
 }
 
 export interface EventListResponse {
