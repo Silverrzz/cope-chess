@@ -138,6 +138,12 @@ class StreamSubscription:
             return
         self.queue.put_nowait(event)
 
+    def enqueue_ephemeral(self, event: StreamEnvelope) -> None:
+        if self.closed or self.queue.qsize() >= max(1, self.queue.maxsize // 8):
+            return
+        with contextlib.suppress(asyncio.QueueFull):
+            self.queue.put_nowait(event)
+
 
 class StreamHub:
     def __init__(self, *, max_subscribers: int = 256, max_queue: int = 512) -> None:
@@ -150,6 +156,8 @@ class StreamHub:
         self._tournament_live: dict[int, dict[int, dict[str, Any]]] = {}
         self._event_tournaments: dict[int, set[int]] = {}
         self._tournament_events: dict[int, set[int]] = {}
+        self._ephemeral_buckets: dict[str, tuple[float, float]] = {}
+        self._ephemeral_cleanup_at = 0.0
         self._max_subscribers = max_subscribers
         self._max_queue = max_queue
 
@@ -289,6 +297,7 @@ class StreamHub:
         data: dict[str, Any] | None = None,
         *,
         source: str = "web",
+        ephemeral: bool = False,
     ) -> StreamEnvelope:
         with self._lock:
             seq = self._seq_by_topic.get(topic, 0) + 1
@@ -306,9 +315,34 @@ class StreamHub:
             loop = self._loop
         if loop is None:
             return event
+        if ephemeral:
+            loop.call_soon_threadsafe(_enqueue_ephemeral_subscribers, subscribers, event)
+            return event
         for subscription in subscribers:
             loop.call_soon_threadsafe(subscription.enqueue, event)
         return event
+
+    def allow_ephemeral(self, key: str, *, rate: float, burst: int) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if now >= self._ephemeral_cleanup_at:
+                cutoff = now - 300.0
+                self._ephemeral_buckets = {
+                    bucket_key: bucket
+                    for bucket_key, bucket in self._ephemeral_buckets.items()
+                    if bucket[1] >= cutoff
+                }
+                self._ephemeral_cleanup_at = now + 30.0
+            current = self._ephemeral_buckets.get(key)
+            if current is None:
+                if len(self._ephemeral_buckets) >= 2048:
+                    return False
+                tokens = float(burst)
+            else:
+                tokens = min(float(burst), current[0] + (now - current[1]) * rate)
+            allowed = tokens >= 1.0
+            self._ephemeral_buckets[key] = (tokens - 1.0 if allowed else tokens, now)
+            return allowed
 
     def make_private_event(
         self,
@@ -453,6 +487,14 @@ def _enqueue_internal_event(
         queue.put_nowait(None)
         return
     queue.put_nowait(event)
+
+
+def _enqueue_ephemeral_subscribers(
+    subscriptions: tuple[StreamSubscription, ...],
+    event: StreamEnvelope,
+) -> None:
+    for subscription in subscriptions:
+        subscription.enqueue_ephemeral(event)
 
 
 def create_app(

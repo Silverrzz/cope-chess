@@ -42,6 +42,7 @@ from cope.db import (
     delete_chat_message,
     delete_engine,
     delete_engine_version,
+    delete_event,
     delete_git_host,
     delete_opening_suite,
     delete_rating_list,
@@ -1336,6 +1337,45 @@ def register_api_routes(app: FastAPI) -> None:
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found.")
         return _json(_event_detail_payload(connection, event, admin=True))
+
+    @app.delete("/api/admin/events/{event_id}")
+    def admin_delete_event(
+        event_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = get_event(connection, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found.")
+        linked_tournaments = [
+            get_tournament(connection, int(row["tournament_id"]))
+            for row in connection.execute(
+                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
+                (event_id,),
+            )
+        ]
+        active = [
+            tournament
+            for tournament in linked_tournaments
+            if tournament is not None and tournament.status in {"running", "paused"}
+        ]
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail="Abort active event tournaments before deleting this event.",
+            )
+        try:
+            for tournament in linked_tournaments:
+                if tournament is not None and tournament.status in {"draft", "scheduled"}:
+                    delete_tournament(connection, tournament.id)
+            delete_event(connection, event_id)
+            connection.commit()
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        request.app.state.stream_hub.link_event_tournaments(event_id, ())
+        _publish_admin_change(web_app, request)
+        return _json({"message": f"{event.title} deleted."})
 
     @app.post("/api/admin/event-modules/{module_key}/provision")
     def admin_provision_event_module(

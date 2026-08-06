@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
@@ -31,7 +31,6 @@ const loading = ref(false);
 const loadError = ref("");
 const selectedPly = ref(0);
 const currentPositionFen = ref("startpos");
-const activityTab = ref<"moves" | "chat">("moves");
 const streamState = ref<"connecting" | "live" | "reconnecting" | "closed">("closed");
 const nowMs = ref(Date.now() + props.clockOffsetMs);
 const countdownFinished = ref(false);
@@ -46,9 +45,20 @@ let countdownTimer: number | undefined;
 let countdownAudio: HTMLAudioElement | null = null;
 let audioPlayPending = false;
 let soundPrimed = false;
+let lastCheerRequestAt = 0;
+const seenCheerIds = new Set<string>();
+const cheerTimers = new Set<number>();
+const headingElement = ref<HTMLElement | null>(null);
+const arenaElement = ref<HTMLElement | null>(null);
+const boardColumnElement = ref<HTMLElement | null>(null);
+let arenaFitFrame: number | undefined;
+let headingResizeObserver: ResizeObserver | null = null;
 
 const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
 const countdownAudioLengthMs = 60_000;
+const cheerClientId = typeof globalThis.crypto?.randomUUID === "function"
+  ? globalThis.crypto.randomUUID()
+  : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 
 const fixture = computed(() => payload.value.fixtures.find((item) => item.id === fixtureId.value) ?? payload.value.fixtures[0] ?? null);
 const selectedRelayGame = computed(() => fixture.value?.games.find((game) => String(game.id) === gameId.value) ?? null);
@@ -115,7 +125,14 @@ const showcaseTeams = computed(() => payload.value.teams.map((team) => {
 onMounted(() => {
   selectInitial();
   window.addEventListener("cope:event-cheer", handleCheerEvent as EventListener);
-  if (props.view === "arena") return;
+  if (props.view === "arena") {
+    headingResizeObserver = new ResizeObserver(scheduleArenaFit);
+    if (headingElement.value) headingResizeObserver.observe(headingElement.value);
+    window.addEventListener("resize", scheduleArenaFit);
+    window.visualViewport?.addEventListener("resize", scheduleArenaFit);
+    scheduleArenaFit();
+    return;
+  }
   restoreCountdownCompletion();
   prepareCountdownAudio();
   syncCountdown();
@@ -135,12 +152,52 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleUserActivation);
   window.removeEventListener("keydown", handleUserActivation);
   window.removeEventListener("cope:event-cheer", handleCheerEvent as EventListener);
+  if (arenaFitFrame !== undefined) window.cancelAnimationFrame(arenaFitFrame);
+  headingResizeObserver?.disconnect();
+  window.removeEventListener("resize", scheduleArenaFit);
+  window.visualViewport?.removeEventListener("resize", scheduleArenaFit);
+  for (const timer of cheerTimers) window.clearTimeout(timer);
+  cheerTimers.clear();
   releaseCountdownAudio();
 });
 
 watch(() => payload.value.fixtures, () => selectInitial(), { deep: true });
 watch([fixtureId, gameId], () => { void loadGame(); });
 watch(targetTime, () => syncCountdown());
+watch(headingElement, (next, previous) => {
+  if (previous) headingResizeObserver?.unobserve(previous);
+  if (next) headingResizeObserver?.observe(next);
+  scheduleArenaFit();
+}, { flush: "post" });
+watch([arenaElement, boardColumnElement, gameData], () => scheduleArenaFit(), { flush: "post" });
+
+function scheduleArenaFit(): void {
+  if (props.view !== "arena") return;
+  if (arenaFitFrame !== undefined) window.cancelAnimationFrame(arenaFitFrame);
+  arenaFitFrame = window.requestAnimationFrame(() => {
+    arenaFitFrame = undefined;
+    void fitArenaToViewport();
+  });
+}
+
+async function fitArenaToViewport(): Promise<void> {
+  await nextTick();
+  const arena = arenaElement.value;
+  const boardColumn = boardColumnElement.value;
+  if (!arena || !boardColumn) return;
+  const viewer = boardColumn.firstElementChild as HTMLElement | null;
+  const board = viewer?.querySelector<HTMLElement>(".board-mount");
+  if (!viewer || !board) return;
+  const viewport = window.visualViewport;
+  const viewportBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+  const availableHeight = Math.floor(viewportBottom - arena.getBoundingClientRect().top - 8);
+  if (availableHeight <= 0) return;
+  const chrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height);
+  const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const boardSize = Math.max(0, Math.min(42 * rootFontSize, Math.floor(availableHeight - chrome)));
+  arena.style.setProperty("--arena-content-height", `${availableHeight}px`);
+  arena.style.setProperty("--arena-board-size", `${boardSize}px`);
+}
 
 function selectInitial(): void {
   const fixtures = payload.value.fixtures;
@@ -292,24 +349,35 @@ function handleSpectators(event: Event): void {
 
 async function cheer(team: RelayTeam | null): Promise<void> {
   if (!team) return;
+  const now = Date.now();
+  if (now - lastCheerRequestAt < 350) return;
+  lastCheerRequestAt = now;
   try {
-    await api.post(`/api/events/${encodeURIComponent(props.detail.event.slug)}/engine-relay/cheers`, { body: { team_id: team.id } });
+    await api.post(`/api/events/${encodeURIComponent(props.detail.event.slug)}/engine-relay/cheers`, {
+      body: { team_id: team.id },
+      headers: { "X-Cope-Cheer-Client": cheerClientId },
+    });
   } catch {
-    launchCheer(team.id);
+    return;
   }
 }
 
 function handleCheerEvent(event: Event): void {
-  const teamId = Number((event as CustomEvent<{ team_id?: number }>).detail?.team_id);
-  if (Number.isFinite(teamId)) launchCheer(teamId);
+  const detail = (event as CustomEvent<{ id?: string; team_id?: number }>).detail;
+  const teamId = Number(detail?.team_id);
+  const cheerId = typeof detail?.id === "string" ? detail.id : "";
+  if (!Number.isFinite(teamId) || !cheerId || seenCheerIds.has(cheerId)) return;
+  seenCheerIds.add(cheerId);
+  if (seenCheerIds.size > 128) seenCheerIds.delete(seenCheerIds.values().next().value!);
+  launchCheer(teamId, cheerId);
 }
 
-function launchCheer(teamId: number): void {
+function launchCheer(teamId: number, cheerId: string): void {
   const team = payload.value.teams.find((item) => item.id === teamId);
-  if (!team) return;
+  if (!team || cheerBursts.value.length >= 6) return;
   const side = team.id === blackTeam.value?.id ? "right" : "left";
   const burst: { id: string; color: string; side: "left" | "right"; x: number; y: number; pieces: number[] } = {
-    id: `${Date.now()}-${Math.random()}`,
+    id: cheerId,
     color: team.primary_color,
     side,
     x: side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13,
@@ -317,9 +385,11 @@ function launchCheer(teamId: number): void {
     pieces: Array.from({ length: 7 }, (_, index) => index),
   };
   cheerBursts.value.push(burst);
-  window.setTimeout(() => {
+  const timer = window.setTimeout(() => {
+    cheerTimers.delete(timer);
     cheerBursts.value = cheerBursts.value.filter((item) => item.id !== burst.id);
   }, 900);
+  cheerTimers.add(timer);
 }
 
 function teamForSide(side: "white" | "black"): RelayTeam | null {
@@ -358,11 +428,6 @@ function analysisFor(side: "white" | "black", member: RelayRosterMember | null):
 function teamStyle(team: RelayTeam | null): Record<string, string> | undefined {
   if (!team) return undefined;
   return { "--relay-primary": team.primary_color, "--relay-secondary": team.secondary_color };
-}
-
-function memberIsCurrent(side: "white" | "black", member: RelayRosterMember): boolean {
-  const current = side === "white" ? whiteMember.value : blackMember.value;
-  return String(current?.engine_id ?? "") === String(member.engine_id);
 }
 
 function appendChat(message: EventDetailResponse["chat_messages"][number]): void {
@@ -550,6 +615,9 @@ function handleUserActivation(): void {
       <span class="chess-piece chess-piece--knight" aria-hidden="true">♞</span>
       <span class="chess-piece chess-piece--pawn" aria-hidden="true">♟</span>
       <span class="chess-piece chess-piece--bishop" aria-hidden="true">♝</span>
+      <span class="chess-piece chess-piece--queen" aria-hidden="true">♛</span>
+      <span class="chess-piece chess-piece--rook" aria-hidden="true">♜</span>
+      <span class="chess-piece chess-piece--knight-small" aria-hidden="true">♞</span>
 
       <div class="clash-hero__content">
         <header class="clash-heading">
@@ -580,9 +648,12 @@ function handleUserActivation(): void {
 
         <div class="clash-actions">
           <RouterLink :to="{ name: 'event-arena', params: { slug: detail.event.slug } }" class="clash-primary-action"><AppIcon name="trophy" :size="19" /> Enter arena <AppIcon name="arrow-right" :size="18" /></RouterLink>
-          <button v-if="whiteTeam" type="button" class="cheer-button" :style="teamStyle(whiteTeam)" @click="cheer(whiteTeam)">Cheer {{ whiteTeam.short_name || whiteTeam.name }}</button>
-          <button v-if="blackTeam" type="button" class="cheer-button" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)">Cheer {{ blackTeam.short_name || blackTeam.name }}</button>
         </div>
+      </div>
+
+      <div v-if="whiteTeam || blackTeam" class="clash-cheer-rail" aria-label="Cheer for a relay team">
+        <button v-if="whiteTeam" type="button" class="clash-cheer-action" :style="teamStyle(whiteTeam)" @click="cheer(whiteTeam)"><span><AppIcon name="trophy" :size="18" /></span><span><small>Cheer for</small><strong>{{ whiteTeam.short_name || whiteTeam.name }}</strong></span></button>
+        <button v-if="blackTeam" type="button" class="clash-cheer-action" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)"><span><AppIcon name="trophy" :size="18" /></span><span><small>Cheer for</small><strong>{{ blackTeam.short_name || blackTeam.name }}</strong></span></button>
       </div>
 
       <aside class="clash-status-card clash-status-card--systems">
@@ -596,23 +667,19 @@ function handleUserActivation(): void {
       </aside>
     </section>
 
-    <section v-if="props.view === 'arena'" class="relay-showcase">
-      <div class="relay-showcase__inner">
-        <header class="relay-showcase__heading">
-          <div><span><i></i> Live relay control</span><h2>The arena</h2><p>Every handoff, move and engine thought streamed from the relay in real time.</p></div>
-          <RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="relay-showcase__back"><AppIcon name="arrow-left" :size="16" /> Event page</RouterLink>
-        </header>
-
-  <section class="relay-broadcast">
-    <header class="relay-broadcast__bar">
-      <div>
-        <span>Engine relay broadcast</span>
-        <strong>{{ fixture?.title ?? "No fixture registered" }}</strong>
-      </div>
-      <div class="relay-broadcast__selectors">
+    <section v-if="props.view === 'arena'" class="relay-viewer">
+      <header ref="headingElement" class="tournament-heading">
+        <div class="tournament-heading__title">
+          <div class="title-line"><h1>{{ detail.event.title }}</h1><span class="relay-status">{{ gameLabel }}</span><span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ spectatorCount.toLocaleString() }}</span></div>
+          <p>{{ fixture?.title ?? "Engine relay" }}<template v-if="viewerGame"> / Game {{ viewerGame.game_number ?? viewerGame.id }}</template></p>
+        </div>
+        <div class="tournament-heading__controls">
+          <RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink>
+          <div class="relay-broadcast__selectors">
         <label v-if="payload.fixtures.length > 1"><span>Fixture</span><select :value="fixture?.id ?? ''" @change="selectFixture(($event.target as HTMLSelectElement).value)"><option v-for="item in payload.fixtures" :key="item.id" :value="item.id">{{ item.title }}</option></select></label>
         <label v-if="fixture?.games.length"><span>Board</span><select :value="gameId" @change="selectGame(($event.target as HTMLSelectElement).value)"><option v-for="game in fixture.games" :key="game.id" :value="String(game.id)">Game {{ game.game_number ?? game.id }} · {{ statusLabel(game.status) }}<template v-if="game.result"> · {{ resultLabel(game.result) }}</template></option></select></label>
-        <div class="relay-broadcast__state"><StreamIndicator v-if="gameData && !['finished', 'aborted'].includes(gameData.tournament.status)" :state="streamState" /><span>{{ gameLabel }}</span></div>
+        <StreamIndicator v-if="gameData && !['finished', 'aborted'].includes(gameData.tournament.status)" :state="streamState" />
+      </div>
       </div>
     </header>
 
@@ -621,43 +688,25 @@ function handleUserActivation(): void {
     <ContentState v-else-if="loading && !gameData" kind="loading" title="Synchronising the relay" />
     <ContentState v-else-if="loadError && !gameData" kind="error" :message="loadError" action-label="Try again" @action="loadGame" />
 
-    <template v-else-if="gameData && viewerGame">
-      <div class="handoff-strip">
-        <div v-for="side in (['white', 'black'] as const)" :key="side" :style="teamStyle(side === 'white' ? whiteTeam : blackTeam)">
-          <span>{{ side }} relay</span>
-          <strong>{{ (side === 'white' ? whiteMember : blackMember)?.display_name || (side === 'white' ? whiteTeam : blackTeam)?.name }}</strong>
-          <small>{{ (side === 'white' ? whiteMember : blackMember)?.relay_moves ?? 0 }} team moves · {{ ((side === 'white' ? whiteMember : blackMember)?.nodes ?? 0).toLocaleString() }} nodes</small>
-          <i :class="{ live: activeSide === side }"></i>
-        </div>
+    <section v-else-if="gameData && viewerGame" ref="arenaElement" class="arena" :aria-label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'}`">
+      <div class="engine-column">
+        <div class="relay-engine-slot" :style="teamStyle(blackTeam)"><EnginePanel side="black" :name="blackMember?.display_name || blackTeam?.name || ''" :engine-id="blackMember?.engine_id ?? null" :clock="`${(blackMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" /></div>
+        <div class="relay-engine-slot" :style="teamStyle(whiteTeam)"><EnginePanel side="white" :name="whiteMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteMember?.engine_id ?? null" :clock="`${(whiteMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" /></div>
+        <dl class="game-facts">
+          <div :style="teamStyle(blackTeam)"><dt>Black team</dt><dd>{{ blackTeam?.name ?? '-' }} <button v-if="blackTeam" type="button" @click="cheer(blackTeam)">Cheer</button></dd></div>
+          <div :style="teamStyle(whiteTeam)"><dt>White team</dt><dd>{{ whiteTeam?.name ?? '-' }} <button v-if="whiteTeam" type="button" @click="cheer(whiteTeam)">Cheer</button></dd></div>
+          <div><dt>Status</dt><dd>{{ statusLabel(gameStatus) }}</dd></div>
+          <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
+        </dl>
       </div>
-
-      <div class="relay-arena">
-        <aside class="relay-activity">
-          <nav aria-label="Game activity"><button type="button" :class="{ active: activityTab === 'moves' }" @click="activityTab = 'moves'">Moves <span>{{ moves.length }}</span></button><button type="button" :class="{ active: activityTab === 'chat' }" @click="activityTab = 'chat'">Chat <span>{{ detail.chat_messages.length }}</span></button></nav>
-          <MoveList v-if="activityTab === 'moves'" class="relay-activity__panel" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" title="Relay move log" @update:model-value="selectedPly = $event" />
-          <ChatPanel v-else class="relay-activity__panel" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="appendChat" />
-        </aside>
-
-        <div class="relay-board">
-          <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
-          <div class="relay-board__caption"><span>Game {{ viewerGame.game_number ?? viewerGame.id }}</span><strong>{{ whiteTeam?.short_name || whiteTeam?.name }} — {{ blackTeam?.short_name || blackTeam?.name }}</strong><span>{{ statusLabel(gameStatus) }}</span></div>
-        </div>
-
-        <div class="relay-engines">
-          <section v-for="side in (['black', 'white'] as const)" :key="side" class="relay-team" :style="teamStyle(side === 'white' ? whiteTeam : blackTeam)">
-            <header><div><span>{{ side }} team</span><h3>{{ (side === 'white' ? whiteTeam : blackTeam)?.name }}</h3></div><strong>{{ (side === 'white' ? whiteTeam : blackTeam)?.motto }}</strong><button type="button" class="cheer-button cheer-button--arena" @click="cheer(side === 'white' ? whiteTeam : blackTeam)">Cheer</button></header>
-            <div class="relay-roster">
-              <article v-for="(member, index) in (side === 'white' ? whiteTeam : blackTeam)?.roster ?? []" :key="member.id" :class="{ current: memberIsCurrent(side, member), thinking: memberIsCurrent(side, member) && activeSide === side }">
-                <span>{{ index + 1 }}</span><div><strong>{{ member.label || member.name }}</strong><small>{{ member.version }}</small></div><dl><div><dt>Run</dt><dd>{{ member.relay_moves }}</dd></div><div><dt>Nodes</dt><dd>{{ member.nodes.toLocaleString() }}</dd></div></dl>
-              </article>
-            </div>
-            <EnginePanel :side="side" :name="(side === 'white' ? whiteMember : blackMember)?.display_name || (side === 'white' ? whiteTeam : blackTeam)?.name || ''" :engine-id="(side === 'white' ? whiteMember : blackMember)?.engine_id ?? null" :clock="`${((side === 'white' ? whiteMember : blackMember)?.nodes ?? 0).toLocaleString()} nodes`" :analysis="side === 'white' ? whiteAnalysis : blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === side" />
-          </section>
-        </div>
+      <div ref="boardColumnElement" class="board-column">
+        <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
       </div>
-    </template>
-  </section>
-      </div>
+      <aside class="activity-column" aria-label="Game activity">
+        <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
+        <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="appendChat" />
+      </aside>
+    </section>
     </section>
 
   </div>
@@ -759,6 +808,9 @@ function handleUserActivation(): void {
 .chess-piece--knight { top: 1.5rem; right: 5%; font-size: clamp(12rem, 18vw, 20rem); transform: rotate(6deg) scaleX(-1); }
 .chess-piece--pawn { bottom: -1rem; left: -2rem; font-size: clamp(10rem, 15vw, 16rem); filter: blur(5px); }
 .chess-piece--bishop { right: -1rem; bottom: -1rem; font-size: clamp(10rem, 15vw, 16rem); filter: blur(4px); }
+.chess-piece--queen { top: 29%; left: 21%; font-size: clamp(5rem, 8vw, 9rem); opacity: .11; transform: rotate(12deg); }
+.chess-piece--rook { top: 31%; right: 21%; font-size: clamp(5rem, 7.5vw, 8.5rem); opacity: .1; transform: rotate(-10deg); }
+.chess-piece--knight-small { right: 43%; bottom: 2%; font-size: clamp(5rem, 8vw, 9rem); opacity: .09; transform: rotate(8deg) scaleX(-1); }
 
 .clash-hero__content {
   z-index: 2;
@@ -767,7 +819,7 @@ function handleUserActivation(): void {
   margin: 0 auto;
   justify-items: center;
   align-content: center;
-  padding: clamp(2rem, 4vh, 3.5rem) clamp(1rem, 4vw, 4rem) 2rem;
+  padding: clamp(2rem, 4vh, 3.5rem) clamp(1rem, 4vw, 4rem) 7rem;
 }
 
 .clash-heading { display: grid; justify-items: center; text-align: center; }
@@ -932,10 +984,50 @@ function handleUserActivation(): void {
 .clash-node--thinking .clash-node__beacon > span { animation: node-thinking 1.3s ease-in-out infinite; }
 .clash-orbit__empty { position: absolute; inset: 45% 0 auto; margin: 0; color: #6c7e99; text-align: center; }
 
-.clash-actions { z-index: 4; display: grid; justify-items: center; gap: .55rem; margin-top: -2.1rem; }
+.clash-actions { z-index: 4; display: grid; justify-items: center; padding: 1rem 1.5rem; margin-top: -2rem; }
 .clash-actions button, .clash-actions > a { display: inline-flex; align-items: center; justify-content: center; border: 0; cursor: pointer; font: inherit; font-weight: 730; text-decoration: none; }
-.clash-primary-action { min-height: 3.2rem; gap: .65rem; padding: 0 1.35rem; border-radius: .55rem; background: linear-gradient(135deg, #215bb9, #3a7add); box-shadow: 0 .7rem 1.6rem rgb(29 86 180 / 26%); color: white; transition: transform .18s ease, box-shadow .18s ease; }
+.clash-primary-action { min-height: 3.65rem; gap: .75rem; padding: 0 1.8rem; border-radius: .65rem; background: linear-gradient(135deg, #215bb9, #3a7add); box-shadow: 0 .8rem 1.8rem rgb(29 86 180 / 28%); color: white; font-size: 1rem; transition: transform .18s ease, box-shadow .18s ease; }
 .clash-primary-action:hover { transform: translateY(-2px); box-shadow: 0 1rem 2rem rgb(29 86 180 / 32%); }
+
+.clash-cheer-rail {
+  position: absolute;
+  z-index: 7;
+  bottom: 1.35rem;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  padding: .45rem;
+  border: 1px solid rgb(255 255 255 / 72%);
+  border-radius: .85rem;
+  background: rgb(255 255 255 / 48%);
+  box-shadow: 0 .8rem 2.2rem rgb(42 75 124 / 12%);
+  backdrop-filter: blur(16px);
+  transform: translateX(-50%);
+}
+.clash-cheer-action {
+  display: grid;
+  grid-template-columns: auto minmax(5rem, 1fr);
+  align-items: center;
+  gap: .6rem;
+  min-width: 9.5rem;
+  min-height: 3.15rem;
+  padding: .4rem .8rem .4rem .45rem;
+  border: 1px solid color-mix(in srgb, var(--relay-primary) 34%, white);
+  border-radius: .6rem;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--relay-primary) 16%, white), rgb(255 255 255 / 86%));
+  box-shadow: inset 0 1px rgb(255 255 255 / 75%);
+  color: color-mix(in srgb, var(--relay-primary) 78%, #08152b);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.clash-cheer-action > span:first-child { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: .5rem; background: var(--relay-primary); color: white; box-shadow: 0 .35rem .8rem color-mix(in srgb, var(--relay-primary) 28%, transparent); }
+.clash-cheer-action > span:last-child { display: grid; min-width: 0; }
+.clash-cheer-action small { color: var(--color-text-muted, #607080); font-size: .55rem; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.clash-cheer-action strong { overflow: hidden; margin-top: .08rem; font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.clash-cheer-action:hover { border-color: var(--relay-primary); box-shadow: 0 .55rem 1.2rem color-mix(in srgb, var(--relay-primary) 18%, transparent); transform: translateY(-2px); }
+.clash-cheer-action:active { transform: translateY(0) scale(.98); }
 
 .clash-status-card {
   position: absolute;
@@ -964,6 +1056,68 @@ function handleUserActivation(): void {
 .clash-status-card > i { width: .45rem; height: .45rem; border-radius: 50%; background: #a7b6c9; }
 .clash-status-card > i.active { background: #35bf5b; box-shadow: 0 0 0 .25rem rgb(53 191 91 / 12%); }
 
+.relay-viewer {
+  --arena-board-size: clamp(30rem, calc(100dvh - 15rem), 42rem);
+  --arena-content-height: calc(var(--arena-board-size) + 6.35rem);
+  position: relative;
+  display: grid;
+  overflow-anchor: none;
+  width: 100%;
+  gap: var(--space-md, 1rem);
+  padding: .55rem clamp(.75rem, 1.5vw, 1.75rem) 3rem;
+  background: var(--color-background, #f7f9fd);
+  color: var(--color-text, #17202a);
+}
+.tournament-heading { display: flex; align-items: end; justify-content: space-between; gap: var(--space-xl, 2rem); padding-block-end: .55rem; border-block-end: 1px solid var(--color-border, #d5dbe1); }
+.tournament-heading__title { display: grid; align-items: center; min-width: 0; }
+.title-line { display: flex; align-items: center; gap: var(--space-sm, .5rem); min-width: 0; }
+.tournament-heading h1, .tournament-heading p, .game-facts { margin: 0; }
+.tournament-heading h1 { max-width: 54rem; font-size: clamp(1.45rem, 2.7vw, 2.15rem); letter-spacing: -.035em; line-height: 1.05; overflow-wrap: anywhere; }
+.tournament-heading__title > p { margin-block-start: .18rem; color: var(--color-text-muted, #607080); font-size: .75rem; }
+.relay-status, .relay-spectators { display: inline-flex; align-items: center; gap: .25rem; min-height: 1.45rem; padding-inline: .5rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; color: var(--color-text-muted, #607080); font-size: .62rem; font-weight: 730; white-space: nowrap; }
+.tournament-heading__controls, .relay-broadcast__selectors { display: flex; align-items: end; gap: .65rem; }
+.relay-broadcast__selectors label { display: grid; gap: .25rem; min-width: 0; color: var(--color-text-muted, #607080); font-size: .64rem; font-weight: 700; }
+.relay-broadcast__selectors label:last-of-type { width: clamp(16rem, 27vw, 27rem); }
+.relay-broadcast__selectors select { width: 100%; min-height: 2.35rem; padding: .4rem 2rem .4rem .65rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-sm, .35rem); background: var(--color-surface, #fff); color: var(--color-text, #17202a); font: inherit; font-size: .77rem; }
+.event-page-link { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .35rem; padding-inline: .8rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted, #607080); font-size: .72rem; font-weight: 730; text-decoration: none; white-space: nowrap; }
+.arena { display: grid; grid-template-columns: minmax(25rem, 29rem) var(--arena-board-size) minmax(28rem, 1fr); gap: clamp(.7rem, 1.5vw, 1.2rem); align-items: start; height: var(--arena-content-height); min-height: 0; }
+.engine-column, .activity-column { display: grid; min-height: 0; gap: var(--space-sm, .5rem); }
+.engine-column { grid-template-rows: repeat(2, minmax(0, 1fr)) auto; height: var(--arena-content-height); }
+.relay-engine-slot { min-width: 0; min-height: 0; }
+.relay-engine-slot :deep(.engine-panel) { --side-color: var(--relay-primary); min-height: 0; border-color: color-mix(in srgb, var(--relay-primary) 30%, var(--color-border, #d5dbe1)); }
+.relay-engine-slot :deep(.engine-panel--active) { box-shadow: 0 0 0 1px var(--relay-primary), 0 0 1.4rem color-mix(in srgb, var(--relay-primary) 20%, transparent); }
+.board-column { width: var(--arena-board-size); min-width: 0; justify-self: center; }
+.activity-column { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); height: var(--arena-content-height); }
+.activity-column > * { min-width: 0; min-height: 0; height: 100%; }
+.game-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 1px; height: 6.35rem; overflow: hidden; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-md, .5rem); background: var(--color-border, #d5dbe1); }
+.game-facts div { min-width: 0; padding: .65rem .75rem; background: var(--color-surface, #fff); }
+.game-facts dt { color: var(--color-text-muted, #607080); font-size: .59rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.game-facts dd { display: flex; align-items: center; justify-content: space-between; gap: .35rem; overflow: hidden; margin: .18rem 0 0; font-size: .75rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.game-facts button { padding: .15rem .45rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 50%, var(--color-border, #d5dbe1)); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 10%, var(--color-surface, #fff)); color: var(--relay-primary); cursor: pointer; font: inherit; font-size: .58rem; }
+
+@media (max-width: 96rem) {
+  .arena { grid-template-columns: minmax(25rem, 1fr) var(--arena-board-size); height: auto; }
+  .engine-column { grid-column: 1; grid-row: 1; }
+  .board-column { grid-column: 2; grid-row: 1; }
+  .activity-column { grid-column: 1 / -1; grid-row: 2; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(24rem, 34rem); height: min(34rem, calc(100dvh - 8rem)); }
+}
+@media (max-width: 58rem) {
+  .tournament-heading { align-items: stretch; flex-direction: column; }
+  .tournament-heading__controls { justify-content: space-between; }
+  .arena { grid-template-columns: 1fr; }
+  .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
+  .engine-column .game-facts { grid-column: 1 / -1; }
+  .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
+  .activity-column { grid-column: 1; grid-row: 3; }
+}
+@media (max-width: 40rem) {
+  .tournament-heading__controls, .relay-broadcast__selectors { align-items: stretch; flex-direction: column-reverse; }
+  .relay-broadcast__selectors label, .relay-broadcast__selectors label:last-of-type { width: 100%; }
+  .engine-column { grid-template-columns: 1fr; }
+  .engine-column .game-facts { grid-column: 1; }
+  .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
+}
+
 .relay-showcase { scroll-margin-top: var(--header-height, 4rem); background: linear-gradient(180deg, #f7f9fd, #eef3fa); }
 .relay-showcase__inner { width: min(100%, 100rem); margin: 0 auto; padding: clamp(3rem, 6vw, 5rem) clamp(1rem, 3vw, 2.5rem); }
 .relay-showcase__heading { display: flex; align-items: end; justify-content: space-between; gap: 2rem; margin-bottom: 1.4rem; }
@@ -985,7 +1139,7 @@ function handleUserActivation(): void {
 @media (max-width: 88rem) { .relay-arena { grid-template-columns: minmax(14rem, .55fr) minmax(22rem, 1fr); }.relay-engines { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; }.relay-activity { min-height: 34rem; } }
 @media (max-width: 60rem) { .clash-hero__content { align-content: start; }.clash-orbit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; height: auto; margin-top: 1.2rem; }.clash-orbit__rings { display: none; }.clash-node { position: relative; inset: auto; width: auto; }.clash-node__card { width: min(100%, 12rem); }.clash-actions { margin-top: 1.5rem; }.relay-showcase__heading { align-items: start; flex-direction: column; }.relay-broadcast__bar { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors { flex-wrap: wrap; }.relay-arena { grid-template-columns: 1fr; }.relay-board { grid-row: 1; }.relay-activity { min-height: 26rem; }.relay-engines { grid-template-columns: 1fr; }.handoff-strip { grid-template-columns: 1fr; } }
 @media (max-width: 60rem) { .clash-orbit--2 .clash-node { inset: auto; } }
-@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
+@media (max-width: 38rem) { .clash-hero__content { padding-top: 1.4rem; }.clash-heading h1 { font-size: clamp(2.7rem, 13vw, 4.2rem); }.clash-countdown { margin-top: 1rem; }.clash-countdown > div { padding: .85rem .25rem; }.clash-countdown strong { font-size: clamp(2rem, 13vw, 3.2rem); }.clash-countdown span { font-size: .5rem; letter-spacing: .1em; }.clash-schedule { text-align: center; }.clash-orbit { grid-template-columns: 1fr 1fr; }.clash-node__beacon > span { width: 3.8rem; height: 3.8rem; }.clash-node__card { min-width: 0; padding-inline: .4rem; }.clash-node__card strong { max-width: 7.5rem; }.clash-cheer-rail { right: .75rem; left: .75rem; gap: .4rem; transform: none; }.clash-cheer-action { min-width: 0; flex: 1; padding-right: .5rem; }.relay-broadcast__selectors { align-items: stretch; flex-direction: column; }.relay-broadcast__selectors select { width: 100%; }.handoff-strip > div { grid-template-columns: minmax(0, 1fr) auto; }.handoff-strip > div > span { grid-column: 1 / -1; }.handoff-strip small { grid-column: 1; }.handoff-strip i { grid-column: 2; }.relay-roster { grid-template-columns: 1fr; } }
 :global(:root[data-theme="dark"] .engine-clash-page) { --clash-ink: #f4f8ff; background: #08111e; color: #eef4ff; }
 :global(:root[data-theme="dark"] .engine-clash-page--final-minute .clash-hero) { background: radial-gradient(circle at 50% 42%, #20395e, #0d1d32 58%, #07101d); }
 :global(:root[data-theme="dark"] .relay-showcase) { background: linear-gradient(180deg, #0b1420, #0e1927); color: #eef4ff; }
@@ -1006,6 +1160,9 @@ function handleUserActivation(): void {
 :global(:root[data-theme="dark"] .clash-hero::after) { background: rgb(50 88 139 / 20%); }
 :global(:root[data-theme="dark"] .clash-hero__wash) { opacity: .32; background-image: radial-gradient(circle, rgb(99 151 222 / 28%) 0 1px, transparent 1.4px); }
 :global(:root[data-theme="dark"] .chess-piece) { color: #6c8fbd; opacity: .13; }
+:global(:root[data-theme="dark"] .clash-cheer-rail) { border-color: rgb(119 155 204 / 24%); background: rgb(12 27 46 / 68%); box-shadow: 0 .8rem 2.2rem rgb(0 0 0 / 28%); }
+:global(:root[data-theme="dark"] .clash-cheer-action) { border-color: color-mix(in srgb, var(--relay-primary) 42%, #263b56); background: linear-gradient(135deg, color-mix(in srgb, var(--relay-primary) 18%, #142339), #101b2a); color: color-mix(in srgb, var(--relay-primary) 48%, white); box-shadow: inset 0 1px rgb(255 255 255 / 5%); }
+:global(:root[data-theme="dark"] .clash-cheer-action small) { color: #94a8c2; }
 :global(:root[data-theme="dark"] .clash-kicker) { border-color: rgb(105 158 231 / 16%); background: rgb(35 67 108 / 58%); color: #8fbbff; }
 :global(:root[data-theme="dark"] .clash-heading h1),
 :global(:root[data-theme="dark"] .clash-countdown strong) { color: #f6f9ff; }

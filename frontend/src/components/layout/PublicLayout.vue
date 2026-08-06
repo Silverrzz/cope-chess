@@ -9,7 +9,7 @@ import SettingsDrawer from "@/components/ui/SettingsDrawer.vue";
 
 const route = useRoute();
 const menuOpen = ref(false);
-const compactGameLayout = computed(() => route.name === "tournament");
+const compactGameLayout = computed(() => route.name === "tournament" || route.name === "event-arena");
 
 const navItems = [
   { label: "Events", to: "/events" },

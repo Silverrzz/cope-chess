@@ -55,6 +55,7 @@ from .registry import EventModule, register_event_module
 MODULE_KEY = "engine-relay"
 MODULE_VERSION = 1
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_CHEER_CLIENT = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,6 +639,16 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        hub = request.app.state.stream_hub
+        client_host = request.client.host if request.client is not None else "unknown"
+        supplied_client = request.headers.get("x-cope-cheer-client", "")
+        client_key = supplied_client if _CHEER_CLIENT.fullmatch(supplied_client) else client_host
+        if not hub.allow_ephemeral(
+            f"cheer-client:{slug}:{client_host}:{client_key}",
+            rate=4.0,
+            burst=8,
+        ):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
         event = get_event_by_slug(connection, slug)
         if (
             event is None
@@ -653,24 +664,20 @@ def _register_api(app: FastAPI) -> None:
         ).fetchone()
         if team is None:
             raise HTTPException(status_code=404, detail="Relay team not found.")
-        tournament_ids = tuple(
-            int(row["tournament_id"])
-            for row in connection.execute(
-                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
-                (event.id,),
-            ).fetchall()
-        )
-        hub = request.app.state.stream_hub
-        hub.link_event_tournaments(event.id, tournament_ids)
+        if not hub.allow_ephemeral(
+            f"cheer-event:{event.id}",
+            rate=20.0,
+            burst=30,
+        ):
+            raise HTTPException(status_code=429, detail="The crowd is cheering too quickly.")
         cheer = {"id": secrets.token_hex(8), "event_id": event.id, "team_id": payload.team_id}
-        hub.publish(f"event.{event.id}", "event.cheer", cheer, source="web")
-        for tournament_id in tournament_ids:
-            hub.publish(
-                f"tournament.{tournament_id}",
-                "event.cheer",
-                {**cheer, "tournament_id": tournament_id},
-                source="web",
-            )
+        hub.publish(
+            f"event.{event.id}",
+            "event.cheer",
+            cheer,
+            source="web",
+            ephemeral=True,
+        )
         return _json({"accepted": True, "cheer_id": cheer["id"]}, 202)
 
     @app.get("/api/admin/events/{event_id}/engine-relay")

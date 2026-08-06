@@ -89,6 +89,7 @@ from .events import (
     create_event_session,
     create_event_stage,
     create_event_update,
+    delete_event,
     event_public_stats,
     event_resource_counts,
     get_event,

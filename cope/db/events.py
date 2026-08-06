@@ -259,6 +259,14 @@ def get_event_by_slug(connection: sqlite3.Connection, slug: str) -> EventRecord 
     return None if row is None else _event_from_row(row)
 
 
+def delete_event(connection: sqlite3.Connection, event_id: int) -> EventRecord | None:
+    event = get_event(connection, event_id)
+    if event is None:
+        return None
+    connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    return event
+
+
 def list_events(
     connection: sqlite3.Connection,
     *,

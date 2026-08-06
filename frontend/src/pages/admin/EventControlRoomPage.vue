@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
 import { api } from "@/api/client";
 import AdminPageHeader from "@/components/admin/AdminPageHeader.vue";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
 import { errorText, formatDate, humanize } from "@/components/admin/format";
+import { useConfirm } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 import { adminEventComponent } from "@/events/registry";
 import type { EventDetailResponse } from "@/types/events";
 
 const props = defineProps<{ id: string }>();
+const router = useRouter();
+const toast = useToast();
+const { confirm } = useConfirm();
 const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
+const deleting = ref(false);
 const error = ref("");
 const customComponent = computed(() => data.value ? adminEventComponent(data.value.handler.key) : null);
 
@@ -28,6 +35,29 @@ async function load(): Promise<void> {
     loading.value = false;
   }
 }
+
+async function remove(): Promise<void> {
+  if (!data.value || deleting.value) return;
+  const accepted = await confirm({
+    title: "Delete event?",
+    message: `Delete “${data.value.event.title}” and all of its event content? Unstarted relay tournaments will also be deleted. Completed tournament history is retained. This cannot be undone.`,
+    confirmLabel: "Delete event",
+    tone: "danger",
+  });
+  if (!accepted) return;
+  deleting.value = true;
+  error.value = "";
+  try {
+    const response = await api.delete<{ message: string }>(`/api/admin/events/${encodeURIComponent(props.id)}`);
+    toast.success(response.message);
+    await router.push("/admin/events");
+  } catch (cause) {
+    toast.error(cause);
+    error.value = errorText(cause);
+  } finally {
+    deleting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -36,7 +66,7 @@ async function load(): Promise<void> {
     <div v-if="loading" class="panel loading-panel" role="status">Opening control room…</div>
     <template v-else-if="data">
       <AdminPageHeader :title="data.event.title" :description="data.event.subtitle || 'Bespoke event control room'">
-        <template #actions><StatusBadge :status="data.event.status" /><RouterLink v-if="data.event.published_at" class="button button--secondary" :to="`/events/${data.event.slug}`">View public event</RouterLink><RouterLink class="button button--ghost" to="/admin/events">Back to events</RouterLink></template>
+        <template #actions><StatusBadge :status="data.event.status" /><RouterLink v-if="data.event.published_at" class="button button--secondary" :to="`/events/${data.event.slug}`">View public event</RouterLink><RouterLink class="button button--ghost" to="/admin/events">Back to events</RouterLink><button class="button button--danger" type="button" :disabled="deleting" @click="remove">{{ deleting ? "Deleting…" : "Delete event" }}</button></template>
       </AdminPageHeader>
 
       <section class="control-strip panel">
