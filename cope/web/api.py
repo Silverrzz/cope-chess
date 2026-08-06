@@ -136,6 +136,7 @@ from cope.events import (
     event_extension_payload,
     event_modules,
     get_event_module,
+    provision_event_module,
     register_event_api_routes,
 )
 from cope.engine_dockerfiles import (
@@ -1335,6 +1336,46 @@ def register_api_routes(app: FastAPI) -> None:
         if event is None:
             raise HTTPException(status_code=404, detail="Event not found.")
         return _json(_event_detail_payload(connection, event, admin=True))
+
+    @app.post("/api/admin/event-modules/{module_key}/provision")
+    def admin_provision_event_module(
+        module_key: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        module = get_event_module(module_key)
+        if module is None:
+            raise HTTPException(status_code=404, detail="Event module not found.")
+        existing = next(
+            (event for event in list_events(connection) if event.handler_key == module.key),
+            None,
+        )
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{module.label} has already been created.",
+            )
+        try:
+            event = provision_event_module(connection, module.key)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=f"{module.label} could not be created because its event already exists.",
+            ) from exc
+        except (RuntimeError, ValueError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "id": event.id,
+                "event": _event_summary_payload(connection, event, admin=True),
+                "message": f"{event.title} created.",
+            },
+            status_code=201,
+        )
 
     @app.post("/api/admin/rating-lists")
     def admin_create_rating_list(

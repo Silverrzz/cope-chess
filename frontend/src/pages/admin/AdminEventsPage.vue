@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
 import { api } from "@/api/client";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
@@ -10,10 +11,12 @@ import { errorText, formatDate, humanize } from "@/components/admin/format";
 import type { AdminEventListResponse, EventSummary } from "@/types/events";
 
 const data = ref<AdminEventListResponse | null>(null);
+const router = useRouter();
 const loading = ref(true);
 const error = ref("");
 const query = ref("");
 const status = ref("");
+const provisioning = ref("");
 
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
@@ -55,6 +58,24 @@ function scheduleLabel(item: EventSummary): string {
   if (item.record.scheduled_start_at) return `Starts ${formatDate(item.record.scheduled_start_at)}`;
   return "Schedule not set";
 }
+
+function eventForModule(moduleKey: string): EventSummary | undefined {
+  return data.value?.events.find((item) => item.handler.key === moduleKey);
+}
+
+async function provision(moduleKey: string): Promise<void> {
+  if (provisioning.value) return;
+  provisioning.value = moduleKey;
+  error.value = "";
+  try {
+    const response = await api.post<{ id: number }>(`/api/admin/event-modules/${encodeURIComponent(moduleKey)}/provision`);
+    await router.push(`/admin/events/${response.id}`);
+  } catch (cause) {
+    error.value = errorText(cause);
+  } finally {
+    provisioning.value = "";
+  }
+}
 </script>
 
 <template>
@@ -89,12 +110,21 @@ function scheduleLabel(item: EventSummary): string {
           </RouterLink>
         </div>
         <AdminEmptyState v-else-if="data.events.length" title="No matching events" description="Adjust the search or status filter." />
-        <AdminEmptyState v-else title="No events have been provisioned" description="Events are intentionally created by registered code modules. Install a module and run its provisioning entrypoint to place it here." />
+        <AdminEmptyState v-else title="No events have been created" description="Create an event from one of the installed formats below, then configure it in its control room." />
       </section>
 
       <section class="module-registry panel">
-        <div><span>Code registry</span><h2>Installed event modules</h2><p>Only version-compatible modules can open their bespoke control rooms.</p></div>
-        <div v-if="data.registered_modules.length" class="module-list"><div v-for="module in data.registered_modules" :key="module.key"><span><strong>{{ module.label }}</strong><code>{{ module.key }}</code></span><StatusBadge status="active" :label="`v${module.version}`" /></div></div>
+        <div><span>Event formats</span><h2>Create a bespoke event</h2><p>Installed formats can be launched here and configured in their dedicated control rooms.</p></div>
+        <div v-if="data.registered_modules.length" class="module-list">
+          <div v-for="module in data.registered_modules" :key="module.key">
+            <span><strong>{{ module.label }}</strong><code>{{ module.key }}</code></span>
+            <div class="module-actions">
+              <StatusBadge status="active" :label="`v${module.version}`" />
+              <RouterLink v-if="eventForModule(module.key)" class="button button--secondary button--small" :to="`/admin/events/${eventForModule(module.key)!.record.id}`">Open event</RouterLink>
+              <button v-else class="button button--primary button--small" type="button" :disabled="!!provisioning" @click="provision(module.key)">{{ provisioning === module.key ? "Creating…" : "Create event" }}</button>
+            </div>
+          </div>
+        </div>
         <p v-else class="module-empty">The universal event system is ready. No bespoke event modules are registered in this build.</p>
       </section>
     </template>
@@ -107,7 +137,8 @@ function scheduleLabel(item: EventSummary): string {
 .event-launchpad { overflow: hidden; padding: 0; }.launchpad-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; padding: 1rem; border-bottom: 1px solid var(--color-border, #d9e0ea); }.launchpad-heading > div > span, .module-registry > div:first-child > span { color: var(--color-accent, #315fcc); font-size: .61rem; font-weight: 780; letter-spacing: .1em; text-transform: uppercase; }.launchpad-heading h2, .module-registry h2 { margin: .18rem 0 0; font-size: 1rem; }.launchpad-heading p, .module-registry p { margin: .2rem 0 0; color: var(--color-text-muted, #64748b); font-size: .7rem; }.launchpad-filters { display: flex; gap: .45rem; }.launchpad-filters input { width: min(17rem, 27vw); }.launchpad-filters select { min-width: 9rem; }
 .admin-event-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); gap: 1px; background: var(--color-border, #d9e0ea); }.admin-event-card { display: grid; gap: 1rem; min-height: 21rem; padding: 1rem; background: var(--color-surface, #fff); color: var(--color-text, #172033); text-decoration: none; transition: background-color var(--transition-fast, 140ms), transform var(--transition-fast, 140ms); }.admin-event-card:hover { z-index: 1; background: color-mix(in srgb, var(--color-accent, #315fcc) 4%, var(--color-surface, #fff)); }.admin-event-card__top, .admin-event-card footer { display: flex; align-items: center; justify-content: space-between; gap: .7rem; }.admin-event-card__top > span { color: var(--color-accent, #315fcc); font-size: .62rem; font-weight: 750; text-transform: uppercase; }.admin-event-card__copy { align-self: center; }.admin-event-card__copy small { color: var(--color-text-muted, #64748b); font-size: .62rem; }.admin-event-card h3 { margin: .35rem 0 0; font-size: 1.3rem; letter-spacing: -.025em; }.admin-event-card__copy p { margin: .5rem 0 0; color: var(--color-text-muted, #64748b); font-size: .74rem; line-height: 1.55; }.admin-event-card__schedule { display: grid; gap: .2rem; padding: .65rem .7rem; border-left: 2px solid var(--color-accent, #315fcc); background: var(--color-surface-subtle, #f1f5f9); }.admin-event-card__schedule span { color: var(--color-text-muted, #64748b); font-size: .62rem; }.admin-event-card__schedule strong { font-size: .72rem; }.admin-event-card dl { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin: 0; }.admin-event-card dt { color: var(--color-text-muted, #64748b); font-size: .57rem; font-weight: 680; text-transform: uppercase; }.admin-event-card dd { margin: .15rem 0 0; font-size: .85rem; font-weight: 760; }.admin-event-card footer { margin-top: auto; padding-top: .7rem; border-top: 1px solid var(--color-border, #d9e0ea); }.module-state { display: inline-flex; align-items: center; gap: .4rem; color: var(--color-text-muted, #64748b); font-size: .65rem; font-weight: 680; }.module-state i { width: .42rem; height: .42rem; border-radius: 50%; background: currentColor; }.module-state--ready { color: var(--color-success, #15803d); }.module-state--warning { color: var(--color-warning, #9a6700); }
 .module-registry { display: grid; grid-template-columns: minmax(15rem, .7fr) minmax(0, 1.3fr); align-items: start; gap: 2rem; padding: 1rem; }.module-list { display: grid; border: 1px solid var(--color-border, #d9e0ea); border-radius: .55rem; }.module-list > div { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .65rem .75rem; border-bottom: 1px solid var(--color-border, #d9e0ea); }.module-list > div:last-child { border-bottom: 0; }.module-list span { display: grid; gap: .15rem; }.module-list strong { font-size: .76rem; }.module-list code { color: var(--color-text-muted, #64748b); font-size: .64rem; }.module-empty { padding: 1rem; border: 1px dashed var(--color-border-strong, #c7d0dc); border-radius: .55rem; background: var(--color-surface-subtle, #f1f5f9); }
+.module-actions { display: flex; align-items: center; justify-content: flex-end; gap: .55rem; }
 @media (max-width: 50rem) { .event-metrics { grid-template-columns: repeat(2, 1fr); }.launchpad-heading { align-items: stretch; flex-direction: column; }.launchpad-filters input { width: 100%; }.module-registry { grid-template-columns: 1fr; } }
-@media (max-width: 34rem) { .launchpad-filters { flex-direction: column; }.launchpad-filters select { width: 100%; } }
+@media (max-width: 34rem) { .launchpad-filters { flex-direction: column; }.launchpad-filters select { width: 100%; }.module-list > div { align-items: stretch; flex-direction: column; }.module-actions { justify-content: space-between; } }
 @media (prefers-reduced-motion: reduce) { .admin-event-card { transition: none; } }
 </style>
