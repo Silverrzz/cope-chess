@@ -8,8 +8,6 @@ from datetime import datetime
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import chess
-import chess.engine
-import chess.pgn
 
 from cope.db import MoveRecord
 
@@ -69,59 +67,70 @@ def render_annotated_pgn(game: PgnGame) -> str:
         if not game.start_fen or game.start_fen == "startpos"
         else chess.Board(game.start_fen)
     )
-    pgn_game = chess.pgn.Game()
+    date, utc_time = _date_headers(game.started_at)
+    headers = [
+        ("Event", game.event),
+        ("Site", "COPE Chess"),
+        ("Date", date),
+        ("Round", str(game.round)),
+        ("White", game.white),
+        ("Black", game.black),
+        ("Result", game.result),
+    ]
     if board.fen() != chess.STARTING_FEN:
-        pgn_game.setup(board)
-
-    pgn_game.headers["Event"] = game.event
-    pgn_game.headers["Site"] = "COPE Chess"
-    pgn_game.headers["Round"] = str(game.round)
-    pgn_game.headers["White"] = game.white
-    pgn_game.headers["Black"] = game.black
-    pgn_game.headers["Result"] = game.result
-    pgn_game.headers["GameId"] = str(game.id)
-    pgn_game.headers["TournamentId"] = str(game.tournament_id)
-    pgn_game.headers["GameNumber"] = str(game.game_number)
+        headers.extend((("FEN", board.fen()), ("SetUp", "1")))
+    headers.extend(
+        (
+            ("GameId", str(game.id)),
+            ("TournamentId", str(game.tournament_id)),
+            ("GameNumber", str(game.game_number)),
+        )
+    )
     if game.termination:
-        pgn_game.headers["Termination"] = game.termination
+        headers.append(("Termination", game.termination))
     if game.opening:
-        pgn_game.headers["Opening"] = game.opening
-    if game.started_at:
-        _set_date_headers(pgn_game, game.started_at)
+        headers.append(("Opening", game.opening))
+    if date != "????.??.??":
+        headers.append(("UTCDate", date))
+    if utc_time:
+        headers.append(("UTCTime", utc_time))
     time_control = _time_control_header(game.time_control)
     if time_control:
-        pgn_game.headers["TimeControl"] = time_control
+        headers.append(("TimeControl", time_control))
     if game.time_control and game.time_control.get("category") == "movenodes":
-        pgn_game.headers["NodeLimit"] = str(game.time_control.get("nodes", "?"))
+        headers.append(("NodeLimit", str(game.time_control.get("nodes", "?"))))
 
-    node = pgn_game
     exported_plies = 0
+    move_lines: list[str] = []
+    move_line: str | None = None
     for move_record in game.moves:
         move = chess.Move.from_uci(move_record.uci)
         if move not in board.legal_moves:
             break
         mover = board.turn
-        node = node.add_variation(move)
+        move_number = board.fullmove_number
+        san = board.san(move)
+        annotation = _move_annotation(move_record)
         board.push(move)
-        node.set_clock(max(0, move_record.clock_after_ms) / 1000)
-        score = _move_score(move_record, mover)
-        if score is None:
-            node.comment = f"{node.comment} [%eval ?]".strip()
+        if mover == chess.WHITE:
+            if move_line is not None:
+                move_lines.append(move_line)
+            move_line = f"{move_number}. {san} {annotation}"
         else:
-            node.set_eval(score, move_record.depth)
-        details = []
-        score_bound = _white_score_bound(move_record.score_bound, mover)
-        if score_bound:
-            details.append(f"eval {score_bound}")
-        if move_record.is_book:
-            details.append("book")
-        if details:
-            node.comment = f"{node.comment} {'; '.join(details)}".strip()
+            if move_line is None:
+                move_line = f"{move_number}... {san} {annotation}"
+            else:
+                move_line = f"{move_line} {san} {annotation}"
+            move_lines.append(move_line)
+            move_line = None
         exported_plies += 1
 
-    pgn_game.headers["PlyCount"] = str(exported_plies)
-    exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=True)
-    return pgn_game.accept(exporter).strip()
+    if move_line is not None:
+        move_lines.append(move_line)
+    headers.append(("PlyCount", str(exported_plies)))
+    header_text = "\n".join(_render_header(name, value) for name, value in headers)
+    movetext = "\n".join((*move_lines, game.result))
+    return f"{header_text}\n\n{movetext}"
 
 
 def pgn_export_exists(
@@ -325,28 +334,31 @@ def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int |
     return conditions, parameters
 
 
-def _move_score(move: MoveRecord, mover: chess.Color) -> chess.engine.PovScore | None:
+def _move_annotation(move: MoveRecord) -> str:
+    if move.is_book:
+        return "{book}"
     if move.eval_mate is not None:
-        return chess.engine.PovScore(chess.engine.Mate(move.eval_mate), mover)
-    if move.eval_cp is not None:
-        return chess.engine.PovScore(chess.engine.Cp(move.eval_cp), mover)
-    return None
+        score = f"{'+' if move.eval_mate >= 0 else '-'}M{abs(move.eval_mate)}"
+    else:
+        score = f"{(move.eval_cp or 0) / 100:+.2f}"
+    depth = move.depth or 0
+    return f"{{{score}/{depth} {_seconds(move.time_ms)}s}}"
 
 
-def _white_score_bound(bound: str | None, mover: chess.Color) -> str | None:
-    if mover == chess.WHITE:
-        return bound
-    return {"lowerbound": "upperbound", "upperbound": "lowerbound"}.get(bound)
+def _render_header(name: str, value: Any) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    escaped = " ".join(escaped.splitlines())
+    return f'[{name} "{escaped}"]'
 
 
-def _set_date_headers(game: chess.pgn.Game, value: str) -> None:
+def _date_headers(value: str | None) -> tuple[str, str | None]:
+    if not value:
+        return "????.??.??", None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return
-    game.headers["Date"] = parsed.strftime("%Y.%m.%d")
-    game.headers["UTCDate"] = parsed.strftime("%Y.%m.%d")
-    game.headers["UTCTime"] = parsed.strftime("%H:%M:%S")
+        return "????.??.??", None
+    return parsed.strftime("%Y.%m.%d"), parsed.strftime("%H:%M:%S")
 
 
 def _time_control_from_config(raw_config: str) -> Mapping[str, Any] | None:
