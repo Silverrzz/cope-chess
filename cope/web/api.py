@@ -973,23 +973,46 @@ def register_api_routes(app: FastAPI) -> None:
     def public_engines(
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        engines = list_engine_records(connection)
-        engine_rows = [
-            {
-                "id": engine.id,
-                "engine_id": engine.engine_id,
-                "name": engine.name,
-                "author": engine.author,
-                "version": engine.version,
-                "repository_full_name": engine.repository_full_name,
-                "source_ref": engine.source_ref,
-                "source_kind": engine.source_kind,
-                "active": engine.active,
-                "created_at": engine.created_at,
-                "record": engine_result_summary(connection, engine.id),
-            }
-            for engine in engines
-        ]
+        versions = list_engine_records(connection)
+        versions_by_family = {
+            family.id: [version for version in versions if version.engine_id == family.id]
+            for family in list_engine_families(connection)
+        }
+        engine_rows = []
+        for family in list_engine_families(connection):
+            family_versions = versions_by_family[family.id]
+            if not family_versions:
+                continue
+            latest = family_versions[0]
+            records = [engine_result_summary(connection, version.id) for version in family_versions]
+            engine_rows.append(
+                {
+                    "id": family.id,
+                    "name": family.name,
+                    "author": family.author,
+                    "active": family.active and any(version.active for version in family_versions),
+                    "latest_version_id": latest.id,
+                    "latest_version": latest.version,
+                    "created_at": latest.created_at,
+                    "version_count": len(family_versions),
+                    "versions": [
+                        {
+                            "id": version.id,
+                            "version": version.version,
+                            "source_kind": version.source_kind,
+                            "source_ref": version.source_ref,
+                            "repository_full_name": version.repository_full_name,
+                            "active": version.active,
+                            "created_at": version.created_at,
+                        }
+                        for version in family_versions
+                    ],
+                    "record": {
+                        key: sum(record[key] for record in records)
+                        for key in ("wins", "draws", "losses", "games")
+                    },
+                }
+            )
         completed_games = connection.execute(
             "SELECT COUNT(*) AS count FROM games WHERE result IS NOT NULL"
         ).fetchone()
@@ -997,9 +1020,9 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "engines": engine_rows,
                 "stats": {
-                    "families": len(list_engine_families(connection)),
-                    "versions": len(engines),
-                    "available": sum(1 for engine in engines if engine.active),
+                    "families": len(engine_rows),
+                    "versions": len(versions),
+                    "available": sum(1 for engine in engine_rows if engine["active"]),
                     "games": int(completed_games["count"]),
                 },
             }
@@ -1017,6 +1040,8 @@ def register_api_routes(app: FastAPI) -> None:
         engine = get_engine_record(connection, engine_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
+        family = get_engine_family(connection, engine.engine_id)
+        versions = list_engine_versions(connection, engine.engine_id)
         games = list_engine_games(
             connection,
             engine_id,
@@ -1028,10 +1053,26 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "engine": engine,
+                "family": family,
+                "versions": versions,
                 "games": games,
                 "engines": web_app._engine_names(connection),
+                "engine_options": [
+                    {
+                        "id": version.id,
+                        "engine_id": version.engine_id,
+                        "name": version.name,
+                        "author": version.author,
+                        "version": version.version,
+                        "source_kind": version.source_kind,
+                        "active": version.active,
+                    }
+                    for version in list_engine_records(connection)
+                ],
                 "record": engine_result_summary(connection, engine_id),
                 "filter_options": engine_game_filter_options(connection, engine_id),
+                "ratings": _public_engine_ratings(connection, engine_id),
+                "badges": [],
             }
         )
 
@@ -3130,6 +3171,70 @@ def register_api_routes(app: FastAPI) -> None:
         )
         _publish_admin_change(web_app, request)
         return _json({"message": "Message deleted."})
+
+
+def _public_engine_ratings(
+    connection: sqlite3.Connection,
+    engine_id: int,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for rating_list in list_rating_lists(connection):
+        rows = list_rating_rows(connection, rating_list.id)
+        selected = next(
+            (row for row in rows if row.engine.engine_id == engine_id),
+            None,
+        )
+        if selected is None:
+            continue
+        raw_history = list(
+            connection.execute(
+                """
+                SELECT elo_before, elo, elo_change, at
+                FROM rating_list_history
+                WHERE rating_list_id = ? AND engine_id = ?
+                ORDER BY id
+                """,
+                (rating_list.id, engine_id),
+            )
+        )
+        history = []
+        if raw_history:
+            history.append(
+                {
+                    "elo": float(raw_history[0]["elo_before"]),
+                    "change": 0.0,
+                    "at": raw_history[0]["at"],
+                }
+            )
+            history.extend(
+                {
+                    "elo": float(item["elo"]),
+                    "change": float(item["elo_change"]),
+                    "at": item["at"],
+                }
+                for item in raw_history
+            )
+        result.append(
+            {
+                "rating_list": rating_list,
+                "elo": selected.elo,
+                "rank": next(
+                    index + 1
+                    for index, row in enumerate(rows)
+                    if row.engine.engine_id == engine_id
+                ),
+                "field_size": len(rows),
+                "games_played": selected.games_played,
+                "error_margin": selected.error_margin,
+                "updated_at": selected.updated_at,
+                "peak_elo": max(
+                    (point["elo"] for point in history),
+                    default=selected.elo,
+                ),
+                "history": history,
+            }
+        )
+    return result
 
 
 def _json(

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import OptionPicker from '@/components/ui/OptionPicker.vue'
 import type {
   EngineGameFilterOptions,
   EngineGameFilters,
@@ -16,6 +17,15 @@ const props = defineProps<{
   filters: EngineGameFilters
   options: EngineGameFilterOptions
   engines: Record<string, string>
+  engineOptions: Array<{
+    id: number
+    engine_id: number
+    name: string
+    author?: string
+    version: string
+    source_kind?: string
+    active?: boolean
+  }>
   engineId: Identifier
   record: { wins: number; draws: number; losses: number; games: number }
 }>()
@@ -42,10 +52,42 @@ const sides: Array<{ value: EngineGameSideFilter; label: string }> = [
   { value: 'black', label: 'Black' },
 ]
 
-const opponentOptions = computed(() => props.options.opponent_ids
-  .filter((id) => String(id) !== String(props.engineId))
-  .map((id) => ({ id, label: props.engines[String(id)] || `Engine ${id}` }))
-  .sort((left, right) => left.label.localeCompare(right.label)))
+const timeControlOptions = computed(() => [
+  { value: '', label: 'Any time control' },
+  ...props.options.time_controls.map((option) => ({ value: option.value, label: option.label })),
+])
+
+const opponentOptions = computed(() => {
+  const allowed = new Set(props.options.opponent_ids.map(String))
+  const grouped = new Map<number, {
+    value: string
+    label: string
+    description: string
+    children: Array<{ value: string; label: string; description: string }>
+  }>()
+  for (const engine of props.engineOptions) {
+    if (!allowed.has(String(engine.id)) || String(engine.id) === String(props.engineId)) continue
+    const child = {
+      value: String(engine.id),
+      label: engine.version,
+      description: `${engine.source_kind === 'commit' ? 'Commit' : 'Release'}${engine.active === false ? ' · unavailable' : ''}`,
+    }
+    const existing = grouped.get(engine.engine_id)
+    if (existing) existing.children.push(child)
+    else grouped.set(engine.engine_id, {
+      value: `family-${engine.engine_id}`,
+      label: engine.name,
+      description: engine.author || 'Unknown author',
+      children: [child],
+    })
+  }
+  return [...grouped.values()]
+    .map((group) => ({
+      ...group,
+      children: group.children.sort((left, right) => right.label.localeCompare(left.label, undefined, { numeric: true, sensitivity: 'base' })),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label))
+})
 
 const draftCount = computed(() => [
   draft.value.result,
@@ -83,7 +125,7 @@ function resultCount(result: EngineGameResultFilter): number {
 function focusableElements(): HTMLElement[] {
   if (!dialog.value) return []
   return Array.from(dialog.value.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
   ))
 }
 
@@ -173,31 +215,20 @@ function submit(): void {
               <fieldset class="filter-section">
                 <legend>Time control</legend>
                 <p>Choose one of the controls used in this engine’s games.</p>
-                <label class="filter-select">
-                  <AppIcon name="clock" :size="17" />
-                  <select v-model="draft.timeControl" aria-label="Time control">
-                    <option value="">Any time control</option>
-                    <option v-for="option in options.time_controls" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                  <AppIcon name="chevron-down" :size="16" />
-                </label>
+                <OptionPicker v-model="draft.timeControl" :options="timeControlOptions" label="Time control" icon="clock" />
               </fieldset>
 
               <fieldset class="filter-section">
                 <legend>Opponent</legend>
-                <p>Narrow the record to a specific engine version.</p>
-                <label class="filter-select">
-                  <AppIcon name="engine" :size="17" />
-                  <select v-model="draft.opponentId" aria-label="Opponent">
-                    <option value="">Any opponent</option>
-                    <option v-for="opponent in opponentOptions" :key="opponent.id" :value="String(opponent.id)">
-                      {{ opponent.label }}
-                    </option>
-                  </select>
-                  <AppIcon name="chevron-down" :size="16" />
-                </label>
+                <p>Choose a family, then select the version.</p>
+                <OptionPicker
+                  v-model="draft.opponentId"
+                  :options="[{ value: '', label: 'Any opponent' }, ...opponentOptions]"
+                  label="Opponent"
+                  icon="engine"
+                  searchable
+                  search-placeholder="Search engines or versions…"
+                />
               </fieldset>
 
               <fieldset class="filter-section filter-section--wide filter-section--side">
@@ -434,36 +465,6 @@ function submit(): void {
 .outcome-option__mark[data-result='win'] { background: var(--color-success-soft); color: var(--color-success); }
 .outcome-option__mark[data-result='draw'] { background: var(--color-warning-soft); color: var(--color-warning); }
 .outcome-option__mark[data-result='loss'] { background: var(--color-danger-soft); color: var(--color-danger); }
-
-.filter-select {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.55rem;
-  min-height: 2.7rem;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-raised);
-  color: var(--color-text-muted);
-  padding-inline: 0.7rem;
-}
-
-.filter-select:focus-within {
-  border-color: var(--color-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-focus) 20%, transparent);
-}
-
-.filter-select select {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  appearance: none;
-  background: transparent;
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 0.78rem;
-}
 
 .filter-section--side {
   display: block;
