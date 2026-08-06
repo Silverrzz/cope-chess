@@ -9,9 +9,10 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import { errorText, formatDate } from '@/components/admin/format'
 
-interface ChatMessage { id: number; tournament_id: number; display_name: string; text: string; at: string }
+interface ChatMessage { id: number; tournament_id: number | null; event_id: number | null; display_name: string; text: string; at: string }
 interface Settings { enabled: boolean; allow_anonymous_names: boolean; max_message_length: number }
-interface Response { messages: ChatMessage[]; settings: Settings; tournament_names: Record<string, string> }
+interface EventName { title: string; slug: string }
+interface Response { messages: ChatMessage[]; settings: Settings; tournament_names: Record<string, string>; event_names: Record<string, EventName> }
 
 const toast = useToast()
 const { confirm } = useConfirm()
@@ -23,9 +24,10 @@ const deleting = ref<number | null>(null)
 const error = ref('')
 const query = ref('')
 const tournamentNames = ref<Record<string, string>>({})
+const eventNames = ref<Record<string, EventName>>({})
 const filteredMessages = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
-  return needle ? messages.value.filter((message) => `${message.display_name} ${message.text} ${tournamentNames.value[String(message.tournament_id)] ?? ''}`.toLocaleLowerCase().includes(needle)) : messages.value
+  return needle ? messages.value.filter((message) => `${message.display_name} ${message.text} ${messageContext(message)}`.toLocaleLowerCase().includes(needle)) : messages.value
 })
 
 async function load(): Promise<void> {
@@ -34,6 +36,7 @@ async function load(): Promise<void> {
     const response = await api.get<Response>('/api/admin/chat')
     messages.value = response.messages
     tournamentNames.value = response.tournament_names ?? {}
+    eventNames.value = response.event_names ?? {}
     Object.assign(settings, {
       enabled: response.settings.enabled,
       allow_anonymous_names: response.settings.allow_anonymous_names,
@@ -41,6 +44,19 @@ async function load(): Promise<void> {
     })
   } catch (cause) { error.value = errorText(cause) }
   finally { loading.value = false }
+}
+
+function messageContext(message: ChatMessage): string {
+  if (message.event_id !== null) return eventNames.value[String(message.event_id)]?.title ?? `Event ${message.event_id}`
+  return tournamentNames.value[String(message.tournament_id)] ?? `Tournament ${message.tournament_id}`
+}
+
+function messageContextUrl(message: ChatMessage): string {
+  if (message.event_id !== null) {
+    const event = eventNames.value[String(message.event_id)]
+    return event ? `/events/${event.slug}` : '/events'
+  }
+  return `/tournaments/${message.tournament_id}`
 }
 
 async function saveSettings(): Promise<void> {
@@ -71,7 +87,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Tournament chat">
+    <AdminPageHeader title="Public chat" description="Moderate the shared chat defaults and messages across tournaments and events.">
       <template #actions><StatusBadge :status="settings.enabled ? 'active' : 'paused'" :label="settings.enabled ? 'Chat enabled' : 'Chat disabled'" /></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
@@ -93,7 +109,7 @@ onMounted(load)
         <div v-if="filteredMessages.length" class="message-list">
           <article v-for="message in filteredMessages" :key="message.id">
             <span class="message-avatar" aria-hidden="true">{{ message.display_name.slice(0, 2).toUpperCase() }}</span>
-            <div class="message-body"><div><strong>{{ message.display_name }}</strong><time :datetime="message.at">{{ formatDate(message.at) }}</time></div><RouterLink class="message-context" :to="`/tournaments/${message.tournament_id}`">{{ tournamentNames[String(message.tournament_id)] ?? `Tournament ${message.tournament_id}` }}</RouterLink><p>{{ message.text }}</p></div>
+            <div class="message-body"><div><strong>{{ message.display_name }}</strong><time :datetime="message.at">{{ formatDate(message.at) }}</time></div><RouterLink class="message-context" :to="messageContextUrl(message)">{{ messageContext(message) }}</RouterLink><p>{{ message.text }}</p></div>
             <button class="button button--danger button--small" type="button" :disabled="deleting === message.id" @click="remove(message)">{{ deleting === message.id ? 'Deleting…' : 'Delete' }}</button>
           </article>
         </div>

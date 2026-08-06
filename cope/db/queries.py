@@ -55,6 +55,7 @@ _DB_STAT_TABLES = (
     "rating_lists",
     "engines",
     "tournaments",
+    "events",
     "games",
     "workers",
     "opening_suites",

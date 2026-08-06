@@ -19,6 +19,19 @@ const router = createRouter({
           meta: { title: "Home" },
         },
         {
+          path: "events",
+          name: "events",
+          component: () => import("@/pages/public/EventsPage.vue"),
+          meta: { title: "Events" },
+        },
+        {
+          path: "events/:slug",
+          name: "event",
+          component: () => import("@/pages/public/EventPage.vue"),
+          props: true,
+          meta: { title: "Event" },
+        },
+        {
           path: "tournaments",
           name: "tournaments",
           component: () => import("@/pages/public/TournamentsPage.vue"),
@@ -80,6 +93,19 @@ const router = createRouter({
           name: "admin-dashboard",
           component: () => import("@/pages/admin/DashboardPage.vue"),
           meta: { title: "Dashboard" },
+        },
+        {
+          path: "events",
+          name: "admin-events",
+          component: () => import("@/pages/admin/AdminEventsPage.vue"),
+          meta: { title: "Manage events" },
+        },
+        {
+          path: "events/:id",
+          name: "admin-event",
+          component: () => import("@/pages/admin/EventControlRoomPage.vue"),
+          props: true,
+          meta: { title: "Event control room" },
         },
         {
           path: "tournaments",

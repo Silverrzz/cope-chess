@@ -24,6 +24,7 @@ from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
 from cope.db import (
     ChatSettingsRecord,
+    EventRecord,
     append_suite_openings,
     create_deployment_job,
     create_dockerfile_pull_job,
@@ -50,6 +51,8 @@ from cope.db import (
     engine_game_filter_options,
     engine_build_is_benchmarked,
     engine_result_summary,
+    event_public_stats,
+    event_resource_counts,
     forget_benchmarker,
     forget_engine_benchmarks,
     forget_failed_benchmark_job,
@@ -58,6 +61,9 @@ from cope.db import (
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
+    get_event,
+    get_event_by_slug,
+    get_event_chat_settings,
     get_engine_artifact_by_sha256,
     get_engine_family,
     get_engine_version_record,
@@ -76,6 +82,14 @@ from cope.db import (
     list_benchmark_hardware,
     list_chat_messages,
     list_engine_games,
+    list_event_awards,
+    list_event_cast,
+    list_event_contest_cast,
+    list_event_contests,
+    list_event_sessions,
+    list_event_stages,
+    list_event_updates,
+    list_events,
     list_engine_records,
     list_engine_benchmark_jobs,
     list_engines,
@@ -117,6 +131,12 @@ from cope.db import (
     update_worker_assignment_settings,
     update_worker_label,
     unschedule_tournament,
+)
+from cope.events import (
+    event_extension_payload,
+    event_modules,
+    get_event_module,
+    register_event_api_routes,
 )
 from cope.engine_dockerfiles import (
     EngineDockerfileError,
@@ -823,6 +843,54 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
+    @app.get("/api/events")
+    def public_events(connection: sqlite3.Connection = Depends(web_app._database)):
+        events = list_events(connection, public_only=True)
+        return _json(
+            {
+                "events": [
+                    _event_summary_payload(connection, event, admin=False)
+                    for event in events
+                ],
+                "event_stats": event_public_stats(connection),
+            }
+        )
+
+    @app.get("/api/events/{slug}")
+    def public_event(
+        slug: str,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = _require_public_event(connection, slug)
+        return _json(_event_detail_payload(connection, event, admin=False))
+
+    @app.post("/api/events/{slug}/chat")
+    async def public_event_chat(
+        slug: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = _require_public_event(connection, slug)
+        form = await read_form(request)
+        settings = get_event_chat_settings(
+            connection,
+            event.id,
+            defaults=get_chat_settings(connection),
+        )
+
+        def create_message():
+            return web_app._create_event_chat_message_from_form(
+                connection,
+                form,
+                event_id=event.id,
+                settings=settings,
+            )
+
+        message = await asyncio.to_thread(create_message)
+        if message is not None:
+            web_app._publish_event_chat_message(request, event.id, message)
+        return _json({"message": message}, status_code=201)
+
     @app.get("/api/tournaments/{tournament_id}")
     def public_tournament(
         tournament_id: int,
@@ -1227,6 +1295,46 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/admin/ratings")
     def admin_ratings(connection: sqlite3.Connection = Depends(web_app._database)):
         return _json(_admin_ratings_payload(connection))
+
+    @app.get("/api/admin/events")
+    def admin_events(connection: sqlite3.Connection = Depends(web_app._database)):
+        modules = event_modules()
+        return _json(
+            {
+                "events": [
+                    _event_summary_payload(connection, event, admin=True)
+                    for event in list_events(connection)
+                ],
+                "statuses": [
+                    "draft",
+                    "announced",
+                    "scheduled",
+                    "live",
+                    "intermission",
+                    "postponed",
+                    "completed",
+                    "cancelled",
+                ],
+                "registered_modules": [
+                    {
+                        "key": module.key,
+                        "label": module.label,
+                        "version": module.version,
+                    }
+                    for module in modules.values()
+                ],
+            }
+        )
+
+    @app.get("/api/admin/events/{event_id}")
+    def admin_event(
+        event_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = get_event(connection, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found.")
+        return _json(_event_detail_payload(connection, event, admin=True))
 
     @app.post("/api/admin/rating-lists")
     def admin_create_rating_list(
@@ -3130,6 +3238,7 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "messages": list_chat_messages(connection, limit=100),
                 "tournament_names": web_app._tournament_names(connection),
+                "event_names": web_app._event_names(connection),
                 "settings": get_chat_settings(connection),
             }
         )
@@ -3166,11 +3275,119 @@ def register_api_routes(app: FastAPI) -> None:
         connection.commit()
         web_app._publish_chat_deletion(
             request,
-            deleted.tournament_id,
-            deleted.id,
+            tournament_id=deleted.tournament_id,
+            event_id=deleted.event_id,
+            message_id=deleted.id,
         )
         _publish_admin_change(web_app, request)
         return _json({"message": "Message deleted."})
+
+    register_event_api_routes(app)
+
+
+def _require_public_event(connection: sqlite3.Connection, slug: str) -> EventRecord:
+    event = get_event_by_slug(connection, slug)
+    if event is None or event.published_at is None or event.status == "draft":
+        raise HTTPException(status_code=404, detail="Event not found.")
+    return event
+
+
+def _event_summary_payload(
+    connection: sqlite3.Connection,
+    event: EventRecord,
+    *,
+    admin: bool,
+) -> dict[str, Any]:
+    module = get_event_module(event.handler_key)
+    sessions = list_event_sessions(connection, event.id)
+    next_session = next(
+        (
+            session
+            for session in sessions
+            if session.status in {"live", "intermission", "scheduled", "pending", "postponed"}
+        ),
+        None,
+    )
+    payload = {
+        "record": event if admin else _public_event_record(event),
+        "counts": event_resource_counts(connection, event.id),
+        "next_session": (
+            next_session
+            if admin or next_session is None
+            else _public_event_child(next_session)
+        ),
+        "handler": {
+            "key": event.handler_key,
+            "required_version": event.handler_version,
+            "available": module is not None,
+            "current": module is not None and module.version == event.handler_version,
+            "label": module.label if module is not None else event.handler_key,
+            "installed_version": module.version if module is not None else None,
+        },
+    }
+    return payload
+
+
+def _event_detail_payload(
+    connection: sqlite3.Connection,
+    event: EventRecord,
+    *,
+    admin: bool,
+) -> dict[str, Any]:
+    module = get_event_module(event.handler_key)
+    defaults = get_chat_settings(connection)
+    chat_settings = get_event_chat_settings(connection, event.id, defaults=defaults)
+    stages = list_event_stages(connection, event.id)
+    sessions = list_event_sessions(connection, event.id)
+    cast = list_event_cast(connection, event.id)
+    contests = list_event_contests(connection, event.id)
+    contest_cast = list_event_contest_cast(connection, event.id)
+    updates = list_event_updates(connection, event.id, public_only=not admin)
+    awards = list_event_awards(connection, event.id)
+    if not admin:
+        stages = tuple(_public_event_child(item) for item in stages)
+        sessions = tuple(_public_event_child(item) for item in sessions)
+        cast = tuple(_public_event_child(item) for item in cast)
+        contests = tuple(_public_event_child(item, remove=("state",)) for item in contests)
+        contest_cast = tuple(_public_event_child(item) for item in contest_cast)
+        awards = tuple(_public_event_child(item) for item in awards)
+    return {
+        "event": event if admin else _public_event_record(event),
+        "handler": {
+            "key": event.handler_key,
+            "required_version": event.handler_version,
+            "available": module is not None,
+            "current": module is not None and module.version == event.handler_version,
+            "label": module.label if module is not None else event.handler_key,
+            "installed_version": module.version if module is not None else None,
+        },
+        "stages": stages,
+        "sessions": sessions,
+        "cast": cast,
+        "contests": contests,
+        "contest_cast": contest_cast,
+        "updates": updates,
+        "awards": awards,
+        "counts": event_resource_counts(connection, event.id),
+        "chat_messages": list_chat_messages(connection, limit=100, event_id=event.id),
+        "chat_settings": chat_settings,
+        "custom": event_extension_payload(connection, event, admin=admin),
+    }
+
+
+def _public_event_record(event: EventRecord) -> dict[str, Any]:
+    payload = jsonable_encoder(event)
+    payload.pop("config", None)
+    payload.pop("state", None)
+    return payload
+
+
+def _public_event_child(item: Any, *, remove: tuple[str, ...] = ()) -> dict[str, Any]:
+    payload = jsonable_encoder(item)
+    payload.pop("metadata", None)
+    for key in remove:
+        payload.pop(key, None)
+    return payload
 
 
 def _public_engine_ratings(

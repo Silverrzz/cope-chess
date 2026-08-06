@@ -190,14 +190,14 @@ class TournamentEstimator:
               CASE WHEN game.status = 'live' THEN (
                 SELECT latest.clock_after_ms
                 FROM moves latest
-                WHERE latest.game_id = game.id AND latest.ply % 2 = 1
+                WHERE latest.game_id = game.id AND latest.ply %% 2 = 1
                 ORDER BY latest.ply DESC
                 LIMIT 1
               ) END AS white_clock_ms,
               CASE WHEN game.status = 'live' THEN (
                 SELECT latest.clock_after_ms
                 FROM moves latest
-                WHERE latest.game_id = game.id AND latest.ply % 2 = 0
+                WHERE latest.game_id = game.id AND latest.ply %% 2 = 0
                 ORDER BY latest.ply DESC
                 LIMIT 1
             ) END AS black_clock_ms

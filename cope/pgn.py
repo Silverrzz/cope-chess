@@ -59,6 +59,7 @@ class PgnGame:
     started_at: str | None
     time_control: Mapping[str, Any] | None
     moves: Sequence[MoveRecord]
+    extra_headers: Mapping[str, Any] | None = None
 
 
 def render_annotated_pgn(game: PgnGame) -> str:
@@ -99,6 +100,8 @@ def render_annotated_pgn(game: PgnGame) -> str:
         headers.append(("TimeControl", time_control))
     if game.time_control and game.time_control.get("category") == "movenodes":
         headers.append(("NodeLimit", str(game.time_control.get("nodes", "?"))))
+    if game.extra_headers:
+        headers.extend((name, value) for name, value in game.extra_headers.items())
 
     exported_plies = 0
     move_lines: list[str] = []
@@ -270,6 +273,7 @@ def _list_export_moves(
                 info_line=row["info_line"],
                 time_ms=int(row["time_ms"]),
                 clock_after_ms=int(row["clock_after_ms"]),
+                engine_version_id=row["engine_version_id"],
             )
         )
     return {game_id: tuple(moves) for game_id, moves in collected.items()}
@@ -342,7 +346,8 @@ def _move_annotation(move: MoveRecord) -> str:
     else:
         score = f"{(move.eval_cp or 0) / 100:+.2f}"
     depth = move.depth or 0
-    return f"{{{score}/{depth} {_seconds(move.time_ms)}s}}"
+    engine = f" engine {move.engine_version_id}" if move.engine_version_id is not None else ""
+    return f"{{{score}/{depth} {_seconds(move.time_ms)}s{engine}}}"
 
 
 def _render_header(name: str, value: Any) -> str:

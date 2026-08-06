@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 14
+PROTOCOL_VERSION = 15
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
@@ -241,6 +241,52 @@ class ColorSlot(StrEnum):
     BLACK = "B"
 
 
+class EngineRelayMember(StrictModel):
+    engine_id: int = Field(gt=0)
+    relay_moves: int = Field(gt=0)
+    nodes: int = Field(gt=0)
+    position: int = Field(ge=0)
+
+
+class EngineRelayTeam(StrictModel):
+    team_id: int = Field(gt=0)
+    name: str = Field(min_length=1, max_length=120)
+    short_name: str = Field(default="", max_length=20)
+    primary_color: str = Field(default="", max_length=32)
+    secondary_color: str = Field(default="", max_length=32)
+    members: tuple[EngineRelayMember, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_members(self) -> EngineRelayTeam:
+        engine_ids = [member.engine_id for member in self.members]
+        if len(set(engine_ids)) != len(engine_ids):
+            raise ValueError("relay team engine ids must be unique")
+        return self
+
+
+class EngineRelayAssignment(StrictModel):
+    event_id: int = Field(gt=0)
+    fixture_id: int = Field(gt=0)
+    teams: dict[ColorSlot, EngineRelayTeam]
+
+    @field_validator("teams")
+    @classmethod
+    def validate_teams(
+        cls,
+        value: dict[ColorSlot, EngineRelayTeam],
+    ) -> dict[ColorSlot, EngineRelayTeam]:
+        if set(value) != {ColorSlot.WHITE, ColorSlot.BLACK}:
+            raise ValueError("relay assignment requires white and black teams")
+        engine_ids = [
+            member.engine_id
+            for team in value.values()
+            for member in team.members
+        ]
+        if len(set(engine_ids)) != len(engine_ids):
+            raise ValueError("an engine cannot play for both relay teams")
+        return value
+
+
 class GameAssignment(StrictModel):
     assignment_id: int = Field(gt=0)
     assignment_key: str = Field(min_length=16, max_length=128)
@@ -248,6 +294,7 @@ class GameAssignment(StrictModel):
     slots: dict[ColorSlot, int]
     time_control: TimeControl
     uci_options_overrides: dict[int, dict[str, UciOptionValue]] = Field(default_factory=dict)
+    engine_relay: EngineRelayAssignment | None = None
 
     @field_validator("slots")
     @classmethod
@@ -630,7 +677,7 @@ class BenchmarkFailed(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[14] = PROTOCOL_VERSION
+    v: Literal[15] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

@@ -67,6 +67,20 @@ def main(argv: list[str] | None = None) -> int:
         "--database-url", dest="db_path", default=_default_database_url()
     )
 
+    events_parser = subparsers.add_parser("events", help="event module operations")
+    events_subparsers = events_parser.add_subparsers(dest="events_command", required=True)
+    events_subparsers.add_parser("list", help="list registered event modules")
+    provision_event_parser = events_subparsers.add_parser(
+        "provision",
+        help="provision an event from a registered module",
+    )
+    provision_event_parser.add_argument("module", help="registered event module key")
+    provision_event_parser.add_argument(
+        "--database-url",
+        dest="db_path",
+        default=_default_database_url(),
+    )
+
     subparsers.add_parser("doctor", help="check database and production configuration")
     subparsers.add_parser("version", help="print the COPE release and protocol version")
 
@@ -404,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "db":
         return _database_command(args)
 
+    if args.role == "events":
+        return _events_command(args)
+
     if args.role == "init-db":
         from .db import initialize_database
 
@@ -733,6 +750,39 @@ def _database_command(args) -> int:
         return 0
 
     raise SystemExit(f"unknown database command: {args.db_command}")
+
+
+def _events_command(args) -> int:
+    from .events import event_modules, provision_event_module
+
+    modules = event_modules()
+    if args.events_command == "list":
+        if not modules:
+            print("no event modules registered")
+            return 0
+        for module in modules.values():
+            print(f"{module.key}\tversion={module.version}\t{module.label}")
+        return 0
+
+    if args.events_command == "provision":
+        from .db import connect_database, initialize_database
+
+        initialize_database(args.db_path)
+        connection = connect_database(args.db_path)
+        try:
+            event = provision_event_module(connection, args.module)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        print(f"event_id={event.id}")
+        print(f"slug={event.slug}")
+        print(f"handler={event.handler_key}@{event.handler_version}")
+        return 0
+
+    raise SystemExit(f"unknown events command: {args.events_command}")
 
 
 def _doctor() -> int:

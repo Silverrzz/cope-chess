@@ -1643,10 +1643,9 @@ class WorkerHandshakeServer:
                 ready.assignment_id,
                 ready.assignment_key,
             )
-            colors = {
-                engine_id: color.name.lower()
-                for color, engine_id in assignment.assignment.slots.items()
-            }
+            from cope.events.engine_relay import relay_engine_colors
+
+            colors = relay_engine_colors(assignment)
             for engine_id, score in ready.hardware_scores.items():
                 record_game_hardware_score(
                     connection,

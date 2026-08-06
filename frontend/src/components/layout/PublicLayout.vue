@@ -12,6 +12,7 @@ const menuOpen = ref(false);
 const compactGameLayout = computed(() => route.name === "tournament");
 
 const navItems = [
+  { label: "Events", to: "/events" },
   { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
   { label: "Engines", to: "/engines" },

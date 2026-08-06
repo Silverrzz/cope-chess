@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import chess
 
@@ -20,6 +21,8 @@ from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
     EngineSpec,
+    EngineRelayMember,
+    EngineRelayTeam,
     GameAssignment,
     GameBenchmarkReference,
     TimeControl,
@@ -240,14 +243,6 @@ def next_worker_assignment(
         if active_games >= tournament.config.concurrency:
             continue
 
-        required_resources = _tournament_required_resources(tournament)
-        available_threads, available_hash_mb = available_resources
-        if (
-            available_threads < required_resources.threads
-            or available_hash_mb < required_resources.hash_mb
-        ):
-            continue
-
         if worker.hw is None:
             continue
         game = _next_playable_game_for_worker(
@@ -260,6 +255,18 @@ def next_worker_assignment(
         if game is None:
             continue
         engines = _assignment_engines(connection, game)
+        if excluded_engine_ids.intersection(engines):
+            continue
+        required_resources = _tournament_required_resources(
+            tournament,
+            engine_count=len(engines),
+        )
+        available_threads, available_hash_mb = available_resources
+        if (
+            available_threads < required_resources.threads
+            or available_hash_mb < required_resources.hash_mb
+        ):
+            continue
         benchmark_reference = get_common_benchmark_reference(
             connection,
             tuple(engines.values()),
@@ -372,16 +379,31 @@ def run_worker_assignment_game(
     )
 
     runtime_time_control = _runtime_time_control(tournament.config.time_control)
-    white = EngineInstance(
-        game_record.white_engine_id,
-        transport,
-        options=_engine_options(assignment, game_record.white_engine_id),
+    engine_instances = {
+        engine_id: EngineInstance(
+            engine_id,
+            transport,
+            options=_engine_options(assignment, engine_id),
+        )
+        for engine_id in assignment.engines
+    }
+    relay = assignment.assignment.engine_relay
+    white_member = (
+        _relay_member_for_moves(relay.teams[ColorSlot.WHITE], 0)
+        if relay is not None
+        else None
     )
-    black = EngineInstance(
-        game_record.black_engine_id,
-        transport,
-        options=_engine_options(assignment, game_record.black_engine_id),
+    black_member = (
+        _relay_member_for_moves(relay.teams[ColorSlot.BLACK], 0)
+        if relay is not None
+        else None
     )
+    white = engine_instances[
+        white_member.engine_id if white_member is not None else game_record.white_engine_id
+    ]
+    black = engine_instances[
+        black_member.engine_id if black_member is not None else game_record.black_engine_id
+    ]
     game = Game(
         id=game_record.id,
         white=white,
@@ -390,9 +412,31 @@ def run_worker_assignment_game(
         white_tm=runtime_time_control.create_manager(),
         black_tm=runtime_time_control.create_manager(),
     )
-    live_reporter = _LiveGameReporter(tournament.id, game_record.id, game, white, black)
-    white.set_info_listener(live_reporter.publish_white_engine_info)
-    black.set_info_listener(live_reporter.publish_black_engine_info)
+    relay_engine_data = _relay_engine_data(relay)
+    live_reporter = _LiveGameReporter(
+        tournament.id,
+        game_record.id,
+        game,
+        white,
+        black,
+        relay_engine_data=relay_engine_data,
+    )
+    if relay is None:
+        white.set_info_listener(live_reporter.publish_white_engine_info)
+        black.set_info_listener(live_reporter.publish_black_engine_info)
+    else:
+        for color, team in relay.teams.items():
+            side = color.name.lower()
+            for member in team.members:
+                engine = engine_instances[member.engine_id]
+                engine.set_info_listener(
+                    lambda line, info, side=side, engine=engine: live_reporter.publish_engine_info(
+                        side,
+                        engine,
+                        line,
+                        info,
+                    )
+                )
     runner = GameRunner(
         game,
         on_clock_sync=live_reporter.publish_clock_sync,
@@ -410,16 +454,16 @@ def run_worker_assignment_game(
         "running",
         "Starting both engines and synchronizing their UCI configuration",
         current=0,
-        total=2,
+        total=len(engine_instances),
     )
-    runner.prepare_game()
+    runner.prepare_game(engine_instances.values())
     progress(
         "startup",
         "engine_initialize",
         "completed",
-        "Both engines passed UCI initialization and readiness checks",
-        current=2,
-        total=2,
+        "Every assigned engine passed UCI initialization and readiness checks",
+        current=len(engine_instances),
+        total=len(engine_instances),
     )
     opening_label = "Start position" if opening is None else opening.name or "Configured opening"
     progress(
@@ -435,8 +479,8 @@ def run_worker_assignment_game(
             "book_plies": len(opening_moves),
         },
     )
-    white.prepare_position(board)
-    black.prepare_position(board)
+    for engine in engine_instances.values():
+        engine.prepare_position(board)
     progress(
         "opening",
         "opening_start_position",
@@ -466,8 +510,8 @@ def run_worker_assignment_game(
         side_to_move = board.turn
         board.push(move)
         game.state.update_from_board()
-        white.prepare_position(board)
-        black.prepare_position(board)
+        for engine in engine_instances.values():
+            engine.prepare_position(board)
         clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         clock_after_ms = _clock_time_ms(clock)
         move_record = record_move(
@@ -549,11 +593,30 @@ def run_worker_assignment_game(
     ):
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
+        if relay is not None:
+            color = ColorSlot.WHITE if side_to_move == chess.WHITE else ColorSlot.BLACK
+            team = relay.teams[color]
+            member = _relay_member_for_moves(
+                team,
+                _relay_moves_played(moves, color),
+            )
+            engine = engine_instances[member.engine_id]
+            manager = RuntimeTimeControl(
+                TimeControlCategory.MOVENODES,
+                nodes=member.nodes,
+            ).create_manager()
+            if side_to_move == chess.WHITE:
+                game.white = engine
+                game.white_tm = manager
+            else:
+                game.black = engine
+                game.black_tm = manager
+        else:
+            engine = white if side_to_move == chess.WHITE else black
         board_before_move = board.copy(stack=False)
         move = runner.run_next_move()
         if move is None:
             break
-        engine = white if side_to_move == chess.WHITE else black
         search = engine.get_last_search_result()
         if search is not None and search.info_line is not None:
             live_reporter.publish_final_engine_info(
@@ -584,6 +647,7 @@ def run_worker_assignment_game(
             info_line=None if search is None else search.info_line,
             time_ms=0 if search is None else search.time_ms,
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
+            engine_version_id=int(engine.get_name()),
         )
         moves.append(move_record)
         connection.commit()
@@ -684,6 +748,47 @@ def run_worker_assignment_game(
     publish_tournament_event(tournament.id)
 
 
+def _relay_member_for_moves(
+    team: EngineRelayTeam,
+    moves_played: int,
+) -> EngineRelayMember:
+    cycle = sum(member.relay_moves for member in team.members)
+    offset = moves_played % cycle
+    for member in team.members:
+        if offset < member.relay_moves:
+            return member
+        offset -= member.relay_moves
+    return team.members[0]
+
+
+def _relay_moves_played(
+    moves: Sequence[MoveRecord],
+    color: ColorSlot,
+) -> int:
+    white = color == ColorSlot.WHITE
+    return sum(
+        1
+        for move in moves
+        if not move.is_book and ((move.ply % 2 == 1) == white)
+    )
+
+
+def _relay_engine_data(relay) -> dict[int, dict[str, Any]]:
+    if relay is None:
+        return {}
+    return {
+        member.engine_id: {
+            "relay_team_id": team.team_id,
+            "relay_team_name": team.name,
+            "relay_position": index,
+            "relay_moves": member.relay_moves,
+            "node_limit": member.nodes,
+        }
+        for team in relay.teams.values()
+        for index, member in enumerate(team.members)
+    }
+
+
 class _LiveGameReporter:
     def __init__(
         self,
@@ -692,12 +797,14 @@ class _LiveGameReporter:
         game: Game,
         white: EngineInstance,
         black: EngineInstance,
+        relay_engine_data: dict[int, dict[str, Any]] | None = None,
     ):
         self._tournament_id = tournament_id
         self._game_id = game_id
         self._game = game
         self._white = white
         self._black = black
+        self._relay_engine_data = relay_engine_data or {}
         self._last_engine_info_at = {"white": 0.0, "black": 0.0}
 
     def publish_white_engine_info(self, line: str, info: EngineSearchInfo) -> None:
@@ -705,6 +812,15 @@ class _LiveGameReporter:
 
     def publish_black_engine_info(self, line: str, info: EngineSearchInfo) -> None:
         self._publish_engine_info("black", self._black, line, info)
+
+    def publish_engine_info(
+        self,
+        side: str,
+        engine: EngineInstance,
+        line: str,
+        info: EngineSearchInfo,
+    ) -> None:
+        self._publish_engine_info(side, engine, line, info)
 
     def publish_final_engine_info(
         self,
@@ -766,6 +882,9 @@ class _LiveGameReporter:
             return
         self._last_engine_info_at[side] = now
         engine_data = _live_engine_data(info)
+        engine_id = int(engine.get_name())
+        engine_data["engine_id"] = engine_id
+        engine_data.update(self._relay_engine_data.get(engine_id, {}))
         root_fen = root_fen or self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen
         engine_data["pv_san"] = pv_to_san(info.pv, root_fen) or "not recorded"
@@ -775,7 +894,7 @@ class _LiveGameReporter:
             {
                 "tournament_id": self._tournament_id,
                 "game_id": self._game_id,
-                "engine_id": engine.get_name(),
+                "engine_id": engine_id,
                 "side": side,
                 "raw": line,
                 "root_fen": root_fen,
@@ -808,7 +927,7 @@ def _clock_time_ms(clock) -> int | None:
     return clock.get_remaining_move_time()
 
 
-def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, str]:
+def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, Any]:
     if info is None:
         return {
             "depth": "-",
@@ -853,6 +972,9 @@ def _worker_assignment_payload(
     engines: dict[int, EngineSpec],
     benchmark_reference: GameBenchmarkReferenceRecord,
 ) -> WorkerGameAssignment:
+    from cope.events.engine_relay import relay_assignment_for_game
+
+    relay = relay_assignment_for_game(connection, game)
     return WorkerGameAssignment(
         assignment=GameAssignment(
             assignment_id=assignment.id,
@@ -865,8 +987,9 @@ def _worker_assignment_payload(
             time_control=tournament.config.time_control,
             uci_options_overrides={
                 engine_id: _tournament_engine_options(tournament, engine_id)
-                for engine_id in {game.white_engine_id, game.black_engine_id}
+                for engine_id in engines
             },
+            engine_relay=relay,
         ),
         tournament_name=tournament.name,
         round=game.round,
@@ -875,7 +998,10 @@ def _worker_assignment_payload(
         opening_moves=() if opening is None else opening.moves,
         max_plies=_max_plies(tournament),
         engines=engines,
-        required_resources=_tournament_required_resources(tournament),
+        required_resources=_tournament_required_resources(
+            tournament,
+            engine_count=len(engines),
+        ),
         benchmark_reference=GameBenchmarkReference(
             hardware_key=benchmark_reference.hardware_key,
             engine_nps=benchmark_reference.engine_nps,
@@ -887,8 +1013,15 @@ def _assignment_engines(
     connection: sqlite3.Connection,
     game: GameRecord,
 ) -> dict[int, EngineSpec]:
+    from cope.events.engine_relay import relay_engine_ids_for_game
+
     engines: dict[int, EngineSpec] = {}
-    for engine_id in {game.white_engine_id, game.black_engine_id}:
+    engine_ids = {
+        game.white_engine_id,
+        game.black_engine_id,
+        *relay_engine_ids_for_game(connection, game),
+    }
+    for engine_id in engine_ids:
         engine = get_engine(connection, engine_id)
         if engine is None:
             raise RuntimeError(f"unknown engine {engine_id}")
@@ -910,13 +1043,17 @@ def _engine_options(
     )
 
 
-def _tournament_required_resources(tournament: TournamentRecord) -> WorkerResources:
+def _tournament_required_resources(
+    tournament: TournamentRecord,
+    *,
+    engine_count: int = 2,
+) -> WorkerResources:
     return WorkerResources(
         threads=tournament.config.engine_threads,
         hash_mb=(
             tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
         )
-        * 2,
+        * max(2, engine_count),
     )
 
 
@@ -934,7 +1071,7 @@ def _worker_available_resources(
         used_hash_mb = 0
         rows = connection.execute(
             """
-            SELECT tournaments.config
+            SELECT tournaments.id, tournaments.config
             FROM game_assignments
             JOIN games ON games.id = game_assignments.game_id
             JOIN tournaments ON tournaments.id = games.tournament_id
@@ -947,9 +1084,15 @@ def _worker_available_resources(
         for row in rows:
             config = TournamentConfig.model_validate_json(row["config"])
             used_threads += config.engine_threads
+            from cope.events.engine_relay import relay_engine_count_for_tournament
+
+            engine_count = relay_engine_count_for_tournament(
+                connection,
+                int(row["id"]),
+            )
             used_hash_mb += (
                 config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
-            ) * 2
+            ) * max(2, engine_count)
     else:
         used_threads, used_hash_mb = used_resources
     return (
@@ -1363,6 +1506,30 @@ def _build_pgn(
 ) -> str:
     white = get_engine(connection, game.white_engine_id)
     black = get_engine(connection, game.black_engine_id)
+    extra_headers: dict[str, Any] = {}
+    white_name = (
+        " ".join((white.name, white.version))
+        if white is not None
+        else f"Engine {game.white_engine_id}"
+    )
+    black_name = (
+        " ".join((black.name, black.version))
+        if black is not None
+        else f"Engine {game.black_engine_id}"
+    )
+    from cope.events.engine_relay import relay_assignment_for_game
+
+    relay = relay_assignment_for_game(connection, game)
+    if relay is not None:
+        white_team = relay.teams[ColorSlot.WHITE]
+        black_team = relay.teams[ColorSlot.BLACK]
+        white_name = white_team.name
+        black_name = black_team.name
+        extra_headers = {
+            "EventType": "Engine Relay",
+            "WhiteRelay": ", ".join(str(member.engine_id) for member in white_team.members),
+            "BlackRelay": ", ".join(str(member.engine_id) for member in black_team.members),
+        }
     return render_annotated_pgn(
         PgnGame(
             id=game.id,
@@ -1370,16 +1537,8 @@ def _build_pgn(
             event=tournament.name,
             round=game.round,
             game_number=game.game_number,
-            white=(
-                " ".join((white.name, white.version))
-                if white is not None
-                else f"Engine {game.white_engine_id}"
-            ),
-            black=(
-                " ".join((black.name, black.version))
-                if black is not None
-                else f"Engine {game.black_engine_id}"
-            ),
+            white=white_name,
+            black=black_name,
             result=result,
             termination=termination,
             opening=opening.name if opening is not None else None,
@@ -1387,5 +1546,6 @@ def _build_pgn(
             started_at=game.started_at,
             time_control=tournament.config.time_control.model_dump(mode="json"),
             moves=moves,
+            extra_headers=extra_headers,
         )
     )

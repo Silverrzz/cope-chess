@@ -1,5 +1,5 @@
 import chess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from .engine_instance import EngineInstance
 from .game_state import GameState
@@ -35,8 +35,13 @@ class GameRunner:
         while not self._get_game_state().is_finished():
             self.run_next_move()
 
-    def prepare_game(self):
-        self._start_game()
+    def prepare_game(self, engines: Iterable[EngineInstance] | None = None):
+        if engines is None:
+            self._start_game()
+            return
+        for engine in engines:
+            engine.start_new_game()
+        self._game_started = True
 
     def run_next_move(self):
         if self._get_game_state().is_finished():

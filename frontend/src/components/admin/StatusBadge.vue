@@ -6,13 +6,13 @@ const props = defineProps<{ status?: string | null; label?: string }>()
 
 const tone = computed(() => {
   const status = props.status?.toLowerCase() ?? ''
-  if (status === 'finished') return 'positive'
-  if (status === 'scheduled') return 'scheduled'
-  if (status === 'paused') return 'warning'
+  if (['finished', 'completed'].includes(status)) return 'positive'
+  if (['announced', 'scheduled'].includes(status)) return 'scheduled'
+  if (['paused', 'intermission', 'postponed'].includes(status)) return 'warning'
   if (['ready', 'connected', 'applied', 'active', 'complete', 'succeeded'].includes(status)) return 'positive'
-  if (['running', 'downloading', 'busy', 'pending', 'minted', 'requested', 'resolving', 'updating_workers', 'building', 'migrating', 'restarting', 'verifying', 'waiting', 'updating'].includes(status)) return 'info'
+  if (['live', 'running', 'downloading', 'busy', 'pending', 'minted', 'requested', 'resolving', 'updating_workers', 'building', 'migrating', 'restarting', 'verifying', 'waiting', 'updating'].includes(status)) return 'info'
   if (['idle', 'offline', 'draft', 'expired', 'deferred'].includes(status)) return 'neutral'
-  if (['failed', 'aborted', 'revoked', 'error', 'disconnected'].includes(status)) return 'danger'
+  if (['failed', 'aborted', 'cancelled', 'revoked', 'error', 'disconnected'].includes(status)) return 'danger'
   return 'neutral'
 })
 </script>

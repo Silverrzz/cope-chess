@@ -36,6 +36,8 @@ from cope.db import (
     SCHEMA_VERSION,
     ChatSettingsRecord,
     ChatMessageRecord,
+    EventChatSettingsRecord,
+    EventRecord,
     GameRecord,
     MoveRecord,
     TournamentRecord,
@@ -45,6 +47,8 @@ from cope.db import (
     database_schema_version,
     get_chat_settings,
     get_chat_message,
+    get_event_by_slug,
+    get_event_chat_settings,
     get_game,
     get_opening_position,
     get_opening_suite,
@@ -57,6 +61,7 @@ from cope.db import (
     list_engine_records,
     list_engines,
     list_games,
+    list_events,
     list_moves,
     list_tournaments,
     list_tournament_matches,
@@ -683,6 +688,54 @@ def create_app(
             },
         )
 
+    @app.get("/events/{slug}/stream")
+    async def public_event_stream(slug: str, request: Request):
+        hub: StreamHub = request.app.state.stream_hub
+        hub.bind_loop()
+        event = await asyncio.to_thread(_public_event_by_slug, request.app, slug)
+        if event is None:
+            raise HTTPException(status_code=404, detail="event not found")
+
+        async def stream():
+            topic = f"event.{event.id}"
+            subscription = hub.subscribe(topic)
+            try:
+                yield sse_stream_event(
+                    hub.make_private_event(
+                        topic,
+                        "event.snapshot",
+                        {
+                            "event_id": event.id,
+                            "revision": event.revision,
+                            "status": event.status,
+                        },
+                        source="web",
+                    )
+                )
+                while True:
+                    try:
+                        stream_event = await asyncio.wait_for(
+                            subscription.queue.get(),
+                            timeout=20,
+                        )
+                    except TimeoutError:
+                        yield ": keep-alive\n\n"
+                        continue
+                    if stream_event is None:
+                        break
+                    yield sse_stream_event(stream_event)
+            finally:
+                hub.unsubscribe(subscription)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.websocket("/internal/stream")
     async def internal_stream(websocket: WebSocket):
         await websocket.accept()
@@ -864,7 +917,12 @@ def _is_spa_request(request: Request) -> bool:
         ("/api/", "/assets/", "/docs/", "/internal/", "/redoc/")
     ):
         return False
-    if path.endswith(".json") or path.endswith("/events"):
+    if path.endswith(".json"):
+        return False
+    if path == "/tournament-spectators/events" or re.fullmatch(
+        r"/(?:tournaments/\d+|admin/workers(?:/\d+)?)/events",
+        path,
+    ):
         return False
     if re.fullmatch(r"/admin/workers/\d+/token", path) is not None:
         return False
@@ -889,14 +947,44 @@ def _public_tournament_exists(app: FastAPI, tournament_id: int) -> bool:
         connection.close()
 
 
+def _public_event_by_slug(app: FastAPI, slug: str) -> EventRecord | None:
+    connection = connect_database(app.state.db_path)
+    try:
+        event = get_event_by_slug(connection, slug)
+        if event is None or event.published_at is None or event.status == "draft":
+            return None
+        return event
+    finally:
+        connection.close()
+
+
 def _social_preview_html(request: Request) -> str | None:
     match = re.fullmatch(r"/tournaments/(\d+)/?", request.url.path)
-    if match is None:
+    event_match = re.fullmatch(r"/events/([a-z0-9]+(?:-[a-z0-9]+)*)/?", request.url.path)
+    if match is None and event_match is None:
         return None
 
     connection = None
     try:
         connection = connect_database(request.app.state.db_path)
+        if event_match is not None:
+            event = get_event_by_slug(connection, event_match.group(1))
+            if event is None or event.published_at is None or event.status == "draft":
+                return None
+            title = f"{event.title} | COPE Chess"
+            description = event.summary or event.subtitle or (
+                "A special unrated COPE Chess exhibition."
+            )
+            template = FRONTEND_INDEX.read_text(encoding="utf-8")
+            return _social_preview_document(
+                template,
+                title=title,
+                description=description,
+                url=str(request.url),
+            )
+
+        if match is None:
+            return None
         tournament = get_tournament(connection, int(match.group(1)))
         if tournament is None or tournament.status == "draft":
             return None
@@ -2063,10 +2151,69 @@ def _create_chat_message_from_form(
     return _chat_message_payload(message)
 
 
+def _create_event_chat_message_from_form(
+    connection: sqlite3.Connection,
+    form: dict[str, list[str]],
+    *,
+    event_id: int,
+    settings: EventChatSettingsRecord,
+) -> dict[str, Any]:
+    if not settings.enabled:
+        raise HTTPException(status_code=403, detail="Chat is disabled.")
+
+    display_name = form_value(form, "display_name")[:40].strip()
+    if not display_name:
+        if settings.allow_anonymous_names:
+            display_name = "Anonymous"
+        else:
+            raise HTTPException(status_code=422, detail="A display name is required.")
+    if display_name.casefold() == "system":
+        raise HTTPException(status_code=422, detail="System is a reserved display name.")
+    text = form_value(form, "text").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Enter a message.")
+    if len(text) > settings.max_message_length:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Messages can be at most {settings.max_message_length} characters.",
+        )
+    if settings.slowmode_seconds > 0:
+        previous = connection.execute(
+            """
+            SELECT at FROM chat_messages
+            WHERE event_id = ? AND LOWER(display_name) = LOWER(?)
+            ORDER BY id DESC LIMIT 1
+            """,
+            (event_id, display_name),
+        ).fetchone()
+        previous_at = None if previous is None else _parse_utc_datetime(previous["at"])
+        if previous_at is not None:
+            elapsed = (datetime.now(UTC) - previous_at).total_seconds()
+            remaining = math.ceil(settings.slowmode_seconds - elapsed)
+            if remaining > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Slow mode is active. Try again in {remaining} seconds.",
+                )
+
+    message_id = create_chat_message(
+        connection,
+        event_id=event_id,
+        display_name=display_name,
+        text=text,
+    )
+    message = get_chat_message(connection, message_id)
+    connection.commit()
+    if message is None:
+        raise RuntimeError("chat message disappeared after creation")
+    return _chat_message_payload(message)
+
+
 def _chat_message_payload(message: ChatMessageRecord) -> dict[str, Any]:
     return {
         "id": message.id,
         "tournament_id": message.tournament_id,
+        "event_id": message.event_id,
         "display_name": message.display_name,
         "text": message.text,
         "at": message.at,
@@ -2096,18 +2243,35 @@ def _publish_chat_message(
     )
 
 
-def _publish_chat_settings_change(
+def _publish_event_chat_message(
     request: Request,
-    connection: sqlite3.Connection,
-    settings: ChatSettingsRecord,
+    event_id: int,
+    message: dict[str, Any],
 ) -> None:
-    payload = {
+    request.app.state.stream_hub.publish(
+        f"event.{event_id}",
+        "chat.message",
+        {"event_id": event_id, "message": message},
+        source="web",
+    )
+
+
+def _event_chat_settings_payload(settings: Any) -> dict[str, Any]:
+    return {
         "enabled": settings.enabled,
         "slowmode_seconds": settings.slowmode_seconds,
         "max_message_length": settings.max_message_length,
         "allow_anonymous_names": settings.allow_anonymous_names,
         "retention_days": settings.retention_days,
     }
+
+
+def _publish_chat_settings_change(
+    request: Request,
+    connection: sqlite3.Connection,
+    settings: ChatSettingsRecord,
+) -> None:
+    payload = _event_chat_settings_payload(settings)
     for tournament in list_tournaments(connection):
         if tournament.status == "draft":
             continue
@@ -2117,17 +2281,51 @@ def _publish_chat_settings_change(
             {"tournament_id": tournament.id, "settings": payload},
             source="web",
         )
+    for event in list_events(connection, public_only=True):
+        event_settings = get_event_chat_settings(
+            connection,
+            event.id,
+            defaults=settings,
+        )
+        request.app.state.stream_hub.publish(
+            f"event.{event.id}",
+            "chat.settings",
+            {
+                "event_id": event.id,
+                "settings": _event_chat_settings_payload(event_settings),
+            },
+            source="web",
+        )
 
 
 def _publish_chat_deletion(
     request: Request,
-    tournament_id: int,
+    *,
+    tournament_id: int | None,
+    event_id: int | None,
     message_id: int,
 ) -> None:
+    if tournament_id is not None:
+        request.app.state.stream_hub.publish(
+            f"tournament.{tournament_id}",
+            "chat.deleted",
+            {"tournament_id": tournament_id, "message_id": message_id},
+            source="web",
+        )
+    if event_id is not None:
+        request.app.state.stream_hub.publish(
+            f"event.{event_id}",
+            "chat.deleted",
+            {"event_id": event_id, "message_id": message_id},
+            source="web",
+        )
+
+
+def _publish_event_change(request: Request, event_id: int) -> None:
     request.app.state.stream_hub.publish(
-        f"tournament.{tournament_id}",
-        "chat.deleted",
-        {"tournament_id": tournament_id, "message_id": message_id},
+        f"event.{event_id}",
+        "event.changed",
+        {"event_id": event_id},
         source="web",
     )
 
@@ -2145,6 +2343,13 @@ def _engine_display_name(name: str, version: str | None) -> str:
 
 def _tournament_names(connection: sqlite3.Connection) -> dict[int, str]:
     return {tournament.id: tournament.name for tournament in list_tournaments(connection)}
+
+
+def _event_names(connection: sqlite3.Connection) -> dict[int, dict[str, str]]:
+    return {
+        event.id: {"title": event.title, "slug": event.slug}
+        for event in list_events(connection)
+    }
 
 
 def _selected_viewer_game(request: Request, games: tuple[GameRecord, ...]) -> GameRecord | None:
@@ -2297,6 +2502,7 @@ def _move_payload(move: MoveRecord, root_fen: str | None) -> dict[str, Any]:
         "info_line": move.info_line,
         "time_ms": move.time_ms,
         "clock_after_ms": move.clock_after_ms,
+        "engine_version_id": move.engine_version_id,
     }
 
 def _tournament_live_payload(
@@ -2505,7 +2711,7 @@ def _latest_move_index_for_side(moves: tuple[MoveRecord, ...], side: str) -> int
             return index
     return -1
 
-def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) -> dict[str, str]:
+def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) -> dict[str, Any]:
     if move is None:
         return {
             "depth": "-",
@@ -2526,6 +2732,7 @@ def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) 
     hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
 
     return {
+        "engine_id": move.engine_version_id,
         "depth": str(move.depth) if move.depth is not None else "-",
         "seldepth": str(seldepth) if seldepth is not None else "-",
         "nps": nps,

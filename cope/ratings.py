@@ -99,6 +99,11 @@ def apply_tournament_rating_commit(
         raise RatingCommitError("tournament is not finished or aborted")
     if not tournament.config.rated:
         raise RatingCommitError("tournament is not rated")
+    if connection.execute(
+        "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
+        (tournament_id,),
+    ).fetchone() is not None:
+        raise RatingCommitError("engine relay tournaments are never eligible for ratings")
     games = _committable_games(tournament, list_games(connection, tournament_id))
     _validate_games(tournament, games)
     applied_at = utc_now()

@@ -9,12 +9,12 @@ const props = defineProps<{
 
 const tone = computed(() => {
   const status = props.status?.toLowerCase() || ''
-  if (status === 'finished') return 'positive'
+  if (['finished', 'completed'].includes(status)) return 'positive'
   if (['live', 'running', 'connected', 'ready'].includes(status)) return 'info'
-  if (status === 'scheduled') return 'scheduled'
+  if (['announced', 'scheduled'].includes(status)) return 'scheduled'
   if (['pending', 'assigned', 'minted'].includes(status)) return 'neutral'
-  if (['paused', 'downloading', 'reconnecting'].includes(status)) return 'warning'
-  if (['aborted', 'abandoned', 'failed', 'revoked', 'offline'].includes(status)) return 'negative'
+  if (['paused', 'intermission', 'postponed', 'downloading', 'reconnecting'].includes(status)) return 'warning'
+  if (['aborted', 'abandoned', 'cancelled', 'failed', 'revoked', 'offline'].includes(status)) return 'negative'
   return 'neutral'
 })
 </script>

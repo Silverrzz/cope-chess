@@ -106,6 +106,7 @@ class MoveRecord:
     info_line: str | None
     time_ms: int
     clock_after_ms: int
+    engine_version_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +278,8 @@ class OpeningRecord:
 @dataclass(frozen=True, slots=True)
 class ChatMessageRecord:
     id: int
-    tournament_id: int
+    tournament_id: int | None
+    event_id: int | None
     display_name: str
     text: str
     at: str
@@ -1140,6 +1142,22 @@ def update_tournament(
     config: TournamentConfig,
 ) -> None:
     """Update a tournament's name, config, and participant list."""
+    relay = connection.execute(
+        """
+        SELECT anchor_a_engine_id, anchor_b_engine_id
+        FROM engine_relay_fixtures
+        WHERE tournament_id = ?
+        """,
+        (tournament_id,),
+    ).fetchone()
+    if relay is not None:
+        if config.rated:
+            raise ValueError("engine relay tournaments are always unrated")
+        anchors = [int(relay["anchor_a_engine_id"]), int(relay["anchor_b_engine_id"])]
+        if config.participants != anchors:
+            raise ValueError("engine relay tournament anchors cannot be changed")
+        if config.format != "round_robin" or config.time_control.category != "movenodes":
+            raise ValueError("engine relay tournaments require round-robin move-node execution")
     connection.execute(
         """
         UPDATE tournaments
@@ -1172,6 +1190,11 @@ def set_tournament_participants(
     *,
     gauntlet_hero_engine_id: int | None = None,
 ) -> TournamentRecord:
+    if connection.execute(
+        "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
+        (tournament.id,),
+    ).fetchone() is not None and participants != tournament.config.participants:
+        raise ValueError("engine relay tournament anchors cannot be changed")
     config_data = tournament.config.model_dump(mode="json")
     config_data["participants"] = participants
     if gauntlet_hero_engine_id is not None:
@@ -1779,6 +1802,7 @@ def record_move(
     info_line: str | None = None,
     time_ms: int = 0,
     clock_after_ms: int = 0,
+    engine_version_id: int | None = None,
 ) -> MoveRecord:
     if (assignment_id is None) != (assignment_key is None):
         raise ValueError("assignment id and key must be provided together")
@@ -1800,15 +1824,17 @@ def record_move(
         info_line,
         time_ms,
         clock_after_ms,
+        engine_version_id,
     )
     if assignment_id is None:
         cursor = connection.execute(
             """
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
-              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms
+              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
+              engine_version_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -1817,9 +1843,10 @@ def record_move(
             """
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
-              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms
+              depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
+              engine_version_id
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
               SELECT 1 FROM game_assignments
               WHERE id = ? AND assignment_key = ? AND game_id = ?
@@ -1848,6 +1875,7 @@ def record_move(
         info_line=info_line,
         time_ms=time_ms,
         clock_after_ms=clock_after_ms,
+        engine_version_id=engine_version_id,
     )
 
 
@@ -3101,16 +3129,19 @@ def list_suite_opening_ids(
 def create_chat_message(
     connection: sqlite3.Connection,
     *,
-    tournament_id: int,
+    tournament_id: int | None = None,
+    event_id: int | None = None,
     display_name: str,
     text: str,
 ) -> int:
+    if (tournament_id is None) == (event_id is None):
+        raise ValueError("chat message requires exactly one subject")
     cursor = connection.execute(
         """
-        INSERT INTO chat_messages (tournament_id, display_name, text, at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO chat_messages (tournament_id, event_id, display_name, text, at)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (tournament_id, display_name, text, utc_now()),
+        (tournament_id, event_id, display_name, text, utc_now()),
     )
     return int(cursor.lastrowid)
 
@@ -3131,13 +3162,11 @@ def list_chat_messages(
     *,
     limit: int = 50,
     tournament_id: int | None = None,
+    event_id: int | None = None,
 ) -> tuple[ChatMessageRecord, ...]:
-    if tournament_id is None:
-        rows = connection.execute(
-            "SELECT * FROM chat_messages WHERE tournament_id IS NOT NULL ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-    else:
+    if tournament_id is not None and event_id is not None:
+        raise ValueError("chat messages can only be filtered by one subject")
+    if tournament_id is not None:
         rows = connection.execute(
             """
             SELECT * FROM chat_messages
@@ -3145,6 +3174,20 @@ def list_chat_messages(
             ORDER BY id DESC LIMIT ?
             """,
             (tournament_id, limit),
+        )
+    elif event_id is not None:
+        rows = connection.execute(
+            """
+            SELECT * FROM chat_messages
+            WHERE event_id = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (event_id, limit),
+        )
+    else:
+        rows = connection.execute(
+            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?",
+            (limit,),
         )
     return tuple(
         _chat_message_from_row(row)
@@ -3820,6 +3863,11 @@ def request_tournament_rating_commit(
             raise ValueError("aborted tournament has no finished games")
     if not tournament.config.rated:
         raise ValueError("unrated tournament results cannot be committed")
+    if connection.execute(
+        "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
+        (tournament.id,),
+    ).fetchone() is not None:
+        raise ValueError("engine relay tournaments are never eligible for ratings")
     if rating_list_ids is None:
         rating_list_ids = (item.id for item in list_rating_lists(connection))
     selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
@@ -4043,6 +4091,7 @@ def _chat_message_from_row(row: sqlite3.Row) -> ChatMessageRecord:
     return ChatMessageRecord(
         id=row["id"],
         tournament_id=row["tournament_id"],
+        event_id=row["event_id"],
         display_name=row["display_name"],
         text=row["text"],
         at=row["at"],
@@ -4131,6 +4180,7 @@ def _move_from_row(row: sqlite3.Row) -> MoveRecord:
         info_line=row["info_line"],
         time_ms=row["time_ms"],
         clock_after_ms=row["clock_after_ms"],
+        engine_version_id=row["engine_version_id"],
     )
 
 

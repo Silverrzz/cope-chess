@@ -15,3 +15,11 @@
 
     log
 }
+
+http://caddy {
+    @worker path /worker
+    reverse_proxy @worker worker-server:8702
+    @benchmarker path /benchmarker
+    reverse_proxy @benchmarker benchmark-server:8703
+    reverse_proxy web:8701
+}

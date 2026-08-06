@@ -10,10 +10,12 @@ const props = withDefaults(defineProps<{
   messages?: ChatMessage[]
   settings?: ChatSettings
   tournamentId?: Identifier | null
+  eventSlug?: string | null
 }>(), {
   messages: () => [],
   settings: () => ({}),
   tournamentId: null,
+  eventSlug: null,
 })
 
 const emit = defineEmits<{
@@ -31,7 +33,7 @@ const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
 const requiresName = computed(() => props.settings.allow_anonymous_names === false)
 const reservedName = computed(() => displayName.value.trim().toLocaleLowerCase() === 'system')
-const canSend = computed(() => props.tournamentId !== null && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
+const canSend = computed(() => (props.tournamentId !== null || !!props.eventSlug) && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
 
 onMounted(() => {
   try { displayName.value = localStorage.getItem(STORAGE_KEY) || '' } catch { /* Storage can be disabled. */ }
@@ -54,7 +56,10 @@ async function submit(): Promise<void> {
   body.set('display_name', displayName.value.trim())
   body.set('text', text.value.trim())
   try {
-    const response = await api.post<{ message?: ChatMessage | null }>(`/api/tournaments/${encodeURIComponent(String(props.tournamentId))}/chat`, { body })
+    const target = props.eventSlug
+      ? `/api/events/${encodeURIComponent(props.eventSlug)}/chat`
+      : `/api/tournaments/${encodeURIComponent(String(props.tournamentId))}/chat`
+    const response = await api.post<{ message?: ChatMessage | null }>(target, { body })
     if (response.message) emit('sent', response.message)
     text.value = ''
     await scrollToLatest()

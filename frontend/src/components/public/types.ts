@@ -78,6 +78,7 @@ export interface MoveRecord {
   info_line?: string | null
   time_ms?: number | null
   clock_after_ms?: number | null
+  engine_version_id?: Identifier | null
 }
 
 export interface OpeningRecord {
@@ -176,6 +177,12 @@ export interface TournamentRatingSummary {
 }
 
 export interface EngineAnalysis {
+  engine_id?: Identifier | null
+  relay_team_id?: Identifier | null
+  relay_team_name?: string | null
+  relay_position?: number | null
+  relay_moves?: number | null
+  node_limit?: number | null
   depth?: string | number | null
   seldepth?: string | number | null
   nodes?: string | number | null
@@ -199,7 +206,8 @@ export interface ClockState {
 
 export interface ChatMessage {
   id?: Identifier
-  tournament_id?: Identifier
+  tournament_id?: Identifier | null
+  event_id?: Identifier | null
   display_name: string
   text: string
   at?: string

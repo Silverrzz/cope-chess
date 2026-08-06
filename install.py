@@ -518,7 +518,7 @@ def _start_client(key: str, settings: dict[str, str]) -> None:
         if not local_build_dirty:
             command.extend(["--env", "COPE_DISABLE_CLIENT_UPDATES=0"])
     if settings[f"{key}_server_url"].startswith(
-        ("ws://worker-server:", "ws://benchmark-server:")
+        ("ws://worker-server:", "ws://benchmark-server:", "ws://caddy")
     ):
         command.extend(["--network", _compose_network()])
     if key in {"worker", "benchmarker"}:
@@ -915,6 +915,10 @@ def _process_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        if os.name == "nt":
+            return False
+        raise
     if os.name != "nt":
         try:
             command = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")

@@ -97,6 +97,7 @@ let benchmarkRefreshTimer: number | undefined
 
 const metrics = computed(() => [
   { label: 'Tournaments', value: data.value?.db_stats.tournaments, to: '/admin/tournaments', icon: 'tournament' },
+  { label: 'Events', value: data.value?.db_stats.events, to: '/admin/events', icon: 'event' },
   { label: 'Engines', value: data.value?.db_stats.engines, to: '/admin/engines', icon: 'engine' },
   { label: 'Rating lists', value: data.value?.db_stats.rating_lists, to: '/admin/ratings', icon: 'category' },
   { label: 'Opening suites', value: data.value?.db_stats.opening_suites, to: '/admin/openings', icon: 'opening' },
@@ -232,6 +233,7 @@ onBeforeUnmount(() => {
         <RouterLink v-for="metric in metrics" :key="metric.label" class="metric-card" :to="metric.to">
           <span class="metric-card__icon" aria-hidden="true">
             <svg v-if="metric.icon === 'tournament'" viewBox="0 0 24 24"><path d="M7 4h10v4a5 5 0 0 1-10 0V4ZM9 17h6M12 13v4M5 6H3v1a4 4 0 0 0 4 4M19 6h2v1a4 4 0 0 1-4 4M7 20h10" /></svg>
+            <svg v-else-if="metric.icon === 'event'" viewBox="0 0 24 24"><path d="M12 12h.01M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13" /></svg>
             <svg v-else-if="metric.icon === 'engine'" viewBox="0 0 24 24"><path d="M7 7h10v10H7zM9 4v3m3-3v3m3-3v3M9 17v3m3-3v3m3-3v3M4 9h3m-3 3h3m-3 3h3m10-6h3m-3 3h3m-3 3h3" /></svg>
             <svg v-else-if="metric.icon === 'category'" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7" /></svg>
             <svg v-else-if="metric.icon === 'opening'" viewBox="0 0 24 24"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3V4Zm3 16a3 3 0 0 1 0-6h11M9 8h6" /></svg>
@@ -395,7 +397,7 @@ onBeforeUnmount(() => {
 .benchmark-ops__row .icon-button svg { fill: none; height: .85rem; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; width: .85rem; }
 .benchmark-ops__row .button { min-height: 1.75rem; padding: .3rem .5rem; }
 .benchmark-ops__empty { color: var(--color-text-muted, #64748b); font-size: .68rem; margin: 0; padding: .8rem; }
-.metric-grid { display: grid; gap: .75rem; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.metric-grid { display: grid; gap: .75rem; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .system-strip { display: flex; flex-wrap: wrap; gap: 1.2rem; padding: .75rem 1rem; }.system-strip > div { display: grid; gap: .15rem; }.system-strip span { color: var(--color-text-muted, #64748b); font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }.system-strip strong, .system-strip code { font-size: .72rem; }
 .metric-card { align-items: center; background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: var(--radius-lg, .8rem); color: inherit; display: flex; gap: .7rem; min-width: 0; padding: .8rem; text-decoration: none; transition: border-color 120ms ease, transform 120ms ease; }
 .metric-card:hover { border-color: var(--color-accent, #315fcc); transform: translateY(-1px); }

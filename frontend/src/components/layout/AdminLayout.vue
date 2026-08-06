@@ -32,6 +32,7 @@ const navGroups: { label: string; items: { label: string; to: string; icon: Icon
   {
     label: "Competition",
     items: [
+      { label: "Events", to: "/admin/events", icon: "radio" },
       { label: "Tournaments", to: "/admin/tournaments", icon: "trophy" },
       { label: "Ratings", to: "/admin/ratings", icon: "gauge" },
     ],

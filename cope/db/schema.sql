@@ -107,6 +107,187 @@ CREATE TABLE IF NOT EXISTS tournaments (
   finished_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS events (
+  id BIGSERIAL PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
+  handler_key TEXT NOT NULL,
+  handler_version INTEGER NOT NULL DEFAULT 1 CHECK (handler_version > 0),
+  title TEXT NOT NULL,
+  subtitle TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  rules TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN (
+      'draft', 'announced', 'scheduled', 'live', 'intermission',
+      'postponed', 'completed', 'cancelled'
+    )),
+  featured INTEGER NOT NULL DEFAULT 0 CHECK (featured IN (0, 1)),
+  published_at TEXT,
+  scheduled_start_at TEXT,
+  scheduled_end_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  theme TEXT NOT NULL DEFAULT '{}',
+  config TEXT NOT NULL DEFAULT '{}',
+  state TEXT NOT NULL DEFAULT '{}',
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS event_stages (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  stage_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'active', 'completed', 'cancelled')),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  scheduled_start_at TEXT,
+  scheduled_end_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (event_id, stage_key),
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_sessions (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  stage_id BIGINT REFERENCES event_stages(id) ON DELETE SET NULL,
+  session_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending', 'scheduled', 'live', 'intermission',
+      'completed', 'postponed', 'cancelled'
+    )),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  scheduled_start_at TEXT,
+  scheduled_end_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (event_id, session_key),
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_cast_members (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  parent_id BIGINT REFERENCES event_cast_members(id) ON DELETE SET NULL,
+  member_key TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('engine', 'team', 'person', 'other')),
+  display_name TEXT NOT NULL,
+  short_name TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'reserve', 'withdrawn', 'eliminated')),
+  engine_version_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL,
+  profile TEXT NOT NULL DEFAULT '',
+  avatar_url TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL CHECK (position >= 0),
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (event_id, member_key),
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_contests (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  stage_id BIGINT REFERENCES event_stages(id) ON DELETE SET NULL,
+  session_id BIGINT REFERENCES event_sessions(id) ON DELETE SET NULL,
+  contest_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending', 'scheduled', 'live', 'intermission',
+      'completed', 'postponed', 'cancelled'
+    )),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  scheduled_start_at TEXT,
+  scheduled_end_at TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  result TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT '{}',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (event_id, contest_key),
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_contest_cast (
+  contest_id BIGINT NOT NULL REFERENCES event_contests(id) ON DELETE CASCADE,
+  cast_member_id BIGINT NOT NULL REFERENCES event_cast_members(id) ON DELETE CASCADE,
+  side TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL CHECK (position >= 0),
+  metadata TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (contest_id, cast_member_id),
+  UNIQUE (contest_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_updates (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL
+    CHECK (kind IN ('announcement', 'schedule', 'incident', 'result', 'milestone')),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  occurred_at TEXT NOT NULL,
+  published_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS event_awards (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  award_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  recipient_cast_id BIGINT REFERENCES event_cast_members(id) ON DELETE SET NULL,
+  recipient_label TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL CHECK (position >= 0),
+  awarded_at TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (event_id, award_key),
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS event_chat_settings (
+  event_id BIGINT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
+  slowmode_seconds INTEGER CHECK (slowmode_seconds IS NULL OR slowmode_seconds >= 0),
+  max_message_length INTEGER CHECK (max_message_length IS NULL OR max_message_length > 0),
+  allow_anonymous_names INTEGER CHECK (
+    allow_anonymous_names IS NULL OR allow_anonymous_names IN (0, 1)
+  ),
+  retention_days INTEGER CHECK (retention_days IS NULL OR retention_days > 0)
+);
+
+CREATE TABLE IF NOT EXISTS engine_relay_fixtures (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  tournament_id BIGINT NOT NULL UNIQUE REFERENCES tournaments(id) ON DELETE CASCADE,
+  team_a_id BIGINT NOT NULL REFERENCES event_cast_members(id),
+  team_b_id BIGINT NOT NULL REFERENCES event_cast_members(id),
+  anchor_a_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  anchor_b_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  title TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  created_at TEXT NOT NULL,
+  CHECK (team_a_id <> team_b_id),
+  CHECK (anchor_a_engine_id <> anchor_b_engine_id),
+  UNIQUE (event_id, position)
+);
+
 ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS scheduled_start_at TEXT;
 UPDATE tournaments
 SET scheduled_start_at = to_char(
@@ -419,9 +600,11 @@ CREATE TABLE IF NOT EXISTS game_hardware_scores (
   hardware_score DOUBLE PRECISION NOT NULL CHECK (hardware_score > 0),
   elapsed_ms BIGINT NOT NULL CHECK (elapsed_ms >= 0),
   recorded_at TEXT NOT NULL,
-  PRIMARY KEY (game_id, engine_version_id),
-  UNIQUE (game_id, color)
+  PRIMARY KEY (game_id, engine_version_id)
 );
+
+ALTER TABLE game_hardware_scores
+  DROP CONSTRAINT IF EXISTS game_hardware_scores_game_id_color_key;
 
 CREATE TABLE IF NOT EXISTS moves (
   game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
@@ -452,6 +635,7 @@ ALTER TABLE engine_benchmarks ADD CONSTRAINT engine_benchmarks_artifact_sha256_c
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS score_bound TEXT CHECK (score_bound IN ('lowerbound', 'upperbound'));
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS seldepth INTEGER;
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS hashfull INTEGER;
+ALTER TABLE moves ADD COLUMN IF NOT EXISTS engine_version_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS rating_lists (
   id BIGSERIAL PRIMARY KEY,
@@ -545,11 +729,20 @@ ALTER TABLE openings ALTER COLUMN start_fen SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chat_messages (
   id BIGSERIAL PRIMARY KEY,
-  tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  tournament_id BIGINT REFERENCES tournaments(id) ON DELETE CASCADE,
+  event_id BIGINT REFERENCES events(id) ON DELETE CASCADE,
   display_name TEXT NOT NULL,
   text TEXT NOT NULL,
-  at TEXT NOT NULL
+  at TEXT NOT NULL,
+  CONSTRAINT chat_messages_subject_check
+    CHECK ((tournament_id IS NOT NULL)::integer + (event_id IS NOT NULL)::integer = 1)
 );
+
+ALTER TABLE chat_messages ALTER COLUMN tournament_id DROP NOT NULL;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS event_id BIGINT REFERENCES events(id) ON DELETE CASCADE;
+ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS chat_messages_subject_check;
+ALTER TABLE chat_messages ADD CONSTRAINT chat_messages_subject_check
+  CHECK ((tournament_id IS NOT NULL)::integer + (event_id IS NOT NULL)::integer = 1);
 
 CREATE TABLE IF NOT EXISTS system_chat_events (
   tournament_id BIGINT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -658,7 +851,23 @@ CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 32)
+CREATE INDEX IF NOT EXISTS idx_events_public_status
+  ON events(published_at, status, scheduled_start_at, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_handler ON events(handler_key, id DESC);
+CREATE INDEX IF NOT EXISTS idx_event_stages_event_position ON event_stages(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_event_sessions_event_position ON event_sessions(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_event_cast_event_position ON event_cast_members(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_event_contests_event_position ON event_contests(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_event_updates_public
+  ON event_updates(event_id, published_at, occurred_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_event_awards_event_position ON event_awards(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_event_position ON engine_relay_fixtures(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_a ON engine_relay_fixtures(team_a_id);
+CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_b ON engine_relay_fixtures(team_b_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
+  WHERE event_id IS NOT NULL;
+
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 34)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
