@@ -76,6 +76,7 @@ let countdownTimer: number | undefined;
 let countdownFrame: number | undefined;
 let countdownAudio: HTMLAudioElement | null = null;
 let audioPlayPending = false;
+let countdownAudioStarted = false;
 const soundPrimed = ref(false);
 let lastCheerRequestAt = 0;
 const seenCheerIds = new Set<string>();
@@ -601,11 +602,7 @@ function prepareCountdownAudio(force = false): void {
   });
   audio.addEventListener("playing", () => {
     if (countdownAudio !== audio || countdownFinished.value) return;
-    const expected = expectedCountdownAudioTime();
-    if (expected === null) return;
-    audio.loop = false;
-    audio.volume = 1;
-    seekCountdownAudio(audio, expected, true);
+    if (!finalMinuteActive.value) return;
     soundState.value = "playing";
   });
   audio.addEventListener("error", () => {
@@ -621,6 +618,7 @@ function releaseCountdownAudio(): void {
   countdownAudio.load();
   countdownAudio = null;
   audioPlayPending = false;
+  countdownAudioStarted = false;
 }
 
 function expectedCountdownAudioTime(): number | null {
@@ -628,10 +626,9 @@ function expectedCountdownAudioTime(): number | null {
   return Math.max(0, Math.min(60, (countdownAudioLengthMs - (targetTime.value - authoritativeNow())) / 1000));
 }
 
-function seekCountdownAudio(audio: HTMLAudioElement, expected: number, force = false): void {
+function seekCountdownAudio(audio: HTMLAudioElement, expected: number): void {
   const maximum = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - .015) : 60;
   const position = Math.min(expected, maximum);
-  if (!force && Math.abs(audio.currentTime - position) <= .035) return;
   try {
     audio.currentTime = position;
   } catch {
@@ -642,17 +639,18 @@ function seekCountdownAudio(audio: HTMLAudioElement, expected: number, force = f
 async function playCountdownAudio(expected: number, force = false): Promise<void> {
   prepareCountdownAudio(soundState.value === "unavailable");
   const audio = countdownAudio;
-  if (!audio || audioPlayPending || countdownFinished.value) return;
+  if (!audio || audioPlayPending || countdownAudioStarted || countdownFinished.value) return;
+  if (!audio.paused) return;
   if (!force && soundState.value === "blocked") return;
   audio.loop = false;
   audio.volume = 1;
-  seekCountdownAudio(audio, expected, true);
+  seekCountdownAudio(audio, expected);
   audio.playbackRate = 1;
   audioPlayPending = true;
   try {
     await audio.play();
-    const corrected = expectedCountdownAudioTime();
-    if (corrected !== null) seekCountdownAudio(audio, corrected, true);
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    countdownAudioStarted = true;
     soundPrimed.value = true;
     soundState.value = "playing";
   } catch (cause) {
@@ -675,7 +673,6 @@ function syncCountdown(forceAudio = false): void {
     if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
     countdownFrame = undefined;
     countdownBeat.value = -1;
-    if (countdownAudio && !countdownAudio.paused && !soundPrimed.value) countdownAudio.pause();
     if (soundState.value === "playing") soundState.value = "armed";
     return;
   }
@@ -684,10 +681,7 @@ function syncCountdown(forceAudio = false): void {
   scheduleCountdownFrame();
   const beat = Math.floor(expected + .025);
   if (beat !== countdownBeat.value) countdownBeat.value = beat;
-  if (countdownAudio && !countdownAudio.paused) {
-    countdownAudio.loop = false;
-    countdownAudio.volume = 1;
-    seekCountdownAudio(countdownAudio, expected);
+  if (countdownAudioStarted || (countdownAudio && !countdownAudio.paused)) {
     soundState.value = "playing";
     return;
   }
@@ -727,20 +721,22 @@ async function enableCountdownSound(dismiss = false): Promise<void> {
     return;
   }
   const audio = countdownAudio;
-  if (!audio || soundPrimed.value) return;
+  if (!audio || audioPlayPending || !audio.paused || soundPrimed.value) return;
   audio.loop = true;
   audio.volume = 0;
   audioPlayPending = true;
   try {
     await audio.play();
+    audio.pause();
+    audio.currentTime = 0;
     soundPrimed.value = true;
     soundState.value = "armed";
   } catch {
-    audio.loop = false;
     soundState.value = "blocked";
   } finally {
+    audio.loop = false;
+    audio.volume = 1;
     audioPlayPending = false;
-    if (!soundPrimed.value) audio.volume = 1;
   }
 }
 
