@@ -158,6 +158,10 @@ function fixtureTeamNames(fixture: RelayFixture): string {
   return `${fixture.team_a_name} vs ${fixture.team_b_name}`;
 }
 
+function fixtureTeamCount(fixture: RelayFixture): number {
+  return fixture.teams?.length ?? 2;
+}
+
 function createFixture(): void {
   if (!fixtureForm.title.trim() || !fixtureSelectionValid.value) return;
   void run("fixture-new", async () => {
@@ -273,14 +277,14 @@ function fixtureCycles(fixture: RelayFixture): number | string {
           <label class="fixture-builder__wide"><span>Optional scheduled start</span><input v-model="fixtureForm.scheduled_start_at" class="input" type="datetime-local"></label>
           <button class="advanced-toggle" type="button" :aria-expanded="showAdvancedFixture" @click="showAdvancedFixture = !showAdvancedFixture"><span><AppIcon name="settings" :size="15" />Advanced settings</span><AppIcon name="chevron-down" :size="15" :class="{ rotated: showAdvancedFixture }" /></button>
           <div v-if="showAdvancedFixture" class="advanced-fields"><label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label><label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label></div>
-          <div class="fixture-summary"><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Rating</span><strong>Unrated</strong></div><div><span>Mode</span><strong>Relay</strong></div></div>
+          <div class="fixture-summary"><div><span>Teams</span><strong>{{ fixtureForm.team_ids.length }}</strong></div><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Mode</span><strong>Round robin</strong></div></div>
           <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || !fixtureSelectionValid">{{ pending === 'fixture-new' ? 'Creating…' : 'Create fixture' }}</button>
         </form>
 
         <div class="fixture-list">
           <article v-for="fixture in payload.fixtures" :key="fixture.id" class="panel fixture-card">
             <header><div><span>Fixture {{ fixture.position + 1 }}</span><h3>{{ fixture.title }}</h3><p>{{ fixtureTeamNames(fixture) }}</p></div><StatusBadge :status="fixture.tournament?.status ?? 'missing'" /></header>
-            <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
+            <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Teams</dt><dd>{{ fixtureTeamCount(fixture) }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
             <div class="fixture-games"><RouterLink v-for="game in fixture.games" :key="game.id" :to="`/tournaments/${fixture.tournament_id}?game_id=${game.id}`"><span>G{{ game.game_number ?? game.id }}</span><strong>{{ game.result || game.status }}</strong></RouterLink><span v-if="!fixture.games.length">No games</span></div>
             <div v-if="fixture.tournament?.status === 'draft' || fixture.tournament?.status === 'scheduled'" class="fixture-schedule"><input v-model="schedules[fixture.id]" class="input" type="datetime-local"><button class="button button--secondary button--small" type="button" :disabled="!!pending || !schedules[fixture.id]" @click="scheduleFixture(fixture)">{{ fixture.tournament?.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button></div>
             <footer><RouterLink class="button button--ghost button--small" :to="`/admin/tournaments/${fixture.tournament_id}`"><AppIcon name="settings" :size="14" />Manage</RouterLink><RouterLink v-if="fixture.tournament?.status !== 'draft'" class="button button--ghost button--small" :to="`/tournaments/${fixture.tournament_id}`"><AppIcon name="external-link" :size="14" />View</RouterLink><button v-if="fixture.tournament?.status === 'scheduled'" class="button button--secondary button--small" type="button" :disabled="!!pending" @click="unscheduleFixture(fixture)">Unschedule</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="button button--primary button--small" type="button" :disabled="!!pending" @click="startFixture(fixture)"><AppIcon name="play" :size="14" />Start now</button><button v-if="['draft', 'scheduled'].includes(fixture.tournament?.status ?? '')" class="icon-button icon-button--danger" type="button" :disabled="!!pending" aria-label="Delete fixture" @click="deleteFixture(fixture)"><AppIcon name="trash" :size="15" /></button></footer>

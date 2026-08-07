@@ -20,6 +20,7 @@ const { confirm } = useConfirm();
 const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
 const deleting = ref(false);
+const resetting = ref(false);
 const error = ref("");
 const showDetails = ref(false);
 const customComponent = computed(() => data.value ? adminEventComponent(data.value.handler.key) : null);
@@ -60,6 +61,29 @@ async function remove(): Promise<void> {
     deleting.value = false;
   }
 }
+
+async function reset(): Promise<void> {
+  if (!data.value || resetting.value) return;
+  const accepted = await confirm({
+    title: "Reset event?",
+    message: `Reset “${data.value.event.title}” to a new draft? All fixtures, games, results, schedules, updates, and chat will be deleted. Team and rostered engine details will be kept. This cannot be undone.`,
+    confirmLabel: "Reset event",
+    tone: "danger",
+  });
+  if (!accepted) return;
+  resetting.value = true;
+  error.value = "";
+  try {
+    const response = await api.post<{ message: string }>(`/api/admin/events/${encodeURIComponent(props.id)}/reset`);
+    toast.success(response.message);
+    await load();
+  } catch (cause) {
+    toast.error(cause);
+    error.value = errorText(cause);
+  } finally {
+    resetting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -77,7 +101,7 @@ async function remove(): Promise<void> {
 
       <section v-if="showDetails" class="event-details panel">
         <dl><div><dt>Event</dt><dd>#{{ data.event.id }} · {{ data.event.slug }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(data.event.scheduled_start_at) }}</dd></div><div><dt>Revision</dt><dd>{{ data.event.revision }}</dd></div><div><dt>Visibility</dt><dd>{{ data.event.published_at ? "Published" : "Private" }}</dd></div></dl>
-        <div class="event-details__actions"><RouterLink class="button button--ghost button--small" to="/admin/events"><AppIcon name="arrow-left" :size="14" />All events</RouterLink><button class="button button--danger button--small" type="button" :disabled="deleting" @click="remove"><AppIcon name="trash" :size="14" />{{ deleting ? "Deleting…" : "Delete event" }}</button></div>
+        <div class="event-details__actions"><RouterLink class="button button--ghost button--small" to="/admin/events"><AppIcon name="arrow-left" :size="14" />All events</RouterLink><button class="button button--secondary button--small" type="button" :disabled="resetting || deleting" @click="reset"><AppIcon name="refresh" :size="14" />{{ resetting ? "Resetting…" : "Reset event" }}</button><button class="button button--danger button--small" type="button" :disabled="deleting || resetting" @click="remove"><AppIcon name="trash" :size="14" />{{ deleting ? "Deleting…" : "Delete event" }}</button></div>
       </section>
 
       <component :is="customComponent" v-if="customComponent && data.handler.current" :detail="data" @changed="load" />

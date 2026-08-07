@@ -274,6 +274,38 @@ def delete_event(connection: sqlite3.Connection, event_id: int) -> EventRecord |
     return event
 
 
+def reset_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
+    event = get_event(connection, event_id)
+    if event is None:
+        raise ValueError("event does not exist")
+    for table in (
+        "event_awards",
+        "event_updates",
+        "event_contests",
+        "event_sessions",
+        "event_stages",
+        "event_chat_settings",
+        "chat_messages",
+    ):
+        connection.execute(f"DELETE FROM {table} WHERE event_id = ?", (event_id,))
+    connection.execute(
+        "UPDATE event_cast_members SET status = 'active' WHERE event_id = ?",
+        (event_id,),
+    )
+    connection.execute(
+        """
+        UPDATE events
+        SET status = 'draft', published_at = NULL,
+            scheduled_start_at = NULL, scheduled_end_at = NULL,
+            started_at = NULL, finished_at = NULL, state = '{}',
+            revision = revision + 1, updated_at = ?
+        WHERE id = ?
+        """,
+        (utc_now(), event_id),
+    )
+    return _required_event(connection, event_id)
+
+
 def list_events(
     connection: sqlite3.Connection,
     *,

@@ -113,6 +113,7 @@ from cope.db import (
     mint_worker_token_for_worker,
     replace_suite_openings,
     replay_game,
+    reset_event,
     record_manual_benchmark,
     register_engine_artifact,
     reschedule_engine_benchmarks,
@@ -1398,6 +1399,51 @@ def register_api_routes(app: FastAPI) -> None:
         request.app.state.stream_hub.link_event_tournaments(event_id, ())
         _publish_admin_change(web_app, request)
         return _json({"message": f"{event.title} deleted."})
+
+    @app.post("/api/admin/events/{event_id}/reset")
+    def admin_reset_event(
+        event_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = get_event(connection, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="Event not found.")
+        linked_tournaments = [
+            get_tournament(connection, int(row["tournament_id"]))
+            for row in connection.execute(
+                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
+                (event_id,),
+            )
+        ]
+        active = [
+            tournament
+            for tournament in linked_tournaments
+            if tournament is not None and tournament.status in {"running", "paused"}
+        ]
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail="Abort active event tournaments before resetting this event.",
+            )
+        try:
+            for tournament in linked_tournaments:
+                if tournament is not None:
+                    delete_tournament(connection, tournament.id)
+            reset_event(connection, event_id)
+            connection.commit()
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        request.app.state.stream_hub.link_event_tournaments(event_id, ())
+        request.app.state.stream_hub.publish(
+            f"event.{event_id}",
+            "event.changed",
+            {"event_id": event_id},
+            source="web",
+        )
+        _publish_admin_change(web_app, request)
+        return _json({"message": f"{event.title} reset to a new draft."})
 
     @app.post("/api/admin/event-modules/{module_key}/provision")
     def admin_provision_event_module(

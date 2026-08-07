@@ -107,6 +107,7 @@ from .events import (
     reconcile_all_engine_relay_events,
     reconcile_engine_relay_event,
     reconcile_engine_relay_events_for_tournament,
+    reset_event,
     set_event_chat_settings,
     set_event_cast_status,
     set_event_published,
