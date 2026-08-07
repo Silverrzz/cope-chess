@@ -248,7 +248,10 @@ def next_worker_assignment(
             preload_event_engines=tournament.status == "scheduled",
         )
 
-    for tournament_id in list_worker_event_fixture_candidates(connection, worker.id):
+    event_candidate_ids = list_worker_event_fixture_candidates(connection, worker.id)
+    if event_candidate_ids and used_resources not in {None, (0, 0)}:
+        return None
+    for tournament_id in event_candidate_ids:
         tournament = get_tournament(connection, tournament_id)
         if tournament is None:
             continue

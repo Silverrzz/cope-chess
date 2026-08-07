@@ -2536,7 +2536,7 @@ def list_worker_event_fixture_candidates(
               AND tournament.status IN ('scheduled', 'running')
               AND claim.tournament_id IS NULL
             ORDER BY
-              CASE WHEN tournament.status = 'scheduled' THEN 0 ELSE 1 END,
+              CASE WHEN tournament.status = 'running' THEN 0 ELSE 1 END,
               tournament.scheduled_start_at ASC NULLS LAST,
               fixture.position,
               fixture.id
@@ -2714,19 +2714,19 @@ def update_worker_assignment_settings(
         )
     connection.execute(
         """
-        DELETE FROM event_fixture_workers claim
-        WHERE claim.worker_id = ?
+        DELETE FROM event_fixture_workers
+        WHERE event_fixture_workers.worker_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM worker_event_permissions permission
-            WHERE permission.worker_id = claim.worker_id
-              AND permission.event_id = claim.event_id
+            WHERE permission.worker_id = event_fixture_workers.worker_id
+              AND permission.event_id = event_fixture_workers.event_id
           )
           AND NOT EXISTS (
             SELECT 1
             FROM game_assignments assignment
             JOIN games game ON game.id = assignment.game_id
-            WHERE game.tournament_id = claim.tournament_id
-              AND assignment.worker_id = claim.worker_id
+            WHERE game.tournament_id = event_fixture_workers.tournament_id
+              AND assignment.worker_id = event_fixture_workers.worker_id
               AND assignment.status IN ('assigned', 'acked', 'live')
           )
         """,

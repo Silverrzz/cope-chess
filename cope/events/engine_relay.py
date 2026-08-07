@@ -496,15 +496,21 @@ def _fixture_payload(
     fixture: EngineRelayFixtureRecord,
 ) -> dict[str, Any]:
     tournament = get_tournament(connection, fixture.tournament_id)
-    worker = connection.execute(
-        """
-        SELECT workers.id, workers.label, workers.status, claims.claimed_at
-        FROM event_fixture_workers claims
-        JOIN workers ON workers.id = claims.worker_id
-        WHERE claims.tournament_id = ?
-        """,
-        (fixture.tournament_id,),
-    ).fetchone()
+    worker = None
+    if tournament is not None and tournament.status in {
+        "scheduled",
+        "running",
+        "paused",
+    }:
+        worker = connection.execute(
+            """
+            SELECT workers.id, workers.label, workers.status, claims.claimed_at
+            FROM event_fixture_workers claims
+            JOIN workers ON workers.id = claims.worker_id
+            WHERE claims.tournament_id = ?
+            """,
+            (fixture.tournament_id,),
+        ).fetchone()
     games = () if tournament is None else list_games(connection, tournament.id)
     cast = _cast_by_id(connection, fixture.event_id)
     fixture_teams = _fixture_teams(connection, fixture)
@@ -698,6 +704,10 @@ def _touch_event(connection: sqlite3.Connection, event_id: int) -> None:
 
 
 def _publish_change(request: Request, event_id: int) -> None:
+    request.app.state.stream_hub.publish_to_internal(
+        "runner.wake",
+        {"reason": f"engine-relay-event:{event_id}"},
+    )
     request.app.state.stream_hub.publish(
         f"event.{event_id}",
         "event.changed",
