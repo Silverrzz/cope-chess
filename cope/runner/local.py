@@ -44,7 +44,10 @@ from cope.db import (
     TournamentRecord,
     WorkerRecord,
     assign_game_to_worker,
+    claim_event_fixture_worker,
     connect_database,
+    event_fixture_has_worker_permissions,
+    event_fixture_worker,
     finish_game,
     get_engine,
     get_game,
@@ -52,14 +55,17 @@ from cope.db import (
     get_common_benchmark_reference,
     get_opening_position,
     get_tournament,
+    get_worker_event_fixture,
     list_games,
     list_moves,
     list_tournaments,
+    list_worker_event_fixture_candidates,
     list_worker_tournament_ids,
     lock_tournament,
     mark_game_assignment_live,
     mark_game_live,
     record_move,
+    release_event_fixture_worker,
     set_tournament_current_round_at_least,
     set_tournament_status,
     touch_service_heartbeat,
@@ -225,6 +231,40 @@ def next_worker_assignment(
     )
     if available_resources is None:
         return None
+    active_event_fixture = get_worker_event_fixture(connection, worker.id)
+    if active_event_fixture is not None:
+        tournament = get_tournament(connection, active_event_fixture.tournament_id)
+        if tournament is None or tournament.status == "paused":
+            return None
+        if tournament.status == "scheduled" and used_resources not in {None, (0, 0)}:
+            return None
+        return _next_tournament_worker_assignment(
+            connection,
+            worker,
+            tournament,
+            available_resources=available_resources,
+            excluded_engine_ids=excluded_engine_ids,
+            excluded_game_ids=excluded_game_ids,
+            preload_event_engines=tournament.status == "scheduled",
+        )
+
+    for tournament_id in list_worker_event_fixture_candidates(connection, worker.id):
+        tournament = get_tournament(connection, tournament_id)
+        if tournament is None:
+            continue
+        assignment = _next_tournament_worker_assignment(
+            connection,
+            worker,
+            tournament,
+            available_resources=available_resources,
+            excluded_engine_ids=excluded_engine_ids,
+            excluded_game_ids=excluded_game_ids,
+            claim_event_fixture=True,
+            preload_event_engines=tournament.status == "scheduled",
+        )
+        if assignment is not None:
+            return assignment
+
     allowed_tournament_ids = (
         None
         if worker.tournament_scope == "all"
@@ -233,78 +273,119 @@ def next_worker_assignment(
     for tournament in list_tournaments(connection):
         if tournament.status != "running":
             continue
+        claimed_worker = event_fixture_worker(connection, tournament.id)
+        if claimed_worker is not None and claimed_worker.worker_id != worker.id:
+            continue
+        if claimed_worker is None and event_fixture_has_worker_permissions(
+            connection,
+            tournament.id,
+        ):
+            continue
         if (
             allowed_tournament_ids is not None
             and tournament.id not in allowed_tournament_ids
         ):
             continue
-
-        active_games = _active_game_count(connection, tournament.id)
-        if active_games >= tournament.config.concurrency:
-            continue
-
-        if worker.hw is None:
-            continue
-        game = _next_playable_game_for_worker(
+        assignment = _next_tournament_worker_assignment(
             connection,
-            tournament.id,
             worker,
+            tournament,
+            available_resources=available_resources,
             excluded_engine_ids=excluded_engine_ids,
             excluded_game_ids=excluded_game_ids,
         )
-        if game is None:
-            continue
-        engines = _assignment_engines(connection, game)
-        if excluded_engine_ids.intersection(engines):
-            continue
-        required_resources = _tournament_required_resources(
-            connection,
-            tournament,
-            engine_count=len(engines),
-            participant_engine_ids=(game.white_engine_id, game.black_engine_id),
-        )
-        available_threads, available_hash_mb = available_resources
-        if (
-            available_threads < required_resources.threads
-            or available_hash_mb < required_resources.hash_mb
-        ):
-            continue
-        benchmark_reference = get_common_benchmark_reference(
-            connection,
-            tuple(engines.values()),
-        )
-        if benchmark_reference is None:
-            continue
-
-        set_tournament_current_round_at_least(connection, tournament.id, game.round)
-        assignment_record = assign_game_to_worker(
-            connection,
-            game_id=game.id,
-            assignment_key=secrets.token_urlsafe(24),
-            worker_id=worker.id,
-        )
-        if assignment_record is None:
-            continue
-        opening = get_opening_position(connection, game.opening_id)
-        LOG.info(
-            "claimed game worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s",
-            worker.id,
-            assignment_record.id,
-            game.id,
-            tournament.name,
-            game.round,
-        )
-        return _worker_assignment_payload(
-            connection,
-            tournament,
-            game,
-            assignment_record,
-            opening,
-            engines,
-            benchmark_reference,
-        )
+        if assignment is not None:
+            return assignment
 
     return None
+
+
+def _next_tournament_worker_assignment(
+    connection: sqlite3.Connection,
+    worker: WorkerRecord,
+    tournament: TournamentRecord,
+    *,
+    available_resources: tuple[int, int],
+    excluded_engine_ids: frozenset[int],
+    excluded_game_ids: frozenset[int],
+    claim_event_fixture: bool = False,
+    preload_event_engines: bool = False,
+) -> WorkerGameAssignment | None:
+    if tournament.status not in {"running", "scheduled"}:
+        return None
+    if _active_game_count(connection, tournament.id) >= tournament.config.concurrency:
+        return None
+    if worker.hw is None:
+        return None
+    game = _next_playable_game_for_worker(
+        connection,
+        tournament.id,
+        worker,
+        excluded_engine_ids=excluded_engine_ids,
+        excluded_game_ids=excluded_game_ids,
+    )
+    if game is None:
+        return None
+    engines = _assignment_engines(
+        connection,
+        game,
+        preload_event_engines=preload_event_engines,
+    )
+    if excluded_engine_ids.intersection(engines):
+        return None
+    required_resources = _tournament_required_resources(
+        connection,
+        tournament,
+        engine_count=len(engines),
+        participant_engine_ids=(game.white_engine_id, game.black_engine_id),
+    )
+    available_threads, available_hash_mb = available_resources
+    if (
+        available_threads < required_resources.threads
+        or available_hash_mb < required_resources.hash_mb
+    ):
+        return None
+    benchmark_reference = get_common_benchmark_reference(
+        connection,
+        tuple(engines.values()),
+    )
+    if benchmark_reference is None:
+        return None
+    claimed = None
+    if claim_event_fixture:
+        claimed = claim_event_fixture_worker(connection, tournament.id, worker.id)
+        if claimed is None:
+            return None
+    set_tournament_current_round_at_least(connection, tournament.id, game.round)
+    assignment_record = assign_game_to_worker(
+        connection,
+        game_id=game.id,
+        assignment_key=secrets.token_urlsafe(24),
+        worker_id=worker.id,
+    )
+    if assignment_record is None:
+        if claimed is not None:
+            release_event_fixture_worker(connection, tournament.id, worker.id)
+        return None
+    opening = get_opening_position(connection, game.opening_id)
+    LOG.info(
+        "claimed game worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s event_preload=%s",
+        worker.id,
+        assignment_record.id,
+        game.id,
+        tournament.name,
+        game.round,
+        preload_event_engines,
+    )
+    return _worker_assignment_payload(
+        connection,
+        tournament,
+        game,
+        assignment_record,
+        opening,
+        engines,
+        benchmark_reference,
+    )
 
 
 def mark_worker_assignment_live(
@@ -381,15 +462,23 @@ def run_worker_assignment_game(
     )
 
     runtime_time_control = _runtime_time_control(tournament.config.time_control)
+    relay = assignment.assignment.engine_relay
+    runtime_engine_ids = {
+        *assignment.assignment.slots.values(),
+        *(
+            member.engine_id
+            for team in (() if relay is None else relay.teams.values())
+            for member in team.members
+        ),
+    }
     engine_instances = {
         engine_id: EngineInstance(
             engine_id,
             transport,
             options=_engine_options(assignment, engine_id),
         )
-        for engine_id in assignment.engines
+        for engine_id in runtime_engine_ids
     }
-    relay = assignment.assignment.engine_relay
     white_member = (
         _relay_member_for_moves(relay.teams[ColorSlot.WHITE], 0)
         if relay is not None
@@ -1004,8 +1093,13 @@ def _worker_assignment_payload(
 def _assignment_engines(
     connection: sqlite3.Connection,
     game: GameRecord,
+    *,
+    preload_event_engines: bool = False,
 ) -> dict[int, EngineSpec]:
-    from cope.events.engine_relay import relay_engine_ids_for_game
+    from cope.events.engine_relay import (
+        relay_engine_ids_for_game,
+        relay_engine_ids_for_tournament,
+    )
 
     engines: dict[int, EngineSpec] = {}
     engine_ids = {
@@ -1013,6 +1107,10 @@ def _assignment_engines(
         game.black_engine_id,
         *relay_engine_ids_for_game(connection, game),
     }
+    if preload_event_engines:
+        engine_ids.update(
+            relay_engine_ids_for_tournament(connection, game.tournament_id)
+        )
     for engine_id in engine_ids:
         engine = get_engine(connection, engine_id)
         if engine is None:

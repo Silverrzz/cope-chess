@@ -279,6 +279,7 @@ def reset_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
     if event is None:
         raise ValueError("event does not exist")
     for table in (
+        "worker_event_permissions",
         "event_awards",
         "event_updates",
         "event_contests",

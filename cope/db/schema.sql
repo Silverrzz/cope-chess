@@ -388,6 +388,22 @@ CREATE TABLE IF NOT EXISTS worker_tournament_permissions (
   PRIMARY KEY (worker_id, tournament_id)
 );
 
+CREATE TABLE IF NOT EXISTS worker_event_permissions (
+  worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  PRIMARY KEY (worker_id, event_id)
+);
+
+CREATE TABLE IF NOT EXISTS event_fixture_workers (
+  tournament_id BIGINT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  claimed_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_fixture_workers_active_worker
+  ON event_fixture_workers(worker_id);
+
 CREATE TABLE IF NOT EXISTS game_assignments (
   id BIGSERIAL PRIMARY KEY,
   game_id BIGINT NOT NULL UNIQUE REFERENCES games(id) ON DELETE CASCADE,
@@ -885,13 +901,17 @@ CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_anchor ON engine_relay
 CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
   WHERE event_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 36)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 37)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 CREATE INDEX IF NOT EXISTS idx_workers_machine_active ON workers(machine_id, status);
 CREATE INDEX IF NOT EXISTS idx_worker_tournament_permissions_tournament
   ON worker_tournament_permissions(tournament_id, worker_id);
+CREATE INDEX IF NOT EXISTS idx_worker_event_permissions_event
+  ON worker_event_permissions(event_id, worker_id);
+CREATE INDEX IF NOT EXISTS idx_event_fixture_workers_event
+  ON event_fixture_workers(event_id, worker_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_machine_id ON workers(machine_id)
   WHERE machine_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_game_assignments_worker_active ON game_assignments(worker_id, status);

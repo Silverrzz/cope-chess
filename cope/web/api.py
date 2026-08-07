@@ -118,6 +118,7 @@ from cope.db import (
     register_engine_artifact,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
+    restore_tournament,
     revoke_worker,
     schedule_tournament,
     set_tournament_concurrency,
@@ -641,8 +642,9 @@ class WorkerSettingsPayload(BaseModel):
     core_limit: int | None = Field(default=None, ge=1)
     tournament_scope: Literal["all", "selected"] = "all"
     tournament_ids: list[int] = Field(default_factory=list)
+    event_ids: list[int] = Field(default_factory=list)
 
-    @field_validator("tournament_ids")
+    @field_validator("tournament_ids", "event_ids")
     @classmethod
     def validate_tournament_ids(cls, value: list[int]) -> list[int]:
         if any(tournament_id <= 0 for tournament_id in value):
@@ -2278,13 +2280,24 @@ def register_api_routes(app: FastAPI) -> None:
                 detail=f"Cannot {action or 'change'} a {tournament.status} tournament.",
             )
         target = allowed[action]
-        set_tournament_status(connection, tournament_id, target)
-        connection.commit()
+        try:
+            if action == "restore":
+                restore_tournament(connection, tournament_id)
+            else:
+                set_tournament_status(connection, tournament_id, target)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         _publish_admin_change(web_app, request)
         return _json(
             {
                 "status": target,
-                "message": f"Tournament {target}.",
+                "message": (
+                    "Tournament restored and paused."
+                    if action == "restore"
+                    else f"Tournament {target}."
+                ),
             }
         )
 
@@ -3330,6 +3343,7 @@ def register_api_routes(app: FastAPI) -> None:
                 core_limit=payload.core_limit,
                 tournament_scope=payload.tournament_scope,
                 tournament_ids=payload.tournament_ids,
+                event_ids=payload.event_ids,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

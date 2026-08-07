@@ -58,6 +58,7 @@ from cope.db import (
     finish_game_assignment,
     acknowledge_game_assignment,
     get_game,
+    get_tournament,
     get_worker,
     get_worker_by_session_id,
     get_worker_by_token,
@@ -66,6 +67,7 @@ from cope.db import (
     record_worker_resource_sample,
     record_game_hardware_score,
     record_game_assignment_progress_batch,
+    release_event_fixture_worker,
     reconcile_worker_deployment,
     set_service_endpoint,
     touch_workers_seen,
@@ -918,6 +920,10 @@ class WorkerHandshakeServer:
                     "benchmark_hardware_key": assignment.benchmark_reference.hardware_key,
                 },
             )
+            await self._wait_for_event_fixture_start_or_withdrawn(
+                assignment,
+                cancellation,
+            )
             await self._run_assignment_game_or_withdrawn(
                 assignment,
                 transport,
@@ -1068,6 +1074,60 @@ class WorkerHandshakeServer:
         with contextlib.suppress(asyncio.CancelledError):
             await game_task
         raise AssignmentWithdrawn("assignment was removed")
+
+    async def _wait_for_event_fixture_start_or_withdrawn(
+        self,
+        assignment,
+        cancellation: asyncio.Event,
+    ) -> None:
+        status = await asyncio.to_thread(
+            self._assignment_tournament_status,
+            assignment.assignment.game_id,
+        )
+        if status == "running":
+            return
+        if status not in {"scheduled", "paused"}:
+            raise AssignmentWithdrawn("event fixture is no longer awaiting its start")
+        self._record_assignment_progress(
+            assignment,
+            stage="startup",
+            substage="fixture_wait",
+            status="running",
+            detail="Engines are prepared and reserved until the event fixture starts",
+        )
+        while True:
+            try:
+                await asyncio.wait_for(cancellation.wait(), timeout=0.25)
+            except asyncio.TimeoutError:
+                pass
+            if cancellation.is_set():
+                raise AssignmentWithdrawn("assignment was removed")
+            status = await asyncio.to_thread(
+                self._assignment_tournament_status,
+                assignment.assignment.game_id,
+            )
+            if status == "running":
+                self._record_assignment_progress(
+                    assignment,
+                    stage="startup",
+                    substage="fixture_wait",
+                    status="completed",
+                    detail="The event fixture has started and the prepared engines are released to play",
+                )
+                return
+            if status not in {"scheduled", "paused"}:
+                raise AssignmentWithdrawn("event fixture is no longer awaiting its start")
+
+    def _assignment_tournament_status(self, game_id: int) -> str | None:
+        connection = connect_database(self._config.db_path)
+        try:
+            game = get_game(connection, game_id)
+            if game is None:
+                return None
+            tournament = get_tournament(connection, game.tournament_id)
+            return None if tournament is None else tournament.status
+        finally:
+            connection.close()
 
     def _inactive_assignment_ids(
         self,
@@ -1647,13 +1707,16 @@ class WorkerHandshakeServer:
 
             colors = relay_engine_colors(assignment)
             for engine_id, score in ready.hardware_scores.items():
+                color = colors.get(engine_id)
+                if color is None:
+                    continue
                 record_game_hardware_score(
                     connection,
                     game_id=ready.game_id,
                     assignment_id=ready.assignment_id,
                     worker_id=worker.id,
                     engine_version_id=engine_id,
-                    color=colors[engine_id],
+                    color=color,
                     benchmark_hardware_key=assignment.benchmark_reference.hardware_key,
                     benchmark_nps=score.benchmark_nps,
                     worker_nps=score.worker_nps,
@@ -1717,6 +1780,12 @@ class WorkerHandshakeServer:
                 error=failure.error,
             )
             game = get_game(connection, assignment.assignment.game_id)
+            if game is not None:
+                release_event_fixture_worker(
+                    connection,
+                    game.tournament_id,
+                    worker.id,
+                )
             connection.commit()
         except Exception:
             connection.rollback()

@@ -51,6 +51,12 @@ export interface RelayFixture {
     position: number;
   }>;
   tournament: TournamentRecord | null;
+  worker: {
+    id: number;
+    label: string;
+    status: string;
+    claimed_at: string;
+  } | null;
   games: RelayGame[];
 }
 

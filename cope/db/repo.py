@@ -169,6 +169,14 @@ class WorkerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class EventFixtureWorkerRecord:
+    tournament_id: int
+    event_id: int
+    worker_id: int
+    claimed_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerFailureRecord:
     id: int
     worker_id: int | None
@@ -992,6 +1000,36 @@ def set_tournament_status(
         _abandon_tournament_games(connection, tournament_id, now)
     if cursor.rowcount > 0:
         _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
+
+
+def restore_tournament(connection: sqlite3.Connection, tournament_id: int) -> None:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None:
+        raise ValueError("tournament does not exist")
+    if tournament.status != "aborted":
+        raise ValueError("only an aborted tournament can be restored")
+    if any(
+        commit.status in {"pending", "claimed", "applied"}
+        for commit in list_tournament_rating_commits(connection, tournament_id)
+    ):
+        raise ValueError("uncommit the tournament ratings before restoring it")
+    game_ids = tuple(
+        int(row["id"])
+        for row in connection.execute(
+            "SELECT id FROM games WHERE tournament_id = ? AND status = 'abandoned'",
+            (tournament_id,),
+        )
+    )
+    _reset_games_for_replay(connection, game_ids, include_abandoned=True)
+    connection.execute(
+        """
+        UPDATE tournaments
+        SET status = 'paused', started_at = COALESCE(started_at, ?), finished_at = NULL
+        WHERE id = ?
+        """,
+        (utc_now(), tournament_id),
+    )
+    _reconcile_engine_relay_events_for_tournament(connection, tournament_id)
 
 
 def set_tournament_current_round_at_least(
@@ -2431,6 +2469,155 @@ def list_worker_tournament_ids(
     )
 
 
+def list_worker_event_ids(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> tuple[int, ...]:
+    return tuple(
+        int(row["event_id"])
+        for row in connection.execute(
+            """
+            SELECT event_id
+            FROM worker_event_permissions
+            WHERE worker_id = ?
+            ORDER BY event_id
+            """,
+            (worker_id,),
+        )
+    )
+
+
+def get_worker_event_fixture(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> EventFixtureWorkerRecord | None:
+    row = connection.execute(
+        """
+        SELECT claim.*, tournament.status AS tournament_status
+        FROM event_fixture_workers claim
+        JOIN tournaments tournament ON tournament.id = claim.tournament_id
+        WHERE claim.worker_id = ?
+        """,
+        (worker_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["tournament_status"] not in {"scheduled", "running", "paused"}:
+        connection.execute(
+            "DELETE FROM event_fixture_workers WHERE tournament_id = ?",
+            (int(row["tournament_id"]),),
+        )
+        return None
+    return EventFixtureWorkerRecord(
+        tournament_id=int(row["tournament_id"]),
+        event_id=int(row["event_id"]),
+        worker_id=int(row["worker_id"]),
+        claimed_at=str(row["claimed_at"]),
+    )
+
+
+def list_worker_event_fixture_candidates(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> tuple[int, ...]:
+    return tuple(
+        int(row["tournament_id"])
+        for row in connection.execute(
+            """
+            SELECT fixture.tournament_id
+            FROM worker_event_permissions permission
+            JOIN events event ON event.id = permission.event_id
+            JOIN engine_relay_fixtures fixture ON fixture.event_id = event.id
+            JOIN tournaments tournament ON tournament.id = fixture.tournament_id
+            LEFT JOIN event_fixture_workers claim
+              ON claim.tournament_id = fixture.tournament_id
+            WHERE permission.worker_id = ?
+              AND event.status NOT IN ('completed', 'cancelled')
+              AND tournament.status IN ('scheduled', 'running')
+              AND claim.tournament_id IS NULL
+            ORDER BY
+              CASE WHEN tournament.status = 'scheduled' THEN 0 ELSE 1 END,
+              tournament.scheduled_start_at ASC NULLS LAST,
+              fixture.position,
+              fixture.id
+            """,
+            (worker_id,),
+        )
+    )
+
+
+def event_fixture_worker(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> EventFixtureWorkerRecord | None:
+    row = connection.execute(
+        "SELECT * FROM event_fixture_workers WHERE tournament_id = ?",
+        (tournament_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return EventFixtureWorkerRecord(
+        tournament_id=int(row["tournament_id"]),
+        event_id=int(row["event_id"]),
+        worker_id=int(row["worker_id"]),
+        claimed_at=str(row["claimed_at"]),
+    )
+
+
+def event_fixture_has_worker_permissions(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM engine_relay_fixtures fixture
+        JOIN worker_event_permissions permission
+          ON permission.event_id = fixture.event_id
+        WHERE fixture.tournament_id = ?
+        LIMIT 1
+        """,
+        (tournament_id,),
+    ).fetchone()
+    return row is not None
+
+
+def claim_event_fixture_worker(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    worker_id: int,
+) -> EventFixtureWorkerRecord | None:
+    connection.execute(
+        """
+        INSERT INTO event_fixture_workers (
+          tournament_id, event_id, worker_id, claimed_at
+        )
+        SELECT fixture.tournament_id, fixture.event_id, permission.worker_id, ?
+        FROM engine_relay_fixtures fixture
+        JOIN tournaments tournament ON tournament.id = fixture.tournament_id
+        JOIN worker_event_permissions permission
+          ON permission.event_id = fixture.event_id AND permission.worker_id = ?
+        WHERE fixture.tournament_id = ?
+          AND tournament.status IN ('scheduled', 'running')
+        ON CONFLICT DO NOTHING
+        """,
+        (utc_now(), worker_id, tournament_id),
+    )
+    claim = event_fixture_worker(connection, tournament_id)
+    return claim if claim is not None and claim.worker_id == worker_id else None
+
+
+def release_event_fixture_worker(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    worker_id: int,
+) -> None:
+    connection.execute(
+        "DELETE FROM event_fixture_workers WHERE tournament_id = ? AND worker_id = ?",
+        (tournament_id, worker_id),
+    )
+
+
 def update_worker_assignment_settings(
     connection: sqlite3.Connection,
     worker_id: int,
@@ -2438,6 +2625,7 @@ def update_worker_assignment_settings(
     core_limit: int | None,
     tournament_scope: str,
     tournament_ids: Iterable[int],
+    event_ids: Iterable[int],
 ) -> None:
     worker = get_worker(connection, worker_id)
     if worker is None:
@@ -2473,6 +2661,25 @@ def update_worker_assignment_settings(
         if available_ids != set(selected_ids):
             raise ValueError("workers can only be assigned to unfinished tournaments")
 
+    selected_event_ids = tuple(dict.fromkeys(int(value) for value in event_ids))
+    if any(event_id <= 0 for event_id in selected_event_ids):
+        raise ValueError("worker event ids must be positive")
+    if selected_event_ids:
+        placeholders = ", ".join("?" for _ in selected_event_ids)
+        available_event_ids = {
+            int(row["id"])
+            for row in connection.execute(
+                f"""
+                SELECT id FROM events
+                WHERE id IN ({placeholders})
+                  AND status NOT IN ('completed', 'cancelled')
+                """,
+                selected_event_ids,
+            )
+        }
+        if available_event_ids != set(selected_event_ids):
+            raise ValueError("workers can only be assigned to current events")
+
     connection.execute(
         """
         UPDATE workers
@@ -2493,6 +2700,38 @@ def update_worker_assignment_settings(
             """,
             ((worker_id, tournament_id) for tournament_id in selected_ids),
         )
+    connection.execute(
+        "DELETE FROM worker_event_permissions WHERE worker_id = ?",
+        (worker_id,),
+    )
+    if selected_event_ids:
+        connection.executemany(
+            """
+            INSERT INTO worker_event_permissions (worker_id, event_id)
+            VALUES (?, ?)
+            """,
+            ((worker_id, event_id) for event_id in selected_event_ids),
+        )
+    connection.execute(
+        """
+        DELETE FROM event_fixture_workers claim
+        WHERE claim.worker_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM worker_event_permissions permission
+            WHERE permission.worker_id = claim.worker_id
+              AND permission.event_id = claim.event_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM game_assignments assignment
+            JOIN games game ON game.id = assignment.game_id
+            WHERE game.tournament_id = claim.tournament_id
+              AND assignment.worker_id = claim.worker_id
+              AND assignment.status IN ('assigned', 'acked', 'live')
+          )
+        """,
+        (worker_id,),
+    )
 
 
 def record_worker_failure(
@@ -2751,6 +2990,10 @@ def disconnect_worker(
         reason=reason,
     )
     connection.execute(
+        "DELETE FROM event_fixture_workers WHERE worker_id = ?",
+        (worker_id,),
+    )
+    connection.execute(
         """
         UPDATE workers
         SET status = 'offline', last_seen = ?
@@ -2838,6 +3081,8 @@ def _active_worker_game_ids(
 def _reset_games_for_replay(
     connection: sqlite3.Connection,
     game_ids: Iterable[int],
+    *,
+    include_abandoned: bool = False,
 ) -> None:
     """Discard every attempt-scoped artifact before games are reassigned."""
     ids = tuple(dict.fromkeys(int(game_id) for game_id in game_ids))
@@ -2848,6 +3093,11 @@ def _reset_games_for_replay(
     connection.execute(
         f"DELETE FROM game_hardware_scores WHERE game_id IN ({placeholders})",
         ids,
+    )
+    resettable_statuses = (
+        "'pending', 'assigned', 'live', 'abandoned'"
+        if include_abandoned
+        else "'pending', 'assigned', 'live'"
     )
     connection.execute(
         f"""
@@ -2861,7 +3111,7 @@ def _reset_games_for_replay(
             started_at = NULL,
             finished_at = NULL
         WHERE id IN ({placeholders})
-          AND status IN ('pending', 'assigned', 'live')
+          AND status IN ({resettable_statuses})
         """,
         ids,
     )

@@ -14,7 +14,9 @@ import type { Worker, WorkerRow } from '@/components/admin/types'
 
 interface WorkerFailure { id: number; worker_id: number | null; worker_label: string; machine_id: string | null; assignment_id: number | null; game_id: number | null; engine_id: number | null; engine_name: string; stage: string; error: string; occurred_at: string }
 interface WorkerTournament { id: number; name: string; status: string }
-interface WorkerSettings { core_limit: number | null; effective_cores: number | null; effective_memory_mb: number | null; tournament_scope: 'all' | 'selected'; tournament_ids: number[]; tournaments: WorkerTournament[] }
+interface WorkerEvent { id: number; title: string; status: string; scheduled_start_at: string | null }
+interface EventClaim { event_id: number; event_title: string; tournament_id: number; fixture_title: string; status: string; scheduled_start_at: string | null; assignment_id: number | null; assignment_status: string | null }
+interface WorkerSettings { core_limit: number | null; effective_cores: number | null; effective_memory_mb: number | null; tournament_scope: 'all' | 'selected'; tournament_ids: number[]; tournaments: WorkerTournament[]; event_ids: number[]; events: WorkerEvent[]; event_claim: EventClaim | null }
 interface ResourceSample { sampled_at: string; cpu_percent: number; memory_used_mb: number; memory_total_mb: number; memory_available_mb: number; coordinator_cpu_cores: number; coordinator_memory_mb: number; engine_cpu_cores: number; engine_memory_mb: number; disk_used_mb: number; disk_free_mb: number; disk_total_mb: number }
 interface ResourceAllocation { assignment_id: number; game_id: number; status: string; tournament_id: number; tournament_name: string; white_engine: string; black_engine: string; threads: number; engine_hash_mb: number; process_memory_mb: number; memory_mb: number }
 interface WorkerResources { latest: ResourceSample | null; samples: ResourceSample[]; allocations: ResourceAllocation[] }
@@ -37,6 +39,7 @@ const label = ref('')
 const coreLimit = ref<number | ''>('')
 const tournamentScope = ref<'all' | 'selected'>('all')
 const selectedTournamentIds = ref<number[]>([])
+const selectedEventIds = ref<number[]>([])
 const savedSettingsKey = ref('')
 const settingsInitialized = ref(false)
 const copied = ref(false)
@@ -47,6 +50,7 @@ let source: EventSource | null = null
 const latest = computed(() => data.value?.resources.latest ?? null)
 const samples = computed(() => data.value?.resources.samples ?? [])
 const allocations = computed(() => data.value?.resources.allocations ?? [])
+const eventClaim = computed(() => data.value?.settings.event_claim ?? null)
 const detectedCoreCount = computed(() => data.value?.worker.hw?.logical_cores ?? null)
 const effectiveCoreCount = computed(() => data.value?.settings.effective_cores ?? detectedCoreCount.value ?? 0)
 const detectedMemoryMb = computed(() => {
@@ -80,6 +84,8 @@ const missionState = computed(() => {
   if (!latest.value) return 'Waiting for first telemetry sample'
   if (!telemetryFresh.value) return 'Telemetry is catching up'
   if (cpuPercent.value >= 92 || memoryPercent.value >= 92) return 'Capacity pressure detected'
+  if (eventClaim.value?.status === 'scheduled') return `Ready for ${eventClaim.value.event_title}`
+  if (eventClaim.value) return `Dedicated to ${eventClaim.value.event_title}`
   if (allocations.value.length) return `${allocations.value.length} active ${allocations.value.length === 1 ? 'game' : 'games'} under control`
   return 'Online and ready for work'
 })
@@ -102,6 +108,7 @@ const settingsKey = computed(() => JSON.stringify({
   core_limit: coreLimit.value === '' ? null : Number(coreLimit.value),
   tournament_scope: tournamentScope.value,
   tournament_ids: [...selectedTournamentIds.value].sort((left, right) => left - right),
+  event_ids: [...selectedEventIds.value].sort((left, right) => left - right),
 }))
 const settingsDirty = computed(() => settingsInitialized.value && settingsKey.value !== savedSettingsKey.value)
 
@@ -156,6 +163,7 @@ function syncSettings(response: Response): void {
   selectedTournamentIds.value = response.settings.tournament_scope === 'all'
     ? response.settings.tournaments.map((tournament) => tournament.id)
     : [...response.settings.tournament_ids]
+  selectedEventIds.value = [...response.settings.event_ids]
   settingsInitialized.value = true
   savedSettingsKey.value = settingsKey.value
 }
@@ -208,11 +216,20 @@ function clearTournaments(): void {
   selectedTournamentIds.value = []
 }
 
+function selectAllEvents(): void {
+  selectedEventIds.value = data.value?.settings.events.map((event) => event.id) ?? []
+}
+
+function clearEvents(): void {
+  selectedEventIds.value = []
+}
+
 async function saveSettings(): Promise<void> {
   const parsedCoreLimit = coreLimit.value === '' ? null : Number(coreLimit.value)
   if (parsedCoreLimit !== null && (!Number.isInteger(parsedCoreLimit) || parsedCoreLimit < 1)) { error.value = 'CPU thread limit must be a positive whole number.'; return }
   if (parsedCoreLimit !== null && detectedCoreCount.value !== null && parsedCoreLimit > detectedCoreCount.value) { error.value = `CPU thread limit cannot exceed the detected ${detectedCoreCount.value} threads.`; return }
   const availableTournamentIds = new Set(data.value?.settings.tournaments.map((tournament) => tournament.id) ?? [])
+  const availableEventIds = new Set(data.value?.settings.events.map((event) => event.id) ?? [])
   pending.value = 'settings'
   try {
     const response = await api.put<{ message: string }>(`/api/admin/workers/${id.value}/settings`, {
@@ -220,6 +237,7 @@ async function saveSettings(): Promise<void> {
         core_limit: parsedCoreLimit,
         tournament_scope: tournamentScope.value,
         tournament_ids: tournamentScope.value === 'selected' ? selectedTournamentIds.value.filter((tournamentId) => availableTournamentIds.has(tournamentId)) : [],
+        event_ids: selectedEventIds.value.filter((eventId) => availableEventIds.has(eventId)),
       },
     })
     toast.success(response.message)
@@ -297,9 +315,10 @@ onBeforeUnmount(() => source?.close())
           <StatusBadge :status="data.row.status" />
         </div>
         <div class="mission-work">
-          <div class="mission-work__pulse" :class="{ active: allocations.length }"><AppIcon :name="allocations.length ? 'activity' : 'radio'" :size="18" /></div>
-          <div><span>{{ allocations.length ? 'Current operation' : 'Scheduler state' }}</span><strong>{{ data.row.work?.summary ?? 'No active assignment' }}</strong><small>{{ data.row.work?.detail || (allocations.length ? 'Work is progressing normally.' : 'Standing by for a compatible assignment.') }}</small></div>
-          <div class="mission-work__meta"><span>{{ allocations.length }} active</span><span>{{ reservedThreads }}/{{ effectiveCoreCount || '—' }} threads reserved</span><span>Seen {{ formatDate(data.worker.last_seen) }}</span></div>
+          <div class="mission-work__pulse" :class="{ active: allocations.length || eventClaim }"><AppIcon :name="allocations.length || eventClaim ? 'activity' : 'radio'" :size="18" /></div>
+          <div v-if="eventClaim"><span>Event reservation</span><strong>{{ eventClaim.fixture_title }}</strong><small>{{ eventClaim.status === 'scheduled' ? eventClaim.assignment_status === 'acked' ? 'Every fixture engine is built and ready at the start barrier.' : 'Building and benchmarking the fixture engines now.' : 'All scheduler capacity is dedicated to this event fixture.' }}</small></div>
+          <div v-else><span>{{ allocations.length ? 'Current operation' : 'Scheduler state' }}</span><strong>{{ data.row.work?.summary ?? 'No active assignment' }}</strong><small>{{ data.row.work?.detail || (allocations.length ? 'Work is progressing normally.' : 'Standing by for a compatible assignment.') }}</small></div>
+          <div class="mission-work__meta"><span>{{ eventClaim ? 'Exclusive event' : `${allocations.length} active` }}</span><span>{{ eventClaim ? `${effectiveCoreCount || '—'}/${effectiveCoreCount || '—'} threads allocated` : `${reservedThreads}/${effectiveCoreCount || '—'} threads reserved` }}</span><span>{{ eventClaim?.scheduled_start_at ? `Starts ${formatDate(eventClaim.scheduled_start_at)}` : `Seen ${formatDate(data.worker.last_seen)}` }}</span></div>
         </div>
       </section>
 
@@ -418,7 +437,15 @@ onBeforeUnmount(() => source?.close())
                 <label v-for="tournament in data.settings.tournaments" :key="tournament.id"><input v-model="selectedTournamentIds" type="checkbox" :value="tournament.id" :disabled="tournamentScope === 'all'"><span class="route-check"><AppIcon name="check" :size="13" /></span><span><strong>{{ tournament.name }}</strong><small>{{ tournament.status }} · Queue #{{ tournament.id }}</small></span><StatusBadge :status="tournament.status" /></label>
               </div>
               <div v-else class="routing-empty"><AppIcon name="check-circle" :size="20" /><span><strong>No unfinished tournaments</strong><small>There are currently no queues to route.</small></span></div>
-              <p v-if="tournamentScope === 'selected' && selectedTournamentIds.length === 0" class="routing-warning"><AppIcon name="alert-circle" :size="15" /> No tournament can dispatch to this worker, so it will remain idle.</p>
+              <p v-if="tournamentScope === 'selected' && selectedTournamentIds.length === 0 && selectedEventIds.length === 0" class="routing-warning"><AppIcon name="alert-circle" :size="15" /> No tournament or event can dispatch to this worker, so it will remain idle.</p>
+              <div class="event-routing">
+                <div class="routing-header"><div><span>Event reservations</span><strong>{{ selectedEventIds.length }} assigned</strong></div><div v-if="data.settings.events.length"><button type="button" @click="selectAllEvents">Select all</button><button type="button" @click="clearEvents">Clear</button></div></div>
+                <p>Assigned events may reserve the entire worker as soon as a fixture is scheduled. Engines are built and benchmarked before its start time, and unrelated queues remain blocked until the fixture finishes.</p>
+                <div v-if="data.settings.events.length" class="route-list event-route-list">
+                  <label v-for="event in data.settings.events" :key="event.id"><input v-model="selectedEventIds" type="checkbox" :value="event.id"><span class="route-check"><AppIcon name="check" :size="13" /></span><span><strong>{{ event.title }}</strong><small>{{ event.scheduled_start_at ? `Next start ${formatDate(event.scheduled_start_at)}` : `${event.status} · Awaiting a scheduled fixture` }}</small></span><StatusBadge :status="event.status" /></label>
+                </div>
+                <div v-else class="routing-empty"><AppIcon name="trophy" :size="20" /><span><strong>No current events</strong><small>Current events will become available for whole-worker assignment here.</small></span></div>
+              </div>
             </fieldset>
           </div>
           <footer class="policy-actions"><div><AppIcon name="info" :size="16" /><span>Memory scheduling remains automatic at <strong>{{ formatResource(data.settings.effective_memory_mb ?? 0) }}</strong>, preserving OS and process headroom.</span></div><button class="button button--primary" type="submit" :disabled="!!pending || !settingsDirty">{{ pending === 'settings' ? 'Applying policy…' : 'Apply resource policy' }}</button></footer>
@@ -555,6 +582,7 @@ onBeforeUnmount(() => source?.close())
 .capacity-impact { display: grid; gap: .4rem; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: .75rem; }.capacity-impact > div { background: var(--color-surface-subtle, #f3f6f9); border-radius: .5rem; display: grid; gap: .18rem; padding: .55rem; }.capacity-impact span { color: var(--color-text-muted, #64748b); font-size: .55rem; }.capacity-impact strong { font-size: .75rem; }
 .routing-header { align-items: center; display: flex; justify-content: space-between; margin-top: .9rem; }.routing-header > div:first-child { align-items: baseline; display: flex; gap: .4rem; }.routing-header span { color: var(--color-text-muted, #64748b); font-size: .6rem; }.routing-header strong { font-size: .67rem; }.routing-header > div:last-child { display: flex; gap: .6rem; }.routing-header button { background: none; border: 0; color: var(--color-accent, #2f78c4); cursor: pointer; font-size: .6rem; padding: 0; }
 .route-list { border: 1px solid var(--color-border, #d9e0ea); border-radius: .65rem; display: grid; margin-top: .45rem; max-height: 16rem; overflow: auto; }.route-list label { align-items: center; cursor: pointer; display: grid; gap: .5rem; grid-template-columns: auto auto minmax(0, 1fr) auto; padding: .65rem .7rem; }.route-list label + label { border-top: 1px solid var(--color-border, #d9e0ea); }.route-list input { height: 0; opacity: 0; position: absolute; width: 0; }.route-check { align-items: center; border: 1px solid var(--color-border, #c8d1dd); border-radius: .3rem; color: transparent; display: flex; height: 1.15rem; justify-content: center; width: 1.15rem; }.route-list input:checked + .route-check { background: var(--color-accent, #2f78c4); border-color: var(--color-accent, #2f78c4); color: #fff; }.route-list label > span:nth-of-type(2) { display: grid; gap: .1rem; }.route-list label strong { font-size: .66rem; }.route-list label small { color: var(--color-text-muted, #64748b); font-size: .56rem; text-transform: capitalize; }.route-list.automatic { opacity: .66; }.routing-empty { align-items: center; background: var(--color-surface-subtle, #f3f6f9); border-radius: .6rem; display: flex; gap: .55rem; margin-top: .55rem; padding: .7rem; }.routing-empty span { display: grid; gap: .12rem; }.routing-empty strong { font-size: .67rem; }.routing-empty small { color: var(--color-text-muted, #64748b); font-size: .58rem; }.routing-warning { align-items: center; color: var(--color-warning, #8a5a12) !important; display: flex; gap: .35rem; }
+.event-routing { border-top: 1px solid var(--color-border, #d9e0ea); margin-top: 1rem; padding-top: .15rem; }.event-routing > p { color: var(--color-text-muted, #64748b); font-size: .61rem; line-height: 1.45; margin: .35rem 0 0; }.event-route-list { max-height: 12rem; }
 .policy-actions { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: 1rem; justify-content: space-between; padding: .85rem 1.15rem; }.policy-actions > div { align-items: center; color: var(--color-text-muted, #64748b); display: flex; font-size: .63rem; gap: .45rem; }.policy-actions strong { color: var(--color-text, #182230); }
 .system-grid { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }.system-card { overflow: hidden; padding: 0; }.system-card > header { align-items: center; border-bottom: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .6rem; padding: .8rem 1rem; }.system-card > header > span { align-items: center; background: color-mix(in srgb, var(--color-accent, #2f78c4) 8%, transparent); border-radius: .45rem; color: var(--color-accent, #2f78c4); display: flex; height: 2rem; justify-content: center; width: 2rem; }.system-card h2 { font-size: .82rem; margin: 0; }.system-card header p { color: var(--color-text-muted, #64748b); font-size: .6rem; margin: .15rem 0 0; }
 .identity-form { align-items: end; display: grid; gap: .55rem; grid-template-columns: minmax(0, 1fr) auto; padding: .85rem 1rem; }.identity-form label { display: grid; font-size: .64rem; font-weight: 700; gap: .3rem; }

@@ -71,6 +71,7 @@ from cope.db import (
     list_worker_failures,
     list_worker_resource_samples,
     list_worker_activities,
+    list_worker_event_ids,
     touch_service_heartbeat,
 )
 from cope.core.san import pv_to_san
@@ -111,6 +112,7 @@ TOURNAMENT_ACTIONS: dict[str, dict[str, str]] = {
     "scheduled": {"abort": "aborted"},
     "running": {"pause": "paused", "abort": "aborted"},
     "paused": {"resume": "running", "abort": "aborted"},
+    "aborted": {"restore": "paused"},
 }
 CONNECTED_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
 WORKER_RECENT_SECONDS = 60
@@ -1994,6 +1996,46 @@ def _worker_admin_api_payload(
         for tournament_id in list_worker_tournament_ids(connection, worker.id)
         if tournament_id in available_tournament_ids
     ]
+    events = [
+        {
+            "id": event.id,
+            "title": event.title,
+            "status": event.status,
+            "scheduled_start_at": event.scheduled_start_at,
+        }
+        for event in list_events(connection)
+        if event.status not in {"completed", "cancelled"}
+    ]
+    available_event_ids = {event["id"] for event in events}
+    event_ids = [
+        event_id
+        for event_id in list_worker_event_ids(connection, worker.id)
+        if event_id in available_event_ids
+    ]
+    event_claim = connection.execute(
+        """
+        SELECT claim.event_id, event.title AS event_title,
+               claim.tournament_id, tournament.name AS fixture_title,
+               tournament.status, tournament.scheduled_start_at,
+               assignment.id AS assignment_id,
+               assignment.status AS assignment_status
+        FROM event_fixture_workers claim
+        JOIN events event ON event.id = claim.event_id
+        JOIN tournaments tournament ON tournament.id = claim.tournament_id
+        LEFT JOIN games game
+          ON game.tournament_id = tournament.id
+         AND game.status IN ('assigned', 'live')
+        LEFT JOIN game_assignments assignment
+          ON assignment.game_id = game.id
+         AND assignment.worker_id = claim.worker_id
+         AND assignment.status IN ('assigned', 'acked', 'live')
+        WHERE claim.worker_id = ?
+          AND tournament.status IN ('scheduled', 'running', 'paused')
+        ORDER BY assignment.id NULLS LAST
+        LIMIT 1
+        """,
+        (worker.id,),
+    ).fetchone()
     resource_samples = list_worker_resource_samples(connection, worker.id, limit=120)
     return {
         "row": {
@@ -2016,6 +2058,9 @@ def _worker_admin_api_payload(
             "tournament_scope": worker.tournament_scope,
             "tournament_ids": tournament_ids,
             "tournaments": tournaments,
+            "event_ids": event_ids,
+            "events": events,
+            "event_claim": None if event_claim is None else dict(event_claim),
         },
         "resources": {
             "latest": (

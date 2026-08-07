@@ -377,6 +377,21 @@ def relay_engine_count_for_tournament(
     )
 
 
+def relay_engine_ids_for_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> tuple[int, ...]:
+    fixture = _get_fixture_for_tournament(connection, tournament_id)
+    if fixture is None:
+        return ()
+    return tuple(
+        int(member.engine_version_id)
+        for fixture_team in _fixture_teams(connection, fixture)
+        for member in _team_members(connection, fixture.event_id, fixture_team.team_id)
+        if member.engine_version_id is not None
+    )
+
+
 def relay_resources_for_tournament(
     connection: sqlite3.Connection,
     tournament_id: int,
@@ -481,6 +496,15 @@ def _fixture_payload(
     fixture: EngineRelayFixtureRecord,
 ) -> dict[str, Any]:
     tournament = get_tournament(connection, fixture.tournament_id)
+    worker = connection.execute(
+        """
+        SELECT workers.id, workers.label, workers.status, claims.claimed_at
+        FROM event_fixture_workers claims
+        JOIN workers ON workers.id = claims.worker_id
+        WHERE claims.tournament_id = ?
+        """,
+        (fixture.tournament_id,),
+    ).fetchone()
     games = () if tournament is None else list_games(connection, tournament.id)
     cast = _cast_by_id(connection, fixture.event_id)
     fixture_teams = _fixture_teams(connection, fixture)
@@ -515,6 +539,7 @@ def _fixture_payload(
     return {
         **asdict(fixture),
         "tournament": None if tournament is None else asdict(tournament),
+        "worker": None if worker is None else dict(worker),
         "games": game_payloads,
         "teams": [
             {
@@ -1239,7 +1264,7 @@ def _provision(connection: sqlite3.Connection) -> int:
         role="relay team",
         accent_color="#f97316",
         position=0,
-        metadata={"secondary_color": "#fdba74", "motto": "Built for the handoff"},
+        metadata={"secondary_color": "#fdba74", "motto": ""},
     )
     create_event_cast_member(
         connection,
@@ -1251,7 +1276,7 @@ def _provision(connection: sqlite3.Connection) -> int:
         role="relay team",
         accent_color="#22d3ee",
         position=1,
-        metadata={"secondary_color": "#a5f3fc", "motto": "Every node counts"},
+        metadata={"secondary_color": "#a5f3fc", "motto": ""},
     )
     return event_id
 
