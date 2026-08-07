@@ -50,9 +50,11 @@ export interface RelayFixture {
 
 export interface RelayEngineOption {
   id: number;
+  engine_id: number;
   name: string;
   version: string;
   author: string;
+  source_kind: "release" | "commit";
 }
 
 export interface RelayOpeningSuite {

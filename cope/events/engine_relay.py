@@ -35,7 +35,7 @@ from cope.db import (
     get_event_by_slug,
     get_game,
     get_tournament,
-    list_engines,
+    list_engine_records,
     list_event_cast,
     list_games,
     list_moves,
@@ -476,12 +476,15 @@ def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool)
     if admin:
         payload["engine_options"] = [
             {
-                "id": engine.engine_id,
+                "id": engine.id,
+                "engine_id": engine.engine_id,
                 "name": engine.name,
                 "version": engine.version,
                 "author": engine.author,
+                "source_kind": engine.source_kind,
             }
-            for engine in list_engines(connection, active_only=True)
+            for engine in list_engine_records(connection)
+            if engine.active and engine.engine_active
         ]
         payload["opening_suites"] = [
             {"id": suite.id, "name": suite.name, "description": suite.description}

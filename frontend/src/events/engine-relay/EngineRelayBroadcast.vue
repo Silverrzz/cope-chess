@@ -107,6 +107,8 @@ const whiteAnalysis = ref<EngineAnalysis | null>(null);
 const blackAnalysis = ref<EngineAnalysis | null>(null);
 const whiteCardMember = computed(() => memberForAnalysis("white", whiteAnalysis.value) ?? whiteMember.value);
 const blackCardMember = computed(() => memberForAnalysis("black", blackAnalysis.value) ?? blackMember.value);
+const whiteRoster = computed(() => rotatingRoster(whiteTeam.value, whiteMember.value));
+const blackRoster = computed(() => rotatingRoster(blackTeam.value, blackMember.value));
 const gameStatus = computed(() => viewerGame.value?.status ?? fixture.value?.tournament?.status ?? "draft");
 const gameLabel = computed(() => {
   if (!viewerGame.value) return "Awaiting schedule";
@@ -171,6 +173,13 @@ const format = computed(() => {
 const settingsRows = computed(() => (gameData.value?.settings || []).map((row) => Array.isArray(row)
   ? { label: String(row[0]), value: String(row[1]) }
   : { label: String(row.label), value: String(row.value) }));
+
+function rotatingRoster(team: RelayTeam | null, current: RelayRosterMember | null): RelayRosterMember[] {
+  const roster = team?.roster ?? [];
+  if (!current) return roster;
+  const currentIndex = roster.findIndex((member) => member.id === current.id);
+  return currentIndex < 0 ? roster : [...roster.slice(currentIndex), ...roster.slice(0, currentIndex)];
+}
 
 watch(gameId, () => {
   whiteAnalysis.value = null;
@@ -826,11 +835,11 @@ function handleUserActivation(): void {
     <section v-else-if="gameData && viewerGame" ref="arenaElement" class="arena" :aria-label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'}`">
       <div class="engine-column">
         <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
-          <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><span v-for="member in blackTeam?.roster ?? []" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></div>
+          <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in blackRoster" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
           <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '—'" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
         </div>
         <div class="relay-engine-slot" :style="teamStyle(whiteTeam)" :data-relay-team-id="whiteTeam?.id">
-          <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><span v-for="member in whiteTeam?.roster ?? []" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></div>
+          <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in whiteRoster" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
           <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '—'" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
         </div>
         <div class="arena-cheers" aria-label="Cheer for a team">
@@ -1298,10 +1307,13 @@ function handleUserActivation(): void {
 .relay-engine-slot { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: .3rem; min-width: 0; min-height: 0; padding: .25rem; border-radius: calc(var(--radius-md, .5rem) + .25rem); background: color-mix(in srgb, var(--relay-primary) 5%, transparent); box-shadow: 0 0 1.35rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
 .relay-engine-slot :deep(.engine-panel) { min-height: 0; border-color: var(--color-border, #d5dbe1); }
 .relay-engine-slot :deep(.engine-panel--active) { border-color: var(--color-border-strong, #99a8bb); box-shadow: 0 0 0 1px var(--color-border-strong, #99a8bb); }
-.relay-team-strip { display: flex; align-items: center; gap: .3rem; min-width: 0; min-height: 1.75rem; overflow: hidden; padding-inline: .35rem; }
+.relay-team-strip { display: flex; align-items: center; gap: .3rem; min-width: 0; min-height: 1.75rem; padding-inline: .35rem; }
 .relay-team-strip strong { flex: 0 0 auto; margin-right: .15rem; color: var(--relay-primary); font-size: .62rem; }
-.relay-team-strip span { overflow: hidden; min-width: 0; padding: .2rem .38rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; background: var(--color-surface, #fff); color: var(--color-text-muted, #607080); font-size: .52rem; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.relay-team-strip__track { display: flex; flex: 1 1 auto; align-items: center; gap: .3rem; min-width: 0; overflow: hidden; }
+.relay-team-strip span { flex: 0 0 auto; padding: .2rem .38rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; background: var(--color-surface, #fff); color: var(--color-text-muted, #607080); font-size: .52rem; font-weight: 680; white-space: nowrap; transition: transform .38s ease, border-color .2s ease, background-color .2s ease, color .2s ease; }
 .relay-team-strip span.current { border-color: var(--relay-primary); background: color-mix(in srgb, var(--relay-primary) 12%, var(--color-surface, #fff)); color: var(--color-text, #17202a); }
+.relay-chip-enter-active, .relay-chip-leave-active { transition: opacity .2s ease; }
+.relay-chip-enter-from, .relay-chip-leave-to { opacity: 0; }
 .board-column { width: var(--arena-board-size); min-width: 0; justify-self: center; }
 .activity-column { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); height: var(--arena-content-height); }
 .activity-column > * { min-width: 0; min-height: 0; height: 100%; }

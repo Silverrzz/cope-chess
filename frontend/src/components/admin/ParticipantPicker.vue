@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
-import type { Engine } from './types'
+interface Engine {
+  id: number
+  engine_id: number
+  name: string
+  author?: string
+  version: string
+  source_kind: 'release' | 'commit'
+}
 
 interface EngineGroup {
   id: number
@@ -10,7 +17,7 @@ interface EngineGroup {
   versions: Engine[]
 }
 
-const props = defineProps<{ modelValue: number[]; engines: Engine[] }>()
+const props = withDefaults(defineProps<{ modelValue: number[]; engines: Engine[]; single?: boolean }>(), { single: false })
 const emit = defineEmits<{ 'update:modelValue': [value: number[]] }>()
 
 const query = ref('')
@@ -58,6 +65,10 @@ function selectionLabel(group: EngineGroup): string {
 }
 
 function toggle(engineId: number): void {
+  if (props.single) {
+    emit('update:modelValue', selected.value.has(engineId) ? [] : [engineId])
+    return
+  }
   const next = new Set(props.modelValue)
   if (next.has(engineId)) next.delete(engineId)
   else next.add(engineId)
@@ -94,8 +105,8 @@ watch(visibleGroups, (available) => {
         <AppIcon name="search" :size="16" />
         <input v-model="query" class="input" type="search" placeholder="Search by engine, author, or version">
       </label>
-      <span class="participant-picker__count" aria-live="polite">{{ modelValue.length }} selected</span>
-      <button v-if="visibleVersions.length" class="button button--ghost button--small" type="button" @click="selectVisible">Select visible</button>
+      <span class="participant-picker__count" aria-live="polite">{{ modelValue.length ? (single ? '1 selected' : `${modelValue.length} selected`) : 'None selected' }}</span>
+      <button v-if="visibleVersions.length && !single" class="button button--ghost button--small" type="button" @click="selectVisible">Select visible</button>
       <button v-if="modelValue.length" class="button button--ghost button--small" type="button" @click="clear">Clear</button>
     </div>
 
@@ -129,15 +140,15 @@ watch(visibleGroups, (available) => {
         <header class="participant-versions__heading">
           <div>
             <strong>{{ activeGroup.name }}</strong>
-            <small>Choose participating versions</small>
+            <small>{{ single ? 'Choose a version' : 'Choose participating versions' }}</small>
           </div>
           <button class="participant-versions__close" type="button" :aria-label="`Close ${activeGroup.name} versions`" @click="activeEngineId = null">
             <AppIcon name="close" :size="16" />
           </button>
         </header>
         <div class="participant-versions__actions">
-          <span>{{ selectedVersions(activeGroup).length }} of {{ activeGroup.versions.length }} selected</span>
-          <div>
+          <span>{{ single ? `${activeGroup.versions.length} available` : `${selectedVersions(activeGroup).length} of ${activeGroup.versions.length} selected` }}</span>
+          <div v-if="!single">
             <button type="button" @click="selectGroup(activeGroup)">Select all</button>
             <button v-if="selectedVersions(activeGroup).length" type="button" @click="clearGroup(activeGroup)">Clear</button>
           </div>
@@ -149,7 +160,7 @@ watch(visibleGroups, (available) => {
             class="participant-version"
             :class="{ 'participant-version--selected': selected.has(version.id) }"
           >
-            <input type="checkbox" :checked="selected.has(version.id)" @change="toggle(version.id)">
+            <input :type="single ? 'radio' : 'checkbox'" :checked="selected.has(version.id)" @change="toggle(version.id)">
             <span>
               <strong>{{ version.version }}</strong>
               <small>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }}</small>

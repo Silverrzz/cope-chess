@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from "vue";
 
 import { api } from "@/api/client";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
+import ParticipantPicker from "@/components/admin/ParticipantPicker.vue";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { errorText, formatDate } from "@/components/admin/format";
@@ -118,6 +119,10 @@ function addMember(team: RelayTeam): void {
   });
 }
 
+function selectMemberEngine(team: RelayTeam, selection: number[]): void {
+  memberDraft(team).engine_id = selection[0] ?? 0;
+}
+
 function saveMember(team: RelayTeam, member: RelayRosterMember): void {
   void run(`member-${member.id}`, () => api.put(`/api/admin/events/${props.detail.event.id}/engine-relay/teams/${team.id}/members/${member.id}`, {
     body: {
@@ -225,7 +230,7 @@ function fixtureCycles(fixture: RelayFixture): number | string {
               </form>
             </div>
             <p v-else class="roster-empty">No engines</p>
-            <form v-if="!team.locked" class="add-engine" @submit.prevent="addMember(team)"><label><span>Engine version</span><select v-model.number="memberDraft(team).engine_id" class="input"><option :value="0" disabled>Select an engine</option><option v-for="engine in payload.engine_options ?? []" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option></select></label><label><span>Order</span><input v-model.number="memberDraft(team).position" class="input" type="number" min="0"></label><label><span>Threads</span><input v-model.number="memberDraft(team).threads" class="input" type="number" min="1" max="1024"></label><label><span>Hash · MB</span><input v-model.number="memberDraft(team).hash_mb" class="input" type="number" min="1" step="1"></label><button class="button button--primary button--small" type="submit" :disabled="!!pending || !memberDraft(team).engine_id">Add to relay</button></form>
+            <form v-if="!team.locked" class="add-engine" @submit.prevent="addMember(team)"><div class="add-engine__picker"><span>Engine version</span><ParticipantPicker :model-value="memberDraft(team).engine_id ? [memberDraft(team).engine_id] : []" :engines="payload.engine_options ?? []" single @update:model-value="selectMemberEngine(team, $event)" /></div><label><span>Order</span><input v-model.number="memberDraft(team).position" class="input" type="number" min="0"></label><label><span>Threads</span><input v-model.number="memberDraft(team).threads" class="input" type="number" min="1" max="1024"></label><label><span>Hash · MB</span><input v-model.number="memberDraft(team).hash_mb" class="input" type="number" min="1" step="1"></label><button class="button button--primary button--small" type="submit" :disabled="!!pending || !memberDraft(team).engine_id">Add to relay</button></form>
           </section>
         </article>
       </div>
@@ -310,6 +315,9 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 .roster-editor { padding-top: .2rem; border-top: 0; }
 .roster-table { border-radius: .6rem; }
 .add-engine { padding: .7rem; border: 1px dashed color-mix(in srgb, var(--team-primary) 35%, var(--color-border)); }
+.add-engine { grid-template-columns: 4.5rem 5rem 8rem auto; }
+.add-engine__picker { display: grid; grid-column: 1 / -1; gap: .3rem; }
+.add-engine__picker > span { color: var(--color-text-muted, #64748b); font-size: .58rem; font-weight: 680; }
 .fixture-layout { display: block; }
 .fixture-layout--building { display: grid; grid-template-columns: minmax(20rem, .72fr) minmax(0, 1.28fr); }
 .fixture-builder { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-sm); }
