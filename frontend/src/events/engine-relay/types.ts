@@ -10,6 +10,11 @@ export interface RelayRosterMember {
   threads: number;
   hash_mb: number;
   position: number;
+  rating: {
+    elo: number;
+    error_margin: number | null;
+    list_name: string;
+  } | null;
 }
 
 export interface RelayTeam {

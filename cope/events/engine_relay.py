@@ -40,6 +40,8 @@ from cope.db import (
     list_games,
     list_moves,
     list_opening_suites,
+    list_rating_lists,
+    list_rating_rows,
     reconcile_engine_relay_event,
     schedule_tournament,
     set_event_published,
@@ -445,6 +447,7 @@ def _team_payload(
     connection: sqlite3.Connection,
     event_id: int,
     team: EventCastMemberRecord,
+    ratings: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     roster = []
     for member in _team_members(connection, event_id, team.id):
@@ -461,6 +464,7 @@ def _team_payload(
                 "threads": threads,
                 "hash_mb": hash_mb,
                 "position": position,
+                "rating": ratings.get(int(member.engine_version_id or 0)),
             }
         )
     return {
@@ -570,7 +574,20 @@ def _fixture_payload(
 
 
 def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool) -> dict[str, Any]:
-    teams = [_team_payload(connection, event.id, team) for team in _teams(connection, event.id)]
+    ratings: dict[int, dict[str, Any]] = {}
+    for rating_list in list_rating_lists(connection):
+        for row in list_rating_rows(connection, rating_list.id):
+            candidate = {
+                "elo": row.elo,
+                "error_margin": row.error_margin,
+                "list_name": rating_list.name,
+            }
+            current = ratings.get(row.engine.engine_id)
+            candidate_margin = row.error_margin if row.error_margin is not None else float("inf")
+            current_margin = current["error_margin"] if current and current["error_margin"] is not None else float("inf")
+            if current is None or candidate_margin < current_margin:
+                ratings[row.engine.engine_id] = candidate
+    teams = [_team_payload(connection, event.id, team, ratings) for team in _teams(connection, event.id)]
     fixtures = [_fixture_payload(connection, fixture) for fixture in _list_fixtures(connection, event.id)]
     payload: dict[str, Any] = {
         "teams": teams,
