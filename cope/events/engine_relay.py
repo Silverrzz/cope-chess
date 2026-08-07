@@ -73,6 +73,14 @@ class EngineRelayFixtureRecord:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class EngineRelayFixtureTeamRecord:
+    fixture_id: int
+    team_id: int
+    anchor_engine_id: int
+    position: int
+
+
 class RelayTeamPayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     short_name: str = Field(default="", max_length=20)
@@ -113,8 +121,9 @@ class RelayMemberPayload(BaseModel):
 
 class RelayFixturePayload(BaseModel):
     title: str = Field(min_length=1, max_length=160)
-    team_a_id: int = Field(gt=0)
-    team_b_id: int = Field(gt=0)
+    team_ids: list[int] = Field(default_factory=list)
+    team_a_id: int | None = Field(default=None, gt=0)
+    team_b_id: int | None = Field(default=None, gt=0)
     cycles: int = Field(default=1, gt=0, le=1000)
     opening_suite_id: int | None = Field(default=None, gt=0)
     concurrency: int = Field(default=1, gt=0, le=256)
@@ -151,9 +160,19 @@ class RelayFixturePayload(BaseModel):
         return None if value is None else value.astimezone(UTC)
 
     @model_validator(mode="after")
-    def distinct_teams(self) -> RelayFixturePayload:
-        if self.team_a_id == self.team_b_id:
-            raise ValueError("a relay fixture requires two different teams")
+    def selected_teams(self) -> RelayFixturePayload:
+        team_ids = self.team_ids
+        if not team_ids and self.team_a_id is not None and self.team_b_id is not None:
+            team_ids = [self.team_a_id, self.team_b_id]
+        if len(team_ids) < 2:
+            raise ValueError("a relay fixture requires at least two teams")
+        if any(team_id <= 0 for team_id in team_ids):
+            raise ValueError("relay team ids must be positive")
+        if len(set(team_ids)) != len(team_ids):
+            raise ValueError("relay fixture teams must be unique")
+        self.team_ids = team_ids
+        self.team_a_id = team_ids[0]
+        self.team_b_id = team_ids[1]
         return self
 
 
@@ -212,6 +231,35 @@ def _list_fixtures(
             "SELECT * FROM engine_relay_fixtures WHERE event_id = ? ORDER BY position, id",
             (event_id,),
         )
+    )
+
+
+def _fixture_teams(
+    connection: sqlite3.Connection,
+    fixture: EngineRelayFixtureRecord,
+) -> tuple[EngineRelayFixtureTeamRecord, ...]:
+    rows = connection.execute(
+        """
+        SELECT fixture_id, team_id, anchor_engine_id, position
+        FROM engine_relay_fixture_teams
+        WHERE fixture_id = ?
+        ORDER BY position, team_id
+        """,
+        (fixture.id,),
+    ).fetchall()
+    if not rows:
+        return (
+            EngineRelayFixtureTeamRecord(fixture.id, fixture.team_a_id, fixture.anchor_a_engine_id, 0),
+            EngineRelayFixtureTeamRecord(fixture.id, fixture.team_b_id, fixture.anchor_b_engine_id, 1),
+        )
+    return tuple(
+        EngineRelayFixtureTeamRecord(
+            fixture_id=int(row["fixture_id"]),
+            team_id=int(row["team_id"]),
+            anchor_engine_id=int(row["anchor_engine_id"]),
+            position=int(row["position"]),
+        )
+        for row in rows
     )
 
 
@@ -283,22 +331,15 @@ def relay_assignment_for_game(
     if fixture is None:
         return None
     cast = _cast_by_id(connection, fixture.event_id)
-    team_a = cast.get(fixture.team_a_id)
-    team_b = cast.get(fixture.team_b_id)
-    if team_a is None or team_b is None:
+    fixture_teams = _fixture_teams(connection, fixture)
+    teams_by_anchor = {
+        item.anchor_engine_id: cast.get(item.team_id)
+        for item in fixture_teams
+    }
+    white_team = teams_by_anchor.get(game.white_engine_id)
+    black_team = teams_by_anchor.get(game.black_engine_id)
+    if white_team is None or black_team is None:
         raise RuntimeError("relay fixture team is missing")
-    if (
-        game.white_engine_id == fixture.anchor_a_engine_id
-        and game.black_engine_id == fixture.anchor_b_engine_id
-    ):
-        white_team, black_team = team_a, team_b
-    elif (
-        game.white_engine_id == fixture.anchor_b_engine_id
-        and game.black_engine_id == fixture.anchor_a_engine_id
-    ):
-        white_team, black_team = team_b, team_a
-    else:
-        raise RuntimeError("relay fixture game anchors do not match its teams")
     return EngineRelayAssignment(
         event_id=fixture.event_id,
         fixture_id=fixture.id,
@@ -332,20 +373,28 @@ def relay_engine_count_for_tournament(
         return 2
     return sum(
         len(_team_members(connection, fixture.event_id, team_id))
-        for team_id in (fixture.team_a_id, fixture.team_b_id)
+        for team_id in (item.team_id for item in _fixture_teams(connection, fixture))
     )
 
 
 def relay_resources_for_tournament(
     connection: sqlite3.Connection,
     tournament_id: int,
+    participant_engine_ids: tuple[int, ...] | None = None,
 ) -> tuple[tuple[int, int], ...]:
     fixture = _get_fixture_for_tournament(connection, tournament_id)
     if fixture is None:
         return ()
+    fixture_teams = _fixture_teams(connection, fixture)
+    if participant_engine_ids is not None:
+        selected_anchors = set(participant_engine_ids)
+        fixture_teams = tuple(
+            item for item in fixture_teams
+            if item.anchor_engine_id in selected_anchors
+        )
     return tuple(
         _member_settings(member)[:2]
-        for team_id in (fixture.team_a_id, fixture.team_b_id)
+        for team_id in (item.team_id for item in fixture_teams)
         for member in _team_members(connection, fixture.event_id, team_id)
     )
 
@@ -413,12 +462,18 @@ def _team_payload(
 
 
 def _side_team_ids(
+    connection: sqlite3.Connection,
     fixture: EngineRelayFixtureRecord,
     game: GameRecord,
 ) -> tuple[int, int]:
-    if game.white_engine_id == fixture.anchor_a_engine_id:
-        return fixture.team_a_id, fixture.team_b_id
-    return fixture.team_b_id, fixture.team_a_id
+    teams_by_anchor = {
+        item.anchor_engine_id: item.team_id
+        for item in _fixture_teams(connection, fixture)
+    }
+    try:
+        return teams_by_anchor[game.white_engine_id], teams_by_anchor[game.black_engine_id]
+    except KeyError as cause:
+        raise RuntimeError("relay fixture game anchors do not match its teams") from cause
 
 
 def _fixture_payload(
@@ -428,14 +483,15 @@ def _fixture_payload(
     tournament = get_tournament(connection, fixture.tournament_id)
     games = () if tournament is None else list_games(connection, tournament.id)
     cast = _cast_by_id(connection, fixture.event_id)
+    fixture_teams = _fixture_teams(connection, fixture)
     team_assignments = {
-        team_id: _team_assignment(connection, fixture.event_id, cast[team_id])
-        for team_id in (fixture.team_a_id, fixture.team_b_id)
-        if team_id in cast
+        item.team_id: _team_assignment(connection, fixture.event_id, cast[item.team_id])
+        for item in fixture_teams
+        if item.team_id in cast
     }
     game_payloads = []
     for game in games:
-        white_team_id, black_team_id = _side_team_ids(fixture, game)
+        white_team_id, black_team_id = _side_team_ids(connection, fixture, game)
         moves = list_moves(connection, game.id)
         white_team = team_assignments.get(white_team_id)
         black_team = team_assignments.get(black_team_id)
@@ -460,6 +516,15 @@ def _fixture_payload(
         **asdict(fixture),
         "tournament": None if tournament is None else asdict(tournament),
         "games": game_payloads,
+        "teams": [
+            {
+                "id": item.team_id,
+                "name": cast[item.team_id].display_name if item.team_id in cast else "Unknown team",
+                "anchor_engine_id": item.anchor_engine_id,
+                "position": item.position,
+            }
+            for item in fixture_teams
+        ],
         "team_a_name": cast.get(fixture.team_a_id).display_name if fixture.team_a_id in cast else "Team A",
         "team_b_name": cast.get(fixture.team_b_id).display_name if fixture.team_b_id in cast else "Team B",
     }
@@ -550,12 +615,13 @@ def _team_locked(connection: sqlite3.Connection, team_id: int) -> bool:
         """
         SELECT 1
         FROM engine_relay_fixtures fixture
+        JOIN engine_relay_fixture_teams fixture_team ON fixture_team.fixture_id = fixture.id
         JOIN tournaments tournament ON tournament.id = fixture.tournament_id
-        WHERE (fixture.team_a_id = ? OR fixture.team_b_id = ?)
+        WHERE fixture_team.team_id = ?
           AND tournament.status IN ('running', 'paused', 'finished', 'aborted')
         LIMIT 1
         """,
-        (team_id, team_id),
+        (team_id,),
     ).fetchone()
     return row is not None
 
@@ -570,24 +636,21 @@ def _validate_member_compatibility(
         _fixture_from_row(row)
         for row in connection.execute(
             """
-            SELECT * FROM engine_relay_fixtures
-            WHERE event_id = ? AND (team_a_id = ? OR team_b_id = ?)
+            SELECT fixture.*
+            FROM engine_relay_fixtures fixture
+            JOIN engine_relay_fixture_teams fixture_team ON fixture_team.fixture_id = fixture.id
+            WHERE fixture.event_id = ? AND fixture_team.team_id = ?
             """,
-            (event_id, team_id, team_id),
+            (event_id, team_id),
         )
     )
     for fixture in fixtures:
-        other_team_id = fixture.team_b_id if fixture.team_a_id == team_id else fixture.team_a_id
         engine_ids = {
             engine_id,
             *(
                 int(member.engine_version_id)
-                for member in _team_members(connection, event_id, team_id)
-                if member.engine_version_id is not None
-            ),
-            *(
-                int(member.engine_version_id)
-                for member in _team_members(connection, event_id, other_team_id)
+                for fixture_team in _fixture_teams(connection, fixture)
+                for member in _team_members(connection, event_id, fixture_team.team_id)
                 if member.engine_version_id is not None
             ),
         }
@@ -774,8 +837,8 @@ def _register_api(app: FastAPI) -> None:
         _required_event(connection, event_id)
         _required_team(connection, event_id, team_id)
         fixture = connection.execute(
-            "SELECT 1 FROM engine_relay_fixtures WHERE team_a_id = ? OR team_b_id = ? LIMIT 1",
-            (team_id, team_id),
+            "SELECT 1 FROM engine_relay_fixture_teams WHERE team_id = ? LIMIT 1",
+            (team_id,),
         ).fetchone()
         if fixture is not None:
             raise HTTPException(status_code=409, detail="Remove this team from every fixture before deleting it.")
@@ -894,12 +957,11 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=409, detail="This roster is locked because one of its fixtures has started.")
         anchor = connection.execute(
             """
-            SELECT 1 FROM engine_relay_fixtures
-            WHERE (team_a_id = ? AND anchor_a_engine_id = ?)
-               OR (team_b_id = ? AND anchor_b_engine_id = ?)
+            SELECT 1 FROM engine_relay_fixture_teams
+            WHERE team_id = ? AND anchor_engine_id = ?
             LIMIT 1
             """,
-            (team_id, member.engine_version_id, team_id, member.engine_version_id),
+            (team_id, member.engine_version_id),
         ).fetchone()
         if anchor is not None:
             raise HTTPException(status_code=409, detail="This engine anchors an existing fixture and cannot be removed.")
@@ -917,22 +979,22 @@ def _register_api(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         _required_event(connection, event_id)
-        team_a = _required_team(connection, event_id, payload.team_a_id)
-        team_b = _required_team(connection, event_id, payload.team_b_id)
+        teams = tuple(
+            _required_team(connection, event_id, team_id)
+            for team_id in payload.team_ids
+        )
         if payload.opening_suite_id is not None and not any(
             suite.id == payload.opening_suite_id
             for suite in list_opening_suites(connection)
         ):
             raise HTTPException(status_code=422, detail="Select an available opening suite.")
-        if not _team_members(connection, event_id, team_a.id) or not _team_members(
-            connection,
-            event_id,
-            team_b.id,
-        ):
-            raise HTTPException(status_code=422, detail="Both teams need at least one engine before creating a fixture.")
-        relay_a = _team_assignment(connection, event_id, team_a)
-        relay_b = _team_assignment(connection, event_id, team_b)
-        engine_ids = [member.engine_id for team in (relay_a, relay_b) for member in team.members]
+        if any(not _team_members(connection, event_id, team.id) for team in teams):
+            raise HTTPException(status_code=422, detail="Every team needs at least one engine before creating a fixture.")
+        relay_teams = tuple(
+            _team_assignment(connection, event_id, team)
+            for team in teams
+        )
+        engine_ids = [member.engine_id for team in relay_teams for member in team.members]
         if len(set(engine_ids)) != len(engine_ids):
             raise HTTPException(status_code=409, detail="An engine version cannot play for both relay teams.")
         engines = tuple(get_engine(connection, engine_id) for engine_id in engine_ids)
@@ -940,12 +1002,11 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=422, detail="Every relay engine must still be available.")
         if get_common_benchmark_reference(connection, tuple(engine for engine in engines if engine is not None)) is None:
             raise HTTPException(status_code=409, detail="The full relay roster does not share a benchmark hardware reference yet.")
-        anchor_a = relay_a.members[0].engine_id
-        anchor_b = relay_b.members[0].engine_id
+        anchors = [team.members[0].engine_id for team in relay_teams]
         config = TournamentConfig(
             format=TournamentFormat.ROUND_ROBIN,
             format_options=RoundRobinFormatOptions(cycles=payload.cycles),
-            participants=[anchor_a, anchor_b],
+            participants=anchors,
             time_control=IncrementTimeControl(
                 initial_ms=payload.initial_ms,
                 increment_ms=payload.increment_ms,
@@ -955,8 +1016,8 @@ def _register_api(app: FastAPI) -> None:
             adjudication=payload.adjudication,
             rated=False,
             lag_compensation_ms=payload.lag_compensation_ms,
-            engine_threads=max(member.threads for team in (relay_a, relay_b) for member in team.members),
-            engine_hash_mb=max(member.hash_mb for team in (relay_a, relay_b) for member in team.members),
+            engine_threads=max(member.threads for team in relay_teams for member in team.members),
+            engine_hash_mb=max(member.hash_mb for team in relay_teams for member in team.members),
             uci_options=payload.uci_options,
         )
         tournament_id = create_tournament(connection, payload.title, config)
@@ -976,16 +1037,30 @@ def _register_api(app: FastAPI) -> None:
             (
                 event_id,
                 tournament_id,
-                payload.team_a_id,
-                payload.team_b_id,
-                anchor_a,
-                anchor_b,
+                payload.team_ids[0],
+                payload.team_ids[1],
+                anchors[0],
+                anchors[1],
                 payload.title,
                 position,
                 utc_now(),
             ),
         )
         fixture_id = int(cursor.lastrowid)
+        connection.executemany(
+            """
+            INSERT INTO engine_relay_fixture_teams (
+              fixture_id, team_id, anchor_engine_id, position
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                (fixture_id, team_id, anchor_engine_id, position)
+                for position, (team_id, anchor_engine_id) in enumerate(
+                    zip(payload.team_ids, anchors, strict=True)
+                )
+            ),
+        )
         if payload.scheduled_start_at is not None:
             tournament = get_tournament(connection, tournament_id)
             if tournament is None:
@@ -1005,7 +1080,7 @@ def _register_api(app: FastAPI) -> None:
             {
                 "id": fixture_id,
                 "tournament_id": tournament_id,
-                "message": "Relay fixture created as an unrated tournament.",
+                "message": "Relay round-robin fixture created as an unrated tournament.",
             },
             201,
         )

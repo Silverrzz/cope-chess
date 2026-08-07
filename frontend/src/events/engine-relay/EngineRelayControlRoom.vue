@@ -27,8 +27,7 @@ const visibility = reactive({ published: !!props.detail.event.published_at });
 const newTeam = reactive({ name: "", short_name: "", primary_color: "#315fcc", secondary_color: "#8fb3ff", profile: "", motto: "" });
 const fixtureForm = reactive({
   title: "",
-  team_a_id: 0,
-  team_b_id: 0,
+  team_ids: [] as number[],
   cycles: 1,
   opening_suite_id: "",
   concurrency: 1,
@@ -42,7 +41,11 @@ const memberDrafts = reactive<Record<number, { engine_id: number; threads: numbe
 const schedules = reactive<Record<number, string>>({});
 
 const readyTeams = computed(() => payload.value.teams.filter((team) => team.roster.length));
-const projectedGames = computed(() => Math.max(1, Number(fixtureForm.cycles) || 1) * 2);
+const projectedGames = computed(() => {
+  const teamCount = fixtureForm.team_ids.length;
+  return teamCount < 2 ? 0 : teamCount * (teamCount - 1) * Math.max(1, Number(fixtureForm.cycles) || 1);
+});
+const fixtureSelectionValid = computed(() => fixtureForm.team_ids.length >= 2);
 
 watch(
   () => props.detail.event.published_at,
@@ -140,14 +143,28 @@ function deleteMember(team: RelayTeam, member: RelayRosterMember): void {
   void run(`member-delete-${member.id}`, () => api.delete(`/api/admin/events/${props.detail.event.id}/engine-relay/teams/${team.id}/members/${member.id}`));
 }
 
+function toggleFixtureTeam(teamId: number): void {
+  const index = fixtureForm.team_ids.indexOf(teamId);
+  if (index < 0) fixtureForm.team_ids.push(teamId);
+  else fixtureForm.team_ids.splice(index, 1);
+}
+
+function selectAllFixtureTeams(): void {
+  fixtureForm.team_ids = readyTeams.value.map((team) => team.id);
+}
+
+function fixtureTeamNames(fixture: RelayFixture): string {
+  if (fixture.teams?.length) return fixture.teams.map((team) => team.name).join(" · ");
+  return `${fixture.team_a_name} vs ${fixture.team_b_name}`;
+}
+
 function createFixture(): void {
-  if (!fixtureForm.title.trim() || !fixtureForm.team_a_id || !fixtureForm.team_b_id) return;
+  if (!fixtureForm.title.trim() || !fixtureSelectionValid.value) return;
   void run("fixture-new", async () => {
     const response = await api.post<{ message?: string }>(`/api/admin/events/${props.detail.event.id}/engine-relay/fixtures`, {
       body: {
         title: fixtureForm.title,
-        team_a_id: Number(fixtureForm.team_a_id),
-        team_b_id: Number(fixtureForm.team_b_id),
+        team_ids: fixtureForm.team_ids.map(Number),
         cycles: Number(fixtureForm.cycles),
         opening_suite_id: fixtureForm.opening_suite_id ? Number(fixtureForm.opening_suite_id) : null,
         concurrency: Number(fixtureForm.concurrency),
@@ -158,7 +175,7 @@ function createFixture(): void {
         scheduled_start_at: fixtureForm.scheduled_start_at ? new Date(fixtureForm.scheduled_start_at).toISOString() : null,
       },
     });
-    Object.assign(fixtureForm, { title: "", team_a_id: 0, team_b_id: 0, cycles: 1, opening_suite_id: "", scheduled_start_at: "" });
+    Object.assign(fixtureForm, { title: "", team_ids: [], cycles: 1, opening_suite_id: "", scheduled_start_at: "" });
     return response;
   });
 }
@@ -243,8 +260,12 @@ function fixtureCycles(fixture: RelayFixture): number | string {
         <form v-if="showFixtureBuilder" class="panel fixture-builder" @submit.prevent="createFixture">
           <header><span>New fixture</span><h3>Set up a match</h3></header>
           <label class="fixture-builder__wide"><span>Fixture name</span><input v-model="fixtureForm.title" class="input" required placeholder="Heat 1"></label>
-          <label><span>Team A</span><select v-model.number="fixtureForm.team_a_id" class="input"><option :value="0" disabled>Select team</option><option v-for="team in readyTeams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
-          <label><span>Team B</span><select v-model.number="fixtureForm.team_b_id" class="input"><option :value="0" disabled>Select team</option><option v-for="team in readyTeams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
+          <fieldset class="fixture-team-picker fixture-builder__wide">
+            <legend>Round-robin teams</legend>
+            <header><span>{{ fixtureForm.team_ids.length }} selected</span><span><button type="button" @click="selectAllFixtureTeams">Select all</button><button type="button" @click="fixtureForm.team_ids = []">Clear</button></span></header>
+            <div><label v-for="team in readyTeams" :key="team.id" :class="{ selected: fixtureForm.team_ids.includes(team.id) }"><input type="checkbox" :checked="fixtureForm.team_ids.includes(team.id)" @change="toggleFixtureTeam(team.id)"><span class="team-pick-swatch" :style="{ '--team-primary': team.primary_color, '--team-secondary': team.secondary_color }"><i></i><i></i></span><span><strong>{{ team.name }}</strong><small>{{ team.roster.length }} {{ team.roster.length === 1 ? 'engine' : 'engines' }}</small></span><AppIcon name="check" :size="14" /></label></div>
+            <small>Select at least two teams. Every pairing plays both colours in each cycle.</small>
+          </fieldset>
           <label><span>Round-robin cycles</span><input v-model.number="fixtureForm.cycles" class="input" type="number" min="1" max="1000"></label>
           <label><span>Opening suite</span><select v-model="fixtureForm.opening_suite_id" class="input"><option value="">No opening suite</option><option v-for="suite in payload.opening_suites ?? []" :key="suite.id" :value="String(suite.id)">{{ suite.name }}</option></select></label>
           <label><span>Time · seconds</span><input v-model.number="fixtureForm.time_seconds" class="input" type="number" min="0.001" step="any"></label>
@@ -253,12 +274,12 @@ function fixtureCycles(fixture: RelayFixture): number | string {
           <button class="advanced-toggle" type="button" :aria-expanded="showAdvancedFixture" @click="showAdvancedFixture = !showAdvancedFixture"><span><AppIcon name="settings" :size="15" />Advanced settings</span><AppIcon name="chevron-down" :size="15" :class="{ rotated: showAdvancedFixture }" /></button>
           <div v-if="showAdvancedFixture" class="advanced-fields"><label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label><label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label></div>
           <div class="fixture-summary"><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Rating</span><strong>Unrated</strong></div><div><span>Mode</span><strong>Relay</strong></div></div>
-          <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || fixtureForm.team_a_id === fixtureForm.team_b_id">{{ pending === 'fixture-new' ? 'Creating…' : 'Create fixture' }}</button>
+          <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || !fixtureSelectionValid">{{ pending === 'fixture-new' ? 'Creating…' : 'Create fixture' }}</button>
         </form>
 
         <div class="fixture-list">
           <article v-for="fixture in payload.fixtures" :key="fixture.id" class="panel fixture-card">
-            <header><div><span>Fixture {{ fixture.position + 1 }}</span><h3>{{ fixture.title }}</h3><p>{{ fixture.team_a_name }} vs {{ fixture.team_b_name }}</p></div><StatusBadge :status="fixture.tournament?.status ?? 'missing'" /></header>
+            <header><div><span>Fixture {{ fixture.position + 1 }}</span><h3>{{ fixture.title }}</h3><p>{{ fixtureTeamNames(fixture) }}</p></div><StatusBadge :status="fixture.tournament?.status ?? 'missing'" /></header>
             <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
             <div class="fixture-games"><RouterLink v-for="game in fixture.games" :key="game.id" :to="`/tournaments/${fixture.tournament_id}?game_id=${game.id}`"><span>G{{ game.game_number ?? game.id }}</span><strong>{{ game.result || game.status }}</strong></RouterLink><span v-if="!fixture.games.length">No games</span></div>
             <div v-if="fixture.tournament?.status === 'draft' || fixture.tournament?.status === 'scheduled'" class="fixture-schedule"><input v-model="schedules[fixture.id]" class="input" type="datetime-local"><button class="button button--secondary button--small" type="button" :disabled="!!pending || !schedules[fixture.id]" @click="scheduleFixture(fixture)">{{ fixture.tournament?.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button></div>
@@ -321,6 +342,25 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 .fixture-layout { display: block; }
 .fixture-layout--building { display: grid; grid-template-columns: minmax(20rem, .72fr) minmax(0, 1.28fr); }
 .fixture-builder { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-sm); }
+.fixture-team-picker { display: grid; gap: .55rem; min-width: 0; margin: 0; padding: .7rem; border: 1px solid var(--color-border); border-radius: .55rem; }
+.fixture-team-picker legend { padding: 0 .25rem; color: var(--color-text-muted); font-size: .58rem; font-weight: 680; }
+.fixture-team-picker > header { display: flex; align-items: center; justify-content: space-between; }
+.fixture-team-picker > header > span:first-child { color: var(--color-accent); font-size: .6rem; font-weight: 750; }
+.fixture-team-picker > header > span:last-child { display: flex; gap: .3rem; }
+.fixture-team-picker > header button { padding: .2rem .4rem; border: 0; background: transparent; color: var(--color-accent); cursor: pointer; font: inherit; font-size: .58rem; font-weight: 700; }
+.fixture-team-picker > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; }
+.fixture-team-picker > div > label { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: .5rem; min-width: 0; padding: .55rem; border: 1px solid var(--color-border); border-radius: .45rem; cursor: pointer; }
+.fixture-team-picker > div > label.selected { border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border)); background: var(--color-accent-soft); }
+.fixture-team-picker input { position: absolute; opacity: 0; pointer-events: none; }
+.fixture-team-picker label > span:nth-of-type(2) { display: grid; min-width: 0; }
+.fixture-team-picker label strong, .fixture-team-picker label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fixture-team-picker label strong { font-size: .64rem; }
+.fixture-team-picker label small, .fixture-team-picker > small { color: var(--color-text-muted); font-size: .54rem; }
+.fixture-team-picker label > .app-icon { color: transparent; }
+.fixture-team-picker label.selected > .app-icon { color: var(--color-accent); }
+.team-pick-swatch { display: flex; overflow: hidden; width: 1.45rem; height: 1.45rem; border-radius: .35rem; }
+.team-pick-swatch i { flex: 1; background: var(--team-primary); }
+.team-pick-swatch i:last-child { background: var(--team-secondary); }
 .advanced-toggle { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; min-height: 2.35rem; padding: 0 .65rem; border: 1px solid var(--color-border); border-radius: .45rem; background: var(--color-surface-subtle); color: var(--color-text-secondary); cursor: pointer; }
 .advanced-toggle span { display: flex; align-items: center; gap: .4rem; font-size: .66rem; font-weight: 700; }
 .advanced-toggle .app-icon { transition: transform var(--transition-fast); }
@@ -335,4 +375,5 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 .fixture-empty .button { justify-self: center; margin-top: .3rem; }
 @media (max-width: 78rem) { .relay-toolbar { align-items: stretch; flex-direction: column; }.visibility-control { justify-content: flex-end; padding-top: .4rem; border-top: 1px solid var(--color-border); }.fixture-layout--building { grid-template-columns: 1fr; }.fixture-builder { position: static; } }
 @media (max-width: 46rem) { .relay-toolbar nav { display: grid; grid-template-columns: repeat(3, 1fr); }.relay-toolbar nav button { justify-content: center; padding: 0 .35rem; }.visibility-control { align-items: stretch; flex-direction: column; }.lifecycle-status { justify-content: space-between; }.publish-toggle { border-left: 0; }.overview-grid { grid-template-columns: 1fr; }.event-health dl { grid-template-columns: repeat(2, 1fr); }.event-health dl div:nth-child(2) { border-right: 0; }.event-health dl div:nth-child(-n+2) { border-bottom: 1px solid var(--color-border); }.team-header-actions { grid-column: 1 / -1; justify-content: space-between; }.advanced-fields { grid-template-columns: 1fr; } }
+@media (max-width: 46rem) { .fixture-team-picker > div { grid-template-columns: 1fr; } }
 </style>

@@ -1157,7 +1157,7 @@ def update_tournament(
     """Update a tournament's name, config, and participant list."""
     relay = connection.execute(
         """
-        SELECT anchor_a_engine_id, anchor_b_engine_id
+        SELECT id
         FROM engine_relay_fixtures
         WHERE tournament_id = ?
         """,
@@ -1166,7 +1166,18 @@ def update_tournament(
     if relay is not None:
         if config.rated:
             raise ValueError("engine relay tournaments are always unrated")
-        anchors = [int(relay["anchor_a_engine_id"]), int(relay["anchor_b_engine_id"])]
+        anchors = [
+            int(row["anchor_engine_id"])
+            for row in connection.execute(
+                """
+                SELECT anchor_engine_id
+                FROM engine_relay_fixture_teams
+                WHERE fixture_id = ?
+                ORDER BY position, team_id
+                """,
+                (relay["id"],),
+            )
+        ]
         if config.participants != anchors:
             raise ValueError("engine relay tournament anchors cannot be changed")
         if config.format != "round_robin" or config.time_control.category != "movenodes":

@@ -174,6 +174,40 @@ const format = computed(() => {
 const settingsRows = computed(() => (gameData.value?.settings || []).map((row) => Array.isArray(row)
   ? { label: String(row[0]), value: String(row[1]) }
   : { label: String(row.label), value: String(row.value) }));
+const teamsByAnchor = computed(() => {
+  const entries: Array<[string, RelayTeam]> = [];
+  const selectedFixture = fixture.value;
+  if (!selectedFixture) return new Map(entries);
+  for (const fixtureTeam of selectedFixture.teams || []) {
+    const team = payload.value.teams.find((item) => item.id === fixtureTeam.id);
+    if (team) entries.push([String(fixtureTeam.anchor_engine_id), team]);
+  }
+  if (entries.length) return new Map(entries);
+  const teamA = payload.value.teams.find((team) => team.id === selectedFixture.team_a_id);
+  const teamB = payload.value.teams.find((team) => team.id === selectedFixture.team_b_id);
+  if (teamA) entries.push([String(selectedFixture.anchor_a_engine_id), teamA]);
+  if (teamB) entries.push([String(selectedFixture.anchor_b_engine_id), teamB]);
+  return new Map(entries);
+});
+const teamNames = computed(() => Object.fromEntries(
+  [...teamsByAnchor.value].map(([engineId, team]) => [engineId, team.name]),
+));
+const teamStandings = computed(() => (gameData.value?.standings || []).map((standing) => {
+  const team = teamsByAnchor.value.get(String(standing.engine_id));
+  return { ...standing, name: team?.name ?? standing.name, team_id: team?.id ?? standing.engine_id };
+}));
+const teamHardwareRows = computed(() => (gameData.value?.engine_hardware || []).map((row) => ({
+  ...row,
+  name: teamsByAnchor.value.get(String(row.engine_id))?.name ?? row.name,
+})));
+const relayGameRoutes = computed<Record<string, RouteLocationRaw>>(() => Object.fromEntries(
+  (gameData.value?.games || []).map((game) => [String(game.id), {
+    name: "event-arena",
+    params: { slug: props.detail.event.slug },
+    query: { game_id: String(game.id) },
+    hash: "#relay-arena",
+  }]),
+));
 
 function rotatingRoster(team: RelayTeam | null, current: RelayRosterMember | null): RelayRosterMember[] {
   const roster = team?.roster ?? [];
@@ -236,6 +270,14 @@ onBeforeUnmount(() => {
 watch(() => payload.value.fixtures, () => selectInitial(), { deep: true });
 watch([fixtureId, gameId], () => { void loadGame(); });
 watch(gamePage, () => { void loadGame(); });
+watch(() => queryValue(route.query.game_id), (requestedGameId) => {
+  if (!requestedGameId || requestedGameId === gameId.value) return;
+  const requestedFixture = payload.value.fixtures.find((item) => item.games.some((game) => String(game.id) === requestedGameId));
+  if (!requestedFixture) return;
+  fixtureId.value = requestedFixture.id;
+  gameId.value = requestedGameId;
+  gameData.value = null;
+});
 watch(targetTime, (value, previous) => {
   if (value !== previous) resetCountdownForTarget();
 });
@@ -281,6 +323,15 @@ function selectInitial(): void {
     fixtureId.value = null;
     gameId.value = "";
     gameData.value = null;
+    return;
+  }
+  const requestedGameId = queryValue(route.query.game_id);
+  const requestedFixture = requestedGameId
+    ? fixtures.find((item) => item.games.some((game) => String(game.id) === requestedGameId))
+    : undefined;
+  if (requestedFixture) {
+    fixtureId.value = requestedFixture.id;
+    gameId.value = requestedGameId;
     return;
   }
   if (!fixtures.some((item) => item.id === fixtureId.value)) {
@@ -839,7 +890,7 @@ function handleUserActivation(): void {
     <ContentState v-else-if="loading && !gameData" kind="loading" title="Synchronising the relay" />
     <ContentState v-else-if="loadError && !gameData" kind="error" :message="loadError" action-label="Try again" @action="loadGame" />
 
-    <section v-else-if="gameData && viewerGame" ref="arenaElement" class="arena" :aria-label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'}`">
+    <section v-else-if="gameData && viewerGame" id="relay-arena" ref="arenaElement" class="arena" :aria-label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'}`">
       <div class="engine-column">
         <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
           <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in blackRoster" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
@@ -865,7 +916,7 @@ function handleUserActivation(): void {
 
     <section v-if="gameData" class="tournament-data">
       <nav class="data-tabs" aria-label="Tournament information">
-        <RouterLink :to="tabTarget('standings')" :aria-current="activeTab === 'standings' ? 'page' : undefined">Standings <span>{{ gameData.standings?.length || 0 }}</span></RouterLink>
+        <RouterLink :to="tabTarget('standings')" :aria-current="activeTab === 'standings' ? 'page' : undefined">Standings <span>{{ teamStandings.length }}</span></RouterLink>
         <RouterLink :to="tabTarget('games')" :aria-current="activeTab === 'games' ? 'page' : undefined">Games <span>{{ gameTotal }}</span></RouterLink>
         <RouterLink :to="tabTarget('settings')" :aria-current="activeTab === 'settings' ? 'page' : undefined">Settings</RouterLink>
       </nav>
@@ -874,17 +925,16 @@ function handleUserActivation(): void {
         <header><div><h2 id="standings-title">Standings</h2></div></header>
         <div v-if="gameData.standings?.length" class="table-wrap">
           <table>
-            <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
+            <thead><tr><th>Rank</th><th>Team</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th></tr></thead>
             <tbody>
-              <tr v-for="(standing, index) in gameData.standings" :key="standing.engine_id">
+              <tr v-for="(standing, index) in teamStandings" :key="standing.team_id">
                 <td class="rank-cell">{{ index + 1 }}</td>
-                <td><RouterLink :to="`/engines/${standing.engine_id}`">{{ standing.name }}</RouterLink></td>
+                <td class="team-cell">{{ standing.name }}</td>
                 <td class="number-cell">{{ standing.points }}</td>
                 <td class="number-cell">{{ scorePercentLabel(standing.score_percent) }}</td>
                 <td class="number-cell">{{ standing.played }}</td>
                 <td v-if="format === 'swiss'" class="number-cell">{{ standing.buchholz ?? 0 }}</td>
                 <td v-if="format === 'knockout'" class="number-cell">{{ standing.stage ?? 0 }}</td>
-                <td class="action-cell"><RouterLink :to="`/engines/${standing.engine_id}`" :aria-label="`View ${standing.name}`">View</RouterLink></td>
               </tr>
             </tbody>
           </table>
@@ -894,7 +944,7 @@ function handleUserActivation(): void {
 
       <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
         <header><div><h2 id="games-title">Finished games</h2></div></header>
-        <GameTable v-if="gameData.games.length" :games="gameData.games" :engines="gameData.engines" caption="Finished tournament games" />
+        <GameTable v-if="gameData.games.length" :games="gameData.games" :engines="teamNames" :game-routes="relayGameRoutes" :participant-links="false" caption="Finished team games" />
         <ContentState v-else kind="empty" compact title="No finished games yet" />
         <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
           <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
@@ -910,14 +960,14 @@ function handleUserActivation(): void {
         </dl>
         <ContentState v-else kind="empty" compact title="No settings recorded" />
 
-        <div v-if="gameData.engine_hardware?.length" class="hardware-section">
-          <h3>Engine hardware</h3>
+        <div v-if="teamHardwareRows.length" class="hardware-section">
+          <h3>Team hardware</h3>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Engine</th><th>Hash</th><th>Threads</th><th>Active hardware</th></tr></thead>
+              <thead><tr><th>Team</th><th>Hash</th><th>Threads</th><th>Active hardware</th></tr></thead>
               <tbody>
-                <tr v-for="row in gameData.engine_hardware" :key="row.engine_id">
-                  <td><RouterLink :to="`/engines/${row.engine_id}`">{{ row.name }}</RouterLink></td>
+                <tr v-for="row in teamHardwareRows" :key="row.engine_id">
+                  <td class="team-cell">{{ row.name }}</td>
                   <td>{{ row.hash || '-' }}</td>
                   <td>{{ row.threads || '-' }}</td>
                   <td>{{ row.hardware || 'Not reported' }}</td>
@@ -1350,6 +1400,7 @@ function handleUserActivation(): void {
 .pagination button:disabled { cursor: default; opacity: .45; }
 .pagination span { color: var(--color-text-muted, #607080); font-size: .72rem; }
 .rank-cell { width: 4rem; color: var(--color-text-muted, #607080); font-variant-numeric: tabular-nums; }
+.team-cell { font-weight: 700; }
 .number-cell { width: 6rem; font-weight: 730; font-variant-numeric: tabular-nums; }
 .action-cell { width: 4rem; text-align: end !important; }
 .action-cell a { color: var(--color-accent, #2f78c4) !important; font-size: .72rem; }

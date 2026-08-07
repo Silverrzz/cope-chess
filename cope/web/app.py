@@ -1935,7 +1935,11 @@ def _worker_allocations_payload(
         tournament = tournaments[tournament_id]
         if tournament is None:
             continue
-        relay_resources = relay_resources_for_tournament(connection, tournament_id)
+        relay_resources = relay_resources_for_tournament(
+            connection,
+            tournament_id,
+            (int(row["white_engine_id"]), int(row["black_engine_id"])),
+        )
         if relay_resources:
             threads = max(threads for threads, _ in relay_resources)
             engine_hash_mb = sum(hash_mb for _, hash_mb in relay_resources)

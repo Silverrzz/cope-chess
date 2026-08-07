@@ -288,6 +288,22 @@ CREATE TABLE IF NOT EXISTS engine_relay_fixtures (
   UNIQUE (event_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS engine_relay_fixture_teams (
+  fixture_id BIGINT NOT NULL REFERENCES engine_relay_fixtures(id) ON DELETE CASCADE,
+  team_id BIGINT NOT NULL REFERENCES event_cast_members(id),
+  anchor_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (fixture_id, team_id),
+  UNIQUE (fixture_id, anchor_engine_id),
+  UNIQUE (fixture_id, position)
+);
+
+INSERT INTO engine_relay_fixture_teams (fixture_id, team_id, anchor_engine_id, position)
+SELECT id, team_a_id, anchor_a_engine_id, 0 FROM engine_relay_fixtures
+UNION ALL
+SELECT id, team_b_id, anchor_b_engine_id, 1 FROM engine_relay_fixtures
+ON CONFLICT (fixture_id, team_id) DO NOTHING;
+
 ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS scheduled_start_at TEXT;
 UPDATE tournaments
 SET scheduled_start_at = to_char(
@@ -864,10 +880,12 @@ CREATE INDEX IF NOT EXISTS idx_event_awards_event_position ON event_awards(event
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_event_position ON engine_relay_fixtures(event_id, position);
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_a ON engine_relay_fixtures(team_a_id);
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_b ON engine_relay_fixtures(team_b_id);
+CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_team ON engine_relay_fixture_teams(team_id);
+CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_anchor ON engine_relay_fixture_teams(anchor_engine_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
   WHERE event_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 35)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 36)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

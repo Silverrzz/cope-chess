@@ -261,6 +261,7 @@ def next_worker_assignment(
             connection,
             tournament,
             engine_count=len(engines),
+            participant_engine_ids=(game.white_engine_id, game.black_engine_id),
         )
         available_threads, available_hash_mb = available_resources
         if (
@@ -991,6 +992,7 @@ def _worker_assignment_payload(
             connection,
             tournament,
             engine_count=len(engines),
+            participant_engine_ids=(game.white_engine_id, game.black_engine_id),
         ),
         benchmark_reference=GameBenchmarkReference(
             hardware_key=benchmark_reference.hardware_key,
@@ -1038,10 +1040,15 @@ def _tournament_required_resources(
     tournament: TournamentRecord,
     *,
     engine_count: int = 2,
+    participant_engine_ids: tuple[int, ...] | None = None,
 ) -> WorkerResources:
     from cope.events.engine_relay import relay_resources_for_tournament
 
-    relay_resources = relay_resources_for_tournament(connection, tournament.id)
+    relay_resources = relay_resources_for_tournament(
+        connection,
+        tournament.id,
+        participant_engine_ids,
+    )
     if relay_resources:
         return WorkerResources(
             threads=max(threads for threads, _ in relay_resources),
@@ -1073,7 +1080,7 @@ def _worker_available_resources(
         used_hash_mb = 0
         rows = connection.execute(
             """
-            SELECT tournaments.id
+            SELECT tournaments.id, games.white_engine_id, games.black_engine_id
             FROM game_assignments
             JOIN games ON games.id = game_assignments.game_id
             JOIN tournaments ON tournaments.id = games.tournament_id
@@ -1090,6 +1097,10 @@ def _worker_available_resources(
             resources = _tournament_required_resources(
                 connection,
                 active_tournament,
+                participant_engine_ids=(
+                    int(row["white_engine_id"]),
+                    int(row["black_engine_id"]),
+                ),
             )
             used_threads += resources.threads
             used_hash_mb += resources.hash_mb

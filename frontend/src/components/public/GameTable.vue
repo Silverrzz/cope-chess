@@ -1,25 +1,31 @@
 <script setup lang="ts">
+import type { RouteLocationRaw } from 'vue-router'
+
 import type { GameRecord } from './types'
 import { engineName, resultLabel, shortResult, tournamentName } from './format'
 import StatusPill from './StatusPill.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   games: GameRecord[]
   engines?: Record<string, string>
   tournamentNames?: Record<string, string>
+  gameRoutes?: Record<string, RouteLocationRaw>
+  participantLinks?: boolean
   showTournament?: boolean
   showRound?: boolean
   caption?: string
 }>(), {
   engines: () => ({}),
   tournamentNames: () => ({}),
+  gameRoutes: () => ({}),
+  participantLinks: true,
   showTournament: false,
   showRound: true,
   caption: 'Chess games',
 })
 
-function gameUrl(game: GameRecord): string {
-  return `/tournaments/${game.tournament_id}?game_id=${game.id}`
+function gameUrl(game: GameRecord): RouteLocationRaw {
+  return props.gameRoutes[String(game.id)] ?? `/tournaments/${game.tournament_id}?game_id=${game.id}`
 }
 </script>
 
@@ -45,14 +51,16 @@ function gameUrl(game: GameRecord): string {
           </td>
           <td v-if="showRound" class="column-small" data-label="Round">{{ game.round ?? '-' }}</td>
           <td data-label="White">
-            <RouterLink :to="`/engines/${game.white_engine_id}`">
+            <RouterLink v-if="participantLinks" :to="`/engines/${game.white_engine_id}`">
               {{ engineName(engines, game.white_engine_id, game.white_name) }}
             </RouterLink>
+            <span v-else class="participant-name">{{ engineName(engines, game.white_engine_id, game.white_name) }}</span>
           </td>
           <td data-label="Black">
-            <RouterLink :to="`/engines/${game.black_engine_id}`">
+            <RouterLink v-if="participantLinks" :to="`/engines/${game.black_engine_id}`">
               {{ engineName(engines, game.black_engine_id, game.black_name) }}
             </RouterLink>
+            <span v-else class="participant-name">{{ engineName(engines, game.black_engine_id, game.black_name) }}</span>
           </td>
           <td data-label="Status"><StatusPill :status="game.status" /></td>
           <td class="column-result" data-label="Result" :title="resultLabel(game.result)">{{ shortResult(game.result) }}</td>
@@ -110,6 +118,8 @@ function gameUrl(game: GameRecord): string {
   font-weight: 600;
   text-decoration: none;
 }
+
+.participant-name { font-weight: 600; }
 
 .game-table a:hover {
   color: var(--color-accent, #2f78c4);

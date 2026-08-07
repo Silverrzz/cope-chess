@@ -44,6 +44,12 @@ export interface RelayFixture {
   created_at: string;
   team_a_name: string;
   team_b_name: string;
+  teams: Array<{
+    id: number;
+    name: string;
+    anchor_engine_id: Identifier;
+    position: number;
+  }>;
   tournament: TournamentRecord | null;
   games: RelayGame[];
 }
