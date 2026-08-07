@@ -103,8 +103,10 @@ const whiteTeam = computed(() => teamForSide("white"));
 const blackTeam = computed(() => teamForSide("black"));
 const whiteMember = computed(() => currentMember("white"));
 const blackMember = computed(() => currentMember("black"));
-const whiteAnalysis = computed(() => analysisFor("white", whiteMember.value));
-const blackAnalysis = computed(() => analysisFor("black", blackMember.value));
+const whiteAnalysis = ref<EngineAnalysis | null>(null);
+const blackAnalysis = ref<EngineAnalysis | null>(null);
+const whiteCardMember = computed(() => memberForAnalysis("white", whiteAnalysis.value) ?? whiteMember.value);
+const blackCardMember = computed(() => memberForAnalysis("black", blackAnalysis.value) ?? blackMember.value);
 const gameStatus = computed(() => viewerGame.value?.status ?? fixture.value?.tournament?.status ?? "draft");
 const gameLabel = computed(() => {
   if (!viewerGame.value) return "Awaiting schedule";
@@ -169,6 +171,17 @@ const format = computed(() => {
 const settingsRows = computed(() => (gameData.value?.settings || []).map((row) => Array.isArray(row)
   ? { label: String(row[0]), value: String(row[1]) }
   : { label: String(row.label), value: String(row.value) }));
+
+watch(gameId, () => {
+  whiteAnalysis.value = null;
+  blackAnalysis.value = null;
+});
+watch(() => gameData.value?.engine_data?.white ?? null, (analysis) => {
+  if (analysis) whiteAnalysis.value = analysis;
+}, { immediate: true });
+watch(() => gameData.value?.engine_data?.black ?? null, (analysis) => {
+  if (analysis) blackAnalysis.value = analysis;
+}, { immediate: true });
 
 onMounted(() => {
   selectInitial();
@@ -495,20 +508,13 @@ function currentMember(side: "white" | "black"): RelayRosterMember | null {
   }
   const white = side === "white";
   const movesPlayed = moves.value.filter((move) => !move.is_book && ((move.ply % 2 === 1) === white)).length;
-  const cycle = team.roster.reduce((total, member) => total + member.relay_moves, 0);
-  let offset = movesPlayed % cycle;
-  for (const member of team.roster) {
-    if (offset < member.relay_moves) return member;
-    offset -= member.relay_moves;
-  }
-  return team.roster[0] ?? null;
+  return team.roster[movesPlayed % team.roster.length] ?? null;
 }
 
-function analysisFor(side: "white" | "black", member: RelayRosterMember | null): EngineAnalysis | null {
-  const analysis = gameData.value?.engine_data?.[side] ?? null;
-  if (!analysis || !member) return analysis;
-  if (analysis.engine_id !== null && analysis.engine_id !== undefined && String(analysis.engine_id) !== String(member.engine_id)) return null;
-  return analysis;
+function memberForAnalysis(side: "white" | "black", analysis: EngineAnalysis | null): RelayRosterMember | null {
+  const team = side === "white" ? whiteTeam.value : blackTeam.value;
+  if (!team || analysis?.engine_id === null || analysis?.engine_id === undefined) return null;
+  return team.roster.find((member) => String(member.engine_id) === String(analysis.engine_id)) ?? null;
 }
 
 function teamStyle(team: RelayTeam | null): Record<string, string> | undefined {
@@ -821,18 +827,16 @@ function handleUserActivation(): void {
       <div class="engine-column">
         <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
           <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><span v-for="member in blackTeam?.roster ?? []" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></div>
-          <EnginePanel side="black" :name="blackMember?.display_name || blackTeam?.name || ''" :engine-id="blackMember?.engine_id ?? null" :clock="`${(blackMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
+          <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '—'" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
         </div>
         <div class="relay-engine-slot" :style="teamStyle(whiteTeam)" :data-relay-team-id="whiteTeam?.id">
           <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><span v-for="member in whiteTeam?.roster ?? []" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></div>
-          <EnginePanel side="white" :name="whiteMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteMember?.engine_id ?? null" :clock="`${(whiteMember?.nodes ?? 0).toLocaleString()} nodes`" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
+          <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '—'" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
         </div>
-        <dl class="game-facts">
-          <div :style="teamStyle(blackTeam)"><dt>Black team</dt><dd><span>{{ blackTeam?.name ?? '-' }}</span><button v-if="blackTeam" type="button" class="cheer-button cheer-button--arena" @click="cheer(blackTeam)"><AppIcon name="trophy" :size="12" /> Cheer</button></dd></div>
-          <div :style="teamStyle(whiteTeam)"><dt>White team</dt><dd><span>{{ whiteTeam?.name ?? '-' }}</span><button v-if="whiteTeam" type="button" class="cheer-button cheer-button--arena" @click="cheer(whiteTeam)"><AppIcon name="trophy" :size="12" /> Cheer</button></dd></div>
-          <div><dt>Status</dt><dd>{{ statusLabel(gameStatus) }}</dd></div>
-          <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
-        </dl>
+        <div class="arena-cheers" aria-label="Cheer for a team">
+          <button v-if="blackTeam" type="button" class="cheer-button cheer-button--arena" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)"><AppIcon name="trophy" :size="14" /> Cheer {{ blackTeam.short_name || blackTeam.name }}</button>
+          <button v-if="whiteTeam" type="button" class="cheer-button cheer-button--arena" :style="teamStyle(whiteTeam)" @click="cheer(whiteTeam)"><AppIcon name="trophy" :size="14" /> Cheer {{ whiteTeam.short_name || whiteTeam.name }}</button>
+        </div>
       </div>
       <div ref="boardColumnElement" class="board-column">
         <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
@@ -930,7 +934,7 @@ function handleUserActivation(): void {
 .cheer-button { display: inline-flex; min-height: 2.2rem; align-items: center; justify-content: center; gap: .3rem; padding: 0 .85rem; border: 1px solid color-mix(in srgb, var(--relay-primary) 55%, white); border-radius: 999px; background: color-mix(in srgb, var(--relay-primary) 13%, white); color: color-mix(in srgb, var(--relay-primary) 82%, #071426); cursor: pointer; font-size: .65rem; font-weight: 800; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--relay-primary) 14%, transparent); }
 .cheer-button:hover { border-color: color-mix(in srgb, var(--relay-primary) 78%, white); background: color-mix(in srgb, var(--relay-primary) 22%, white); box-shadow: 0 .3rem .75rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
 .cheer-button:active { transform: scale(.96); }
-.cheer-button--arena { min-width: 4.5rem; min-height: 1.85rem; padding-inline: .7rem; font-size: .59rem; }
+.cheer-button--arena { min-width: 0; min-height: 2.65rem; padding-inline: 1rem; font-size: .67rem; }
 @keyframes cheer-pop { 0% { opacity: 0; transform: translate(var(--cheer-start-x), var(--cheer-start-y)) rotate(0) scale(.5); } 13% { opacity: .95; } 100% { opacity: 0; transform: translate(var(--cheer-end-x), var(--cheer-end-y)) rotate(var(--cheer-rotation)) scale(1); } }
 
 @media (prefers-reduced-motion: reduce) { .cheer-burst i { animation-duration: .18s; } }
@@ -1050,8 +1054,8 @@ function handleUserActivation(): void {
 }
 
 .clash-countdown {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  justify-content: center;
   width: min(100%, 50rem);
   margin-top: 1.1rem;
 }
@@ -1059,6 +1063,7 @@ function handleUserActivation(): void {
 .clash-countdown > div {
   position: relative;
   display: grid;
+  width: 25%;
   justify-items: center;
   gap: .35rem;
   padding: clamp(.8rem, 2.6vh, 1.45rem) .75rem 1.2rem;
@@ -1278,7 +1283,7 @@ function handleUserActivation(): void {
 .tournament-heading { display: flex; align-items: end; justify-content: space-between; gap: var(--space-xl, 2rem); padding-block-end: .55rem; border-block-end: 1px solid var(--color-border, #d5dbe1); }
 .tournament-heading__title { display: grid; align-items: center; min-width: 0; }
 .title-line { display: flex; align-items: center; gap: var(--space-sm, .5rem); min-width: 0; }
-.tournament-heading h1, .tournament-heading p, .game-facts { margin: 0; }
+.tournament-heading h1, .tournament-heading p { margin: 0; }
 .tournament-heading h1 { max-width: 54rem; font-size: clamp(1.45rem, 2.7vw, 2.15rem); letter-spacing: -.035em; line-height: 1.05; overflow-wrap: anywhere; }
 .tournament-heading__title > p { margin-block-start: .18rem; color: var(--color-text-muted, #607080); font-size: .75rem; }
 .relay-status, .relay-spectators { display: inline-flex; align-items: center; gap: .25rem; min-height: 1.45rem; padding-inline: .5rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; color: var(--color-text-muted, #607080); font-size: .62rem; font-weight: 730; white-space: nowrap; }
@@ -1300,11 +1305,7 @@ function handleUserActivation(): void {
 .board-column { width: var(--arena-board-size); min-width: 0; justify-self: center; }
 .activity-column { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); height: var(--arena-content-height); }
 .activity-column > * { min-width: 0; min-height: 0; height: 100%; }
-.game-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 1px; height: 6.35rem; overflow: hidden; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-md, .5rem); background: var(--color-border, #d5dbe1); }
-.game-facts div { min-width: 0; padding: .65rem .75rem; background: var(--color-surface, #fff); }
-.game-facts dt { color: var(--color-text-muted, #607080); font-size: .59rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
-.game-facts dd { display: flex; align-items: center; justify-content: space-between; gap: .7rem; overflow: hidden; margin: .18rem 0 0; font-size: .75rem; font-weight: 700; white-space: nowrap; }
-.game-facts dd > span { overflow: hidden; min-width: 0; text-overflow: ellipsis; }
+.arena-cheers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; padding-top: .15rem; }
 
 .tournament-data { display: grid; gap: var(--space-sm, .5rem); margin-block-start: var(--space-md, 1rem); }
 .data-tabs { display: flex; gap: .3rem; overflow-x: auto; }
@@ -1351,7 +1352,7 @@ function handleUserActivation(): void {
   .tournament-heading__controls { justify-content: space-between; }
   .arena { grid-template-columns: 1fr; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
-  .engine-column .game-facts { grid-column: 1 / -1; }
+  .engine-column .arena-cheers { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
   .activity-column { grid-column: 1; grid-row: 3; }
 }
@@ -1359,7 +1360,7 @@ function handleUserActivation(): void {
   .tournament-heading__controls, .relay-broadcast__selectors { align-items: stretch; flex-direction: column-reverse; }
   .relay-broadcast__selectors label, .relay-broadcast__selectors label:last-of-type { width: 100%; }
   .engine-column { grid-template-columns: 1fr; }
-  .engine-column .game-facts { grid-column: 1; }
+  .engine-column .arena-cheers { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
   .settings-list { grid-template-columns: 1fr; }
 }

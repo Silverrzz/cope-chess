@@ -181,8 +181,8 @@ export interface EngineAnalysis {
   relay_team_id?: Identifier | null
   relay_team_name?: string | null
   relay_position?: number | null
-  relay_moves?: number | null
-  node_limit?: number | null
+  relay_threads?: number | null
+  relay_hash_mb?: number | null
   depth?: string | number | null
   seldepth?: string | number | null
   nodes?: string | number | null

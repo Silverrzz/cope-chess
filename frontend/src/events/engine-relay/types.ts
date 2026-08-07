@@ -7,8 +7,8 @@ export interface RelayRosterMember {
   version: string;
   display_name: string;
   label: string;
-  relay_moves: number;
-  nodes: number;
+  threads: number;
+  hash_mb: number;
   position: number;
 }
 

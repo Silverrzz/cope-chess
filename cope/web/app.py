@@ -542,6 +542,13 @@ def create_app(
             StaticFiles(directory=str(frontend_assets)),
             name="frontend-assets",
         )
+    frontend_audio = FRONTEND_DIST_DIR / "audio"
+    if frontend_audio.is_dir():
+        app.mount(
+            "/audio",
+            StaticFiles(directory=str(frontend_audio)),
+            name="frontend-audio",
+        )
 
     @app.get("/health/live", include_in_schema=False)
     def health_live():
@@ -679,7 +686,7 @@ def create_app(
             and 200 <= response.status_code < 400
         ):
             _publish_admin_post_streams(request)
-        if path.startswith("/assets/"):
+        if path.startswith(("/assets/", "/audio/")):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -1049,6 +1056,7 @@ def _is_spa_request(request: Request) -> bool:
     if path in {
         "/api",
         "/assets",
+        "/audio",
         "/docs",
         "/internal",
         "/openapi.json",
@@ -1056,7 +1064,7 @@ def _is_spa_request(request: Request) -> bool:
     }:
         return False
     if path.startswith(
-        ("/api/", "/assets/", "/docs/", "/internal/", "/redoc/")
+        ("/api/", "/assets/", "/audio/", "/docs/", "/internal/", "/redoc/")
     ):
         return False
     if path.endswith(".json"):
@@ -1896,6 +1904,8 @@ def _worker_allocations_payload(
     connection: sqlite3.Connection,
     worker_id: int,
 ) -> list[dict[str, Any]]:
+    from cope.events.engine_relay import relay_resources_for_tournament
+
     rows = connection.execute(
         """
         SELECT
@@ -1925,8 +1935,15 @@ def _worker_allocations_payload(
         tournament = tournaments[tournament_id]
         if tournament is None:
             continue
-        engine_hash_mb = tournament.config.engine_hash_mb * 2
-        process_memory_mb = ENGINE_PROCESS_MEMORY_OVERHEAD_MB * 2
+        relay_resources = relay_resources_for_tournament(connection, tournament_id)
+        if relay_resources:
+            threads = max(threads for threads, _ in relay_resources)
+            engine_hash_mb = sum(hash_mb for _, hash_mb in relay_resources)
+            process_memory_mb = ENGINE_PROCESS_MEMORY_OVERHEAD_MB * len(relay_resources)
+        else:
+            threads = tournament.config.engine_threads
+            engine_hash_mb = tournament.config.engine_hash_mb * 2
+            process_memory_mb = ENGINE_PROCESS_MEMORY_OVERHEAD_MB * 2
         allocations.append(
             {
                 "assignment_id": int(row["assignment_id"]),
@@ -1942,7 +1959,7 @@ def _worker_allocations_payload(
                     int(row["black_engine_id"]),
                     f"Engine {row['black_engine_id']}",
                 ),
-                "threads": tournament.config.engine_threads,
+                "threads": threads,
                 "engine_hash_mb": engine_hash_mb,
                 "process_memory_mb": process_memory_mb,
                 "memory_mb": engine_hash_mb + process_memory_mb,

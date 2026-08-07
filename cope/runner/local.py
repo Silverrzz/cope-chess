@@ -20,6 +20,7 @@ from cope.core.san import pv_to_san
 from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
+    EngineRelayAssignment,
     EngineSpec,
     EngineRelayMember,
     EngineRelayTeam,
@@ -31,7 +32,6 @@ from cope.core.models import (
     MoveNodesTimeControl,
     MoveTimeControl,
     MovesToGoTimeControl,
-    TournamentConfig,
     WorkerResources,
     ENGINE_PROCESS_MEMORY_OVERHEAD_MB,
 )
@@ -258,6 +258,7 @@ def next_worker_assignment(
         if excluded_engine_ids.intersection(engines):
             continue
         required_resources = _tournament_required_resources(
+            connection,
             tournament,
             engine_count=len(engines),
         )
@@ -601,16 +602,10 @@ def run_worker_assignment_game(
                 _relay_moves_played(moves, color),
             )
             engine = engine_instances[member.engine_id]
-            manager = RuntimeTimeControl(
-                TimeControlCategory.MOVENODES,
-                nodes=member.nodes,
-            ).create_manager()
             if side_to_move == chess.WHITE:
                 game.white = engine
-                game.white_tm = manager
             else:
                 game.black = engine
-                game.black_tm = manager
         else:
             engine = white if side_to_move == chess.WHITE else black
         board_before_move = board.copy(stack=False)
@@ -752,13 +747,7 @@ def _relay_member_for_moves(
     team: EngineRelayTeam,
     moves_played: int,
 ) -> EngineRelayMember:
-    cycle = sum(member.relay_moves for member in team.members)
-    offset = moves_played % cycle
-    for member in team.members:
-        if offset < member.relay_moves:
-            return member
-        offset -= member.relay_moves
-    return team.members[0]
+    return team.members[moves_played % len(team.members)]
 
 
 def _relay_moves_played(
@@ -781,8 +770,8 @@ def _relay_engine_data(relay) -> dict[int, dict[str, Any]]:
             "relay_team_id": team.team_id,
             "relay_team_name": team.name,
             "relay_position": index,
-            "relay_moves": member.relay_moves,
-            "node_limit": member.nodes,
+            "relay_threads": member.threads,
+            "relay_hash_mb": member.hash_mb,
         }
         for team in relay.teams.values()
         for index, member in enumerate(team.members)
@@ -986,7 +975,7 @@ def _worker_assignment_payload(
             },
             time_control=tournament.config.time_control,
             uci_options_overrides={
-                engine_id: _tournament_engine_options(tournament, engine_id)
+                engine_id: _tournament_engine_options(tournament, engine_id, relay)
                 for engine_id in engines
             },
             engine_relay=relay,
@@ -999,6 +988,7 @@ def _worker_assignment_payload(
         max_plies=_max_plies(tournament),
         engines=engines,
         required_resources=_tournament_required_resources(
+            connection,
             tournament,
             engine_count=len(engines),
         ),
@@ -1044,10 +1034,22 @@ def _engine_options(
 
 
 def _tournament_required_resources(
+    connection: sqlite3.Connection,
     tournament: TournamentRecord,
     *,
     engine_count: int = 2,
 ) -> WorkerResources:
+    from cope.events.engine_relay import relay_resources_for_tournament
+
+    relay_resources = relay_resources_for_tournament(connection, tournament.id)
+    if relay_resources:
+        return WorkerResources(
+            threads=max(threads for threads, _ in relay_resources),
+            hash_mb=sum(
+                hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
+                for _, hash_mb in relay_resources
+            ),
+        )
     return WorkerResources(
         threads=tournament.config.engine_threads,
         hash_mb=(
@@ -1071,7 +1073,7 @@ def _worker_available_resources(
         used_hash_mb = 0
         rows = connection.execute(
             """
-            SELECT tournaments.id, tournaments.config
+            SELECT tournaments.id
             FROM game_assignments
             JOIN games ON games.id = game_assignments.game_id
             JOIN tournaments ON tournaments.id = games.tournament_id
@@ -1082,17 +1084,15 @@ def _worker_available_resources(
             (worker.id,),
         )
         for row in rows:
-            config = TournamentConfig.model_validate_json(row["config"])
-            used_threads += config.engine_threads
-            from cope.events.engine_relay import relay_engine_count_for_tournament
-
-            engine_count = relay_engine_count_for_tournament(
+            active_tournament = get_tournament(connection, int(row["id"]))
+            if active_tournament is None:
+                continue
+            resources = _tournament_required_resources(
                 connection,
-                int(row["id"]),
+                active_tournament,
             )
-            used_hash_mb += (
-                config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
-            ) * max(2, engine_count)
+            used_threads += resources.threads
+            used_hash_mb += resources.hash_mb
     else:
         used_threads, used_hash_mb = used_resources
     return (
@@ -1104,11 +1104,28 @@ def _worker_available_resources(
 def _tournament_engine_options(
     tournament: TournamentRecord,
     engine_id: int,
+    relay: EngineRelayAssignment | None = None,
 ) -> dict[str, str | int | bool]:
-    del engine_id
     options = dict(tournament.config.uci_options)
-    options["Threads"] = tournament.config.engine_threads
-    options["Hash"] = tournament.config.engine_hash_mb
+    member = (
+        next(
+            (
+                member
+                for team in relay.teams.values()
+                for member in team.members
+                if member.engine_id == engine_id
+            ),
+            None,
+        )
+        if relay is not None
+        else None
+    )
+    options["Threads"] = (
+        member.threads if member is not None else tournament.config.engine_threads
+    )
+    options["Hash"] = (
+        member.hash_mb if member is not None else tournament.config.engine_hash_mb
+    )
     return options
 
 

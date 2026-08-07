@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 15
+PROTOCOL_VERSION = 16
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
@@ -243,8 +243,8 @@ class ColorSlot(StrEnum):
 
 class EngineRelayMember(StrictModel):
     engine_id: int = Field(gt=0)
-    relay_moves: int = Field(gt=0)
-    nodes: int = Field(gt=0)
+    threads: int = Field(gt=0)
+    hash_mb: int = Field(gt=0)
     position: int = Field(ge=0)
 
 
@@ -677,7 +677,7 @@ class BenchmarkFailed(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[15] = PROTOCOL_VERSION
+    v: Literal[16] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

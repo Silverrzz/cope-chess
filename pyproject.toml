@@ -43,4 +43,5 @@ include = ["cope*"]
 "cope.web" = [
     "frontend_dist/*",
     "frontend_dist/assets/*",
+    "frontend_dist/audio/*",
 ]

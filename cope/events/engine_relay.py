@@ -19,7 +19,7 @@ from cope.core.models import (
     EngineRelayAssignment,
     EngineRelayMember,
     EngineRelayTeam,
-    MoveNodesTimeControl,
+    IncrementTimeControl,
     RoundRobinFormatOptions,
     TournamentConfig,
     TournamentFormat,
@@ -100,8 +100,8 @@ class RelayCheerPayload(BaseModel):
 
 class RelayMemberPayload(BaseModel):
     engine_id: int = Field(gt=0)
-    relay_moves: int = Field(default=4, gt=0, le=1000)
-    nodes: int = Field(default=100000, gt=0)
+    threads: int = Field(default=1, gt=0, le=1024)
+    hash_mb: int = Field(default=256, gt=0, le=1_048_576)
     position: int = Field(default=0, ge=0, le=1000)
     label: str = Field(default="", max_length=80)
 
@@ -118,8 +118,8 @@ class RelayFixturePayload(BaseModel):
     cycles: int = Field(default=1, gt=0, le=1000)
     opening_suite_id: int | None = Field(default=None, gt=0)
     concurrency: int = Field(default=1, gt=0, le=256)
-    engine_threads: int = Field(default=1, gt=0, le=1024)
-    engine_hash_mb: int = Field(default=256, gt=0, le=1_048_576)
+    initial_ms: int = Field(default=60_000, gt=0)
+    increment_ms: int = Field(default=1_000, ge=0)
     lag_compensation_ms: int = Field(default=50, ge=0, le=60_000)
     adjudication: AdjudicationConfig = Field(default_factory=AdjudicationConfig)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
@@ -140,7 +140,7 @@ class RelayFixturePayload(BaseModel):
             if not name.strip():
                 raise ValueError("UCI option names cannot be blank")
             if name.strip().lower() in {"threads", "hash"}:
-                raise ValueError("Threads and Hash use the fixture resource controls")
+                raise ValueError("Threads and Hash use the relay engine resource controls")
         return value
 
     @field_validator("scheduled_start_at")
@@ -243,8 +243,8 @@ def _team_members(
 
 def _member_settings(member: EventCastMemberRecord) -> tuple[int, int, int, str]:
     return (
-        max(1, int(member.metadata.get("relay_moves", 4))),
-        max(1, int(member.metadata.get("nodes", 100000))),
+        max(1, int(member.metadata.get("threads", 1))),
+        max(1, int(member.metadata.get("hash_mb", 256))),
         max(0, int(member.metadata.get("relay_order", member.position))),
         str(member.metadata.get("label", "")),
     )
@@ -265,8 +265,8 @@ def _team_assignment(
         members=tuple(
             EngineRelayMember(
                 engine_id=int(member.engine_version_id or 0),
-                relay_moves=_member_settings(member)[0],
-                nodes=_member_settings(member)[1],
+                threads=_member_settings(member)[0],
+                hash_mb=_member_settings(member)[1],
                 position=_member_settings(member)[2],
             )
             for member in members
@@ -336,6 +336,20 @@ def relay_engine_count_for_tournament(
     )
 
 
+def relay_resources_for_tournament(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> tuple[tuple[int, int], ...]:
+    fixture = _get_fixture_for_tournament(connection, tournament_id)
+    if fixture is None:
+        return ()
+    return tuple(
+        _member_settings(member)[:2]
+        for team_id in (fixture.team_a_id, fixture.team_b_id)
+        for member in _team_members(connection, fixture.event_id, team_id)
+    )
+
+
 def relay_engine_colors(assignment: Any) -> dict[int, str]:
     relay = assignment.assignment.engine_relay
     if relay is None:
@@ -351,13 +365,7 @@ def relay_engine_colors(assignment: Any) -> dict[int, str]:
 
 
 def relay_member_at(team: EngineRelayTeam, moves_played: int) -> EngineRelayMember:
-    cycle = sum(member.relay_moves for member in team.members)
-    offset = moves_played % cycle
-    for member in team.members:
-        if offset < member.relay_moves:
-            return member
-        offset -= member.relay_moves
-    return team.members[0]
+    return team.members[moves_played % len(team.members)]
 
 
 def _moves_played(moves: tuple[MoveRecord, ...], side: ColorSlot) -> int:
@@ -376,7 +384,7 @@ def _team_payload(
 ) -> dict[str, Any]:
     roster = []
     for member in _team_members(connection, event_id, team.id):
-        relay_moves, nodes, position, label = _member_settings(member)
+        threads, hash_mb, position, label = _member_settings(member)
         engine = get_engine(connection, int(member.engine_version_id or 0))
         roster.append(
             {
@@ -386,8 +394,8 @@ def _team_payload(
                 "version": engine.version if engine is not None else "",
                 "display_name": member.display_name,
                 "label": label,
-                "relay_moves": relay_moves,
-                "nodes": nodes,
+                "threads": threads,
+                "hash_mb": hash_mb,
                 "position": position,
             }
         )
@@ -824,8 +832,8 @@ def _register_api(app: FastAPI) -> None:
             role="relay engine",
             engine_version_id=payload.engine_id,
             metadata={
-                "relay_moves": payload.relay_moves,
-                "nodes": payload.nodes,
+                "threads": payload.threads,
+                "hash_mb": payload.hash_mb,
                 "relay_order": payload.position,
                 "label": payload.label,
             },
@@ -854,8 +862,8 @@ def _register_api(app: FastAPI) -> None:
             (
                 json.dumps(
                     {
-                        "relay_moves": payload.relay_moves,
-                        "nodes": payload.nodes,
+                        "threads": payload.threads,
+                        "hash_mb": payload.hash_mb,
                         "relay_order": payload.position,
                         "label": payload.label,
                     },
@@ -935,14 +943,17 @@ def _register_api(app: FastAPI) -> None:
             format=TournamentFormat.ROUND_ROBIN,
             format_options=RoundRobinFormatOptions(cycles=payload.cycles),
             participants=[anchor_a, anchor_b],
-            time_control=MoveNodesTimeControl(nodes=max(member.nodes for team in (relay_a, relay_b) for member in team.members)),
+            time_control=IncrementTimeControl(
+                initial_ms=payload.initial_ms,
+                increment_ms=payload.increment_ms,
+            ),
             concurrency=payload.concurrency,
             opening_suite_id=payload.opening_suite_id,
             adjudication=payload.adjudication,
             rated=False,
             lag_compensation_ms=payload.lag_compensation_ms,
-            engine_threads=payload.engine_threads,
-            engine_hash_mb=payload.engine_hash_mb,
+            engine_threads=max(member.threads for team in (relay_a, relay_b) for member in team.members),
+            engine_hash_mb=max(member.hash_mb for team in (relay_a, relay_b) for member in team.members),
             uci_options=payload.uci_options,
         )
         tournament_id = create_tournament(connection, payload.title, config)
@@ -1126,9 +1137,9 @@ def _provision(connection: sqlite3.Connection) -> int:
         handler_version=MODULE_VERSION,
         title="OpenBench Engine Clash",
         subtitle="One board. Two teams. Every handoff changes the fight.",
-        summary="Open-source chess engines relay through a single game, carrying the position forward under individual node odds.",
-        description="A relay exhibition built around the engines developed and tested across OpenBench communities. Each team fields a configured running order, and every engine owns a fixed stretch of team moves before handing the same position to the next specialist.",
-        rules="Each fixture runs through the normal COPE tournament scheduler and remains unrated. Teams relay after their configured number of moves. Every roster member receives its own node allowance, and all moves retain the identity and telemetry of the engine that played them.",
+        summary="Open-source chess engines relay through a single game, carrying the position forward under a shared clock.",
+        description="A relay exhibition built around the engines developed and tested across OpenBench communities. Each team fields a configured running order, and engines hand the position to the next specialist after every team move.",
+        rules="Each fixture runs through the normal COPE tournament scheduler and remains unrated. Teams relay after every move under the fixture clock. Every roster member receives its own thread and hash allocation, and all moves retain the identity and telemetry of the engine that played them.",
         status="draft",
         featured=True,
         theme={
