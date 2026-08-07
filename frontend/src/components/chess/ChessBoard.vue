@@ -54,7 +54,6 @@ const emit = defineEmits<{
 const viewer = ref<HTMLElement | null>(null)
 const board = ref<HTMLElement | null>(null)
 let ground: ChessgroundApi | null = null
-let boardResizeObserver: ResizeObserver | null = null
 const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
 const positions = computed(() => buildPositions(props.fen, props.moves))
@@ -108,8 +107,6 @@ onMounted(() => {
       animation: { enabled: !props.compact, duration: 150 },
       drawable: { enabled: false, brushes: arrowBrushes },
     })
-    boardResizeObserver = new ResizeObserver(() => ground?.redrawAll())
-    boardResizeObserver.observe(board.value)
     renderBoard()
   }
   if (props.controls) document.addEventListener('keydown', handleKey)
@@ -117,8 +114,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', handleKey)
-  boardResizeObserver?.disconnect()
-  boardResizeObserver = null
   ground?.destroy()
   ground = null
 })

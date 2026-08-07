@@ -388,11 +388,22 @@ function eventPayload<T>(event: Event): T | null {
 function handleMove(event: Event): void {
   const data = eventPayload<{ game_id?: Identifier; move?: MoveRecord; ply?: number }>(event);
   if (!data?.move || String(data.game_id) !== gameId.value || !gameData.value) return;
+  if (data.ply !== undefined && data.move.ply !== data.ply) {
+    scheduleRefresh();
+    return;
+  }
   const records = [...gameData.value.viewer_moves];
   const index = records.findIndex((move) => move.ply === data.move!.ply);
   const wasLatest = selectedPly.value >= records.length;
   if (index >= 0) records[index] = data.move;
-  else records.push(data.move);
+  else {
+    const latestPly = records.at(-1)?.ply;
+    if (latestPly !== undefined && data.move.ply !== latestPly + 1) {
+      scheduleRefresh();
+      return;
+    }
+    records.push(data.move);
+  }
   records.sort((left, right) => left.ply - right.ply);
   gameData.value.viewer_moves = records;
   if (wasLatest) selectedPly.value = records.length;
