@@ -5,6 +5,7 @@ import { useRoute, useRouter, type RouteLocationRaw } from "vue-router";
 import { api } from "@/api/client";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
 import MoveList from "@/components/chess/MoveList.vue";
+import { buildPositions, parseFen, positionFen, type BoardArrow } from "@/components/chess/chess";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
@@ -110,6 +111,37 @@ const whiteCardMember = computed(() => memberForAnalysis("white", whiteAnalysis.
 const blackCardMember = computed(() => memberForAnalysis("black", blackAnalysis.value) ?? blackMember.value);
 const whiteRoster = computed(() => rotatingRoster(whiteTeam.value, whiteMember.value));
 const blackRoster = computed(() => rotatingRoster(blackTeam.value, blackMember.value));
+const suggestedMoves = computed<BoardArrow[]>(() => {
+  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci));
+  const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length));
+  const viewedFen = positionFen(positions[viewedPly]!);
+  const sideToMove = parseFen(viewedFen).turn === "w" ? "white" : "black";
+  const arrows: BoardArrow[] = [];
+  const previousMove = viewedPly > 0 ? moves.value[viewedPly - 1] : undefined;
+
+  if (previousMove) {
+    const fallbackPv = movePv(previousMove);
+    const playedMove = normalizedUci(previousMove.uci);
+    if (fallbackPv[0] === playedMove && fallbackPv[1]) {
+      arrows.push(teamArrow(fallbackPv[1], moveSide(viewedPly - 1)));
+    }
+  }
+
+  const nextMove = moves.value[viewedPly];
+  if (nextMove) {
+    const nextPv = movePv(nextMove);
+    if (nextPv[0]) arrows.push(teamArrow(nextPv[0], sideToMove));
+  } else if (viewerGame.value?.status === "live") {
+    const currentAnalysis = gameData.value?.engine_data?.[sideToMove];
+    if (samePosition(currentAnalysis?.root_fen, viewedFen)) {
+      const currentPv = pvMoves(currentAnalysis?.info);
+      const fallbackPv = currentPv.length ? currentPv : pvMoves(currentAnalysis?.pv);
+      if (fallbackPv[0]) arrows.push(teamArrow(fallbackPv[0], sideToMove));
+    }
+  }
+
+  return arrows;
+});
 const gameStatus = computed(() => viewerGame.value?.status ?? fixture.value?.tournament?.status ?? "draft");
 const gameLabel = computed(() => {
   if (!viewerGame.value) return "Awaiting schedule";
@@ -214,6 +246,41 @@ function rotatingRoster(team: RelayTeam | null, current: RelayRosterMember | nul
   if (!current) return roster;
   const currentIndex = roster.findIndex((member) => member.id === current.id);
   return currentIndex < 0 ? roster : [...roster.slice(currentIndex), ...roster.slice(0, currentIndex)];
+}
+
+function teamArrow(move: string, color: "white" | "black"): BoardArrow {
+  const team = color === "white" ? whiteTeam.value : blackTeam.value;
+  return team ? { move, color, fillColor: team.primary_color } : { move, color };
+}
+
+function moveSide(index: number): "white" | "black" {
+  const first = parseFen(opening.value.fen).turn === "w" ? "white" : "black";
+  return index % 2 === 0 ? first : first === "white" ? "black" : "white";
+}
+
+function pvMoves(value: string | null | undefined): string[] {
+  if (!value) return [];
+  const parts = value.trim().split(/\s+/);
+  const pvIndex = parts.indexOf("pv");
+  if (parts[0] === "info" && pvIndex < 0) return [];
+  return parts
+    .slice(pvIndex >= 0 ? pvIndex + 1 : 0)
+    .map(normalizedUci)
+    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move));
+}
+
+function movePv(move: MoveRecord): string[] {
+  const infoPv = pvMoves(move.info_line);
+  return infoPv.length ? infoPv : pvMoves(move.pv);
+}
+
+function normalizedUci(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function samePosition(left: string | null | undefined, right: string): boolean {
+  if (!left) return false;
+  return left.trim().split(/\s+/).slice(0, 3).join(" ") === right.trim().split(/\s+/).slice(0, 3).join(" ");
 }
 
 watch(gameId, () => {
@@ -906,7 +973,7 @@ function handleUserActivation(): void {
         </div>
       </div>
       <div ref="boardColumnElement" class="board-column">
-        <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
+        <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :arrows="suggestedMoves" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
       </div>
       <aside class="activity-column" aria-label="Game activity">
         <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />

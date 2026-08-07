@@ -6,6 +6,7 @@ export type Piece = 'P' | 'N' | 'B' | 'R' | 'Q' | 'K' | 'p' | 'n' | 'b' | 'r' | 
 export interface BoardArrow {
   move: string
   color: Color
+  fillColor?: string
 }
 
 export interface Position {

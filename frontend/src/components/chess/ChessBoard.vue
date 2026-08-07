@@ -21,6 +21,8 @@ const arrowBrushes: DrawBrushes = {
   yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
   engineBlack: { key: 'engine-black', color: '#000000', opacity: 0.56, lineWidth: 14 },
   engineWhite: { key: 'engine-white', color: '#ffffff', opacity: 0.72, lineWidth: 8 },
+  engineBlackOutline: { key: 'engine-black-outline', color: '#050505', opacity: 0.98, lineWidth: 19 },
+  engineWhiteOutline: { key: 'engine-white-outline', color: '#ffffff', opacity: 0.98, lineWidth: 19 },
 }
 
 const props = withDefaults(defineProps<{
@@ -96,7 +98,7 @@ watch([
   lastMove,
   () => props.orientation,
   () => props.coordinates,
-  () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}`).join('|'),
+  () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}`).join('|'),
 ], renderBoard)
 
 onMounted(() => {
@@ -136,20 +138,40 @@ function renderBoard(): void {
   const lastMoveSquares = /^[a-h][1-8][a-h][1-8]/.test(move)
     ? [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
     : []
-  const autoShapes = props.arrows
+  const arrows = props.arrows
     .filter((arrow) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(arrow.move.toLowerCase()))
     .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
-    .map<DrawShape>((arrow) => ({
+  const teamArrows = arrows.filter((arrow) => arrow.fillColor)
+  const outlinedShapes = teamArrows.map<DrawShape>((arrow) => ({
+    orig: arrow.move.slice(0, 2).toLowerCase() as Key,
+    dest: arrow.move.slice(2, 4).toLowerCase() as Key,
+    brush: arrow.color === 'white' ? 'engineWhiteOutline' : 'engineBlackOutline',
+  }))
+  const fillBrushes = Object.fromEntries(teamArrows.map((arrow, index) => [
+    `engineTeam${index}`,
+    {
+      key: `engine-team-${index}-${arrow.fillColor!.replace(/[^a-z0-9]/gi, '')}`,
+      color: arrow.fillColor!,
+      opacity: 0.58,
+      lineWidth: 11,
+    },
+  ]))
+  const autoShapes = [
+    ...outlinedShapes,
+    ...arrows.map<DrawShape>((arrow) => ({
       orig: arrow.move.slice(0, 2).toLowerCase() as Key,
       dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-      brush: arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
-    }))
+      brush: arrow.fillColor
+        ? `engineTeam${teamArrows.indexOf(arrow)}`
+        : arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
+    })),
+  ]
   const config: ChessgroundConfig = {
     fen: currentFen.value,
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
-    drawable: { autoShapes },
+    drawable: { autoShapes, brushes: { ...arrowBrushes, ...fillBrushes } },
   }
   ground.set(config)
 }
