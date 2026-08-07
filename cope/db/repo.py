@@ -2525,23 +2525,33 @@ def list_worker_event_fixture_candidates(
         for row in connection.execute(
             """
             SELECT fixture.tournament_id
-            FROM worker_event_permissions permission
-            JOIN events event ON event.id = permission.event_id
-            JOIN engine_relay_fixtures fixture ON fixture.event_id = event.id
+            FROM engine_relay_fixtures fixture
+            JOIN events event ON event.id = fixture.event_id
             JOIN tournaments tournament ON tournament.id = fixture.tournament_id
             LEFT JOIN event_fixture_workers claim
               ON claim.tournament_id = fixture.tournament_id
-            WHERE permission.worker_id = ?
-              AND event.status NOT IN ('completed', 'cancelled')
+            WHERE event.status NOT IN ('completed', 'cancelled')
               AND tournament.status IN ('scheduled', 'running')
               AND claim.tournament_id IS NULL
+              AND (
+                EXISTS (
+                  SELECT 1 FROM worker_event_permissions permission
+                  WHERE permission.worker_id = ?
+                    AND permission.event_id = fixture.event_id
+                )
+                OR EXISTS (
+                  SELECT 1 FROM worker_tournament_permissions permission
+                  WHERE permission.worker_id = ?
+                    AND permission.tournament_id = fixture.tournament_id
+                )
+              )
             ORDER BY
               CASE WHEN tournament.status = 'running' THEN 0 ELSE 1 END,
               tournament.scheduled_start_at ASC NULLS LAST,
               fixture.position,
               fixture.id
             """,
-            (worker_id,),
+            (worker_id, worker_id),
         )
     )
 
@@ -2572,9 +2582,21 @@ def event_fixture_has_worker_permissions(
         """
         SELECT 1
         FROM engine_relay_fixtures fixture
-        JOIN worker_event_permissions permission
-          ON permission.event_id = fixture.event_id
         WHERE fixture.tournament_id = ?
+          AND (
+            EXISTS (
+              SELECT 1 FROM event_fixture_workers claim
+              WHERE claim.tournament_id = fixture.tournament_id
+            )
+            OR EXISTS (
+              SELECT 1 FROM worker_event_permissions permission
+              WHERE permission.event_id = fixture.event_id
+            )
+            OR EXISTS (
+              SELECT 1 FROM worker_tournament_permissions permission
+              WHERE permission.tournament_id = fixture.tournament_id
+            )
+          )
         LIMIT 1
         """,
         (tournament_id,),
@@ -2592,16 +2614,26 @@ def claim_event_fixture_worker(
         INSERT INTO event_fixture_workers (
           tournament_id, event_id, worker_id, claimed_at
         )
-        SELECT fixture.tournament_id, fixture.event_id, permission.worker_id, ?
+        SELECT fixture.tournament_id, fixture.event_id, ?, ?
         FROM engine_relay_fixtures fixture
         JOIN tournaments tournament ON tournament.id = fixture.tournament_id
-        JOIN worker_event_permissions permission
-          ON permission.event_id = fixture.event_id AND permission.worker_id = ?
         WHERE fixture.tournament_id = ?
           AND tournament.status IN ('scheduled', 'running')
+          AND (
+            EXISTS (
+              SELECT 1 FROM worker_event_permissions permission
+              WHERE permission.worker_id = ?
+                AND permission.event_id = fixture.event_id
+            )
+            OR EXISTS (
+              SELECT 1 FROM worker_tournament_permissions permission
+              WHERE permission.worker_id = ?
+                AND permission.tournament_id = fixture.tournament_id
+            )
+          )
         ON CONFLICT DO NOTHING
         """,
-        (utc_now(), worker_id, tournament_id),
+        (worker_id, utc_now(), tournament_id, worker_id, worker_id),
     )
     claim = event_fixture_worker(connection, tournament_id)
     return claim if claim is not None and claim.worker_id == worker_id else None

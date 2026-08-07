@@ -504,7 +504,15 @@ def _fixture_payload(
     }:
         worker = connection.execute(
             """
-            SELECT workers.id, workers.label, workers.status, claims.claimed_at
+            SELECT workers.id, workers.label, workers.status, claims.claimed_at,
+                   EXISTS (
+                     SELECT 1
+                     FROM games game
+                     JOIN game_assignments assignment ON assignment.game_id = game.id
+                     WHERE game.tournament_id = claims.tournament_id
+                       AND assignment.worker_id = claims.worker_id
+                       AND assignment.status IN ('acked', 'live')
+                   ) AS prepared
             FROM event_fixture_workers claims
             JOIN workers ON workers.id = claims.worker_id
             WHERE claims.tournament_id = ?

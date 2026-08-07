@@ -17,6 +17,7 @@ import { clockLabel, errorMessage, resultLabel, scorePercentLabel, statusLabel }
 import type {
   ClockState,
   EngineAnalysis,
+  GameRecord,
   Identifier,
   MoveRecord,
   TournamentDetailResponse,
@@ -396,7 +397,7 @@ function selectInitial(): void {
   const requestedFixture = requestedGameId
     ? fixtures.find((item) => item.games.some((game) => String(game.id) === requestedGameId))
     : undefined;
-  if (requestedFixture) {
+  if (requestedFixture && fixtureId.value === null && !gameId.value) {
     fixtureId.value = requestedFixture.id;
     gameId.value = requestedGameId;
     return;
@@ -412,11 +413,16 @@ function selectInitial(): void {
 
 function chooseGame(): void {
   const games = fixture.value?.games ?? [];
-  if (games.some((game) => String(game.id) === gameId.value)) return;
-  const preferred = games.find((game) => game.status === "live")
+  const current = games.find((game) => String(game.id) === gameId.value);
+  if (current && ["live", "assigned"].includes(current.status)) return;
+  const active = games.find((game) => game.status === "live")
     ?? games.find((game) => game.status === "assigned")
-    ?? games.find((game) => game.status === "pending")
-    ?? games.at(-1);
+  if (active) {
+    activateGame(active.id);
+    return;
+  }
+  if (current) return;
+  const preferred = games.find((game) => game.status === "pending") ?? games.at(-1);
   gameId.value = preferred ? String(preferred.id) : "";
 }
 
@@ -427,9 +433,14 @@ function selectFixture(value: string): void {
   chooseGame();
 }
 
-function selectGame(value: string): void {
-  gameId.value = value;
+function activateGame(value: Identifier): void {
+  const nextGameId = String(value);
+  if (nextGameId === gameId.value) return;
+  gameId.value = nextGameId;
   gameData.value = null;
+  if (queryValue(route.query.game_id) !== nextGameId) {
+    void router.replace({ query: { ...route.query, game_id: nextGameId } });
+  }
 }
 
 async function loadGame(silent = false): Promise<void> {
@@ -475,6 +486,7 @@ function connectStream(): void {
   stream.addEventListener("engine.info", handleEngineInfo);
   stream.addEventListener("clock.sync", handleClock);
   stream.addEventListener("spectators.changed", handleSpectators);
+  stream.addEventListener("tournament.snapshot", handleTournamentSnapshot);
   stream.addEventListener("tournament.changed", scheduleRefresh);
 }
 
@@ -554,6 +566,15 @@ function handleSpectators(event: Event): void {
   const data = eventPayload<{ tournament_id?: Identifier; spectator_count?: number }>(event);
   if (!data || data.spectator_count === undefined || String(data.tournament_id) !== String(fixture.value?.tournament_id ?? "") || !gameData.value) return;
   gameData.value.spectator_count = data.spectator_count;
+}
+
+function handleTournamentSnapshot(event: Event): void {
+  const data = eventPayload<{ active_games?: GameRecord[] }>(event);
+  if (!data?.active_games || !["live", "assigned"].includes(viewerGame.value?.status ?? "")) return;
+  if (data.active_games.some((game) => String(game.id) === gameId.value)) return;
+  const nextGame = data.active_games.find((game) => game.status === "live")
+    ?? data.active_games.find((game) => game.status === "assigned");
+  if (nextGame) activateGame(nextGame.id);
 }
 
 function queryValue(value: unknown): string {
@@ -946,7 +967,6 @@ function handleUserActivation(): void {
           <RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink>
           <div class="relay-broadcast__selectors">
         <label v-if="payload.fixtures.length > 1"><span>Fixture</span><select :value="fixture?.id ?? ''" @change="selectFixture(($event.target as HTMLSelectElement).value)"><option v-for="item in payload.fixtures" :key="item.id" :value="item.id">{{ item.title }}</option></select></label>
-        <label v-if="fixture?.games.length"><span>Board</span><select :value="gameId" @change="selectGame(($event.target as HTMLSelectElement).value)"><option v-for="game in fixture.games" :key="game.id" :value="String(game.id)">Game {{ game.game_number ?? game.id }} · {{ statusLabel(game.status) }}<template v-if="game.result"> · {{ resultLabel(game.result) }}</template></option></select></label>
         <StreamIndicator v-if="gameData && !['finished', 'aborted'].includes(gameData.tournament.status)" :state="streamState" />
       </div>
       </div>

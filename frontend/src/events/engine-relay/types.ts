@@ -56,6 +56,7 @@ export interface RelayFixture {
     label: string;
     status: string;
     claimed_at: string;
+    prepared: boolean;
   } | null;
   games: RelayGame[];
 }
