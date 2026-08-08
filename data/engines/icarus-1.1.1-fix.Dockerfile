@@ -11,7 +11,7 @@ ENV CARGO_TERM_COLOR=never \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release --locked --package icarus --features use-bmi2 --target x86_64-unknown-linux-musl \
+    cargo build --release --locked --package icarus --target x86_64-unknown-linux-musl \
     && install -Dm755 target/x86_64-unknown-linux-musl/release/icarus /opt/cope/engine \
     && strip /opt/cope/engine
 
