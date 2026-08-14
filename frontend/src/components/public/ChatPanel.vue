@@ -24,11 +24,15 @@ const emit = defineEmits<{
 
 const STORAGE_KEY = 'cope.chat.displayName'
 const log = ref<HTMLElement | null>(null)
+const activeTab = ref<'chat' | 'system'>('chat')
 const displayName = ref('')
 const text = ref('')
 const submitting = ref(false)
 const submitError = ref('')
 
+const chatMessages = computed(() => props.messages.filter((message) => message.display_name !== 'System'))
+const systemMessages = computed(() => props.messages.filter((message) => message.display_name === 'System'))
+const visibleMessages = computed(() => activeTab.value === 'chat' ? chatMessages.value : systemMessages.value)
 const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
 const requiresName = computed(() => props.settings.allow_anonymous_names === false)
@@ -40,7 +44,7 @@ onMounted(() => {
   scrollToLatest()
 })
 
-watch(() => props.messages.length, scrollToLatest)
+watch(() => [activeTab.value, visibleMessages.value.length], scrollToLatest)
 watch(displayName, (value) => {
   try {
     if (value.trim()) localStorage.setItem(STORAGE_KEY, value.trim())
@@ -77,26 +81,52 @@ async function scrollToLatest(): Promise<void> {
 </script>
 
 <template>
-  <section id="chat" class="chat-panel" aria-labelledby="chat-title">
-    <header>
-      <h2 id="chat-title">Chat</h2>
-      <span>{{ messages.length }} message{{ messages.length === 1 ? '' : 's' }}</span>
+  <section id="chat" class="chat-panel" aria-label="Chat and system log">
+    <header class="chat-tabs" role="tablist" aria-label="Activity feed">
+      <button
+        id="chat-tab"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'chat'"
+        aria-controls="chat-feed"
+        @click="activeTab = 'chat'"
+      >
+        Chat <span>{{ chatMessages.length }}</span>
+      </button>
+      <button
+        id="system-log-tab"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'system'"
+        aria-controls="system-log-feed"
+        @click="activeTab = 'system'"
+      >
+        System log <span>{{ systemMessages.length }}</span>
+      </button>
     </header>
 
-    <div ref="log" class="chat-log" role="log" aria-live="polite" aria-relevant="additions">
-      <ol v-if="messages.length">
-        <li v-for="(message, index) in messages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': message.display_name === 'System' }">
+    <div
+      :id="activeTab === 'chat' ? 'chat-feed' : 'system-log-feed'"
+      ref="log"
+      class="chat-log"
+      role="tabpanel"
+      :aria-labelledby="activeTab === 'chat' ? 'chat-tab' : 'system-log-tab'"
+      aria-live="polite"
+      aria-relevant="additions"
+    >
+      <ol v-if="visibleMessages.length">
+        <li v-for="(message, index) in visibleMessages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': activeTab === 'system' }">
           <div>
-            <strong>{{ message.display_name }}</strong>
+            <strong v-if="activeTab === 'chat'">{{ message.display_name }}</strong>
             <time v-if="message.at" :datetime="message.at">{{ new Date(message.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
           </div>
           <p>{{ message.text }}</p>
         </li>
       </ol>
-      <p v-else class="chat-empty">No messages yet.</p>
+      <p v-else class="chat-empty">{{ activeTab === 'chat' ? 'No chat messages yet.' : 'No system events yet.' }}</p>
     </div>
 
-    <form v-if="enabled" class="chat-form" autocomplete="off" @submit.prevent="submit">
+    <form v-if="activeTab === 'chat' && enabled" class="chat-form" autocomplete="off" @submit.prevent="submit">
       <label>
         <span>Name{{ requiresName ? '' : ' (optional)' }}</span>
         <input v-model="displayName" name="display_name" maxlength="40" autocomplete="nickname" :required="requiresName" placeholder="Your name">
@@ -114,7 +144,7 @@ async function scrollToLatest(): Promise<void> {
       </div>
       <p v-if="submitError" class="chat-error" role="alert">{{ submitError }}</p>
     </form>
-    <p v-else class="chat-disabled">Chat is currently closed.</p>
+    <p v-else-if="activeTab === 'chat'" class="chat-disabled">Chat is currently closed.</p>
   </section>
 </template>
 
@@ -129,23 +159,49 @@ async function scrollToLatest(): Promise<void> {
   background: var(--color-surface, #fff);
 }
 
-.chat-panel > header {
+.chat-tabs {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: var(--space-sm, 0.5rem) var(--space-md, 1rem);
+  gap: 0.15rem;
+  padding: 0.2rem;
   border-block-end: 1px solid var(--color-border, #d5dbe1);
+  background: color-mix(in srgb, var(--color-bg, #f5f7f9) 72%, var(--color-surface, #fff));
 }
 
-.chat-panel h2 {
-  margin: 0;
-  font-size: 0.95rem;
-}
-
-.chat-panel > header span {
+.chat-tabs button {
+  display: inline-flex;
+  min-height: 1.7rem;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem;
+  border: 0;
+  border-radius: var(--radius-sm, 0.35rem);
+  background: transparent;
   color: var(--color-text-muted, #607080);
+  font: inherit;
   font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.chat-tabs button[aria-selected='true'] {
+  background: var(--color-surface, #fff);
+  color: var(--color-text, #17202a);
+  box-shadow: 0 0 0 1px var(--color-border, #d5dbe1);
+}
+
+.chat-tabs button:focus-visible {
+  outline: 2px solid var(--color-accent, #2f78c4);
+  outline-offset: 1px;
+}
+
+.chat-tabs span {
+  min-width: 1rem;
+  padding: 0.05rem 0.25rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border, #d5dbe1) 60%, transparent);
+  font-size: 0.6rem;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .chat-log {
@@ -187,8 +243,13 @@ async function scrollToLatest(): Promise<void> {
   overflow-wrap: anywhere;
 }
 
-.chat-log .chat-message--system strong {
-  color: var(--color-primary, var(--color-accent, #2f78c4));
+.chat-log .chat-message--system {
+  padding-inline-start: 0.55rem;
+  border-inline-start: 2px solid color-mix(in srgb, var(--color-accent, #2f78c4) 45%, transparent);
+}
+
+.chat-log .chat-message--system time {
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-empty,

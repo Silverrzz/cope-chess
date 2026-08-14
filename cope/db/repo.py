@@ -1135,6 +1135,17 @@ def set_tournament_concurrency(
     )
 
 
+def update_tournament_name(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    name: str,
+) -> None:
+    connection.execute(
+        "UPDATE tournaments SET name = ? WHERE id = ?",
+        (name, tournament_id),
+    )
+
+
 def claim_tournament_worker_profile(
     connection: sqlite3.Connection,
     tournament_id: int,

@@ -131,6 +131,7 @@ from cope.db import (
     update_opening_suite,
     update_rating_list_anchor,
     update_tournament,
+    update_tournament_name,
     update_worker_assignment_settings,
     update_worker_label,
     unschedule_tournament,
@@ -469,6 +470,18 @@ def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
 class TournamentPayload(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     config: TournamentConfig
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("tournament name cannot be blank")
+        return value
+
+
+class TournamentNamePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
 
     @field_validator("name")
     @classmethod
@@ -843,6 +856,7 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
+        event_tournament_ids = web_app._event_linked_tournament_ids(connection)
         items = [
             web_app._tournament_summary(
                 connection,
@@ -851,7 +865,7 @@ def register_api_routes(app: FastAPI) -> None:
                 estimator=estimator,
             )
             for tournament in list_tournaments(connection)
-            if tournament.status != "draft"
+            if tournament.status != "draft" and tournament.id not in event_tournament_ids
         ]
         for item in items:
             item["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
@@ -927,6 +941,8 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
+        if web_app._is_event_tournament(connection, tournament_id):
+            raise HTTPException(status_code=404, detail="Event tournament.")
         if tournament.status == "draft":
             raise HTTPException(status_code=404, detail="Tournament not found.")
         engines = web_app._engine_names(connection)
@@ -1934,9 +1950,10 @@ def register_api_routes(app: FastAPI) -> None:
         if tournament.status not in {"draft", "running", "paused"}:
             raise HTTPException(
                 status_code=409,
-                detail="Only draft tournaments and the concurrency of running or paused tournaments can be edited.",
+                detail="Only draft tournaments and the name or concurrency of running or paused tournaments can be edited here.",
             )
         try:
+            name_changed = payload.name != tournament.name
             if tournament.status in {"running", "paused"}:
                 unchanged_config = payload.config.model_dump(
                     mode="json",
@@ -1946,11 +1963,12 @@ def register_api_routes(app: FastAPI) -> None:
                     mode="json",
                     exclude={"concurrency"},
                 )
-                if payload.name != tournament.name or unchanged_config != current_config:
+                if unchanged_config != current_config:
                     raise HTTPException(
                         status_code=409,
-                        detail="Only game concurrency can be changed while a tournament is running or paused.",
+                        detail="Only the name and game concurrency can be changed while a tournament is running or paused.",
                     )
+                update_tournament_name(connection, tournament_id, payload.name)
                 set_tournament_concurrency(
                     connection,
                     tournament_id,
@@ -1986,12 +2004,30 @@ def register_api_routes(app: FastAPI) -> None:
                 detail="The database could not save the tournament. Try again.",
             ) from exc
         _publish_admin_change(web_app, request)
-        message = (
-            "Tournament concurrency updated."
-            if tournament.status in {"running", "paused"}
-            else "Tournament updated."
-        )
+        if tournament.status in {"running", "paused"}:
+            concurrency_changed = payload.config.concurrency != tournament.config.concurrency
+            if name_changed and concurrency_changed:
+                message = "Tournament name and concurrency updated."
+            elif name_changed:
+                message = "Tournament renamed."
+            else:
+                message = "Tournament concurrency updated."
+        else:
+            message = "Tournament updated."
         return _json({"id": tournament_id, "message": message})
+
+    @app.put("/api/admin/tournaments/{tournament_id}/name")
+    def admin_tournament_name(
+        tournament_id: int,
+        payload: TournamentNamePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        _require_tournament(connection, tournament_id)
+        update_tournament_name(connection, tournament_id, payload.name)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"id": tournament_id, "message": "Tournament renamed."})
 
     @app.post("/api/admin/tournaments/{tournament_id}/schedule")
     @app.patch("/api/admin/tournaments/{tournament_id}/schedule")

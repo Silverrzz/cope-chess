@@ -149,6 +149,10 @@ def list_upcoming_games(
         JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE games.status = 'pending'
           AND tournaments.status IN ('scheduled', 'running')
+          AND NOT EXISTS (
+            SELECT 1 FROM engine_relay_fixtures fixture
+            WHERE fixture.tournament_id = games.tournament_id
+          )
         ORDER BY
           CASE WHEN tournaments.status = 'scheduled' THEN 0 ELSE 1 END,
           tournaments.scheduled_start_at NULLS LAST,

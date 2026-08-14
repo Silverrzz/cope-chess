@@ -2,13 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdated, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
-import { api } from '@/api/client'
+import { ApiError, api } from '@/api/client'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
 import { buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
 import ChatPanel from '@/components/public/ChatPanel.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EnginePanel from '@/components/public/EnginePanel.vue'
+import FollowEnginePicker from '@/components/public/FollowEnginePicker.vue'
 import GameTable from '@/components/public/GameTable.vue'
 import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
@@ -418,6 +419,10 @@ async function loadDetail(background: boolean): Promise<void> {
     }
     if (!pendingGameNavigationId) connectStream()
   } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.message === 'Event tournament.') {
+      await router.replace({ name: 'home' })
+      return
+    }
     if ((error as { name?: string })?.name !== 'AbortError') {
       loadError.value = errorMessage(error, 'This tournament could not be loaded.')
     }
@@ -1054,19 +1059,14 @@ function forgetManualFollowPauseGame(): void {
               <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
             </select>
           </label>
-          <div v-if="participantEngines.length" class="follow-engine-picker">
-            <div class="follow-engine-picker__heading">
-              <label for="follow-engine">Follow engine</label>
-              <span v-if="followStateLabel" class="follow-engine-picker__status">
-                <span class="follow-engine-picker__state" :data-state="followState">{{ followStateLabel }}</span>
-                <button v-if="followState === 'paused'" type="button" @click="resumeFollowing">Resume</button>
-              </span>
-            </div>
-            <select id="follow-engine" v-model="followedEngineId">
-              <option value="">Don't follow</option>
-              <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }}</option>
-            </select>
-          </div>
+          <FollowEnginePicker
+            v-if="participantEngines.length"
+            v-model="followedEngineId"
+            :engines="participantEngines"
+            :state="followState"
+            :state-label="followStateLabel"
+            @resume="resumeFollowing"
+          />
         </div>
       </header>
 
@@ -1311,58 +1311,6 @@ function forgetManualFollowPauseGame(): void {
 
 .follow-engine-picker {
   width: clamp(13rem, 19vw, 18rem);
-}
-
-.follow-engine-picker__heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-}
-
-.follow-engine-picker__heading > label {
-  color: inherit;
-  font: inherit;
-}
-
-.follow-engine-picker__status {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  min-width: 0;
-}
-
-.follow-engine-picker__state {
-  overflow: hidden;
-  color: var(--color-text-muted, #607080);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.follow-engine-picker__state[data-state='live'] {
-  color: var(--color-success, #218739);
-}
-
-.follow-engine-picker__state[data-state='fallback'],
-.follow-engine-picker__state[data-state='waiting'] {
-  color: var(--color-warning, #a15c00);
-}
-
-.follow-engine-picker__state[data-state='paused'] {
-  color: var(--color-text-muted, #607080);
-}
-
-.follow-engine-picker__status button {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--color-accent, #2f78c4);
-  cursor: pointer;
-  font: inherit;
-  font-weight: 750;
-  text-decoration: underline;
-  text-underline-offset: 0.12em;
 }
 
 .game-picker__heading {

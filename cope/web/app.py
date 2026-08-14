@@ -667,6 +667,13 @@ def create_app(
                         status_code=403,
                     )
 
+        if (
+            request.method == "GET"
+            and re.fullmatch(r"/tournaments/\d+/?", path) is not None
+            and await asyncio.to_thread(_event_tournament_page, app, path)
+        ):
+            return RedirectResponse(url="/", status_code=307)
+
         if _is_spa_request(request) and FRONTEND_INDEX.is_file():
             preview_html = await asyncio.to_thread(_social_preview_html, request)
             response = (
@@ -1094,7 +1101,11 @@ def _public_tournament_exists(app: FastAPI, tournament_id: int) -> bool:
     connection = connect_database(app.state.db_path)
     try:
         tournament = get_tournament(connection, tournament_id)
-        return tournament is not None and tournament.status != "draft"
+        return (
+            tournament is not None
+            and tournament.status != "draft"
+            and not _is_event_tournament(connection, tournament_id)
+        )
     finally:
         connection.close()
 
@@ -1129,6 +1140,33 @@ def _private_event_page(app: FastAPI, path: str) -> bool:
         return False
     event = _event_by_slug(app, match.group(1))
     return event is not None and not _event_is_public(event)
+
+
+def _event_tournament_page(app: FastAPI, path: str) -> bool:
+    match = re.fullmatch(r"/tournaments/(\d+)/?", path)
+    if match is None:
+        return False
+    connection = connect_database(app.state.db_path)
+    try:
+        return _is_event_tournament(connection, int(match.group(1)))
+    finally:
+        connection.close()
+
+
+def _event_linked_tournament_ids(connection: sqlite3.Connection) -> set[int]:
+    return {
+        int(row["tournament_id"])
+        for row in connection.execute(
+            "SELECT tournament_id FROM engine_relay_fixtures"
+        )
+    }
+
+
+def _is_event_tournament(connection: sqlite3.Connection, tournament_id: int) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
+        (tournament_id,),
+    ).fetchone() is not None
 
 
 def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:

@@ -82,6 +82,7 @@ const pending = ref('')
 const copyingDetails = ref(false)
 const detailsCopied = ref(false)
 const concurrency = ref(1)
+const tournamentName = ref('')
 const showCommit = ref(false)
 const showSchedule = ref(false)
 const clock = ref(Date.now())
@@ -152,7 +153,9 @@ async function load(): Promise<void> {
       })
       if (sequence !== loadSequence) return
     }
+    const previousName = data.value?.tournament.name
     data.value = response
+    if (!previousName || tournamentName.value === previousName) tournamentName.value = response.tournament.name
     concurrency.value = response.tournament.config.concurrency
   }
   catch (cause) {
@@ -201,6 +204,20 @@ async function saveDraft(payload: { name: string; config: TournamentConfig }): P
   pending.value = 'save'
   try {
     const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}`, { body: payload })
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
+async function renameTournament(): Promise<void> {
+  if (!data.value) return
+  const name = tournamentName.value.trim()
+  if (!name) { error.value = 'Enter a tournament name.'; return }
+  pending.value = 'name'
+  try {
+    const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}/name`, { body: { name } })
+    tournamentName.value = name
     toast.success(response.message)
     await load()
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
@@ -444,6 +461,17 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
         @cancel="showSchedule = false"
       />
 
+      <section v-if="data.tournament.status !== 'draft'" class="panel rename-panel">
+        <div>
+          <h2>Tournament name</h2>
+          <p>Change the display name without interrupting games in progress.</p>
+        </div>
+        <form class="rename-form" @submit.prevent="renameTournament">
+          <label><span>Name</span><input v-model="tournamentName" class="input" required maxlength="160"></label>
+          <button class="button button--primary" type="submit" :disabled="!!pending || !tournamentName.trim() || tournamentName.trim() === data.tournament.name">{{ pending === 'name' ? 'Saving…' : 'Save name' }}</button>
+        </form>
+      </section>
+
       <section v-if="data.tournament.status !== 'draft'" class="panel schedule-overview">
         <div>
           <span>{{ lifecycleStartLabel }}</span>
@@ -569,9 +597,9 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .schedule-overview strong { font-size: .9rem; }
 .schedule-overview small { color: var(--color-accent, #315fcc); font-size: .68rem; }
 .schedule-overview > p { border-top: 1px solid var(--color-border, #d9e0ea); color: var(--color-text-muted, #64748b); font-size: .7rem; grid-column: 1 / -1; margin: 0; padding: .65rem 1rem; }
-.concurrency-panel { align-items: end; display: flex; gap: 1.5rem; justify-content: space-between; padding: 1rem; }
-.concurrency-panel h2 { font-size: .92rem; margin: 0; }
-.concurrency-panel p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
+.concurrency-panel, .rename-panel { align-items: end; display: flex; gap: 1.5rem; justify-content: space-between; padding: 1rem; }
+.concurrency-panel h2, .rename-panel h2 { font-size: .92rem; margin: 0; }
+.concurrency-panel p, .rename-panel p { color: var(--color-text-muted, #64748b); font-size: .73rem; margin: .2rem 0 0; }
 .commit-panel { align-items: center; display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1rem; }
 .commit-picker { display: flex; flex-wrap: wrap; gap: .75rem 1rem; padding: 1rem; }
 .commit-picker > div { flex: 1 0 100%; }
@@ -595,10 +623,11 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .result-filter legend { color: var(--color-text-muted, #64748b); font-weight: 700; margin-bottom: .45rem; padding: 0; text-transform: uppercase; }
 .result-filter label { align-items: center; display: flex; font-size: .74rem; gap: .45rem; }
 .result-filter input { accent-color: var(--color-accent, #2563eb); }
-.concurrency-form { align-items: end; display: flex; gap: .5rem; }
-.concurrency-form label { display: grid; gap: .25rem; }
-.concurrency-form label span { color: var(--color-text-muted, #64748b); font-size: .68rem; }
+.concurrency-form, .rename-form { align-items: end; display: flex; gap: .5rem; }
+.concurrency-form label, .rename-form label { display: grid; gap: .25rem; }
+.concurrency-form label span, .rename-form label span { color: var(--color-text-muted, #64748b); font-size: .68rem; }
 .concurrency-form .input { min-width: 0; width: 9rem; }
+.rename-form .input { min-width: 16rem; width: min(30rem, 40vw); }
 .definition-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); margin: 0; padding: .35rem 1rem 1rem; }
 .definition-list div { border-bottom: 1px solid var(--color-border, #d9e0ea); padding: .7rem 0; }
 .definition-list dt { color: var(--color-text-muted, #64748b); font-size: .68rem; }
@@ -610,5 +639,5 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 .game-actions { display: flex; gap: .4rem; }
 .pagination { align-items: center; border-top: 1px solid var(--color-border, #d9e0ea); display: flex; gap: .75rem; justify-content: flex-end; padding: .75rem 1rem; }
 .pagination span { color: var(--color-text-muted, #64748b); font-size: .72rem; }
-@media (max-width: 42rem) { .control-bar, .concurrency-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .schedule-overview { grid-template-columns: 1fr; } .schedule-overview > p { grid-column: 1; } .concurrency-form { align-items: end; } .concurrency-form label { flex: 1; } .concurrency-form .input { width: 100%; } .result-filter__menu { grid-template-columns: 1fr; } .result-filter__topline { grid-column: auto; } }
+@media (max-width: 42rem) { .control-bar, .concurrency-panel, .rename-panel { align-items: stretch; flex-direction: column; } .control-bar__actions { justify-content: flex-start; } .schedule-overview { grid-template-columns: 1fr; } .schedule-overview > p { grid-column: 1; } .concurrency-form, .rename-form { align-items: end; } .concurrency-form label, .rename-form label { flex: 1; } .concurrency-form .input, .rename-form .input { width: 100%; } .result-filter__menu { grid-template-columns: 1fr; } .result-filter__topline { grid-column: auto; } }
 </style>
