@@ -27,6 +27,7 @@ from cope.db import (
     ChatSettingsRecord,
     EventRecord,
     append_suite_openings,
+    cancel_tool_job,
     create_deployment_job,
     create_dockerfile_pull_job,
     create_engine,
@@ -36,6 +37,7 @@ from cope.db import (
     create_rating_list,
     create_tournament,
     create_worker,
+    create_tool_job,
     connect_database,
     count_games,
     database_stats,
@@ -75,6 +77,7 @@ from cope.db import (
     get_tournament,
     get_worker,
     get_worker_by_session_id,
+    get_tool_job,
     invalidate_game_pair,
     list_deployment_jobs,
     list_deployment_targets,
@@ -107,8 +110,11 @@ from cope.db import (
     list_service_heartbeats,
     list_suite_openings,
     list_tournaments,
+    list_tool_job_items,
+    list_tool_jobs,
     list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
+    list_workers,
     mint_benchmarker_token,
     mint_worker_token_for_worker,
     replace_suite_openings,
@@ -119,6 +125,7 @@ from cope.db import (
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
     restore_tournament,
+    resume_paused_tournament_games,
     revoke_worker,
     schedule_tournament,
     set_tournament_concurrency,
@@ -651,6 +658,29 @@ class BenchmarkerPayload(BaseModel):
         return value
 
 
+class WhoHasThisPayload(BaseModel):
+    engine_ids: list[int] = Field(min_length=1, max_length=500)
+    option_name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("engine_ids")
+    @classmethod
+    def validate_engine_ids(cls, value: list[int]) -> list[int]:
+        if any(engine_id <= 0 for engine_id in value):
+            raise ValueError("engine ids must be positive")
+        unique = list(dict.fromkeys(value))
+        if len(unique) != len(value):
+            raise ValueError("engine ids must be unique")
+        return unique
+
+    @field_validator("option_name")
+    @classmethod
+    def validate_option_name(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("enter a valid UCI option name")
+        return cleaned
+
+
 class WorkerSettingsPayload(BaseModel):
     core_limit: int | None = Field(default=None, ge=1)
     tournament_scope: Literal["all", "selected"] = "all"
@@ -1057,10 +1087,19 @@ def register_api_routes(app: FastAPI) -> None:
                 ),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),
                 "engine_hardware": web_app._engine_hardware_view(connection, tournament),
-                "chat_messages": list_chat_messages(
-                    connection,
-                    limit=30,
-                    tournament_id=tournament_id,
+                "chat_messages": (
+                    list_chat_messages(
+                        connection,
+                        limit=None,
+                        tournament_id=tournament_id,
+                        system=False,
+                    )
+                    + list_chat_messages(
+                        connection,
+                        limit=100,
+                        tournament_id=tournament_id,
+                        system=True,
+                    )
                 ),
                 "chat_settings": chat_settings,
                 "opening": opening,
@@ -2330,6 +2369,8 @@ def register_api_routes(app: FastAPI) -> None:
             if action == "restore":
                 restore_tournament(connection, tournament_id)
             else:
+                if action == "resume":
+                    resume_paused_tournament_games(connection, tournament_id)
                 set_tournament_status(connection, tournament_id, target)
             connection.commit()
         except ValueError as exc:
@@ -2342,6 +2383,10 @@ def register_api_routes(app: FastAPI) -> None:
                 "message": (
                     "Tournament restored and paused."
                     if action == "restore"
+                    else "Pause requested. Live games will freeze after their current move."
+                    if action == "pause"
+                    else "Tournament resumed from its preserved games."
+                    if action == "resume"
                     else f"Tournament {target}."
                 ),
             }
@@ -3267,6 +3312,122 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"message": "Opening suite deleted."})
 
+    @app.get("/api/admin/tools")
+    def admin_tools(connection: sqlite3.Connection = Depends(web_app._database)):
+        jobs = list_tool_jobs(connection, limit=12)
+        workers = list_workers(connection)
+        return _json(
+            {
+                "tools": [
+                    {
+                        "name": "who_has_this",
+                        "label": "Who Has This",
+                        "description": "Inspect engine UCI handshakes across any selection of versions.",
+                        "href": "/admin/tools/who-has-this",
+                        "status": "available",
+                    }
+                ],
+                "recent_jobs": [
+                    _tool_job_api_payload(connection, job, include_items=False)
+                    for job in jobs
+                ],
+                "connected_workers": sum(
+                    worker.status in {"connected", "ready", "busy"}
+                    for worker in workers
+                ),
+            }
+        )
+
+    @app.get("/api/admin/tools/who-has-this")
+    def admin_who_has_this(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        workers = list_workers(connection)
+        return _json(
+            {
+                "engines": [
+                    {
+                        "id": engine.id,
+                        "family_id": engine.engine_id,
+                        "name": engine.name,
+                        "author": engine.author,
+                        "version": engine.version,
+                        "repository": engine.repository_full_name,
+                        "artifact_ready": engine.artifact is not None,
+                        "active": engine.engine_active,
+                    }
+                    for engine in list_engine_records(connection)
+                ],
+                "workers": [
+                    {
+                        "id": worker.id,
+                        "label": worker.label,
+                        "status": worker.status,
+                    }
+                    for worker in workers
+                    if worker.status in {"connected", "ready", "busy"}
+                ],
+                "recent_jobs": [
+                    _tool_job_api_payload(connection, job, include_items=False)
+                    for job in list_tool_jobs(
+                        connection,
+                        tool_name="who_has_this",
+                        limit=12,
+                    )
+                ],
+            }
+        )
+
+    @app.post("/api/admin/tools/who-has-this")
+    def admin_create_who_has_this(
+        payload: WhoHasThisPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            job = create_tool_job(
+                connection,
+                tool_name="who_has_this",
+                input_data={"option_name": payload.option_name},
+                engine_version_ids=payload.engine_ids,
+            )
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "job": _tool_job_api_payload(connection, job, include_items=True),
+                "message": "UCI option inspection queued.",
+            },
+            status_code=201,
+        )
+
+    @app.get("/api/admin/tools/jobs/{job_id}")
+    def admin_tool_job(
+        job_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        job = get_tool_job(connection, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Tool job not found.")
+        return _json({"job": _tool_job_api_payload(connection, job, include_items=True)})
+
+    @app.post("/api/admin/tools/jobs/{job_id}/cancel")
+    def admin_cancel_tool_job(
+        job_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        job = get_tool_job(connection, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Tool job not found.")
+        if not cancel_tool_job(connection, job_id):
+            raise HTTPException(status_code=409, detail="Only queued tool jobs can be cancelled.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Tool job cancelled."})
+
     # Workers
 
     @app.get("/api/admin/workers")
@@ -3620,7 +3781,10 @@ def _event_detail_payload(
         "updates": updates,
         "awards": awards,
         "counts": event_resource_counts(connection, event.id),
-        "chat_messages": list_chat_messages(connection, limit=100, event_id=event.id),
+        "chat_messages": (
+            list_chat_messages(connection, limit=None, event_id=event.id, system=False)
+            + list_chat_messages(connection, limit=100, event_id=event.id, system=True)
+        ),
         "chat_settings": chat_settings,
         "custom": event_extension_payload(connection, event, admin=admin),
     }
@@ -4067,6 +4231,44 @@ def _deduplicate_openings(
         seen.add(key)
         result.append(opening)
     return result
+
+
+def _tool_job_api_payload(connection, job, *, include_items: bool) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": job.id,
+        "tool_name": job.tool_name,
+        "status": job.status,
+        "input": job.input,
+        "worker": (
+            None
+            if job.worker_id is None
+            else {"id": job.worker_id, "label": job.worker_label or f"Worker {job.worker_id}"}
+        ),
+        "total_items": job.total_items,
+        "completed_items": job.completed_items,
+        "attempt": job.attempt,
+        "error": job.error,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+    }
+    if include_items:
+        payload["items"] = [
+            {
+                "id": item.id,
+                "engine_id": item.engine_version_id,
+                "engine_name": item.engine_name,
+                "engine_version": item.engine_version,
+                "position": item.position,
+                "status": item.status,
+                "result": item.result,
+                "error": item.error,
+                "started_at": item.started_at,
+                "finished_at": item.finished_at,
+            }
+            for item in list_tool_job_items(connection, job.id)
+        ]
+    return payload
 
 
 def _publish_admin_change(web_app, request: Request) -> None:

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -34,6 +35,11 @@ from cope.core.models import (
     EngineInfo,
     EngineStop,
     HardwareInfo,
+    ToolJobAssignment,
+    ToolJobComplete,
+    ToolJobEngineResult,
+    ToolJobFailed,
+    ToolJobProgress,
     WorkerGameAssignment,
     WorkerResourceTelemetry,
     WorkerSessionHello,
@@ -537,6 +543,8 @@ async def _serve_assignments(
     queues: dict[int, asyncio.Queue] = {}
     assignments: dict[int, WorkerGameAssignment] = {}
     tasks: dict[int, asyncio.Task] = {}
+    tool_jobs: dict[int, ToolJobAssignment] = {}
+    tool_tasks: dict[int, asyncio.Task] = {}
     send_lock = asyncio.Lock()
     benchmark_cache = _EngineBenchmarkCache()
     fatal = asyncio.get_running_loop().create_future()
@@ -561,6 +569,15 @@ async def _serve_assignments(
         if error is not None and not fatal.done():
             fatal.set_exception(error)
 
+    def tool_job_done(job_id: int, task: asyncio.Task) -> None:
+        tool_tasks.pop(job_id, None)
+        tool_jobs.pop(job_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None and not fatal.done():
+            fatal.set_exception(error)
+
     try:
         return await _route_assignment_messages(
             websocket,
@@ -570,14 +587,17 @@ async def _serve_assignments(
             queues=queues,
             assignments=assignments,
             tasks=tasks,
+            tool_jobs=tool_jobs,
+            tool_tasks=tool_tasks,
             send_lock=send_lock,
             benchmark_cache=benchmark_cache,
             telemetry=telemetry,
             fatal=fatal,
             assignment_done=assignment_done,
+            tool_job_done=tool_job_done,
         )
     finally:
-        active_tasks = tuple(tasks.values())
+        active_tasks = (*tasks.values(), *tool_tasks.values())
         for task in active_tasks:
             task.cancel()
         await asyncio.gather(*active_tasks, return_exceptions=True)
@@ -600,11 +620,14 @@ async def _route_assignment_messages(
     queues: dict[int, asyncio.Queue],
     assignments: dict[int, WorkerGameAssignment],
     tasks: dict[int, asyncio.Task],
+    tool_jobs: dict[int, ToolJobAssignment],
+    tool_tasks: dict[int, asyncio.Task],
     send_lock: asyncio.Lock,
     benchmark_cache: _EngineBenchmarkCache,
     telemetry: _WorkerTelemetryBatcher,
     fatal: asyncio.Future,
     assignment_done,
+    tool_job_done,
 ) -> tuple[Path, str] | None:
     while True:
         receive = asyncio.create_task(_recv_envelope(websocket))
@@ -620,7 +643,7 @@ async def _route_assignment_messages(
 
         envelope = receive.result()
         if envelope.type == "worker_update":
-            if tasks:
+            if tasks or tool_tasks:
                 raise ProtocolValidationError("runner requested an update during active work")
             update = WorkerUpdateCommand.model_validate(envelope.data)
             return await _apply_worker_update(websocket, update)
@@ -681,6 +704,27 @@ async def _route_assignment_messages(
             )
             continue
 
+        if envelope.type == "tool_job":
+            job = ToolJobAssignment.model_validate(envelope.data)
+            if tasks or tool_tasks:
+                raise ProtocolValidationError("tool job requested during active work")
+            tool_jobs[job.job_id] = job
+            task = asyncio.create_task(
+                _serve_tool_job(
+                    websocket,
+                    job,
+                    send_lock=send_lock,
+                    server_url=server_url,
+                    credential=credential,
+                ),
+                name=f"worker-tool-job-{job.job_id}",
+            )
+            tool_tasks[job.job_id] = task
+            task.add_done_callback(
+                lambda completed, value=job.job_id: tool_job_done(value, completed)
+            )
+            continue
+
         assignment_id = envelope.data.get("assignment_id")
         if not isinstance(assignment_id, int):
             raise ProtocolValidationError(
@@ -692,6 +736,124 @@ async def _route_assignment_messages(
                 f"{envelope.type} references inactive assignment {assignment_id}"
             )
         await queue.put(envelope)
+
+
+async def _serve_tool_job(
+    websocket,
+    job: ToolJobAssignment,
+    *,
+    send_lock: asyncio.Lock,
+    server_url: str,
+    credential: str,
+) -> None:
+    if job.tool_name != "who_has_this":
+        await _send_message(
+            websocket,
+            "tool_job_failed",
+            ToolJobFailed(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                error=f"unsupported tool {job.tool_name}",
+            ),
+            lock=send_lock,
+        )
+        return
+    option_name = str(job.input.get("option_name", "")).strip()
+    if not option_name:
+        await _send_message(
+            websocket,
+            "tool_job_failed",
+            ToolJobFailed(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                error="the tool job has no UCI option name",
+            ),
+            lock=send_lock,
+        )
+        return
+    total = len(job.engines)
+    for current, spec in enumerate(job.engines, start=1):
+        await _send_message(
+            websocket,
+            "tool_job_progress",
+            ToolJobProgress(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status="running",
+                detail=f"Inspecting {spec.name} {spec.version}",
+                current=current - 1,
+                total=total,
+            ),
+            lock=send_lock,
+        )
+        started_ns = time.monotonic_ns()
+        engine = UciEngineProcess(
+            spec,
+            server_url=server_url,
+            credential=credential,
+            command_timeout_s=60,
+            allow_build=True,
+        )
+        try:
+            await asyncio.to_thread(engine.prepare)
+            lines = await asyncio.to_thread(engine.handle_command, "uci")
+            matched_name, option_line = _find_uci_option(lines, option_name)
+            status = "supported" if matched_name else "unsupported"
+            result = ToolJobEngineResult(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status=status,
+                matched_name=matched_name,
+                option_line=option_line,
+                elapsed_ms=max(0, round((time.monotonic_ns() - started_ns) / 1_000_000)),
+            )
+        except Exception as error:
+            result = ToolJobEngineResult(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status="failed",
+                error=(str(error).strip() or error.__class__.__name__)[-8000:],
+                elapsed_ms=max(0, round((time.monotonic_ns() - started_ns) / 1_000_000)),
+            )
+        finally:
+            await asyncio.to_thread(engine.close)
+        await _send_message(websocket, "tool_job_engine_result", result, lock=send_lock)
+        await _send_message(
+            websocket,
+            "tool_job_progress",
+            ToolJobProgress(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status="completed",
+                detail=f"Inspected {spec.name} {spec.version}",
+                current=current,
+                total=total,
+            ),
+            lock=send_lock,
+        )
+    await _send_message(
+        websocket,
+        "tool_job_complete",
+        ToolJobComplete(job_id=job.job_id, job_key=job.job_key),
+        lock=send_lock,
+    )
+
+
+def _find_uci_option(lines: list[str], option_name: str) -> tuple[str, str]:
+    target = " ".join(option_name.split()).casefold()
+    for line in lines:
+        stripped = line.strip()
+        match = re.match(r"^option\s+name\s+(.+?)\s+type\s+\S+", stripped, re.IGNORECASE)
+        if match is None:
+            continue
+        name = match.group(1).strip()
+        if " ".join(name.split()).casefold() == target:
+            return name, stripped[:4000]
+    return "", ""
 
 
 async def _serve_assignment(

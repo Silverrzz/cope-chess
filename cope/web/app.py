@@ -64,6 +64,7 @@ from cope.db import (
     list_events,
     list_moves,
     list_tournaments,
+    list_tool_jobs,
     list_tournament_matches,
     list_upcoming_games,
     list_worker_tournament_ids,
@@ -1761,6 +1762,11 @@ def _worker_admin_rows(
         connection,
         worker_ids=(worker.id for worker in source),
     )
+    tool_jobs = {
+        job.worker_id: job
+        for job in list_tool_jobs(connection, limit=200)
+        if job.status == "running" and job.worker_id is not None
+    }
     for worker in source:
         try:
             rows.append(
@@ -1768,6 +1774,7 @@ def _worker_admin_rows(
                     worker,
                     engines,
                     activity=activities.get(worker.id),
+                    tool_job=tool_jobs.get(worker.id),
                 )
             )
         except (TypeError, ValueError, ValidationError, sqlite3.Error):
@@ -1784,6 +1791,14 @@ def _worker_admin_row(connection: sqlite3.Connection, worker_id: int) -> dict[st
             worker,
             _engine_names(connection),
             activity=get_worker_activity(connection, worker.id),
+            tool_job=next(
+                (
+                    job
+                    for job in list_tool_jobs(connection, limit=200)
+                    if job.status == "running" and job.worker_id == worker.id
+                ),
+                None,
+            ),
         )
         row["failures"] = list_worker_failures(connection, worker.id, limit=20)
         return row
@@ -1796,6 +1811,7 @@ def _worker_admin_view(
     engines: dict[int, str],
     *,
     activity,
+    tool_job=None,
 ) -> dict[str, Any]:
     effective_status = _worker_effective_status(worker)
     activity_view = _worker_activity_view(activity, engines)
@@ -1805,7 +1821,7 @@ def _worker_admin_view(
         "token": _worker_token_view(worker),
         "session": _worker_session_view(worker),
         "machine": _worker_machine_view(worker, effective_status),
-        "work": activity_view or _worker_idle_activity(worker, effective_status),
+        "work": activity_view or _worker_tool_activity(tool_job) or _worker_idle_activity(worker, effective_status),
     }
 
 
@@ -2339,6 +2355,20 @@ def _worker_activity_view(
     )
 
 
+def _worker_tool_activity(job) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    option_name = str(job.input.get("option_name") or "UCI option")
+    return _activity_view(
+        "busy",
+        "Running tool",
+        f"Inspecting {job.completed_items} of {job.total_items} engines",
+        f"Who Has This: {option_name}",
+        href=f"/admin/tools/who-has-this?job={job.id}",
+        meta=f"Attempt {job.attempt}",
+    )
+
+
 def _worker_idle_activity(worker, effective_status: str) -> dict[str, Any]:
     if effective_status == "minted" and worker.token_expires_at is None:
         return _activity_view(
@@ -2704,7 +2734,7 @@ def _home_tournament_cards(
     cards: list[dict[str, Any]] = []
     estimator = TournamentEstimator(connection)
     for tournament in list_tournaments(connection):
-        if tournament.status != "running":
+        if tournament.status not in {"running", "paused"}:
             continue
         active_games = list_active_games(
             connection,
@@ -2712,6 +2742,8 @@ def _home_tournament_cards(
             limit=1,
         )
         game = next((game for game in active_games if game.status == "live"), None)
+        if tournament.status == "paused" and game is None:
+            continue
         moves = list_moves(connection, game.id) if game is not None else ()
         cards.append(
             {

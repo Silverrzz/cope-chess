@@ -27,7 +27,14 @@ function syncMobileViewport(event: MediaQueryListEvent): void {
 onMounted(() => mobileQuery.addEventListener("change", syncMobileViewport));
 onBeforeUnmount(() => mobileQuery.removeEventListener("change", syncMobileViewport));
 
-const navGroups: { label: string; items: { label: string; to: string; icon: IconName }[] }[] = [
+interface NavItem {
+  label: string;
+  to: string;
+  icon: IconName;
+  children?: { label: string; to: string }[];
+}
+
+const navGroups: { label: string; items: NavItem[] }[] = [
   { label: "Overview", items: [{ label: "Dashboard", to: "/admin", icon: "home" }] },
   {
     label: "Competition",
@@ -48,6 +55,12 @@ const navGroups: { label: string; items: { label: string; to: string; icon: Icon
     label: "Operations",
     items: [
       { label: "Workers", to: "/admin/workers", icon: "server" },
+      {
+        label: "Tools",
+        to: "/admin/tools",
+        icon: "wrench",
+        children: [{ label: "Who Has This", to: "/admin/tools/who-has-this" }],
+      },
       { label: "Updates", to: "/admin/updates", icon: "refresh" },
       { label: "Chat", to: "/admin/chat", icon: "message-square" },
       { label: "Settings", to: "/admin/settings", icon: "settings" },
@@ -125,18 +138,30 @@ async function signOut(): Promise<void> {
       <nav class="admin-nav" aria-label="Administration">
         <section v-for="group in navGroups" :key="group.label" class="admin-nav__group">
           <h2 class="admin-nav__label">{{ group.label }}</h2>
-          <RouterLink
-            v-for="item in group.items"
-            :key="item.to"
-            class="admin-nav__link"
-            :class="{ 'admin-nav__link--active': navActive(item.to) }"
-            :to="item.to"
-            active-class=""
-            exact-active-class=""
-          >
-            <AppIcon :name="item.icon" :size="18" />
-            <span>{{ item.label }}</span>
-          </RouterLink>
+          <template v-for="item in group.items" :key="item.to">
+            <RouterLink
+              class="admin-nav__link"
+              :class="{ 'admin-nav__link--active': navActive(item.to) }"
+              :to="item.to"
+              active-class=""
+              exact-active-class=""
+            >
+              <AppIcon :name="item.icon" :size="18" />
+              <span>{{ item.label }}</span>
+              <AppIcon v-if="item.children" class="admin-nav__expand" name="chevron-down" :size="14" />
+            </RouterLink>
+            <div v-if="item.children && navActive(item.to)" class="admin-nav__children">
+              <RouterLink
+                v-for="child in item.children"
+                :key="child.to"
+                class="admin-nav__child"
+                :class="{ 'admin-nav__child--active': route.path === child.to }"
+                :to="child.to"
+              >
+                {{ child.label }}
+              </RouterLink>
+            </div>
+          </template>
         </section>
       </nav>
     </aside>
@@ -265,6 +290,33 @@ async function signOut(): Promise<void> {
 
 .admin-nav__link--active {
   background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.admin-nav__expand {
+  margin-left: auto;
+}
+
+.admin-nav__children {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0 0 var(--space-1) 2.35rem;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--color-border);
+}
+
+.admin-nav__child {
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  padding: 0.42rem var(--space-2);
+  font-size: 0.78rem;
+  font-weight: 580;
+  text-decoration: none;
+}
+
+.admin-nav__child:hover,
+.admin-nav__child--active {
+  background: var(--color-surface-hover);
   color: var(--color-accent);
 }
 

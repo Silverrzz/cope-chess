@@ -47,4 +47,5 @@ export type IconName =
   | "upload"
   | "user"
   | "wifi-off"
+  | "wrench"
   | "x-circle";

@@ -49,6 +49,7 @@ from cope.db import (
     event_fixture_has_worker_permissions,
     event_fixture_worker,
     finish_game,
+    get_game_pause_checkpoint,
     get_engine,
     get_game,
     get_game_assignment,
@@ -64,6 +65,7 @@ from cope.db import (
     lock_tournament,
     mark_game_assignment_live,
     mark_game_live,
+    pause_game_assignment,
     record_move,
     release_event_fixture_worker,
     set_tournament_current_round_at_least,
@@ -415,7 +417,8 @@ def run_worker_assignment_game(
         [str, str, str, str, int | None, int | None, dict | None],
         None,
     ] | None = None,
-) -> None:
+    pause_requested: Callable[[], bool] | None = None,
+) -> bool:
     def progress(
         stage: str,
         substage: str,
@@ -439,15 +442,37 @@ def run_worker_assignment_game(
     _validated_assignment_record(connection, assignment)
     game_record = _validated_game(connection, assignment.assignment.game_id)
     tournament = _validated_tournament(connection, game_record.tournament_id)
+
+    def should_pause() -> bool:
+        if pause_requested is None or not pause_requested():
+            return False
+        current = get_tournament(connection, tournament.id)
+        return current is not None and current.status == "paused"
+
     opening = get_opening_position(connection, game_record.opening_id)
     board = _starting_board(opening)
     recorded_moves = list_moves(connection, game_record.id)
+    checkpoint = get_game_pause_checkpoint(connection, game_record.id)
     opening_moves = () if opening is None else opening.moves
     if assignment.initial_fen != board.fen():
         raise RuntimeError("assignment opening start position does not match the game")
     if assignment.opening_moves != opening_moves:
         raise RuntimeError("assignment opening moves do not match the game")
-    _validate_new_game_attempt(recorded_moves)
+    _validate_new_game_attempt(recorded_moves, checkpoint is not None)
+    if recorded_moves:
+        for recorded_move in recorded_moves:
+            move = chess.Move.from_uci(recorded_move.uci)
+            if move not in board.legal_moves or recorded_move.ply != board.ply() + 1:
+                raise RuntimeError(
+                    f"pause checkpoint move history is invalid at ply {recorded_move.ply}"
+                )
+            board.push(move)
+        if checkpoint is None:
+            raise RuntimeError("resumed game is missing its pause checkpoint")
+        checkpoint_ply = int(checkpoint.state.get("ply", -1))
+        checkpoint_fen = str(checkpoint.state.get("fen", ""))
+        if checkpoint_ply != board.ply() or checkpoint_fen != board.fen():
+            raise RuntimeError("pause checkpoint does not match the recorded game position")
     connection.commit()
     LOG.info(
         "starting game assignment_id=%s game_id=%s tournament=%s round=%s opening=%s",
@@ -513,6 +538,13 @@ def run_worker_assignment_game(
         white_tm=runtime_time_control.create_manager(),
         black_tm=runtime_time_control.create_manager(),
     )
+    if checkpoint is not None:
+        white_clock = checkpoint.state.get("white_clock")
+        black_clock = checkpoint.state.get("black_clock")
+        if not isinstance(white_clock, dict) or not isinstance(black_clock, dict):
+            raise RuntimeError("pause checkpoint clock state is invalid")
+        game.white_tm.restore(white_clock)
+        game.black_tm.restore(black_clock)
     relay_engine_data = _relay_engine_data(relay)
     live_reporter = _LiveGameReporter(
         tournament.id,
@@ -592,14 +624,15 @@ def run_worker_assignment_game(
         metadata={"fen": board.fen()},
     )
     moves = list(recorded_moves)
-    for book_index, uci in enumerate(opening_moves, start=1):
+    opening_moves_to_apply = () if recorded_moves else opening_moves
+    for book_index, uci in enumerate(opening_moves_to_apply, start=1):
         progress(
             "opening",
             "opening_move",
             "running",
-            f"Playing opening book move {book_index}/{len(opening_moves)}: {uci}",
+            f"Playing opening book move {book_index}/{len(opening_moves_to_apply)}: {uci}",
             current=book_index - 1,
-            total=len(opening_moves),
+            total=len(opening_moves_to_apply),
             metadata={"move": uci, "book_ply": book_index},
         )
         move = chess.Move.from_uci(uci)
@@ -644,9 +677,9 @@ def run_worker_assignment_game(
             "opening",
             "opening_move",
             "completed",
-            f"Applied opening book move {book_index}/{len(opening_moves)}: {uci}",
+            f"Applied opening book move {book_index}/{len(opening_moves_to_apply)}: {uci}",
             current=book_index,
-            total=len(opening_moves),
+            total=len(opening_moves_to_apply),
             metadata={
                 "move": uci,
                 "book_ply": book_index,
@@ -659,12 +692,16 @@ def run_worker_assignment_game(
         "opening",
         "opening_moves",
         "completed",
-        f"Completed {len(opening_moves)} book plies for {opening_label}; clocks remain stopped",
-        current=len(opening_moves),
-        total=max(len(opening_moves), 1),
+        (
+            f"Restored {len(recorded_moves)} recorded plies from the pause checkpoint"
+            if recorded_moves
+            else f"Completed {len(opening_moves_to_apply)} book plies for {opening_label}; clocks remain stopped"
+        ),
+        current=len(recorded_moves) if recorded_moves else len(opening_moves_to_apply),
+        total=max(len(recorded_moves) if recorded_moves else len(opening_moves_to_apply), 1),
         metadata={
             "fen": board.fen(),
-            "book_plies": len(opening_moves),
+            "book_plies": sum(1 for move in moves if move.is_book),
             "clocks_started": False,
         },
     )
@@ -692,6 +729,7 @@ def run_worker_assignment_game(
         and not game.state.is_finished()
         and adjudicated is None
         and board.ply() < assignment.max_plies
+        and not should_pause()
     ):
         _start_kibitzer_search(kibitzer, board, live_reporter)
     while (
@@ -699,6 +737,8 @@ def run_worker_assignment_game(
         and adjudicated is None
         and board.ply() < assignment.max_plies
     ):
+        if should_pause():
+            break
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
         if relay is not None:
@@ -782,11 +822,49 @@ def run_worker_assignment_game(
             and not game.state.is_finished()
             and adjudicated is None
             and board.ply() < assignment.max_plies
+            and not should_pause()
         ):
             _start_kibitzer_search(kibitzer, board, live_reporter)
 
     if kibitzer is not None:
         kibitzer.stop_search(wait=True)
+    paused = (
+        should_pause()
+        and not game.state.is_finished()
+        and adjudicated is None
+        and board.ply() < assignment.max_plies
+    )
+    if paused:
+        pause_game_assignment(
+            connection,
+            assignment.assignment.assignment_id,
+            assignment.assignment.assignment_key,
+            {
+                "version": 1,
+                "ply": board.ply(),
+                "fen": board.fen(),
+                "white_clock": game.white_tm.snapshot(),
+                "black_clock": game.black_tm.snapshot(),
+            },
+        )
+        connection.commit()
+        progress(
+            "play",
+            "game_paused",
+            "completed",
+            f"Paused after ply {board.ply()} with position and clocks preserved",
+            current=board.ply(),
+            total=max(assignment.max_plies, board.ply(), 1),
+            metadata={"fen": board.fen(), "plies": board.ply()},
+        )
+        publish_tournament_event(tournament.id)
+        LOG.info(
+            "paused game assignment_id=%s game_id=%s plies=%s",
+            assignment.assignment.assignment_id,
+            game_record.id,
+            board.ply(),
+        )
+        return False
     _validated_assignment_record(connection, assignment)
     progress(
         "play",
@@ -861,6 +939,7 @@ def run_worker_assignment_game(
         len(moves),
     )
     publish_tournament_event(tournament.id)
+    return True
 
 
 def _relay_member_for_moves(
@@ -1530,8 +1609,11 @@ def _starting_board(opening: OpeningPositionRecord | None) -> chess.Board:
     return chess.Board(opening.start_fen)
 
 
-def _validate_new_game_attempt(recorded_moves: tuple[MoveRecord, ...]) -> None:
-    if recorded_moves:
+def _validate_new_game_attempt(
+    recorded_moves: tuple[MoveRecord, ...],
+    has_pause_checkpoint: bool,
+) -> None:
+    if recorded_moves and not has_pause_checkpoint:
         raise RuntimeError(
             "game assignment contains moves from an earlier attempt; "
             "interrupted games must be reset before reassignment"

@@ -206,6 +206,18 @@ const router = createRouter({
           meta: { title: "Worker" },
         },
         {
+          path: "tools",
+          name: "admin-tools",
+          component: () => import("@/pages/admin/ToolsPage.vue"),
+          meta: { title: "Tools" },
+        },
+        {
+          path: "tools/who-has-this",
+          name: "admin-tool-who-has-this",
+          component: () => import("@/pages/admin/WhoHasThisPage.vue"),
+          meta: { title: "Who Has This" },
+        },
+        {
           path: "updates",
           name: "admin-updates",
           component: () => import("@/pages/admin/DeploymentsPage.vue"),

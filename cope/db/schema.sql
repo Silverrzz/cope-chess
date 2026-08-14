@@ -458,6 +458,12 @@ CREATE TABLE IF NOT EXISTS worker_failures (
   occurred_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS game_pause_checkpoints (
+  game_id BIGINT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+  state TEXT NOT NULL,
+  paused_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worker_resource_samples (
   id BIGSERIAL PRIMARY KEY,
   worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
@@ -473,6 +479,38 @@ CREATE TABLE IF NOT EXISTS worker_resource_samples (
   disk_used_mb REAL NOT NULL CHECK (disk_used_mb >= 0),
   disk_free_mb REAL NOT NULL CHECK (disk_free_mb >= 0),
   disk_total_mb REAL NOT NULL CHECK (disk_total_mb > 0)
+);
+
+CREATE TABLE IF NOT EXISTS tool_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  job_key TEXT NOT NULL UNIQUE,
+  tool_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+  input TEXT NOT NULL DEFAULT '{}',
+  worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  total_items INTEGER NOT NULL CHECK (total_items > 0),
+  completed_items INTEGER NOT NULL DEFAULT 0 CHECK (completed_items >= 0),
+  attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tool_job_items (
+  id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL REFERENCES tool_jobs(id) ON DELETE CASCADE,
+  engine_version_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  position INTEGER NOT NULL CHECK (position >= 0),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'supported', 'unsupported', 'failed')),
+  result TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT,
+  UNIQUE (job_id, engine_version_id),
+  UNIQUE (job_id, position)
 );
 
 ALTER TABLE worker_failures DROP CONSTRAINT IF EXISTS worker_failures_stage_check;
@@ -907,8 +945,10 @@ CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_team ON engine_relay_f
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_anchor ON engine_relay_fixture_teams(anchor_engine_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
   WHERE event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
+  WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 38)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 40)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -948,3 +988,6 @@ CREATE INDEX IF NOT EXISTS idx_deployment_targets_worker_pending ON deployment_t
   WHERE target_kind = 'worker' AND target_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_deployment_targets_benchmarker_pending ON deployment_targets(target_id, status)
   WHERE target_kind = 'benchmarker' AND target_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tool_jobs_claim ON tool_jobs(status, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_tool_jobs_worker ON tool_jobs(worker_id, status);
+CREATE INDEX IF NOT EXISTS idx_tool_job_items_job ON tool_job_items(job_id, position);

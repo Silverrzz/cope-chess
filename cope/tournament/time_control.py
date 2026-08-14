@@ -107,6 +107,20 @@ class TimeManager:
     def get_nodes(self) -> int | None:
         return self._nodes
 
+    def snapshot(self) -> dict[str, int | None]:
+        return {
+            "remaining_time": self._remaining_time,
+            "remaining_move_time": self._remaining_move_time,
+            "moves_to_go": self._moves_to_go,
+            "nodes": self._nodes,
+        }
+
+    def restore(self, state: dict[str, int | None]) -> None:
+        self._remaining_time = state.get("remaining_time")
+        self._remaining_move_time = state.get("remaining_move_time")
+        self._moves_to_go = state.get("moves_to_go")
+        self._nodes = state.get("nodes")
+
     def start_clock(self):
         if self._time_control.get_category() is TimeControlCategory.INCREMENT:
             self._remaining_time = round(

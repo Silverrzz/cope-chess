@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-WORKER_PROTOCOL_VERSION = 17
+WORKER_PROTOCOL_VERSION = 18
 BENCHMARK_PROTOCOL_VERSION = 16
 PROTOCOL_VERSION = WORKER_PROTOCOL_VERSION
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
@@ -611,6 +611,54 @@ class WorkerUpdateStatus(StrictModel):
     detail: str = Field(default="", max_length=4000)
 
 
+class ToolJobAssignment(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+    tool_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    input: dict[str, Any] = Field(default_factory=dict)
+    engines: tuple[EngineSpec, ...] = Field(min_length=1, max_length=500)
+
+    @field_validator("engines")
+    @classmethod
+    def validate_engines(cls, value: tuple[EngineSpec, ...]) -> tuple[EngineSpec, ...]:
+        if len({engine.engine_id for engine in value}) != len(value):
+            raise ValueError("tool job engines must be unique")
+        return value
+
+
+class ToolJobMessage(StrictModel):
+    job_id: int = Field(gt=0)
+    job_key: str = Field(min_length=16, max_length=128)
+
+    def matches_job(self, job: ToolJobAssignment) -> bool:
+        return self.job_id == job.job_id and self.job_key == job.job_key
+
+
+class ToolJobProgress(ToolJobMessage):
+    engine_id: int = Field(gt=0)
+    status: Literal["running", "completed"]
+    detail: str = Field(min_length=1, max_length=4000)
+    current: int = Field(ge=0)
+    total: int = Field(gt=0)
+
+
+class ToolJobEngineResult(ToolJobMessage):
+    engine_id: int = Field(gt=0)
+    status: Literal["supported", "unsupported", "failed"]
+    matched_name: str = Field(default="", max_length=200)
+    option_line: str = Field(default="", max_length=4000)
+    error: str = Field(default="", max_length=8000)
+    elapsed_ms: int = Field(ge=0)
+
+
+class ToolJobComplete(ToolJobMessage):
+    pass
+
+
+class ToolJobFailed(ToolJobMessage):
+    error: str = Field(min_length=1, max_length=8000)
+
+
 class WorkerWelcome(StrictModel):
     worker_id: int = Field(gt=0)
     session_id: str = Field(min_length=1)
@@ -705,7 +753,7 @@ class _EnvelopeBase(StrictModel):
 
 
 class Envelope(_EnvelopeBase):
-    v: Literal[17] = WORKER_PROTOCOL_VERSION
+    v: Literal[18] = WORKER_PROTOCOL_VERSION
 
 
 class BenchmarkEnvelope(_EnvelopeBase):

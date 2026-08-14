@@ -32,6 +32,11 @@ from cope.core.models import (
     EngineInfo,
     EngineStop,
     Envelope,
+    ToolJobAssignment,
+    ToolJobComplete,
+    ToolJobEngineResult,
+    ToolJobFailed,
+    ToolJobProgress,
     WORKER_PROTOCOL_VERSION,
     WorkerResources,
     WorkerResourceTelemetry,
@@ -52,26 +57,36 @@ from cope.core.protocol import (
 from cope.db import (
     DEFAULT_DATABASE_URL,
     WorkerRecord,
+    claim_tool_job,
+    complete_tool_job,
     connect_database,
     disconnect_worker,
     fail_game_assignment,
+    fail_tool_job,
+    finish_tool_job_item,
     finish_game_assignment,
     acknowledge_game_assignment,
     get_game,
+    get_engine,
     get_tournament,
     get_worker,
     get_worker_by_session_id,
     get_worker_by_token,
     list_workers,
+    list_tool_job_items,
+    pause_unstarted_game_assignment,
     record_worker_failure,
     record_worker_resource_sample,
     record_game_hardware_score,
     record_game_assignment_progress_batch,
+    release_worker_tool_jobs,
+    reset_tool_jobs,
     release_event_fixture_worker,
     reconcile_worker_deployment,
     set_service_endpoint,
     touch_workers_seen,
     touch_service_heartbeat,
+    start_tool_job_item,
     update_worker_status,
     update_deployment_target_status,
     upsert_worker_connection,
@@ -125,6 +140,10 @@ class AssignmentPreparationFailed(RuntimeError):
 
 
 class AssignmentWithdrawn(RuntimeError):
+    pass
+
+
+class AssignmentPaused(RuntimeError):
     pass
 
 
@@ -434,6 +453,7 @@ class WorkerHandshakeServer:
         connection = connect_database(self._config.db_path)
         try:
             tournament_ids: set[int] = set()
+            reset_tool_jobs(connection)
             for worker in list_workers(connection):
                 if worker.status not in ASSIGNABLE_WORKER_STATUSES:
                     continue
@@ -551,6 +571,10 @@ class WorkerHandshakeServer:
         assignments: dict[int, asyncio.Task] = {}
         assignment_resources: dict[int, WorkerResources] = {}
         assignment_cancellations: dict[int, asyncio.Event] = {}
+        assignment_pause_signals: dict[int, threading.Event] = {}
+        tool_inboxes: dict[int, asyncio.Queue] = {}
+        tool_identities: dict[int, str] = {}
+        tool_jobs: dict[int, asyncio.Task] = {}
         send_lock = asyncio.Lock()
         receiver = asyncio.create_task(
             self._route_worker_messages(
@@ -559,6 +583,8 @@ class WorkerHandshakeServer:
                 inboxes,
                 assignment_identities,
                 retired_assignments,
+                tool_inboxes,
+                tool_identities,
             ),
             name=f"worker-receiver-{worker.id}",
         )
@@ -571,6 +597,37 @@ class WorkerHandshakeServer:
                     worker.app_commit or "",
                 )
                 while pending_update is None and not websocket.closed:
+                    if not assignments and not tool_jobs:
+                        tool_job = await asyncio.to_thread(
+                            self._claim_next_tool_job,
+                            worker,
+                        )
+                        if tool_job is not None:
+                            tool_inbox: asyncio.Queue = asyncio.Queue()
+                            tool_inboxes[tool_job.job_id] = tool_inbox
+                            tool_identities[tool_job.job_id] = tool_job.job_key
+                            tool_jobs[tool_job.job_id] = asyncio.create_task(
+                                self._serve_worker_tool_job(
+                                    websocket,
+                                    worker,
+                                    tool_job,
+                                    inbox=tool_inbox,
+                                    send_lock=send_lock,
+                                ),
+                                name=f"server-tool-job-{tool_job.job_id}",
+                            )
+                            if worker_status != "busy":
+                                if not self._record_worker_status(
+                                    worker.id,
+                                    "busy",
+                                    session_id=worker.session_id,
+                                ):
+                                    raise WorkerConnectionInactive(
+                                        "worker session is no longer current"
+                                    )
+                                worker_status = "busy"
+                    if tool_jobs:
+                        break
                     assignment = await self._claim_next_assignment(
                         worker,
                         wake_generation,
@@ -598,6 +655,7 @@ class WorkerHandshakeServer:
                         assignment.assignment.game_id,
                     )
                     cancellation = asyncio.Event()
+                    pause_signal = threading.Event()
                     task = asyncio.create_task(
                         self._serve_worker_assignment(
                             websocket,
@@ -606,12 +664,14 @@ class WorkerHandshakeServer:
                             inbox=inbox,
                             send_lock=send_lock,
                             cancellation=cancellation,
+                            pause_signal=pause_signal,
                         ),
                         name=f"server-assignment-{assignment_id}",
                     )
                     assignments[assignment_id] = task
                     assignment_resources[assignment_id] = assignment.required_resources
                     assignment_cancellations[assignment_id] = cancellation
+                    assignment_pause_signals[assignment_id] = pause_signal
                     if worker_status != "busy":
                         if not self._record_worker_status(
                             worker.id,
@@ -624,7 +684,7 @@ class WorkerHandshakeServer:
                             )
                         worker_status = "busy"
 
-                if pending_update is not None and not assignments:
+                if pending_update is not None and not assignments and not tool_jobs:
                     receiver.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await receiver
@@ -636,7 +696,7 @@ class WorkerHandshakeServer:
                     )
                     await self._serve_worker_update(websocket, worker, pending_update)
                     return
-                if not assignments and worker_status != "ready":
+                if not assignments and not tool_jobs and worker_status != "ready":
                     if not self._record_worker_status(
                         worker.id,
                         "ready",
@@ -649,7 +709,7 @@ class WorkerHandshakeServer:
 
                 work = asyncio.create_task(self._wait_for_work(wake_generation))
                 done, _pending = await asyncio.wait(
-                    {receiver, work, *assignments.values()},
+                    {receiver, work, *assignments.values(), *tool_jobs.values()},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if receiver in done:
@@ -675,6 +735,25 @@ class WorkerHandshakeServer:
                         cancellation = assignment_cancellations.get(assignment_id)
                         if cancellation is not None:
                             cancellation.set()
+                    try:
+                        paused_assignment_ids = await asyncio.to_thread(
+                            self._paused_assignment_ids,
+                            assignment_identities,
+                        )
+                    except Exception:
+                        paused_assignment_ids = ()
+                        LOG.exception(
+                            "paused assignment reconciliation failed worker_id=%s",
+                            worker.id,
+                        )
+                    for assignment_id in paused_assignment_ids:
+                        pause_signal = assignment_pause_signals.get(assignment_id)
+                        if pause_signal is not None:
+                            pause_signal.set()
+                    paused_assignment_id_set = set(paused_assignment_ids)
+                    for assignment_id, pause_signal in assignment_pause_signals.items():
+                        if assignment_id not in paused_assignment_id_set:
+                            pause_signal.clear()
                 else:
                     work.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -689,6 +768,7 @@ class WorkerHandshakeServer:
                     task = assignments.pop(assignment_id)
                     assignment_resources.pop(assignment_id, None)
                     assignment_cancellations.pop(assignment_id, None)
+                    assignment_pause_signals.pop(assignment_id, None)
                     inboxes.pop(assignment_id, None)
                     identity = assignment_identities.pop(assignment_id, None)
                     if identity is not None:
@@ -704,7 +784,15 @@ class WorkerHandshakeServer:
                             retired_at + RETIRED_ASSIGNMENT_GRACE_S,
                         )
                     task.result()
-                if completed:
+                completed_tools = [
+                    job_id for job_id, task in tool_jobs.items() if task.done()
+                ]
+                for job_id in completed_tools:
+                    task = tool_jobs.pop(job_id)
+                    tool_inboxes.pop(job_id, None)
+                    tool_identities.pop(job_id, None)
+                    task.result()
+                if completed or completed_tools:
                     await self._wake_workers()
         except WorkerConnectionInactive as error:
             LOG.info(
@@ -721,9 +809,12 @@ class WorkerHandshakeServer:
             receiver.cancel()
             for task in assignments.values():
                 task.cancel()
+            for task in tool_jobs.values():
+                task.cancel()
             await asyncio.gather(
                 receiver,
                 *assignments.values(),
+                *tool_jobs.values(),
                 return_exceptions=True,
             )
 
@@ -734,6 +825,8 @@ class WorkerHandshakeServer:
         inboxes: dict[int, asyncio.Queue],
         assignment_identities: dict[int, tuple[str, int]],
         retired_assignments: dict[tuple[int, str], tuple[int, float]],
+        tool_inboxes: dict[int, asyncio.Queue],
+        tool_identities: dict[int, str],
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
@@ -770,6 +863,8 @@ class WorkerHandshakeServer:
                         inboxes,
                         assignment_identities,
                         retired_assignments,
+                        tool_inboxes,
+                        tool_identities,
                     )
                 continue
             await self._route_worker_envelope(
@@ -777,6 +872,8 @@ class WorkerHandshakeServer:
                 inboxes,
                 assignment_identities,
                 retired_assignments,
+                tool_inboxes,
+                tool_identities,
             )
 
     async def _route_worker_envelope(
@@ -785,7 +882,25 @@ class WorkerHandshakeServer:
         inboxes: dict[int, asyncio.Queue],
         assignment_identities: dict[int, tuple[str, int]],
         retired_assignments: dict[tuple[int, str], tuple[int, float]],
+        tool_inboxes: dict[int, asyncio.Queue],
+        tool_identities: dict[int, str],
     ) -> None:
+        if envelope.type.startswith("tool_job_"):
+            job_id = envelope.data.get("job_id")
+            job_key = envelope.data.get("job_key")
+            if not isinstance(job_id, int) or not isinstance(job_key, str):
+                raise ProtocolValidationError(f"{envelope.type} message has no tool job identity")
+            if tool_identities.get(job_id) != job_key:
+                raise ProtocolValidationError(
+                    f"{envelope.type} references inactive tool job {job_id}"
+                )
+            inbox = tool_inboxes.get(job_id)
+            if inbox is None:
+                raise ProtocolValidationError(
+                    f"{envelope.type} references inactive tool job {job_id}"
+                )
+            await inbox.put(envelope)
+            return
         assignment_id = envelope.data.get("assignment_id")
         if not isinstance(assignment_id, int):
             raise ProtocolValidationError(f"{envelope.type} message has no assignment id")
@@ -831,6 +946,179 @@ class WorkerHandshakeServer:
         except ValidationError as error:
             raise ProtocolValidationError(str(error)) from error
 
+    def _claim_next_tool_job(self, worker: WorkerRecord) -> ToolJobAssignment | None:
+        connection = connect_database(self._config.db_path)
+        try:
+            job = claim_tool_job(connection, worker_id=worker.id)
+            if job is None:
+                connection.commit()
+                return None
+            items = list_tool_job_items(connection, job.id, pending_only=True)
+            if not items and job.completed_items == job.total_items:
+                complete_tool_job(
+                    connection,
+                    job_id=job.id,
+                    job_key=job.job_key,
+                    worker_id=worker.id,
+                )
+                connection.commit()
+                return None
+            engines = tuple(
+                engine
+                for item in items
+                if (engine := get_engine(connection, item.engine_version_id)) is not None
+            )
+            if len(engines) != len(items) or not engines:
+                fail_tool_job(
+                    connection,
+                    job_id=job.id,
+                    job_key=job.job_key,
+                    worker_id=worker.id,
+                    error="one or more tool job engines are unavailable",
+                )
+                connection.commit()
+                return None
+            assignment = ToolJobAssignment(
+                job_id=job.id,
+                job_key=job.job_key,
+                tool_name=job.tool_name,
+                input=job.input,
+                engines=engines,
+            )
+            connection.commit()
+            return assignment
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    async def _serve_worker_tool_job(
+        self,
+        websocket: WebSocketServerProtocol,
+        worker: WorkerRecord,
+        job: ToolJobAssignment,
+        *,
+        inbox: asyncio.Queue,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        await _send_message(websocket, "tool_job", job, lock=send_lock)
+        engine_ids = {engine.engine_id for engine in job.engines}
+        while True:
+            envelope = await inbox.get()
+            if envelope.type == "tool_job_progress":
+                progress = ToolJobProgress.model_validate(envelope.data)
+                if not progress.matches_job(job) or progress.engine_id not in engine_ids:
+                    raise ProtocolValidationError("tool job progress identity mismatch")
+                if progress.status == "running":
+                    await asyncio.to_thread(
+                        self._record_tool_job_item_started,
+                        worker.id,
+                        progress,
+                    )
+                continue
+            if envelope.type == "tool_job_engine_result":
+                result = ToolJobEngineResult.model_validate(envelope.data)
+                if not result.matches_job(job) or result.engine_id not in engine_ids:
+                    raise ProtocolValidationError("tool job result identity mismatch")
+                await asyncio.to_thread(
+                    self._record_tool_job_item_result,
+                    worker.id,
+                    result,
+                )
+                continue
+            if envelope.type == "tool_job_complete":
+                complete = ToolJobComplete.model_validate(envelope.data)
+                if not complete.matches_job(job):
+                    raise ProtocolValidationError("tool job completion identity mismatch")
+                await asyncio.to_thread(
+                    self._complete_tool_job,
+                    worker.id,
+                    complete,
+                )
+                return
+            if envelope.type == "tool_job_failed":
+                failure = ToolJobFailed.model_validate(envelope.data)
+                if not failure.matches_job(job):
+                    raise ProtocolValidationError("tool job failure identity mismatch")
+                await asyncio.to_thread(
+                    self._fail_tool_job,
+                    worker.id,
+                    failure,
+                )
+                return
+            raise ProtocolValidationError(f"unexpected tool job message: {envelope.type}")
+
+    def _record_tool_job_item_started(
+        self,
+        worker_id: int,
+        progress: ToolJobProgress,
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            start_tool_job_item(
+                connection,
+                job_id=progress.job_id,
+                job_key=progress.job_key,
+                worker_id=worker_id,
+                engine_version_id=progress.engine_id,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _record_tool_job_item_result(
+        self,
+        worker_id: int,
+        result: ToolJobEngineResult,
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            finish_tool_job_item(
+                connection,
+                job_id=result.job_id,
+                job_key=result.job_key,
+                worker_id=worker_id,
+                engine_version_id=result.engine_id,
+                status=result.status,
+                result={
+                    "matched_name": result.matched_name,
+                    "option_line": result.option_line,
+                    "elapsed_ms": result.elapsed_ms,
+                },
+                error=result.error,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _complete_tool_job(self, worker_id: int, result: ToolJobComplete) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            complete_tool_job(
+                connection,
+                job_id=result.job_id,
+                job_key=result.job_key,
+                worker_id=worker_id,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _fail_tool_job(self, worker_id: int, result: ToolJobFailed) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            fail_tool_job(
+                connection,
+                job_id=result.job_id,
+                job_key=result.job_key,
+                worker_id=worker_id,
+                error=result.error,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     async def _serve_worker_assignment(
         self,
         websocket: WebSocketServerProtocol,
@@ -840,6 +1128,7 @@ class WorkerHandshakeServer:
         inbox: asyncio.Queue,
         send_lock: asyncio.Lock,
         cancellation: asyncio.Event,
+        pause_signal: threading.Event,
     ) -> None:
         payload = assignment.assignment
         LOG.info(
@@ -893,6 +1182,7 @@ class WorkerHandshakeServer:
                 inbox,
                 assignment,
                 cancellation,
+                pause_signal,
             )
             self._clear_engine_preparation_backoff(
                 worker,
@@ -923,11 +1213,13 @@ class WorkerHandshakeServer:
             await self._wait_for_event_fixture_start_or_withdrawn(
                 assignment,
                 cancellation,
+                pause_signal,
             )
-            await self._run_assignment_game_or_withdrawn(
+            game_completed = await self._run_assignment_game_or_withdrawn(
                 assignment,
                 transport,
                 cancellation,
+                pause_signal,
                 lambda stage, substage, status, detail, current=None, total=None, metadata=None:
                     self._record_assignment_progress(
                         assignment,
@@ -940,7 +1232,14 @@ class WorkerHandshakeServer:
                         metadata=metadata,
                     ),
             )
-            game_completed = True
+        except AssignmentPaused:
+            await asyncio.to_thread(self._pause_unstarted_assignment, assignment)
+            LOG.info(
+                "assignment paused before play worker_id=%s assignment_id=%s game_id=%s",
+                worker.id,
+                payload.assignment_id,
+                payload.game_id,
+            )
         except AssignmentWithdrawn:
             withdrawn = True
             LOG.info(
@@ -1024,38 +1323,57 @@ class WorkerHandshakeServer:
         inbox: asyncio.Queue,
         assignment,
         cancellation: asyncio.Event,
+        pause_signal: threading.Event,
     ) -> AssignmentReady:
         ready_task = asyncio.create_task(
             self._receive_assignment_ready(inbox, assignment)
         )
         cancellation_task = asyncio.create_task(cancellation.wait())
+        pause_task = asyncio.create_task(self._wait_for_pause_signal(pause_signal))
         done, _pending = await asyncio.wait(
-            {ready_task, cancellation_task},
+            {ready_task, cancellation_task, pause_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if cancellation_task not in done:
+        if ready_task in done:
             cancellation_task.cancel()
+            pause_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancellation_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await pause_task
             return ready_task.result()
         ready_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await ready_task
+        if pause_task in done:
+            cancellation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancellation_task
+            raise AssignmentPaused("tournament was paused")
+        pause_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pause_task
         raise AssignmentWithdrawn("assignment was removed")
+
+    async def _wait_for_pause_signal(self, pause_signal: threading.Event) -> None:
+        while not pause_signal.is_set():
+            await asyncio.sleep(0.05)
 
     async def _run_assignment_game_or_withdrawn(
         self,
         assignment,
         transport,
         cancellation: asyncio.Event,
+        pause_signal: threading.Event,
         progress_handler,
-    ) -> None:
+    ) -> bool:
         game_task = asyncio.create_task(
             asyncio.to_thread(
                 self._run_assignment_game,
                 assignment,
                 transport,
                 progress_handler,
+                pause_signal,
             )
         )
         cancellation_task = asyncio.create_task(cancellation.wait())
@@ -1067,8 +1385,7 @@ class WorkerHandshakeServer:
             cancellation_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancellation_task
-            game_task.result()
-            return
+            return game_task.result()
         await transport.withdraw()
         game_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1079,13 +1396,16 @@ class WorkerHandshakeServer:
         self,
         assignment,
         cancellation: asyncio.Event,
+        pause_signal: threading.Event,
     ) -> None:
         status = await asyncio.to_thread(
             self._assignment_tournament_status,
             assignment.assignment.game_id,
         )
-        if status == "running":
+        if status == "running" and not pause_signal.is_set():
             return
+        if status == "paused" or pause_signal.is_set():
+            raise AssignmentPaused("tournament was paused")
         if status not in {"scheduled", "paused"}:
             raise AssignmentWithdrawn("event fixture is no longer awaiting its start")
         self._record_assignment_progress(
@@ -1102,6 +1422,8 @@ class WorkerHandshakeServer:
                 pass
             if cancellation.is_set():
                 raise AssignmentWithdrawn("assignment was removed")
+            if pause_signal.is_set():
+                raise AssignmentPaused("tournament was paused")
             status = await asyncio.to_thread(
                 self._assignment_tournament_status,
                 assignment.assignment.game_id,
@@ -1115,6 +1437,8 @@ class WorkerHandshakeServer:
                     detail="The event fixture has started and the prepared engines are released to play",
                 )
                 return
+            if status == "paused":
+                raise AssignmentPaused("tournament was paused")
             if status not in {"scheduled", "paused"}:
                 raise AssignmentWithdrawn("event fixture is no longer awaiting its start")
 
@@ -1159,6 +1483,53 @@ class WorkerHandshakeServer:
             for assignment_id, identity in assignment_identities.items()
             if active.get(assignment_id) != identity
         )
+
+    def _paused_assignment_ids(
+        self,
+        assignment_identities: dict[int, tuple[str, int]],
+    ) -> tuple[int, ...]:
+        assignment_ids = tuple(assignment_identities)
+        if not assignment_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in assignment_ids)
+        connection = connect_database(self._config.db_path)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT ga.id, ga.assignment_key, ga.game_id
+                FROM game_assignments ga
+                JOIN games game ON game.id = ga.game_id
+                JOIN tournaments tournament ON tournament.id = game.tournament_id
+                WHERE ga.id IN ({placeholders})
+                  AND ga.status IN ('assigned', 'acked', 'live')
+                  AND tournament.status = 'paused'
+                """,
+                assignment_ids,
+            )
+            paused = {
+                int(row["id"]): (str(row["assignment_key"]), int(row["game_id"]))
+                for row in rows
+            }
+        finally:
+            connection.close()
+        return tuple(
+            assignment_id
+            for assignment_id, identity in assignment_identities.items()
+            if paused.get(assignment_id) == identity
+        )
+
+    def _pause_unstarted_assignment(self, assignment) -> None:
+        payload = assignment.assignment
+        connection = connect_database(self._config.db_path)
+        try:
+            pause_unstarted_game_assignment(
+                connection,
+                payload.assignment_id,
+                payload.assignment_key,
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
     def _finish_assignment(self, assignment) -> None:
         payload = assignment.assignment
@@ -1518,6 +1889,7 @@ class WorkerHandshakeServer:
                 session_id=worker.session_id,
                 reason="worker connection lost",
             )
+            release_worker_tool_jobs(connection, worker.id)
             connection.commit()
             publish_workers_changed("worker.disconnected", {"worker_id": worker.id})
             return tournament_ids
@@ -1604,16 +1976,24 @@ class WorkerHandshakeServer:
             raise WorkerConnectionInactive(f"worker is {live_worker.status}")
         return live_worker
 
-    def _run_assignment_game(self, assignment, transport, progress_handler) -> None:
+    def _run_assignment_game(
+        self,
+        assignment,
+        transport,
+        progress_handler,
+        pause_signal: threading.Event,
+    ) -> bool:
         connection = connect_database(self._config.db_path)
         try:
-            run_worker_assignment_game(
+            completed = run_worker_assignment_game(
                 connection,
                 assignment,
                 transport,
                 progress_handler=progress_handler,
+                pause_requested=pause_signal.is_set,
             )
             connection.commit()
+            return completed
         except Exception:
             connection.rollback()
             raise

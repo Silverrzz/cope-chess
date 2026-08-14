@@ -123,6 +123,13 @@ class GameAssignmentRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class GamePauseCheckpointRecord:
+    game_id: int
+    state: dict[str, Any]
+    paused_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class GameProgressRecord:
     id: int
     assignment_id: int
@@ -1865,6 +1872,10 @@ def finish_game(
             game_id,
         ),
     )
+    connection.execute(
+        "DELETE FROM game_pause_checkpoints WHERE game_id = ?",
+        (game_id,),
+    )
 
 
 def record_move(
@@ -2006,6 +2017,102 @@ def get_game_assignment_for_game(
     return _get_game_assignment(connection, "game_id", game_id)
 
 
+def get_game_pause_checkpoint(
+    connection: sqlite3.Connection,
+    game_id: int,
+) -> GamePauseCheckpointRecord | None:
+    row = connection.execute(
+        "SELECT game_id, state, paused_at FROM game_pause_checkpoints WHERE game_id = ?",
+        (game_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    state = json.loads(row["state"])
+    if not isinstance(state, dict):
+        raise RuntimeError(f"invalid pause checkpoint for game {game_id}")
+    return GamePauseCheckpointRecord(
+        game_id=int(row["game_id"]),
+        state=state,
+        paused_at=str(row["paused_at"]),
+    )
+
+
+def pause_game_assignment(
+    connection: sqlite3.Connection,
+    assignment_id: int,
+    assignment_key: str,
+    state: dict[str, Any],
+) -> None:
+    assignment = get_game_assignment(connection, assignment_id)
+    if assignment is None or assignment.assignment_key != assignment_key:
+        raise RuntimeError(f"assignment {assignment_id} is no longer active")
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE game_assignments
+        SET status = 'expired', finished_at = ?, last_error = NULL, worker_id = NULL
+        WHERE id = ? AND assignment_key = ? AND status IN ('assigned', 'acked', 'live')
+        """,
+        (now, assignment_id, assignment_key),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"assignment {assignment_id} is no longer active")
+    connection.execute(
+        """
+        INSERT INTO game_pause_checkpoints (game_id, state, paused_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(game_id) DO UPDATE SET
+          state = excluded.state,
+          paused_at = excluded.paused_at
+        """,
+        (assignment.game_id, json.dumps(state, separators=(",", ":")), now),
+    )
+
+
+def pause_unstarted_game_assignment(
+    connection: sqlite3.Connection,
+    assignment_id: int,
+    assignment_key: str,
+) -> None:
+    assignment = get_game_assignment(connection, assignment_id)
+    if assignment is None or assignment.assignment_key != assignment_key:
+        return
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE game_assignments
+        SET status = 'expired', finished_at = ?, last_error = NULL, worker_id = NULL
+        WHERE id = ? AND assignment_key = ? AND status IN ('assigned', 'acked')
+        """,
+        (now, assignment_id, assignment_key),
+    )
+    if cursor.rowcount == 1:
+        connection.execute(
+            "UPDATE games SET status = 'pending' WHERE id = ? AND status = 'assigned'",
+            (assignment.game_id,),
+        )
+
+
+def resume_paused_tournament_games(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE games
+        SET status = 'pending'
+        WHERE tournament_id = ?
+          AND status = 'live'
+          AND EXISTS (
+            SELECT 1 FROM game_pause_checkpoints checkpoint
+            WHERE checkpoint.game_id = games.id
+          )
+        """,
+        (tournament_id,),
+    )
+    return cursor.rowcount
+
+
 def record_game_assignment_progress(
     connection: sqlite3.Connection,
     progress: AssignmentProgress,
@@ -2112,8 +2219,6 @@ def record_game_assignment_progress_batch(
             for progress, source in valid
         ),
     )
-
-
 def list_game_assignment_progress(
     connection: sqlite3.Connection,
     game_id: int,
@@ -3134,6 +3239,10 @@ def _reset_games_for_replay(
     placeholders = ", ".join("?" for _ in ids)
     connection.execute(f"DELETE FROM moves WHERE game_id IN ({placeholders})", ids)
     connection.execute(
+        f"DELETE FROM game_pause_checkpoints WHERE game_id IN ({placeholders})",
+        ids,
+    )
+    connection.execute(
         f"DELETE FROM game_hardware_scores WHERE game_id IN ({placeholders})",
         ids,
     )
@@ -3491,35 +3600,30 @@ def get_chat_message(
 def list_chat_messages(
     connection: sqlite3.Connection,
     *,
-    limit: int = 50,
+    limit: int | None = 50,
     tournament_id: int | None = None,
     event_id: int | None = None,
+    system: bool | None = None,
 ) -> tuple[ChatMessageRecord, ...]:
     if tournament_id is not None and event_id is not None:
         raise ValueError("chat messages can only be filtered by one subject")
+    parameters: list[int] = []
     if tournament_id is not None:
-        rows = connection.execute(
-            """
-            SELECT * FROM chat_messages
-            WHERE tournament_id = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (tournament_id, limit),
-        )
+        query = "SELECT * FROM chat_messages WHERE tournament_id = ?"
+        parameters.append(tournament_id)
     elif event_id is not None:
-        rows = connection.execute(
-            """
-            SELECT * FROM chat_messages
-            WHERE event_id = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (event_id, limit),
-        )
+        query = "SELECT * FROM chat_messages WHERE event_id = ?"
+        parameters.append(event_id)
     else:
-        rows = connection.execute(
-            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
+        query = "SELECT * FROM chat_messages"
+    if system is not None:
+        query += " AND" if parameters else " WHERE"
+        query += " display_name = 'System'" if system else " display_name <> 'System'"
+    query += " ORDER BY id DESC"
+    if limit is not None:
+        query += " LIMIT ?"
+        parameters.append(limit)
+    rows = connection.execute(query, tuple(parameters))
     return tuple(
         _chat_message_from_row(row)
         for row in rows
