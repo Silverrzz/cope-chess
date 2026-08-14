@@ -1934,7 +1934,9 @@ class WorkerEngineTransport:
         self._inbox = inbox
         self._send_lock = send_lock
         self._loop = asyncio.get_running_loop()
-        self._command_lock = asyncio.Lock()
+        self._command_locks: dict[int, asyncio.Lock] = {}
+        self._reply_queues: dict[int, asyncio.Queue] = {}
+        self._receiver_task: asyncio.Task | None = None
         self._closed = threading.Event()
         self._pending: set[Future] = set()
         self._pending_lock = threading.Lock()
@@ -1947,6 +1949,9 @@ class WorkerEngineTransport:
 
     def close(self) -> None:
         self._closed.set()
+        if self._receiver_task is not None:
+            self._receiver_task.cancel()
+            self._receiver_task = None
         with self._pending_lock:
             pending = tuple(self._pending)
         for future in pending:
@@ -1955,14 +1960,21 @@ class WorkerEngineTransport:
     async def withdraw(self) -> None:
         if self._closed.is_set():
             return
+        receiver_task = self._receiver_task
         with self._clock_lock:
             active_searches = tuple(self._active_searches)
         try:
             for engine_id in active_searches:
                 with contextlib.suppress(Exception):
                     await self._send_engine_stop(engine_id)
+            deadline = self._loop.time() + 2
+            while self._active_searches and self._loop.time() < deadline:
+                await asyncio.sleep(0.01)
         finally:
             self.close()
+            if receiver_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receiver_task
 
     def execute_engine_command(
         self,
@@ -2025,7 +2037,8 @@ class WorkerEngineTransport:
         command: str,
         info_handler: Callable[[str], None] | None,
     ) -> EngineCommandOutput:
-        async with self._command_lock:
+        command_lock = self._command_locks.setdefault(engine_id, asyncio.Lock())
+        async with command_lock:
             try:
                 return await self._execute_engine_command_locked(engine_id, command, info_handler)
             finally:
@@ -2041,6 +2054,9 @@ class WorkerEngineTransport:
     ) -> EngineCommandOutput:
         assignment = self._assignment.assignment
         is_search = command.startswith("go")
+        if self._receiver_task is None:
+            self._receiver_task = asyncio.create_task(self._receive_replies())
+        reply_queue = self._reply_queues.setdefault(engine_id, asyncio.Queue())
         with self._clock_lock:
             self._clock_samples.pop(engine_id, None)
         await _send_message(
@@ -2055,11 +2071,7 @@ class WorkerEngineTransport:
         )
 
         while True:
-            envelope = await self._inbox.get()
-            if envelope.type == "assignment_progress":
-                progress = _validate_worker_payload(AssignmentProgress, envelope.data)
-                self._progress_handler(progress)
-                continue
+            envelope = await self._next_reply(reply_queue)
             if envelope.type == "engine_command_started":
                 started = _validate_worker_payload(EngineCommandStarted, envelope.data)
                 self._validate_engine_reply(started, engine_id)
@@ -2113,6 +2125,35 @@ class WorkerEngineTransport:
             if is_search:
                 self._record_clock_sample(engine_id, result.elapsed_ms, running=False)
             return EngineCommandOutput(lines=result.lines, elapsed_ms=result.elapsed_ms)
+
+    async def _next_reply(self, reply_queue: asyncio.Queue):
+        receiver_task = self._receiver_task
+        if receiver_task is None:
+            raise RuntimeError("worker reply receiver is not running")
+        receive_task = asyncio.create_task(reply_queue.get())
+        done, _ = await asyncio.wait(
+            (receive_task, receiver_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if receive_task in done:
+            return receive_task.result()
+        receive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await receive_task
+        receiver_task.result()
+        raise RuntimeError("worker reply receiver stopped")
+
+    async def _receive_replies(self) -> None:
+        while True:
+            envelope = await self._inbox.get()
+            if envelope.type == "assignment_progress":
+                progress = _validate_worker_payload(AssignmentProgress, envelope.data)
+                self._progress_handler(progress)
+                continue
+            engine_id = envelope.data.get("engine_id")
+            if not isinstance(engine_id, int):
+                raise ProtocolValidationError(f"worker message has no engine id: {envelope.type}")
+            await self._reply_queues.setdefault(engine_id, asyncio.Queue()).put(envelope)
 
     def _record_clock_sample(
         self,

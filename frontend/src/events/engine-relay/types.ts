@@ -64,6 +64,14 @@ export interface RelayFixture {
     prepared: boolean;
   } | null;
   games: RelayGame[];
+  winner_team_id: number | null;
+  kibitzer: {
+    engine_id: Identifier;
+    name: string;
+    version: string;
+    threads: number;
+    hash_mb: number;
+  } | null;
 }
 
 export interface RelayEngineOption {
@@ -82,7 +90,7 @@ export interface RelayOpeningSuite {
 }
 
 export interface EngineRelayPayload {
-  format: "engine-relay";
+  format: "engine-relay" | "engine-relay-finale";
   teams: RelayTeam[];
   fixtures: RelayFixture[];
   engine_options?: RelayEngineOption[];

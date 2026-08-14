@@ -189,6 +189,8 @@ export interface EngineAnalysis {
   nps?: string | number | null
   hashfull?: string | number | null
   eval?: string | number | null
+  eval_cp?: number | null
+  eval_mate?: number | null
   info?: string | null
   pv?: string | null
   pv_san?: string | null
@@ -239,7 +241,7 @@ export interface TournamentDetailResponse {
   viewer_game: GameRecord | null
   viewer_moves: MoveRecord[]
   viewer_locked?: boolean
-  engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
+  engine_data?: Partial<Record<'white' | 'black' | 'kibitzer', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
   standings?: StandingRecord[]
@@ -256,7 +258,7 @@ export interface LiveSnapshot {
   game?: GameRecord | null
   opening?: OpeningRecord | null
   moves?: MoveRecord[]
-  engine_data?: Partial<Record<'white' | 'black', EngineAnalysis>>
+  engine_data?: Partial<Record<'white' | 'black' | 'kibitzer', EngineAnalysis>>
   clocks?: Partial<Record<'white' | 'black', string>>
   clock_state?: ClockState | null
   standings?: StandingRecord[]

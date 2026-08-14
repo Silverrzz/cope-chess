@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
@@ -405,6 +406,10 @@ def _start_host_worker(settings: dict[str, str]) -> None:
     environment["COPE_BUILD_VERSION"] = _build_version()
     environment["COPE_UPDATE_ROOT"] = str(RUNTIME / "update")
     environment["COPE_WORKER_ENGINE_DIR"] = str(RUNTIME / "engines")
+    caddy_root = RUNTIME / "caddy-root.crt"
+    worker_host = (urlsplit(settings["worker_server_url"]).hostname or "").lower()
+    if caddy_root.is_file() and worker_host in {"localhost", "127.0.0.1", "::1"}:
+        environment["SSL_CERT_FILE"] = str(caddy_root)
     repository_url = _git_value("remote", "get-url", "origin")
     if repository_url:
         environment["COPE_UPDATE_REPOSITORY_URL"] = repository_url

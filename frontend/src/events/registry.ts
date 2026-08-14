@@ -36,3 +36,9 @@ registerEventComponents("engine-relay", {
   publicPresentation: "immersive",
   admin: EngineRelayControlRoom,
 });
+
+registerEventComponents("engine-relay-finale", {
+  public: EngineRelayBroadcast,
+  publicPresentation: "immersive",
+  admin: EngineRelayControlRoom,
+});

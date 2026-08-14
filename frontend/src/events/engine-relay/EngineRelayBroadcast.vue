@@ -13,7 +13,7 @@ import GameTable from "@/components/public/GameTable.vue";
 import StreamIndicator from "@/components/public/StreamIndicator.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { useViewerSettings } from "@/composables/useViewerSettings";
-import { clockLabel, errorMessage, resultLabel, scorePercentLabel, statusLabel } from "@/components/public/format";
+import { clockLabel, errorMessage, moveEvaluation, moveNps, resultLabel, scorePercentLabel, statusLabel } from "@/components/public/format";
 import type {
   ClockState,
   EngineAnalysis,
@@ -55,6 +55,7 @@ const route = useRoute();
 const router = useRouter();
 
 const payload = computed(() => props.detail.custom as EngineRelayPayload);
+const isFinale = computed(() => props.detail.event.handler_key === "engine-relay-finale");
 const fixtureId = ref<number | null>(null);
 const gameId = ref<string>("");
 const gameData = ref<TournamentDetailResponse | null>(null);
@@ -109,10 +110,48 @@ const whiteMember = computed(() => currentMember("white"));
 const blackMember = computed(() => currentMember("black"));
 const whiteAnalysis = ref<EngineAnalysis | null>(null);
 const blackAnalysis = ref<EngineAnalysis | null>(null);
-const whiteCardMember = computed(() => memberForAnalysis("white", whiteAnalysis.value) ?? whiteMember.value);
-const blackCardMember = computed(() => memberForAnalysis("black", blackAnalysis.value) ?? blackMember.value);
+const isLatestPly = computed(() => selectedPly.value >= moves.value.length);
+const displayedWhiteAnalysis = computed(() => isFinale.value ? analysisForSide("white") : whiteAnalysis.value);
+const displayedBlackAnalysis = computed(() => isFinale.value ? analysisForSide("black") : blackAnalysis.value);
+const whiteCardMember = computed(() => memberForAnalysis("white", displayedWhiteAnalysis.value) ?? whiteMember.value);
+const blackCardMember = computed(() => memberForAnalysis("black", displayedBlackAnalysis.value) ?? blackMember.value);
 const whiteRoster = computed(() => rotatingRoster(whiteTeam.value, whiteMember.value));
 const blackRoster = computed(() => rotatingRoster(blackTeam.value, blackMember.value));
+const winningTeam = computed(() => {
+  const winnerId = payload.value.fixtures.find((item) => item.winner_team_id !== null)?.winner_team_id;
+  return payload.value.teams.find((team) => team.id === winnerId) ?? null;
+});
+const finaleComplete = computed(() => isFinale.value && props.detail.event.status === "completed" && winningTeam.value !== null);
+const kibitzerAnalysis = computed(() => gameData.value?.engine_data?.kibitzer ?? null);
+const kibitzerLabel = computed(() => {
+  const analysis = kibitzerAnalysis.value;
+  if (!analysis) return "—";
+  const factor = parseFen(analysis.root_fen || currentPositionFen.value).turn === "b" ? -1 : 1;
+  if (analysis.eval_mate !== null && analysis.eval_mate !== undefined) return `#${factor * analysis.eval_mate}`;
+  const cp = Number(analysis.eval_cp);
+  return Number.isFinite(cp) ? `${factor * cp >= 0 ? "+" : ""}${(factor * cp / 100).toFixed(2)}` : String(analysis.eval ?? "—");
+});
+const kibitzerPercent = computed(() => {
+  const analysis = kibitzerAnalysis.value;
+  if (!analysis) return 50;
+  const blackToMove = parseFen(analysis.root_fen || currentPositionFen.value).turn === "b";
+  if (analysis.eval_mate !== null && analysis.eval_mate !== undefined) {
+    const whiteMate = blackToMove ? -analysis.eval_mate : analysis.eval_mate;
+    return whiteMate > 0 ? 98 : 2;
+  }
+  const raw = Number(analysis.eval_cp);
+  if (!Number.isFinite(raw)) return 50;
+  const whiteCp = blackToMove ? -raw : raw;
+  return Math.max(2, Math.min(98, 50 + 48 * Math.tanh(whiteCp / 500)));
+});
+const moveAnnotations = computed(() => moves.value.map((move, index) => {
+  if (!isFinale.value) return null;
+  if (move.is_book) return { label: "Opening book" };
+  const side = moveSide(index);
+  const team = side === "white" ? whiteTeam.value : blackTeam.value;
+  const member = team?.roster.find((item) => String(item.engine_id) === String(move.engine_version_id ?? ""));
+  return member ? { label: member.display_name, color: team!.primary_color } : null;
+}));
 const suggestedMoves = computed<BoardArrow[]>(() => {
   const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci));
   const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length));
@@ -252,8 +291,11 @@ function rotatingRoster(team: RelayTeam | null, current: RelayRosterMember | nul
 }
 
 function teamArrow(move: string, color: "white" | "black"): BoardArrow {
-  const team = color === "white" ? whiteTeam.value : blackTeam.value;
-  return team ? { move, color, fillColor: team.primary_color } : { move, color };
+  if (!isFinale.value) {
+    const team = color === "white" ? whiteTeam.value : blackTeam.value;
+    if (team) return { move, color, fillColor: team.primary_color };
+  }
+  return { move, color };
 }
 
 function moveSide(index: number): "white" | "black" {
@@ -275,6 +317,40 @@ function pvMoves(value: string | null | undefined): string[] {
 function movePv(move: MoveRecord): string[] {
   const infoPv = pvMoves(move.info_line);
   return infoPv.length ? infoPv : pvMoves(move.pv);
+}
+
+function analysisForSide(side: "white" | "black"): EngineAnalysis | null {
+  if (isLatestPly.value) return side === "white" ? whiteAnalysis.value : blackAnalysis.value;
+  const moveIndex = latestMoveIndexForSide(side, selectedPly.value);
+  const move = moveIndex >= 0 ? moves.value[moveIndex] : undefined;
+  if (!move) return null;
+  const analysis: EngineAnalysis = {
+    nps: moveNps(move),
+    eval: moveEvaluation(move),
+    root_fen: positionFen(buildPositions(
+      opening.value.fen,
+      moves.value.slice(0, moveIndex).map((item) => item.uci),
+    ).at(-1)!),
+  };
+  if (move.engine_version_id !== undefined) analysis.engine_id = move.engine_version_id;
+  if (move.eval_cp !== undefined) analysis.eval_cp = move.eval_cp;
+  if (move.eval_mate !== undefined) analysis.eval_mate = move.eval_mate;
+  if (move.depth !== undefined) analysis.depth = move.depth;
+  if (move.seldepth !== undefined) analysis.seldepth = move.seldepth;
+  if (move.nodes !== undefined) analysis.nodes = move.nodes;
+  if (move.hashfull !== undefined) analysis.hashfull = move.hashfull;
+  if (move.pv !== undefined) analysis.pv = move.pv;
+  if (move.pv_san !== undefined) analysis.pv_san = move.pv_san;
+  const info = move.info_line || move.pv;
+  if (info !== undefined) analysis.info = info;
+  return analysis;
+}
+
+function latestMoveIndexForSide(side: "white" | "black", ply: number): number {
+  for (let index = Math.min(ply, moves.value.length) - 1; index >= 0; index -= 1) {
+    if (moveSide(index) === side) return index;
+  }
+  return -1;
 }
 
 function normalizedUci(value: string): string {
@@ -462,7 +538,7 @@ async function loadGame(silent = false): Promise<void> {
   if (!silent) loading.value = true;
   loadError.value = "";
   try {
-    const response = await api.get<TournamentDetailResponse>(`/api/tournaments/${fixture.value.tournament_id}`, {
+    const response = await api.get<TournamentDetailResponse>(`/api/events/${encodeURIComponent(props.detail.event.slug)}/tournaments/${fixture.value.tournament_id}`, {
       query: { game_id: gameId.value, page: gamePage.value },
       signal: controller.signal,
     });
@@ -484,7 +560,7 @@ function connectStream(): void {
   if (stream && streamKey === nextKey) return;
   closeStream();
   streamKey = nextKey;
-  stream = new EventSource(`/tournaments/${fixture.value.tournament_id}/events?game_id=${encodeURIComponent(gameId.value)}&spectator=0`);
+  stream = new EventSource(`/events/${encodeURIComponent(props.detail.event.slug)}/tournaments/${fixture.value.tournament_id}/stream?game_id=${encodeURIComponent(gameId.value)}&spectator=0`);
   streamState.value = "connecting";
   stream.onopen = () => { streamState.value = "live"; };
   stream.onerror = () => { streamState.value = "reconnecting"; };
@@ -548,7 +624,7 @@ function handleMove(event: Event): void {
 }
 
 function handleEngineInfo(event: Event): void {
-  const data = eventPayload<{ game_id?: Identifier; side?: "white" | "black"; engine_data?: EngineAnalysis }>(event);
+  const data = eventPayload<{ game_id?: Identifier; side?: "white" | "black" | "kibitzer"; engine_data?: EngineAnalysis }>(event);
   if (!data?.side || !data.engine_data || String(data.game_id) !== gameId.value || !gameData.value) return;
   gameData.value.engine_data = {
     ...gameData.value.engine_data,
@@ -672,9 +748,16 @@ function currentMember(side: "white" | "black"): RelayRosterMember | null {
     const latest = team.roster.find((member) => String(member.engine_id) === String(latestEngineId ?? ""));
     if (latest) return latest;
   }
-  const white = side === "white";
-  const movesPlayed = moves.value.filter((move) => !move.is_book && ((move.ply % 2 === 1) === white)).length;
-  return team.roster[movesPlayed % team.roster.length] ?? null;
+  if (!isFinale.value) {
+    const white = side === "white";
+    const movesPlayed = moves.value.filter((move) => !move.is_book && ((move.ply % 2 === 1) === white)).length;
+    return team.roster[movesPlayed % team.roster.length] ?? null;
+  }
+  const movesPlayed = moves.value.filter((move, index) => !move.is_book && moveSide(index) === side).length;
+  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci));
+  const sideToMove = parseFen(positionFen(positions.at(-1)!)).turn === "w" ? "white" : "black";
+  const turnIndex = side === sideToMove ? movesPlayed : Math.max(0, movesPlayed - 1);
+  return team.roster[turnIndex % team.roster.length] ?? null;
 }
 
 function memberForAnalysis(side: "white" | "black", analysis: EngineAnalysis | null): RelayRosterMember | null {
@@ -927,15 +1010,30 @@ function handleUserActivation(): void {
 </script>
 
 <template>
-  <div class="engine-clash-page" :class="{ 'engine-clash-page--final-minute': finalMinuteActive, 'engine-clash-page--arena': props.view === 'arena' }">
+  <div class="engine-clash-page" :class="{ 'engine-clash-page--final-minute': finalMinuteActive, 'engine-clash-page--arena': props.view === 'arena', 'engine-clash-page--finale': isFinale }">
     <div v-if="confettiEnabled" class="cheer-layer" aria-hidden="true">
       <span v-for="burst in cheerBursts" :key="burst.id" class="cheer-burst" :class="`cheer-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%`, '--cheer-color': burst.color }">
         <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--cheer-start-x': `${piece.startX}rem`, '--cheer-start-y': `${piece.startY}rem`, '--cheer-end-x': `${piece.endX}rem`, '--cheer-end-y': `${piece.endY}rem`, '--cheer-rotation': `${piece.rotation}deg`, '--cheer-delay': `${piece.delay}ms`, '--cheer-duration': `${piece.duration}ms`, '--cheer-size': `${piece.size}rem` }"></i>
       </span>
     </div>
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
-    <section v-if="props.view === 'event'" class="clash-hero" aria-labelledby="clash-title">
+    <section v-if="props.view === 'event' && finaleComplete" class="finale-podium" aria-labelledby="finale-winner-title">
+      <div class="finale-podium__glow" aria-hidden="true"></div>
+      <div class="finale-podium__symbols" aria-hidden="true"><span>♔</span><span>♕</span><span>♖</span><span>♘</span><span>🏆</span><span>🥇</span><span>♚</span><span>🏅</span></div>
+      <div class="finale-podium__content" :style="teamStyle(winningTeam)">
+        <span class="finale-podium__medal">🥇</span>
+        <p>Engine Relay Finale champions</p>
+        <h1 id="finale-winner-title">{{ winningTeam?.name }}</h1>
+        <div class="finale-winning-bench">
+          <article v-for="(member, index) in winningTeam?.roster ?? []" :key="member.id"><span>{{ index + 1 }}</span><div><strong>{{ member.name }}</strong><small>{{ member.version }}</small></div></article>
+        </div>
+        <div class="finale-podium__stand"><span>Winning bench</span><strong>{{ winningTeam?.short_name || winningTeam?.name }}</strong></div>
+        <button type="button" class="finale-cheer" :data-relay-team-id="winningTeam?.id" @click="cheer(winningTeam)"><AppIcon name="trophy" :size="20" /> Cheer the champions</button>
+      </div>
+    </section>
+    <section v-else-if="props.view === 'event'" class="clash-hero" aria-labelledby="clash-title">
       <div class="clash-hero__wash" aria-hidden="true"></div>
+      <div v-if="isFinale" class="finale-symbols" aria-hidden="true"><span>♕</span><span>♖</span><span>♘</span><span>♟</span><span>🏆</span><span>🥇</span><span>♚</span><span>🏅</span><span>♜</span><span>♙</span></div>
       <span class="chess-piece chess-piece--king" aria-hidden="true">♚</span>
       <span class="chess-piece chess-piece--knight" aria-hidden="true">♞</span>
       <span class="chess-piece chess-piece--pawn" aria-hidden="true">♟</span>
@@ -946,7 +1044,7 @@ function handleUserActivation(): void {
 
       <div class="clash-hero__content">
         <header class="clash-heading">
-          <span class="clash-kicker"><AppIcon name="trophy" :size="15" /> Featured showcase event</span>
+          <span class="clash-kicker"><AppIcon name="trophy" :size="15" /> {{ isFinale ? 'Sudden death championship' : 'Featured showcase event' }}</span>
           <h1 id="clash-title">{{ detail.event.title }}</h1>
         </header>
 
@@ -965,7 +1063,7 @@ function handleUserActivation(): void {
             <div class="clash-node__beacon"><span><AppIcon name="trophy" :size="31" /></span></div>
             <div class="clash-node__card">
               <strong>{{ team.name }}</strong>
-              <span>{{ team.engineCount }}-engine relay team</span>
+              <span>{{ isFinale ? `${team.engineCount}-engine finalist bench` : `${team.engineCount}-engine relay team` }}</span>
               <small><i></i>{{ team.thinking ? "Playing now" : team.current ? "On relay" : isLive ? "Ready" : "Relay team" }}</small>
             </div>
           </article>
@@ -1036,11 +1134,11 @@ function handleUserActivation(): void {
       <div class="engine-column">
         <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
           <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in blackRoster" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
-          <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '—'" :analysis="blackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
+          <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '—'" :analysis="displayedBlackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
         </div>
         <div class="relay-engine-slot" :style="teamStyle(whiteTeam)" :data-relay-team-id="whiteTeam?.id">
           <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in whiteRoster" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
-          <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '—'" :analysis="whiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
+          <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '—'" :analysis="displayedWhiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
         </div>
         <div class="arena-cheers" aria-label="Cheer for a team">
           <button v-if="blackTeam" type="button" class="cheer-button cheer-button--arena" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)"><AppIcon name="trophy" :size="14" /> Cheer {{ blackTeam.short_name || blackTeam.name }}</button>
@@ -1048,10 +1146,11 @@ function handleUserActivation(): void {
         </div>
       </div>
       <div ref="boardColumnElement" class="board-column">
+        <div v-if="fixture?.kibitzer" class="kibitzer-bar" :aria-label="`${fixture.kibitzer.name} evaluation ${kibitzerLabel}`"><span class="kibitzer-bar__black" :style="{ height: `${100 - kibitzerPercent}%` }"></span><strong>{{ kibitzerLabel }}</strong><small>{{ fixture.kibitzer.name }}</small></div>
         <ChessViewer :opening="opening" :moves="moves" :model-value="selectedPly" :arrows="suggestedMoves" :label="`${whiteTeam?.name ?? 'White'} versus ${blackTeam?.name ?? 'Black'} relay game`" @update:model-value="selectedPly = $event" @position="currentPositionFen = $event.fen" />
       </div>
       <aside class="activity-column" aria-label="Game activity">
-        <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
+        <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :annotations="moveAnnotations" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
         <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="appendChat" />
       </aside>
     </section>
@@ -1682,5 +1781,59 @@ function handleUserActivation(): void {
 :global(:root[data-theme="dark"] .clash-status-card__icon) { background: rgb(30 55 87 / 72%); color: #84b3ff; }
 :global(:root[data-theme="dark"] .clash-status-card small),
 :global(:root[data-theme="dark"] .clash-status-card div > span) { color: #94a8c2; }
+:global(.public-main:has(.engine-clash-page--finale:not(.engine-clash-page--arena))) { min-height: 0; padding-block: 0; }
+.engine-clash-page--finale:not(.engine-clash-page--arena) { height: calc(100dvh - var(--header-height, 4rem)); min-height: 0; margin-block-end: 0; overflow: hidden; background: #070604; color: #f6eedb; }
+.engine-clash-page--finale .clash-hero { height: 100%; min-height: 0; border-color: #3c3018; background: radial-gradient(ellipse 48% 42% at 50% 47%, rgb(210 163 62 / 18%), transparent 72%), radial-gradient(circle at 16% 24%, rgb(184 132 37 / 9%), transparent 31%), radial-gradient(circle at 84% 78%, rgb(219 170 66 / 8%), transparent 32%), linear-gradient(135deg, #11100d 0%, #080705 52%, #12100b 100%); box-shadow: inset 0 0 8rem rgb(0 0 0 / 62%); }
+.engine-clash-page--finale.engine-clash-page--final-minute .clash-hero { border-color: #6e5425; background: radial-gradient(ellipse 52% 46% at 50% 45%, rgb(230 183 82 / 26%), transparent 70%), radial-gradient(circle at 18% 72%, rgb(182 126 30 / 10%), transparent 34%), linear-gradient(135deg, #151108, #080705 56%, #171208); }
+.engine-clash-page--finale .countdown-pulse-layer { background: radial-gradient(circle at 50% 45%, rgb(235 190 91 / 21%), rgb(183 128 31 / 8%) 52%, transparent 78%); box-shadow: inset 0 0 0 .45rem rgb(217 166 63 / 12%), inset 0 0 9rem rgb(219 168 66 / 17%); }
+.engine-clash-page--finale .clash-hero::before, .engine-clash-page--finale .clash-hero::after { background: rgb(215 166 66 / 12%); filter: blur(6rem); }
+.engine-clash-page--finale .clash-hero__wash { opacity: .22; background-image: radial-gradient(circle, rgb(226 188 103 / 34%) 0 1px, transparent 1.2px); background-size: 5rem 5rem; mask-image: radial-gradient(ellipse at center, black, transparent 78%); }
+.engine-clash-page--finale .chess-piece { color: #d5ab54; opacity: .028; filter: none; }.engine-clash-page--finale .chess-piece--pawn, .engine-clash-page--finale .chess-piece--bishop, .engine-clash-page--finale .chess-piece--queen, .engine-clash-page--finale .chess-piece--rook, .engine-clash-page--finale .chess-piece--knight-small { display: none; }
+.engine-clash-page--finale .clash-hero__content { width: min(100%, 84rem); align-content: center; padding: clamp(1.25rem, 3vh, 2rem) clamp(1rem, 5vw, 5rem) 5.25rem; }
+.engine-clash-page--finale .clash-kicker { border-color: rgb(221 176 79 / 35%); background: rgb(12 10 6 / 72%); box-shadow: inset 0 1px rgb(255 237 189 / 7%); color: #d8ad55; }
+.engine-clash-page--finale .clash-heading h1 { margin-top: .65rem; background: linear-gradient(180deg, #fff5d6 4%, #edcc7b 52%, #b78325 100%); color: #f3d17b; font-size: clamp(3.2rem, 6vw, 5.5rem); font-weight: 720; letter-spacing: -.055em; text-shadow: 0 .15rem 1.5rem rgb(220 166 54 / 13%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.engine-clash-page--finale .clash-schedule { color: #95886d; }
+.engine-clash-page--finale .clash-countdown { margin-top: .65rem; }.engine-clash-page--finale .clash-countdown > div { padding: .6rem .75rem .7rem; }.engine-clash-page--finale .clash-countdown strong { color: #f5d787; font-size: clamp(2.5rem, 5vw, 4.25rem); }.engine-clash-page--finale .clash-countdown span { color: #a98743; }
+.engine-clash-page--finale .countdown-sound { border-color: rgb(220 174 76 / 31%); background: rgb(18 15 9 / 78%); color: #d7ad58; }
+.engine-clash-page--finale .clash-orbit { width: min(100%, 76rem); height: clamp(16rem, 30vh, 20rem); max-height: 20rem; margin-top: .25rem; }
+.engine-clash-page--finale .clash-orbit::after { position: absolute; z-index: 3; top: 45%; left: 50%; display: grid; width: 4.2rem; height: 4.2rem; place-items: center; border: 1px solid rgb(221 177 84 / 34%); border-radius: 50%; background: #0b0905; box-shadow: 0 0 0 .55rem rgb(211 164 66 / 5%), 0 0 3rem rgb(213 164 63 / 14%); color: #dcb664; content: "VS"; font-size: .77rem; font-weight: 850; letter-spacing: .13em; transform: translate(-50%, -50%); }
+.engine-clash-page--finale .clash-orbit__rings { inset: 14% 8% 8%; }
+.engine-clash-page--finale .clash-orbit__rings span:nth-child(1) { inset: 8% 1% 18%; border: 1px solid rgb(210 165 70 / 26%); box-shadow: 0 0 2rem rgb(208 160 59 / 6%); }
+.engine-clash-page--finale .clash-orbit__rings span:nth-child(2) { inset: 0 7% 7%; border-color: rgb(212 166 70 / 13%); }
+.engine-clash-page--finale .clash-orbit__rings span:nth-child(3) { inset: 18% 16% 3%; border-color: rgb(212 166 70 / 9%); }
+.engine-clash-page--finale .clash-node { width: 18rem; color: #f8f0de; }
+.engine-clash-page--finale .clash-orbit--2 .clash-node--1 { top: 17%; left: 6%; }
+.engine-clash-page--finale .clash-orbit--2 .clash-node--2 { top: 17%; right: 6%; bottom: auto; left: auto; }
+.engine-clash-page--finale .clash-node::before { top: -3rem; width: 24rem; height: 16rem; background: radial-gradient(ellipse, color-mix(in srgb, var(--node-color) 24%, transparent), transparent 67%); filter: blur(2rem); }
+.engine-clash-page--finale .clash-node__beacon { z-index: 2; width: 5.8rem; height: 3rem; background: radial-gradient(ellipse, color-mix(in srgb, var(--node-color) 30%, transparent), transparent 68%); box-shadow: none; }
+.engine-clash-page--finale .clash-node__beacon::before { right: .3rem; bottom: .1rem; left: .3rem; height: 1.15rem; border: 1px solid rgb(223 181 92 / 35%); }
+.engine-clash-page--finale .clash-node__beacon::after { right: 1.15rem; bottom: .35rem; left: 1.15rem; height: .7rem; border: 1px solid rgb(223 181 92 / 19%); }
+.engine-clash-page--finale .clash-node__beacon > span { width: 4.15rem; height: 4.15rem; border: 1px solid color-mix(in srgb, var(--node-secondary) 68%, white); background: linear-gradient(145deg, color-mix(in srgb, var(--node-primary, var(--node-color)) 80%, white), var(--node-color)); box-shadow: 0 0 0 .3rem #0d0b07, 0 .8rem 2.2rem rgb(0 0 0 / 48%), 0 0 2.8rem color-mix(in srgb, var(--node-color) 28%, transparent); color: white; }
+.engine-clash-page--finale .clash-node__card { width: 100%; min-width: 0; min-height: 9.5rem; margin-top: -1rem; padding: 3.15rem 1.4rem 1.1rem; border: 1px solid color-mix(in srgb, var(--node-color) 62%, #4d432e); border-radius: 1rem; background: radial-gradient(circle at 50% 0, color-mix(in srgb, var(--node-color) 34%, transparent), transparent 58%), linear-gradient(145deg, color-mix(in srgb, var(--node-color) 24%, #17130d), color-mix(in srgb, var(--node-secondary) 16%, #080705)); box-shadow: inset 0 1px color-mix(in srgb, var(--node-secondary) 20%, transparent), 0 1.4rem 3.2rem rgb(0 0 0 / 38%), 0 0 2.5rem color-mix(in srgb, var(--node-color) 13%, transparent); color: #f7efdc; backdrop-filter: blur(18px); }
+.engine-clash-page--finale .clash-node__card strong { max-width: 15rem; color: #fff8e9; font-size: 1.35rem; letter-spacing: -.025em; }
+.engine-clash-page--finale .clash-node__card > span { margin-top: .35rem; color: color-mix(in srgb, var(--node-secondary) 68%, #ddd2b9); font-size: .7rem; letter-spacing: .03em; }
+.engine-clash-page--finale .clash-node__card small { margin-top: .75rem; padding: .35rem .7rem; border: 1px solid color-mix(in srgb, var(--node-color) 38%, transparent); background: color-mix(in srgb, var(--node-color) 16%, #0b0906); color: color-mix(in srgb, var(--node-secondary) 66%, white); }
+.engine-clash-page--finale .clash-node__card small i { background: var(--node-color); box-shadow: 0 0 .6rem var(--node-color); }
+.engine-clash-page--finale .clash-node--thinking .clash-node__beacon > span { animation: node-thinking 1.3s ease-in-out infinite; }
+.engine-clash-page--finale .clash-actions { margin-top: -2.4rem; }.engine-clash-page--finale .clash-primary-action { background: linear-gradient(135deg, #edcd79, #a8731c); box-shadow: 0 .8rem 2rem rgb(175 121 30 / 22%); color: #151006; }
+.engine-clash-page--finale .clash-cheer-rail { bottom: 1.25rem; width: min(calc(100% - 2rem), 42rem); padding: .5rem; border-color: rgb(222 177 81 / 20%); background: rgb(10 9 7 / 84%); box-shadow: inset 0 1px rgb(255 238 195 / 5%), 0 1rem 2.8rem rgb(0 0 0 / 38%); }
+.engine-clash-page--finale .clash-cheer-action { min-width: 11rem; border-color: color-mix(in srgb, var(--relay-primary) 68%, #65573a); background: linear-gradient(140deg, color-mix(in srgb, var(--relay-primary) 58%, #17130d), color-mix(in srgb, var(--relay-secondary) 42%, #090806)); box-shadow: 0 .45rem 1rem color-mix(in srgb, var(--relay-primary) 16%, transparent); color: white; }
+.engine-clash-page--finale .clash-cheer-action > span:first-child { background: linear-gradient(145deg, color-mix(in srgb, var(--relay-secondary) 72%, white), var(--relay-primary)); box-shadow: 0 .3rem .8rem color-mix(in srgb, var(--relay-primary) 24%, transparent); color: white; }
+.engine-clash-page--finale .clash-cheer-action small { color: color-mix(in srgb, var(--relay-secondary) 62%, white); }.engine-clash-page--finale .clash-cheer-action:hover { border-color: color-mix(in srgb, var(--relay-primary) 74%, white); box-shadow: 0 .65rem 1.5rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
+.engine-clash-page--finale .clash-status-card { border-color: rgb(219 174 79 / 18%); background: rgb(11 10 8 / 82%); box-shadow: inset 0 1px rgb(255 237 194 / 4%), 0 .8rem 2rem rgb(0 0 0 / 32%); color: #eee4cd; }
+.engine-clash-page--finale .clash-status-card__icon { background: rgb(211 165 70 / 10%); color: #d4a94f; }.engine-clash-page--finale .clash-status-card small, .engine-clash-page--finale .clash-status-card div > span { color: #80745e; }.engine-clash-page--finale .clash-status-card > i.active { background: #d6a94e; box-shadow: 0 0 0 .25rem rgb(214 169 78 / 9%); }
+.finale-symbols { position: absolute; z-index: 0; inset: 0; overflow: hidden; color: #d2a54a; pointer-events: none; }
+.finale-symbols span { position: absolute; display: block; opacity: .065; font-family: Georgia, serif; font-size: clamp(2.5rem, 5vw, 5.5rem); line-height: 1; filter: grayscale(1) sepia(1); }
+.finale-symbols span:nth-child(1) { top: 7%; left: 2%; transform: rotate(-12deg); }.finale-symbols span:nth-child(2) { top: 3%; left: 23%; transform: rotate(8deg); }.finale-symbols span:nth-child(3) { top: 17%; left: 42%; transform: rotate(-7deg); }.finale-symbols span:nth-child(4) { top: 4%; right: 25%; transform: rotate(13deg); }.finale-symbols span:nth-child(5) { top: 11%; right: 4%; transform: rotate(-10deg); }
+.finale-symbols span:nth-child(6) { top: 39%; left: 7%; transform: rotate(9deg); }.finale-symbols span:nth-child(7) { top: 45%; left: 25%; transform: rotate(-14deg); }.finale-symbols span:nth-child(8) { top: 36%; right: 27%; transform: rotate(11deg); }.finale-symbols span:nth-child(9) { top: 42%; right: 7%; transform: rotate(-7deg); }.finale-symbols span:nth-child(10) { bottom: 7%; left: 3%; transform: rotate(12deg); }
+.finale-podium { position: relative; display: grid; min-height: calc(100dvh - 2.85rem); overflow: hidden; place-items: center; padding: 4rem 1rem 5rem; background: radial-gradient(ellipse 45% 42% at 50% 42%, rgb(216 168 67 / 19%), transparent 72%), linear-gradient(145deg, #12100c, #070604 58%, #131009); color: #f3e7ca; }
+.finale-podium__glow { position: absolute; inset: 12% 23%; border-radius: 50%; background: #b98123; filter: blur(8rem); opacity: .13; }
+.finale-podium__symbols { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; color: #d4a748; font-size: clamp(3rem, 8vw, 8rem); opacity: .035; filter: grayscale(1) sepia(1); }.finale-podium__symbols span:nth-child(even) { align-self: end; transform: rotate(14deg); }.finale-podium__symbols span:nth-child(3n) { align-self: start; transform: rotate(-14deg); }
+.finale-podium__content { position: relative; z-index: 1; display: grid; width: min(64rem, 100%); justify-items: center; text-align: center; }.finale-podium__medal { font-size: clamp(3.5rem, 7vw, 5.5rem); filter: grayscale(.25) drop-shadow(0 1rem 1.4rem rgb(0 0 0 / 44%)); }.finale-podium__content > p { margin: .65rem 0 0; color: #c7a75f; font-size: .7rem; font-weight: 850; letter-spacing: .2em; text-transform: uppercase; }.finale-podium__content h1 { margin: .55rem 0 1.8rem; background: linear-gradient(180deg, #fff5d3, #d5a84e); color: #e7c46f; font-size: clamp(3rem, 8vw, 6.5rem); line-height: .95; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.finale-winning-bench { display: flex; flex-wrap: wrap; justify-content: center; gap: .7rem; width: 100%; }.finale-winning-bench article { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .7rem; min-width: 12rem; padding: .85rem 1rem; border: 1px solid rgb(215 170 78 / 20%); border-radius: .8rem; background: linear-gradient(145deg, rgb(34 29 19 / 94%), rgb(14 12 8 / 96%)); box-shadow: 0 .8rem 1.8rem rgb(0 0 0 / 28%); text-align: left; }.finale-winning-bench article > span { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid #ca9d42; border-radius: 50%; background: #171108; color: #e5c16d; font-size: .7rem; font-weight: 850; }.finale-winning-bench article div { display: grid; }.finale-winning-bench strong { color: #f6edd9; font-size: .8rem; }.finale-winning-bench small { color: #8f8268; font-size: .62rem; }
+.finale-podium__stand { display: grid; width: min(36rem, 85%); min-height: 6.5rem; margin-top: 1.1rem; place-content: center; border: 1px solid rgb(229 188 98 / 28%); border-radius: .8rem .8rem 0 0; background: linear-gradient(145deg, #a97721, #4d330d); box-shadow: inset 0 1px rgb(255 238 187 / 16%), 0 1.2rem 2.4rem rgb(0 0 0 / 37%); }.finale-podium__stand span { color: #ead18f; font-size: .62rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }.finale-podium__stand strong { margin-top: .25rem; color: #fff4d5; font-size: 1.3rem; }.finale-cheer { display: inline-flex; align-items: center; gap: .55rem; min-height: 3.15rem; margin-top: 1.25rem; padding: 0 1.4rem; border: 1px solid #c6963d; border-radius: 999px; background: linear-gradient(145deg, #e1bb65, #9a6716); color: #171006; cursor: pointer; font: inherit; font-size: .78rem; font-weight: 850; box-shadow: 0 .8rem 1.8rem rgb(0 0 0 / 32%); }
+@media (max-width: 60rem) { .engine-clash-page--finale .clash-hero__content { padding-bottom: 2rem; }.engine-clash-page--finale .clash-orbit { height: auto; margin-top: 2rem; }.engine-clash-page--finale .clash-orbit::after { display: none; }.engine-clash-page--finale .clash-node { width: auto; }.engine-clash-page--finale .clash-node__card { width: min(100%, 18rem); }.engine-clash-page--finale .clash-actions { margin-top: 1.5rem; }.engine-clash-page--finale .clash-cheer-rail { margin-bottom: 1rem; } }
+.board-column { position: relative; }.kibitzer-bar { position: absolute; z-index: 5; top: 0; bottom: 0; left: -2.35rem; width: 1.8rem; overflow: hidden; border: 1px solid #31343a; border-radius: .35rem; background: #f4f4f2; box-shadow: 0 .25rem .7rem rgb(0 0 0 / 18%); }.kibitzer-bar__black { position: absolute; top: 0; right: 0; left: 0; min-height: 2%; background: #202124; transition: height .3s ease; }.kibitzer-bar strong { position: absolute; z-index: 1; top: 50%; left: 50%; padding: .18rem .12rem; border-radius: .2rem; background: rgb(255 255 255 / 82%); color: #111; font-size: .52rem; transform: translate(-50%, -50%) rotate(-90deg); white-space: nowrap; }.kibitzer-bar small { position: absolute; z-index: 1; bottom: .35rem; left: 50%; color: #777; font-size: .43rem; font-weight: 800; letter-spacing: .04em; transform: translateX(-50%) rotate(-90deg); transform-origin: center; white-space: nowrap; }
+@media (max-width: 38rem) { .finale-winning-bench article { min-width: min(100%, 9rem); }.kibitzer-bar { left: .25rem; opacity: .88; } }
 @media (prefers-reduced-motion: reduce) { .countdown-pulse-layer { display: none; } }
 </style>

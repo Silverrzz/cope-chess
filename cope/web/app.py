@@ -465,7 +465,7 @@ class StreamHub:
             engine_data = event.data.get("engine_data")
             if (
                 game_id is None
-                or side not in {"white", "black"}
+                or side not in {"white", "black", "kibitzer"}
                 or not isinstance(engine_data, dict)
             ):
                 return
@@ -702,8 +702,13 @@ def create_app(
         response.headers.setdefault("X-Frame-Options", "DENY")
         return response
 
+    @app.get("/events/{slug}/tournaments/{tournament_id}/stream")
     @app.get("/tournaments/{tournament_id}/events")
-    async def tournament_events(tournament_id: int, request: Request):
+    async def tournament_events(
+        tournament_id: int,
+        request: Request,
+        slug: str | None = None,
+    ):
         hub: StreamHub = request.app.state.stream_hub
         hub.bind_loop()
         event_ids = await asyncio.to_thread(_tournament_event_ids, request.app, tournament_id)
@@ -719,6 +724,10 @@ def create_app(
             _public_tournament_exists,
             request.app,
             tournament_id,
+            event_slug=(
+                slug if request.url.path.startswith("/events/") else None
+            ),
+            admin_authenticated=_admin_request_authenticated(request),
         ):
             raise HTTPException(status_code=404, detail="tournament not found")
 
@@ -1097,14 +1106,25 @@ def _touch_web_heartbeat(app: FastAPI) -> None:
         connection.close()
 
 
-def _public_tournament_exists(app: FastAPI, tournament_id: int) -> bool:
+def _public_tournament_exists(
+    app: FastAPI,
+    tournament_id: int,
+    *,
+    event_slug: str | None = None,
+    admin_authenticated: bool = False,
+) -> bool:
     connection = connect_database(app.state.db_path)
     try:
         tournament = get_tournament(connection, tournament_id)
-        return (
-            tournament is not None
-            and tournament.status != "draft"
-            and not _is_event_tournament(connection, tournament_id)
+        if tournament is None or tournament.status == "draft":
+            return False
+        if event_slug is None:
+            return not _is_event_tournament(connection, tournament_id)
+        event = get_event_by_slug(connection, event_slug)
+        return bool(
+            event is not None
+            and (_event_is_public(event) or admin_authenticated)
+            and _event_has_tournament(connection, event.id, tournament_id)
         )
     finally:
         connection.close()
@@ -1166,6 +1186,17 @@ def _is_event_tournament(connection: sqlite3.Connection, tournament_id: int) -> 
     return connection.execute(
         "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
         (tournament_id,),
+    ).fetchone() is not None
+
+
+def _event_has_tournament(
+    connection: sqlite3.Connection,
+    event_id: int,
+    tournament_id: int,
+) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM engine_relay_fixtures WHERE event_id = ? AND tournament_id = ?",
+        (event_id, tournament_id),
     ).fetchone() is not None
 
 
@@ -2895,11 +2926,14 @@ def _merge_engine_data(
         "white": dict(engine_data["white"]),
         "black": dict(engine_data["black"]),
     }
-    for side in ("white", "black"):
+    if isinstance(live_data.get("kibitzer"), dict):
+        merged["kibitzer"] = {}
+    for side in ("white", "black", "kibitzer"):
         if isinstance(live_data.get(side), dict):
+            merged.setdefault(side, {})
             merged[side].update(
                 {
-                    key: str(value)
+                    key: value
                     for key, value in live_data[side].items()
                     if key in {
                         "depth",
@@ -2912,6 +2946,9 @@ def _merge_engine_data(
                         "pv_san",
                         "info",
                         "root_fen",
+                        "engine_id",
+                        "eval_cp",
+                        "eval_mate",
                     }
                 }
             )

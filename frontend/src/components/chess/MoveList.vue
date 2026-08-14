@@ -7,6 +7,7 @@ interface MoveCell {
   ply: number
   label: string
   isBook: boolean
+  annotation: { label: string; color?: string } | undefined
 }
 
 interface MoveRow {
@@ -22,6 +23,7 @@ const props = withDefaults(defineProps<{
   bookPlies?: number
   modelValue?: number
   title?: string
+  annotations?: Array<{ label: string; color?: string } | null>
 }>(), {
   moves: () => [],
   uciMoves: () => [],
@@ -29,6 +31,7 @@ const props = withDefaults(defineProps<{
   bookPlies: 0,
   modelValue: 0,
   title: 'Moves',
+  annotations: () => [],
 })
 
 const emit = defineEmits<{
@@ -47,6 +50,7 @@ const rows = computed<MoveRow[]>(() => {
       ply: index + 1,
       label: san || props.uciMoves[index] || `Move ${index + 1}`,
       isBook: index < props.bookPlies,
+      annotation: props.annotations[index] ?? undefined,
     }
     if (side === 'w') {
       result.push({ number, white: cell })
@@ -105,7 +109,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.white.isBook || undefined"
             :title="row.white.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.white.ply)"
-          >{{ row.white.label }}</button>
+          ><span>{{ row.white.label }}</span><small v-if="row.white.annotation" :style="{ color: row.white.annotation.color }">{{ row.white.annotation.label }}</small></button>
           <span v-else class="move-placeholder">...</span>
           <button
             v-if="row.black"
@@ -115,7 +119,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.black.isBook || undefined"
             :title="row.black.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.black.ply)"
-          >{{ row.black.label }}</button>
+          ><span>{{ row.black.label }}</span><small v-if="row.black.annotation" :style="{ color: row.black.annotation.color }">{{ row.black.annotation.label }}</small></button>
           <span v-else class="move-placeholder"></span>
         </li>
       </ol>
@@ -194,6 +198,7 @@ function scrollCurrentMoveIntoView(): void {
 }
 
 .move-row button {
+  display: grid;
   overflow: hidden;
   padding: 0.35rem 0.5rem;
   border: 0;
@@ -212,6 +217,15 @@ function scrollCurrentMoveIntoView(): void {
 .move-row button:hover {
   color: var(--color-accent, #2f78c4);
   background: color-mix(in srgb, var(--color-accent, #2f78c4) 9%, transparent);
+}
+
+.move-row button small {
+  overflow: hidden;
+  margin-top: 0.08rem;
+  font-size: 0.58rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .move-row button[data-book='true'] {

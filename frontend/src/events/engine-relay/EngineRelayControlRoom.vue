@@ -16,6 +16,7 @@ const props = defineProps<{ detail: EventDetailResponse }>();
 const emit = defineEmits<{ changed: [] }>();
 const toast = useToast();
 const payload = computed(() => props.detail.custom as EngineRelayPayload);
+const isFinale = computed(() => props.detail.event.handler_key === "engine-relay-finale");
 const pending = ref("");
 const error = ref("");
 const showTeamCreator = ref(false);
@@ -36,6 +37,9 @@ const fixtureForm = reactive({
   lag_compensation_ms: 50,
   max_moves: 200,
   scheduled_start_at: "",
+  kibitzer_engine_id: 0,
+  kibitzer_threads: 1,
+  kibitzer_hash_mb: 256,
 });
 const memberDrafts = reactive<Record<number, { engine_id: number; threads: number; hash_mb: number; position: number; label: string }>>({});
 const schedules = reactive<Record<number, string>>({});
@@ -43,9 +47,10 @@ const schedules = reactive<Record<number, string>>({});
 const readyTeams = computed(() => payload.value.teams.filter((team) => team.roster.length));
 const projectedGames = computed(() => {
   const teamCount = fixtureForm.team_ids.length;
+  if (isFinale.value) return teamCount === 2 ? 2 : 0;
   return teamCount < 2 ? 0 : teamCount * (teamCount - 1) * Math.max(1, Number(fixtureForm.cycles) || 1);
 });
-const fixtureSelectionValid = computed(() => fixtureForm.team_ids.length >= 2);
+const fixtureSelectionValid = computed(() => isFinale.value ? fixtureForm.team_ids.length === 2 : fixtureForm.team_ids.length >= 2);
 
 watch(
   () => props.detail.event.published_at,
@@ -145,12 +150,19 @@ function deleteMember(team: RelayTeam, member: RelayRosterMember): void {
 
 function toggleFixtureTeam(teamId: number): void {
   const index = fixtureForm.team_ids.indexOf(teamId);
-  if (index < 0) fixtureForm.team_ids.push(teamId);
+  if (index < 0) {
+    if (isFinale.value && fixtureForm.team_ids.length >= 2) fixtureForm.team_ids.shift();
+    fixtureForm.team_ids.push(teamId);
+  }
   else fixtureForm.team_ids.splice(index, 1);
 }
 
 function selectAllFixtureTeams(): void {
-  fixtureForm.team_ids = readyTeams.value.map((team) => team.id);
+  fixtureForm.team_ids = readyTeams.value.slice(0, isFinale.value ? 2 : undefined).map((team) => team.id);
+}
+
+function selectKibitzer(selection: number[]): void {
+  fixtureForm.kibitzer_engine_id = selection[0] ?? 0;
 }
 
 function fixtureTeamNames(fixture: RelayFixture): string {
@@ -177,9 +189,12 @@ function createFixture(): void {
         lag_compensation_ms: Number(fixtureForm.lag_compensation_ms),
         adjudication: { draw: null, resign: null, max_moves: fixtureForm.max_moves ? Number(fixtureForm.max_moves) : null },
         scheduled_start_at: fixtureForm.scheduled_start_at ? new Date(fixtureForm.scheduled_start_at).toISOString() : null,
+        kibitzer_engine_id: fixtureForm.kibitzer_engine_id || null,
+        kibitzer_threads: Number(fixtureForm.kibitzer_threads),
+        kibitzer_hash_mb: Number(fixtureForm.kibitzer_hash_mb),
       },
     });
-    Object.assign(fixtureForm, { title: "", team_ids: [], cycles: 1, opening_suite_id: "", scheduled_start_at: "" });
+    Object.assign(fixtureForm, { title: "", team_ids: [], cycles: 1, opening_suite_id: "", scheduled_start_at: "", kibitzer_engine_id: 0, kibitzer_threads: 1, kibitzer_hash_mb: 256 });
     return response;
   });
 }
@@ -205,6 +220,7 @@ function deleteFixture(fixture: RelayFixture): void {
 }
 
 function fixtureCycles(fixture: RelayFixture): number | string {
+  if (isFinale.value) return "Sudden death";
   const options = fixture.tournament?.config?.format_options as { cycles?: number } | undefined;
   return options?.cycles ?? "—";
 }
@@ -265,26 +281,27 @@ function fixtureCycles(fixture: RelayFixture): number | string {
           <header><span>New fixture</span><h3>Set up a match</h3></header>
           <label class="fixture-builder__wide"><span>Fixture name</span><input v-model="fixtureForm.title" class="input" required placeholder="Heat 1"></label>
           <fieldset class="fixture-team-picker fixture-builder__wide">
-            <legend>Round-robin teams</legend>
+            <legend>{{ isFinale ? 'Finale teams' : 'Round-robin teams' }}</legend>
             <header><span>{{ fixtureForm.team_ids.length }} selected</span><span><button type="button" @click="selectAllFixtureTeams">Select all</button><button type="button" @click="fixtureForm.team_ids = []">Clear</button></span></header>
             <div><label v-for="team in readyTeams" :key="team.id" :class="{ selected: fixtureForm.team_ids.includes(team.id) }"><input type="checkbox" :checked="fixtureForm.team_ids.includes(team.id)" @change="toggleFixtureTeam(team.id)"><span class="team-pick-swatch" :style="{ '--team-primary': team.primary_color, '--team-secondary': team.secondary_color }"><i></i><i></i></span><span><strong>{{ team.name }}</strong><small>{{ team.roster.length }} {{ team.roster.length === 1 ? 'engine' : 'engines' }}</small></span><AppIcon name="check" :size="14" /></label></div>
-            <small>Select at least two teams. Every pairing plays both colours in each cycle.</small>
+            <small>{{ isFinale ? 'Select exactly two teams. A tied colour-swapped pair triggers another pair.' : 'Select at least two teams. Every pairing plays both colours in each cycle.' }}</small>
           </fieldset>
-          <label><span>Round-robin cycles</span><input v-model.number="fixtureForm.cycles" class="input" type="number" min="1" max="1000"></label>
+          <label v-if="!isFinale"><span>Round-robin cycles</span><input v-model.number="fixtureForm.cycles" class="input" type="number" min="1" max="1000"></label>
           <label><span>Opening suite</span><select v-model="fixtureForm.opening_suite_id" class="input"><option value="">No opening suite</option><option v-for="suite in payload.opening_suites ?? []" :key="suite.id" :value="String(suite.id)">{{ suite.name }}</option></select></label>
           <label><span>Time · seconds</span><input v-model.number="fixtureForm.time_seconds" class="input" type="number" min="0.001" step="any"></label>
           <label><span>Increment · seconds</span><input v-model.number="fixtureForm.increment_seconds" class="input" type="number" min="0" step="any"></label>
           <label class="fixture-builder__wide"><span>Optional scheduled start</span><input v-model="fixtureForm.scheduled_start_at" class="input" type="datetime-local"></label>
           <button class="advanced-toggle" type="button" :aria-expanded="showAdvancedFixture" @click="showAdvancedFixture = !showAdvancedFixture"><span><AppIcon name="settings" :size="15" />Advanced settings</span><AppIcon name="chevron-down" :size="15" :class="{ rotated: showAdvancedFixture }" /></button>
-          <div v-if="showAdvancedFixture" class="advanced-fields"><label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label><label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label></div>
-          <div class="fixture-summary"><div><span>Teams</span><strong>{{ fixtureForm.team_ids.length }}</strong></div><div><span>Games</span><strong>{{ projectedGames }}</strong></div><div><span>Mode</span><strong>Round robin</strong></div></div>
+          <div v-if="showAdvancedFixture" class="advanced-fields"><label><span>Maximum full moves</span><input v-model.number="fixtureForm.max_moves" class="input" type="number" min="1"></label><label><span>Concurrency</span><input v-model.number="fixtureForm.concurrency" class="input" type="number" min="1"></label><div v-if="isFinale" class="kibitzer-picker"><span>Kibitzer engine</span><ParticipantPicker :model-value="fixtureForm.kibitzer_engine_id ? [fixtureForm.kibitzer_engine_id] : []" :engines="payload.engine_options ?? []" single @update:model-value="selectKibitzer" /></div><label v-if="isFinale"><span>Kibitzer threads</span><input v-model.number="fixtureForm.kibitzer_threads" class="input" type="number" min="1" max="1024"></label><label v-if="isFinale"><span>Kibitzer hash · MB</span><input v-model.number="fixtureForm.kibitzer_hash_mb" class="input" type="number" min="1"></label></div>
+          <div class="fixture-summary"><div><span>Teams</span><strong>{{ fixtureForm.team_ids.length }}</strong></div><div><span>Opening games</span><strong>{{ projectedGames }}</strong></div><div><span>Mode</span><strong>{{ isFinale ? 'Sudden death' : 'Round robin' }}</strong></div></div>
           <button class="button button--primary" type="submit" :disabled="!!pending || readyTeams.length < 2 || !fixtureSelectionValid">{{ pending === 'fixture-new' ? 'Creating…' : 'Create fixture' }}</button>
         </form>
 
         <div class="fixture-list">
           <article v-for="fixture in payload.fixtures" :key="fixture.id" class="panel fixture-card">
             <header><div><span>Fixture {{ fixture.position + 1 }}</span><h3>{{ fixture.title }}</h3><p>{{ fixtureTeamNames(fixture) }}</p></div><StatusBadge :status="fixture.tournament?.status ?? 'missing'" /></header>
-            <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Teams</dt><dd>{{ fixtureTeamCount(fixture) }}</dd></div><div><dt>Cycles</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
+            <dl><div><dt>Games</dt><dd>{{ fixture.games.length }}</dd></div><div><dt>Teams</dt><dd>{{ fixtureTeamCount(fixture) }}</dd></div><div><dt>{{ isFinale ? 'Format' : 'Cycles' }}</dt><dd>{{ fixtureCycles(fixture) }}</dd></div><div><dt>Starts</dt><dd>{{ formatDate(fixture.tournament?.scheduled_start_at) }}</dd></div></dl>
+            <div v-if="fixture.kibitzer" class="fixture-worker"><AppIcon name="activity" :size="14" /><span><strong>{{ fixture.kibitzer.name }} {{ fixture.kibitzer.version }}</strong> kibitzes with {{ fixture.kibitzer.threads }} threads and {{ fixture.kibitzer.hash_mb }} MB hash</span></div>
             <div v-if="fixture.worker" class="fixture-worker"><AppIcon name="server" :size="14" /><span><strong>{{ fixture.worker.label }}</strong> is {{ fixture.tournament?.status === 'scheduled' ? fixture.worker.prepared ? 'fully prepared and waiting for the scheduled start' : 'reserved and preparing this fixture' : 'dedicated to this fixture' }}</span><StatusBadge :status="fixture.worker.prepared ? 'ready' : fixture.worker.status" /></div>
             <div class="fixture-games"><RouterLink v-for="game in fixture.games" :key="game.id" :to="`/tournaments/${fixture.tournament_id}?game_id=${game.id}`"><span>G{{ game.game_number ?? game.id }}</span><strong>{{ game.result || game.status }}</strong></RouterLink><span v-if="!fixture.games.length">No games</span></div>
             <div v-if="fixture.tournament?.status === 'draft' || fixture.tournament?.status === 'scheduled'" class="fixture-schedule"><input v-model="schedules[fixture.id]" class="input" type="datetime-local"><button class="button button--secondary button--small" type="button" :disabled="!!pending || !schedules[fixture.id]" @click="scheduleFixture(fixture)">{{ fixture.tournament?.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button></div>
@@ -371,6 +388,7 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 .advanced-toggle .app-icon { transition: transform var(--transition-fast); }
 .advanced-toggle .rotated { transform: rotate(180deg); }
 .advanced-fields { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: .65rem; padding: .7rem; border-radius: .5rem; background: var(--color-surface-subtle); }
+.kibitzer-picker { display: grid; grid-column: 1 / -1; gap: .3rem; }.kibitzer-picker > span { color: var(--color-text-muted); font-size: .58rem; font-weight: 680; }
 .fixture-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); }
 .fixture-card { align-self: start; padding: 1rem; transition: border-color var(--transition-fast), box-shadow var(--transition-fast); }
 .fixture-card:hover { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-xs); }

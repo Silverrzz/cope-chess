@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 16
+PROTOCOL_VERSION = 17
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
@@ -248,6 +248,12 @@ class EngineRelayMember(StrictModel):
     position: int = Field(ge=0)
 
 
+class EngineRelayKibitzer(StrictModel):
+    engine_id: int = Field(gt=0)
+    threads: int = Field(gt=0)
+    hash_mb: int = Field(gt=0)
+
+
 class EngineRelayTeam(StrictModel):
     team_id: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=120)
@@ -268,6 +274,7 @@ class EngineRelayAssignment(StrictModel):
     event_id: int = Field(gt=0)
     fixture_id: int = Field(gt=0)
     teams: dict[ColorSlot, EngineRelayTeam]
+    kibitzer: EngineRelayKibitzer | None = None
 
     @field_validator("teams")
     @classmethod
@@ -285,6 +292,17 @@ class EngineRelayAssignment(StrictModel):
         if len(set(engine_ids)) != len(engine_ids):
             raise ValueError("an engine cannot play for both relay teams")
         return value
+
+    @model_validator(mode="after")
+    def validate_kibitzer(self) -> EngineRelayAssignment:
+        engine_ids = {
+            member.engine_id
+            for team in self.teams.values()
+            for member in team.members
+        }
+        if self.kibitzer is not None and self.kibitzer.engine_id in engine_ids:
+            raise ValueError("the relay kibitzer must be independent from both teams")
+        return self
 
 
 class GameAssignment(StrictModel):
@@ -677,7 +695,7 @@ class BenchmarkFailed(StrictModel):
 
 
 class Envelope(StrictModel):
-    v: Literal[16] = PROTOCOL_VERSION
+    v: Literal[17] = PROTOCOL_VERSION
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)

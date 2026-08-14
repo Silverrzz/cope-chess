@@ -37,6 +37,8 @@ export type IconName =
   | "search"
   | "server"
   | "settings"
+  | "step-back"
+  | "step-forward"
   | "stop"
   | "sun"
   | "tag"

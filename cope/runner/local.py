@@ -474,6 +474,8 @@ def run_worker_assignment_game(
             for member in team.members
         ),
     }
+    if relay is not None and relay.kibitzer is not None:
+        runtime_engine_ids.add(relay.kibitzer.engine_id)
     engine_instances = {
         engine_id: EngineInstance(
             engine_id,
@@ -498,6 +500,11 @@ def run_worker_assignment_game(
     black = engine_instances[
         black_member.engine_id if black_member is not None else game_record.black_engine_id
     ]
+    kibitzer = (
+        engine_instances[relay.kibitzer.engine_id]
+        if relay is not None and relay.kibitzer is not None
+        else None
+    )
     game = Game(
         id=game_record.id,
         white=white,
@@ -531,6 +538,12 @@ def run_worker_assignment_game(
                         info,
                     )
                 )
+        if kibitzer is not None:
+            kibitzer.set_info_listener(
+                lambda line, info: live_reporter.publish_engine_info(
+                    "kibitzer", kibitzer, line, info
+                )
+            )
     runner = GameRunner(
         game,
         on_clock_sync=live_reporter.publish_clock_sync,
@@ -685,6 +698,8 @@ def run_worker_assignment_game(
         and adjudicated is None
         and board.ply() < assignment.max_plies
     ):
+        if kibitzer is not None and kibitzer.is_searching():
+            kibitzer.stop_search()
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
         if relay is not None:
@@ -752,6 +767,8 @@ def run_worker_assignment_game(
                 clock_after_ms,
             ),
         )
+        if kibitzer is not None and not game.state.is_finished() and adjudicated is None:
+            kibitzer.start_search(board.copy(stack=False), "go infinite")
         if board.ply() <= 10 or board.ply() % 10 == 0:
             LOG.debug(
                 "recorded move game_id=%s ply=%s move=%s",
@@ -760,6 +777,8 @@ def run_worker_assignment_game(
                 move.uci(),
             )
 
+    if kibitzer is not None and kibitzer.is_searching():
+        kibitzer.stop_search()
     _validated_assignment_record(connection, assignment)
     progress(
         "play",
@@ -887,7 +906,7 @@ class _LiveGameReporter:
         self._white = white
         self._black = black
         self._relay_engine_data = relay_engine_data or {}
-        self._last_engine_info_at = {"white": 0.0, "black": 0.0}
+        self._last_engine_info_at = {"white": 0.0, "black": 0.0, "kibitzer": 0.0}
 
     def publish_white_engine_info(self, line: str, info: EngineSearchInfo) -> None:
         self._publish_engine_info("white", self._white, line, info)
@@ -1032,6 +1051,8 @@ def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, Any]:
         "nodes": f"{info.nodes:,}" if info.nodes is not None else "-",
         "hashfull": str(info.hashfull) if info.hashfull is not None else "-",
         "eval": _live_eval_label(info),
+        "eval_cp": info.eval_cp,
+        "eval_mate": info.eval_mate,
         "pv": info.pv or "not recorded",
     }
 
@@ -1232,11 +1253,12 @@ def _tournament_engine_options(
         if relay is not None
         else None
     )
+    kibitzer = relay.kibitzer if relay is not None and relay.kibitzer is not None and relay.kibitzer.engine_id == engine_id else None
     options["Threads"] = (
-        member.threads if member is not None else tournament.config.engine_threads
+        member.threads if member is not None else kibitzer.threads if kibitzer is not None else tournament.config.engine_threads
     )
     options["Hash"] = (
-        member.hash_mb if member is not None else tournament.config.engine_hash_mb
+        member.hash_mb if member is not None else kibitzer.hash_mb if kibitzer is not None else tournament.config.engine_hash_mb
     )
     return options
 

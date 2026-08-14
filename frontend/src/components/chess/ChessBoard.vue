@@ -6,6 +6,8 @@ import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import type { Key } from 'chessground/types'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import AppIcon from '@/components/ui/AppIcon.vue'
+
 import {
   buildPositions,
   materialSummary,
@@ -215,16 +217,16 @@ defineExpose({ selectPly, focusBoard })
     <div v-if="controls" class="board-controls">
       <div class="board-controls__buttons" role="group" aria-label="Replay controls">
         <button type="button" :disabled="selectedPly === 0" title="First position (Home)" aria-label="First position" @click="selectPly(0)">
-          <span aria-hidden="true">|&lt;</span>
+          <AppIcon name="step-back" />
         </button>
         <button type="button" :disabled="selectedPly === 0" title="Previous move (Left arrow)" aria-label="Previous move" @click="selectPly(selectedPly - 1)">
-          <span aria-hidden="true">&lt;</span>
+          <AppIcon name="chevron-left" />
         </button>
         <button type="button" :disabled="selectedPly === moves.length" title="Next move (Right arrow)" aria-label="Next move" @click="selectPly(selectedPly + 1)">
-          <span aria-hidden="true">&gt;</span>
+          <AppIcon name="chevron-right" />
         </button>
         <button type="button" :disabled="selectedPly === moves.length" title="Latest position (End)" aria-label="Latest position" @click="selectPly(moves.length)">
-          <span aria-hidden="true">&gt;|</span>
+          <AppIcon name="step-forward" />
         </button>
       </div>
       <p class="board-controls__status" aria-live="polite">{{ status }}</p>

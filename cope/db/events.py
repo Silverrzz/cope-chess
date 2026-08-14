@@ -462,7 +462,7 @@ def reconcile_engine_relay_event(
     if row is None:
         raise ValueError("event does not exist")
     current = _event_from_row(row)
-    if current.handler_key != "engine-relay":
+    if current.handler_key not in {"engine-relay", "engine-relay-finale"}:
         return current
     fixtures = tuple(
         connection.execute(
@@ -599,7 +599,7 @@ def reconcile_all_engine_relay_events(
     event_ids = tuple(
         int(row["id"])
         for row in connection.execute(
-            "SELECT id FROM events WHERE handler_key = 'engine-relay' ORDER BY id"
+            "SELECT id FROM events WHERE handler_key IN ('engine-relay', 'engine-relay-finale') ORDER BY id"
         )
     )
     return tuple(

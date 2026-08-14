@@ -280,6 +280,9 @@ CREATE TABLE IF NOT EXISTS engine_relay_fixtures (
   team_b_id BIGINT NOT NULL REFERENCES event_cast_members(id),
   anchor_a_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
   anchor_b_engine_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  kibitzer_engine_id BIGINT REFERENCES engine_versions(id),
+  kibitzer_threads INTEGER CHECK (kibitzer_threads IS NULL OR kibitzer_threads > 0),
+  kibitzer_hash_mb INTEGER CHECK (kibitzer_hash_mb IS NULL OR kibitzer_hash_mb > 0),
   title TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0),
   created_at TEXT NOT NULL,
@@ -287,6 +290,10 @@ CREATE TABLE IF NOT EXISTS engine_relay_fixtures (
   CHECK (anchor_a_engine_id <> anchor_b_engine_id),
   UNIQUE (event_id, position)
 );
+
+ALTER TABLE engine_relay_fixtures ADD COLUMN IF NOT EXISTS kibitzer_engine_id BIGINT REFERENCES engine_versions(id);
+ALTER TABLE engine_relay_fixtures ADD COLUMN IF NOT EXISTS kibitzer_threads INTEGER CHECK (kibitzer_threads IS NULL OR kibitzer_threads > 0);
+ALTER TABLE engine_relay_fixtures ADD COLUMN IF NOT EXISTS kibitzer_hash_mb INTEGER CHECK (kibitzer_hash_mb IS NULL OR kibitzer_hash_mb > 0);
 
 CREATE TABLE IF NOT EXISTS engine_relay_fixture_teams (
   fixture_id BIGINT NOT NULL REFERENCES engine_relay_fixtures(id) ON DELETE CASCADE,
@@ -901,7 +908,7 @@ CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_anchor ON engine_relay
 CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
   WHERE event_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 37)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 38)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

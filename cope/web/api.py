@@ -932,16 +932,26 @@ def register_api_routes(app: FastAPI) -> None:
             web_app._publish_event_chat_message(request, event.id, message)
         return _json({"message": message}, status_code=201)
 
+    @app.get("/api/events/{slug}/tournaments/{tournament_id}")
     @app.get("/api/tournaments/{tournament_id}")
     def public_tournament(
         tournament_id: int,
         request: Request,
+        slug: str | None = None,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=25, le=200),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
-        if web_app._is_event_tournament(connection, tournament_id):
+        if slug is not None and request.url.path.startswith("/api/events/"):
+            event = _require_viewable_event(connection, slug, request)
+            if not web_app._event_has_tournament(
+                connection,
+                event.id,
+                tournament_id,
+            ):
+                raise HTTPException(status_code=404, detail="Tournament not found.")
+        elif web_app._is_event_tournament(connection, tournament_id):
             raise HTTPException(status_code=404, detail="Event tournament.")
         if tournament.status == "draft":
             raise HTTPException(status_code=404, detail="Tournament not found.")

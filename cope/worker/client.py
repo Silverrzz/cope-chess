@@ -828,11 +828,17 @@ async def _serve_assignment(
         )
         commands_handled = 0
         play_started = False
+        infinite_searches: dict[int, asyncio.Task] = {}
         while True:
             envelope = await inbox.get()
             if envelope.type == "assignment_complete":
                 complete = AssignmentComplete.model_validate(envelope.data)
                 _validate_assignment_message(complete, assignment, "assignment_complete")
+                for engine_id, task in tuple(infinite_searches.items()):
+                    await asyncio.to_thread(engines[engine_id].stop_search)
+                    with contextlib.suppress(Exception):
+                        await task
+                infinite_searches.clear()
                 completion_received = True
                 LOG.info(
                     "assignment complete assignment_id=%s game_id=%s commands=%s",
@@ -849,6 +855,10 @@ async def _serve_assignment(
                     raise ProtocolValidationError(
                         f"assignment missing engine {stop.engine_id}"
                     )
+                task = infinite_searches.pop(stop.engine_id, None)
+                if task is not None:
+                    await asyncio.to_thread(engines[stop.engine_id].stop_search)
+                    await task
                 continue
 
             if envelope.type != "engine_command":
@@ -867,6 +877,23 @@ async def _serve_assignment(
             engine = engines.get(command.engine_id)
             if engine is None:
                 raise ProtocolValidationError(f"assignment missing engine {command.engine_id}")
+
+            if command.command.strip().lower() == "go infinite":
+                if command.engine_id in infinite_searches:
+                    raise ProtocolValidationError(f"engine {command.engine_id} is already searching")
+                play_started = True
+                infinite_searches[command.engine_id] = asyncio.create_task(
+                    _run_infinite_engine_search(
+                        websocket,
+                        engine,
+                        command,
+                        assignment.engines[command.engine_id].name,
+                        telemetry=telemetry,
+                        send_lock=send_lock,
+                        loop=loop,
+                    )
+                )
+                continue
 
             command_stage, command_substage, command_detail = _command_progress(
                 command.command,
@@ -1228,6 +1255,68 @@ async def _wait_for_engine_search(
             await command_task
         telemetry.discard(command.assignment_id, command.engine_id)
         return None
+
+
+async def _run_infinite_engine_search(
+    websocket,
+    engine: UciEngineProcess,
+    command: EngineCommand,
+    engine_name: str,
+    *,
+    telemetry: _WorkerTelemetryBatcher,
+    send_lock: asyncio.Lock,
+    loop,
+) -> None:
+    await _send_message(
+        websocket,
+        "engine_command_started",
+        EngineCommandStarted(**command.model_dump(exclude={"command"})),
+        lock=send_lock,
+    )
+    command_timer = _CommandTimer()
+    info_publisher = _EngineInfoPublisher(telemetry, command, loop, command_timer)
+    clock_task = asyncio.create_task(
+        _publish_engine_clock(command, telemetry, command_timer)
+    )
+    try:
+        result_lines, elapsed_ms = await asyncio.to_thread(
+            _handle_engine_command_timed,
+            engine,
+            command.command,
+            info_publisher.publish,
+            command_timer,
+        )
+        await info_publisher.finish()
+    except Exception as error:
+        await info_publisher.cancel()
+        await _send_message(
+            websocket,
+            "assignment_failed",
+            AssignmentFailed(
+                **command.model_dump(exclude={"command", "engine_id"}),
+                engine_id=command.engine_id,
+                engine_name=engine_name,
+                stage="runtime" if engine.process_started else "start",
+                error=(str(error).strip() or error.__class__.__name__)[-8000:],
+            ),
+            lock=send_lock,
+        )
+        return
+    finally:
+        clock_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await clock_task
+        telemetry.discard(command.assignment_id, command.engine_id)
+    await _send_message(
+        websocket,
+        "engine_command_result",
+        EngineCommandResult(
+            **command.model_dump(exclude={"command"}),
+            lines=_compact_search_result_lines(result_lines, elapsed_ms),
+            elapsed_ms=elapsed_ms,
+        ),
+        lock=send_lock,
+    )
 
 
 class _AssignmentProgressPublisher:

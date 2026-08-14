@@ -17,9 +17,11 @@ from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
     EngineRelayAssignment,
+    EngineRelayKibitzer,
     EngineRelayMember,
     EngineRelayTeam,
     IncrementTimeControl,
+    KnockoutFormatOptions,
     RoundRobinFormatOptions,
     TournamentConfig,
     TournamentFormat,
@@ -56,6 +58,7 @@ from .registry import EventModule, register_event_module
 
 
 MODULE_KEY = "engine-relay"
+FINALE_MODULE_KEY = "engine-relay-finale"
 MODULE_VERSION = 1
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _CHEER_CLIENT = re.compile(r"^[A-Za-z0-9-]{16,64}$")
@@ -70,6 +73,9 @@ class EngineRelayFixtureRecord:
     team_b_id: int
     anchor_a_engine_id: int
     anchor_b_engine_id: int
+    kibitzer_engine_id: int | None
+    kibitzer_threads: int | None
+    kibitzer_hash_mb: int | None
     title: str
     position: int
     created_at: str
@@ -134,6 +140,9 @@ class RelayFixturePayload(BaseModel):
     lag_compensation_ms: int = Field(default=50, ge=0, le=60_000)
     adjudication: AdjudicationConfig = Field(default_factory=AdjudicationConfig)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
+    kibitzer_engine_id: int | None = Field(default=None, gt=0)
+    kibitzer_threads: int = Field(default=1, gt=0, le=1024)
+    kibitzer_hash_mb: int = Field(default=256, gt=0, le=1_048_576)
     scheduled_start_at: datetime | None = None
 
     @field_validator("title")
@@ -206,6 +215,9 @@ def _fixture_from_row(row: Any) -> EngineRelayFixtureRecord:
         team_b_id=int(row["team_b_id"]),
         anchor_a_engine_id=int(row["anchor_a_engine_id"]),
         anchor_b_engine_id=int(row["anchor_b_engine_id"]),
+        kibitzer_engine_id=None if row["kibitzer_engine_id"] is None else int(row["kibitzer_engine_id"]),
+        kibitzer_threads=None if row["kibitzer_threads"] is None else int(row["kibitzer_threads"]),
+        kibitzer_hash_mb=None if row["kibitzer_hash_mb"] is None else int(row["kibitzer_hash_mb"]),
         title=str(row["title"]),
         position=int(row["position"]),
         created_at=str(row["created_at"]),
@@ -349,6 +361,11 @@ def relay_assignment_for_game(
             ColorSlot.WHITE: _team_assignment(connection, fixture.event_id, white_team),
             ColorSlot.BLACK: _team_assignment(connection, fixture.event_id, black_team),
         },
+        kibitzer=None if fixture.kibitzer_engine_id is None else EngineRelayKibitzer(
+            engine_id=fixture.kibitzer_engine_id,
+            threads=fixture.kibitzer_threads or 1,
+            hash_mb=fixture.kibitzer_hash_mb or 256,
+        ),
     )
 
 
@@ -359,11 +376,14 @@ def relay_engine_ids_for_game(
     relay = relay_assignment_for_game(connection, game)
     if relay is None:
         return ()
-    return tuple(
+    engine_ids = tuple(
         member.engine_id
         for team in relay.teams.values()
         for member in team.members
     )
+    if relay.kibitzer is not None:
+        return (*engine_ids, relay.kibitzer.engine_id)
+    return engine_ids
 
 
 def relay_engine_count_for_tournament(
@@ -376,7 +396,7 @@ def relay_engine_count_for_tournament(
     return sum(
         len(_team_members(connection, fixture.event_id, team_id))
         for team_id in (item.team_id for item in _fixture_teams(connection, fixture))
-    )
+    ) + (1 if fixture.kibitzer_engine_id is not None else 0)
 
 
 def relay_engine_ids_for_tournament(
@@ -386,12 +406,15 @@ def relay_engine_ids_for_tournament(
     fixture = _get_fixture_for_tournament(connection, tournament_id)
     if fixture is None:
         return ()
-    return tuple(
+    engine_ids = tuple(
         int(member.engine_version_id)
         for fixture_team in _fixture_teams(connection, fixture)
         for member in _team_members(connection, fixture.event_id, fixture_team.team_id)
         if member.engine_version_id is not None
     )
+    if fixture.kibitzer_engine_id is not None:
+        return (*engine_ids, fixture.kibitzer_engine_id)
+    return engine_ids
 
 
 def relay_resources_for_tournament(
@@ -409,11 +432,15 @@ def relay_resources_for_tournament(
             item for item in fixture_teams
             if item.anchor_engine_id in selected_anchors
         )
-    return tuple(
+    resources = tuple(
         _member_settings(member)[:2]
         for team_id in (item.team_id for item in fixture_teams)
         for member in _team_members(connection, fixture.event_id, team_id)
     )
+    if fixture.kibitzer_engine_id is not None:
+        team_threads = max((threads for threads, _ in resources), default=0)
+        return (*resources, (team_threads + (fixture.kibitzer_threads or 1), fixture.kibitzer_hash_mb or 256))
+    return resources
 
 
 def relay_engine_colors(assignment: Any) -> dict[int, str]:
@@ -554,11 +581,45 @@ def _fixture_payload(
                 "black_active_engine_id": black_active,
             }
         )
+    winner_team_id = None
+    if tournament is not None and tournament.status == "finished":
+        winner = connection.execute(
+            """
+            SELECT winner_engine_id
+            FROM tournament_matches
+            WHERE tournament_id = ? AND status IN ('finished', 'bye')
+            ORDER BY round DESC, match_index, id
+            LIMIT 1
+            """,
+            (tournament.id,),
+        ).fetchone()
+        if winner is not None and winner["winner_engine_id"] is not None:
+            winner_engine_id = int(winner["winner_engine_id"])
+            winner_team_id = next(
+                (
+                    item.team_id
+                    for item in fixture_teams
+                    if item.anchor_engine_id == winner_engine_id
+                ),
+                None,
+            )
+    kibitzer = None
+    if fixture.kibitzer_engine_id is not None:
+        engine = get_engine(connection, fixture.kibitzer_engine_id)
+        kibitzer = {
+            "engine_id": fixture.kibitzer_engine_id,
+            "name": "Kibitzer" if engine is None else engine.name,
+            "version": "" if engine is None else engine.version,
+            "threads": fixture.kibitzer_threads or 1,
+            "hash_mb": fixture.kibitzer_hash_mb or 256,
+        }
     return {
         **asdict(fixture),
         "tournament": None if tournament is None else asdict(tournament),
         "worker": None if worker is None else dict(worker),
         "games": game_payloads,
+        "winner_team_id": winner_team_id,
+        "kibitzer": kibitzer,
         "teams": [
             {
                 "id": item.team_id,
@@ -592,7 +653,7 @@ def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool)
     payload: dict[str, Any] = {
         "teams": teams,
         "fixtures": fixtures,
-        "format": "engine-relay",
+        "format": event.handler_key,
     }
     if admin:
         payload["engine_options"] = [
@@ -624,7 +685,7 @@ def _admin_payload(connection: sqlite3.Connection, event: EventRecord) -> dict[s
 
 def _required_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
     event = get_event(connection, event_id)
-    if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
+    if event is None or event.handler_key not in {MODULE_KEY, FINALE_MODULE_KEY} or event.handler_version != MODULE_VERSION:
         raise HTTPException(status_code=404, detail="Engine relay event not found.")
     return event
 
@@ -710,6 +771,8 @@ def _validate_member_compatibility(
                 if member.engine_version_id is not None
             ),
         }
+        if fixture.kibitzer_engine_id is not None:
+            engine_ids.add(fixture.kibitzer_engine_id)
         engines = tuple(get_engine(connection, value) for value in engine_ids)
         if any(item is None for item in engines) or get_common_benchmark_reference(
             connection,
@@ -763,7 +826,7 @@ def _register_api(app: FastAPI) -> None:
         event = get_event_by_slug(connection, slug)
         if (
             event is None
-            or event.handler_key != MODULE_KEY
+            or event.handler_key not in {MODULE_KEY, FINALE_MODULE_KEY}
             or event.handler_version != MODULE_VERSION
         ):
             raise HTTPException(status_code=404, detail="Engine relay event not found.")
@@ -791,7 +854,7 @@ def _register_api(app: FastAPI) -> None:
         event = get_event_by_slug(connection, slug)
         if (
             event is None
-            or event.handler_key != MODULE_KEY
+            or event.handler_key not in {MODULE_KEY, FINALE_MODULE_KEY}
             or event.handler_version != MODULE_VERSION
         ):
             raise HTTPException(status_code=404, detail="Engine relay event not found.")
@@ -1038,7 +1101,10 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        event = _required_event(connection, event_id)
+        finale = event.handler_key == FINALE_MODULE_KEY
+        if finale and len(payload.team_ids) != 2:
+            raise HTTPException(status_code=422, detail="A sudden-death finale requires exactly two teams.")
         teams = tuple(
             _required_team(connection, event_id, team_id)
             for team_id in payload.team_ids
@@ -1057,6 +1123,10 @@ def _register_api(app: FastAPI) -> None:
         engine_ids = [member.engine_id for team in relay_teams for member in team.members]
         if len(set(engine_ids)) != len(engine_ids):
             raise HTTPException(status_code=409, detail="An engine version cannot play for both relay teams.")
+        if payload.kibitzer_engine_id is not None:
+            if payload.kibitzer_engine_id in engine_ids:
+                raise HTTPException(status_code=409, detail="The kibitzer must be independent from both relay benches.")
+            engine_ids.append(payload.kibitzer_engine_id)
         engines = tuple(get_engine(connection, engine_id) for engine_id in engine_ids)
         if any(engine is None for engine in engines):
             raise HTTPException(status_code=422, detail="Every relay engine must still be available.")
@@ -1064,8 +1134,8 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=409, detail="The full relay roster does not share a benchmark hardware reference yet.")
         anchors = [team.members[0].engine_id for team in relay_teams]
         config = TournamentConfig(
-            format=TournamentFormat.ROUND_ROBIN,
-            format_options=RoundRobinFormatOptions(cycles=payload.cycles),
+            format=TournamentFormat.KNOCKOUT if finale else TournamentFormat.ROUND_ROBIN,
+            format_options=KnockoutFormatOptions() if finale else RoundRobinFormatOptions(cycles=payload.cycles),
             participants=anchors,
             time_control=IncrementTimeControl(
                 initial_ms=payload.initial_ms,
@@ -1090,9 +1160,11 @@ def _register_api(app: FastAPI) -> None:
             """
             INSERT INTO engine_relay_fixtures (
               event_id, tournament_id, team_a_id, team_b_id,
-              anchor_a_engine_id, anchor_b_engine_id, title, position, created_at
+              anchor_a_engine_id, anchor_b_engine_id,
+              kibitzer_engine_id, kibitzer_threads, kibitzer_hash_mb,
+              title, position, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -1101,6 +1173,9 @@ def _register_api(app: FastAPI) -> None:
                 payload.team_ids[1],
                 anchors[0],
                 anchors[1],
+                payload.kibitzer_engine_id,
+                payload.kibitzer_threads if payload.kibitzer_engine_id is not None else None,
+                payload.kibitzer_hash_mb if payload.kibitzer_engine_id is not None else None,
                 payload.title,
                 position,
                 utc_now(),
@@ -1140,7 +1215,7 @@ def _register_api(app: FastAPI) -> None:
             {
                 "id": fixture_id,
                 "tournament_id": tournament_id,
-                "message": "Relay round-robin fixture created as an unrated tournament.",
+                "message": "Sudden-death relay finale created." if finale else "Relay round-robin fixture created as an unrated tournament.",
             },
             201,
         )
@@ -1316,6 +1391,55 @@ def _provision(connection: sqlite3.Connection) -> int:
     return event_id
 
 
+def _provision_finale(connection: sqlite3.Connection) -> int:
+    event_id = create_event(
+        connection,
+        slug="engine-relay-finale",
+        handler_key=FINALE_MODULE_KEY,
+        handler_version=MODULE_VERSION,
+        title="Engine Relay Finale",
+        subtitle="One pair decides everything.",
+        summary="Two engine benches trade the position until one team wins a colour-swapped pair and claims the finale.",
+        description="A sudden-death relay exhibition where every engine handoff matters and a tied pair immediately sends both benches back out for another.",
+        rules="Each match begins with a colour-swapped pair of unrated games. If the pair is tied, another pair starts. The first team to outscore its opponent across a completed pair wins the event.",
+        status="draft",
+        featured=True,
+        theme={
+            "primary": "#d5a72d",
+            "accent": "#f5cf62",
+            "background": "#100c02",
+            "surface": "#211804",
+            "text": "#fff8d8",
+        },
+        config={"module": FINALE_MODULE_KEY},
+    )
+    create_event_cast_member(
+        connection,
+        event_id,
+        member_key="team-one",
+        kind="team",
+        display_name="Team One",
+        short_name="ONE",
+        role="finale bench",
+        accent_color="#d5a72d",
+        position=0,
+        metadata={"secondary_color": "#f5cf62", "motto": ""},
+    )
+    create_event_cast_member(
+        connection,
+        event_id,
+        member_key="team-two",
+        kind="team",
+        display_name="Team Two",
+        short_name="TWO",
+        role="finale bench",
+        accent_color="#8b6a18",
+        position=1,
+        metadata={"secondary_color": "#e9c85b", "motto": ""},
+    )
+    return event_id
+
+
 register_event_module(
     EventModule(
         key=MODULE_KEY,
@@ -1325,5 +1449,16 @@ register_event_module(
         public_payload=_public_payload,
         admin_payload=_admin_payload,
         register_api=_register_api,
+    )
+)
+
+register_event_module(
+    EventModule(
+        key=FINALE_MODULE_KEY,
+        label="Engine Relay Finale",
+        version=MODULE_VERSION,
+        provision=_provision_finale,
+        public_payload=_public_payload,
+        admin_payload=_admin_payload,
     )
 )
