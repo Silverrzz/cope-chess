@@ -6,7 +6,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-PROTOCOL_VERSION = 17
+WORKER_PROTOCOL_VERSION = 17
+BENCHMARK_PROTOCOL_VERSION = 16
+PROTOCOL_VERSION = WORKER_PROTOCOL_VERSION
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
@@ -694,9 +696,17 @@ class BenchmarkFailed(StrictModel):
     output: str = Field(default="", max_length=64_000)
 
 
-class Envelope(StrictModel):
-    v: Literal[17] = PROTOCOL_VERSION
+class _EnvelopeBase(StrictModel):
+    v: int
     type: str = Field(min_length=1)
     seq: int = Field(ge=0)
     t_mono_ms: int = Field(ge=0)
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class Envelope(_EnvelopeBase):
+    v: Literal[17] = WORKER_PROTOCOL_VERSION
+
+
+class BenchmarkEnvelope(_EnvelopeBase):
+    v: Literal[16] = BENCHMARK_PROTOCOL_VERSION

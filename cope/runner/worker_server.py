@@ -32,7 +32,7 @@ from cope.core.models import (
     EngineInfo,
     EngineStop,
     Envelope,
-    PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION,
     WorkerResources,
     WorkerResourceTelemetry,
     WorkerSessionHello,
@@ -1416,7 +1416,7 @@ class WorkerHandshakeServer:
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
-                protocol_version=PROTOCOL_VERSION,
+                protocol_version=WORKER_PROTOCOL_VERSION,
                 machine_id=hello.machine_id,
                 hw=hello.hw,
             )

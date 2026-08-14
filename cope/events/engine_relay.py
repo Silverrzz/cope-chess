@@ -6,7 +6,7 @@ import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -112,6 +112,7 @@ class RelayTeamPayload(BaseModel):
 
 class RelayCheerPayload(BaseModel):
     team_id: int = Field(gt=0)
+    side: Literal["left", "right"] | None = None
 
 
 class RelayMemberPayload(BaseModel):
@@ -846,6 +847,12 @@ def _register_api(app: FastAPI) -> None:
         supplied_client = request.headers.get("x-cope-cheer-client", "")
         client_key = supplied_client if _CHEER_CLIENT.fullmatch(supplied_client) else client_host
         if not hub.allow_ephemeral(
+            f"cheer-host:{slug}:{client_host}",
+            rate=12.0,
+            burst=24,
+        ):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
+        if not hub.allow_ephemeral(
             f"cheer-client:{slug}:{client_host}:{client_key}",
             rate=4.0,
             burst=8,
@@ -872,7 +879,12 @@ def _register_api(app: FastAPI) -> None:
             burst=30,
         ):
             raise HTTPException(status_code=429, detail="The crowd is cheering too quickly.")
-        cheer = {"id": secrets.token_hex(8), "event_id": event.id, "team_id": payload.team_id}
+        cheer = {
+            "id": secrets.token_hex(8),
+            "event_id": event.id,
+            "team_id": payload.team_id,
+            "side": payload.side,
+        }
         hub.publish(
             f"event.{event.id}",
             "event.cheer",

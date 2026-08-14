@@ -34,9 +34,9 @@ from cope.core.models import (
 )
 from cope.core.protocol import (
     ProtocolValidationError,
-    decode_envelope,
+    decode_benchmark_envelope,
     encode_message,
-    make_message,
+    make_benchmark_message,
 )
 from cope.worker.client import _detect_hardware, _detect_machine_id, _restart_arguments
 from cope.worker.update import install_client_release
@@ -153,8 +153,10 @@ async def _run_connection(
         hardware_key,
     )
     async with connect(connection_config.server_url, max_size=128_000) as websocket:
-        await websocket.send(encode_message(make_message("benchmark_hello", hello)))
-        envelope = decode_envelope(await websocket.recv())
+        await websocket.send(
+            encode_message(make_benchmark_message("benchmark_hello", hello))
+        )
+        envelope = decode_benchmark_envelope(await websocket.recv())
         if envelope.type != "benchmark_welcome":
             raise ProtocolValidationError(
                 f"expected benchmark_welcome, got {envelope.type}"
@@ -174,7 +176,7 @@ async def _run_connection(
         if welcome.update is not None:
             return await _apply_benchmarker_update(websocket, welcome.update)
         while True:
-            envelope = decode_envelope(await websocket.recv())
+            envelope = decode_benchmark_envelope(await websocket.recv())
             if envelope.type == "benchmarker_update":
                 update = BenchmarkerUpdateCommand.model_validate(envelope.data)
                 return await _apply_benchmarker_update(websocket, update)
@@ -193,7 +195,9 @@ async def _run_connection(
                 welcome.session_id,
                 send_progress=progress_supported,
             )
-            await websocket.send(encode_message(make_message(message_type, result)))
+            await websocket.send(
+                encode_message(make_benchmark_message(message_type, result))
+            )
 
 
 async def _run_benchmark_with_progress(
@@ -268,13 +272,13 @@ async def _run_benchmark_with_progress(
                         }
                     )
                     await websocket.send(
-                        encode_message(make_message("benchmark_progress", heartbeat))
+                        encode_message(make_benchmark_message("benchmark_progress", heartbeat))
                     )
                     last_sent_at = now
                 continue
             if send_progress:
                 await websocket.send(
-                    encode_message(make_message("benchmark_progress", progress))
+                    encode_message(make_benchmark_message("benchmark_progress", progress))
                 )
                 last_sent_at = time.monotonic()
         message_type, result = await task
@@ -315,7 +319,7 @@ async def _apply_benchmarker_update(
     }
     await websocket.send(
         encode_message(
-            make_message(
+            make_benchmark_message(
                 "benchmarker_update_status",
                 BenchmarkerUpdateStatus(
                     **status_fields,
@@ -328,7 +332,7 @@ async def _apply_benchmarker_update(
     try:
         await websocket.send(
             encode_message(
-                make_message(
+                make_benchmark_message(
                     "benchmarker_update_status",
                     BenchmarkerUpdateStatus(
                         **status_fields,
@@ -348,7 +352,7 @@ async def _apply_benchmarker_update(
         detail = (str(error).strip() or error.__class__.__name__)[:4000]
         await websocket.send(
             encode_message(
-                make_message(
+                make_benchmark_message(
                     "benchmarker_update_status",
                     BenchmarkerUpdateStatus(
                         **status_fields,
@@ -361,7 +365,7 @@ async def _apply_benchmarker_update(
         raise RuntimeError(f"benchmarker update failed: {detail}") from error
     await websocket.send(
         encode_message(
-            make_message(
+            make_benchmark_message(
                 "benchmarker_update_status",
                 BenchmarkerUpdateStatus(
                     **status_fields,

@@ -1,13 +1,16 @@
 """Shared models and protocol helpers."""
 
 from .models import (
+    BENCHMARK_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION,
     AdjudicationConfig,
     AssignmentCleanupComplete,
     AssignmentComplete,
     AssignmentFailed,
     AssignmentProgress,
     BenchInfo,
+    BenchmarkEnvelope,
     ColorSlot,
     DrawAdjudicationRule,
     EngineArtifactSpec,
@@ -53,20 +56,26 @@ from .models import (
 from .protocol import (
     ProtocolError,
     ProtocolValidationError,
+    decode_benchmark_envelope,
+    decode_benchmark_message,
     decode_envelope,
     decode_message,
     encode_message,
+    make_benchmark_message,
     make_message,
 )
 
 __all__ = [
+    "BENCHMARK_PROTOCOL_VERSION",
     "PROTOCOL_VERSION",
+    "WORKER_PROTOCOL_VERSION",
     "AdjudicationConfig",
     "AssignmentCleanupComplete",
     "AssignmentComplete",
     "AssignmentFailed",
     "AssignmentProgress",
     "BenchInfo",
+    "BenchmarkEnvelope",
     "ColorSlot",
     "DrawAdjudicationRule",
     "EngineArtifactSpec",
@@ -110,8 +119,11 @@ __all__ = [
     "BenchmarkerUpdateStatus",
     "ProtocolError",
     "ProtocolValidationError",
+    "decode_benchmark_envelope",
+    "decode_benchmark_message",
     "decode_envelope",
     "decode_message",
     "encode_message",
+    "make_benchmark_message",
     "make_message",
 ]

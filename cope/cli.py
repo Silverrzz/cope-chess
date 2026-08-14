@@ -407,9 +407,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.role == "version":
-        from .core.models import PROTOCOL_VERSION
+        from .core.models import BENCHMARK_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION
 
-        print(f"cope-chess version={_default_app_version()} protocol={PROTOCOL_VERSION}")
+        print(
+            f"cope-chess version={_default_app_version()} "
+            f"protocol={WORKER_PROTOCOL_VERSION} "
+            f"benchmark_protocol={BENCHMARK_PROTOCOL_VERSION}"
+        )
         return 0
 
     if args.role == "doctor":

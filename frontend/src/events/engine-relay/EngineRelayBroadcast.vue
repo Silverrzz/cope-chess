@@ -49,6 +49,12 @@ interface CheerBurst {
   pieces: CheerPiece[];
 }
 
+interface QueuedCheer {
+  id: string;
+  teamId: number;
+  side: "left" | "right" | null;
+}
+
 const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: "event" | "arena" }>(), { clockOffsetMs: 0, view: "event" });
 const { confettiEnabled } = useViewerSettings();
 const route = useRoute();
@@ -83,8 +89,11 @@ let audioPlayPending = false;
 let countdownAudioStarted = false;
 const soundPrimed = ref(false);
 let lastCheerRequestAt = 0;
+let cheerBatchTimer: number | undefined;
+let victoryRedirectTimer: number | undefined;
 const seenCheerIds = new Set<string>();
 const cheerTimers = new Set<number>();
+const queuedCheers: QueuedCheer[] = [];
 const headingElement = ref<HTMLElement | null>(null);
 const arenaElement = ref<HTMLElement | null>(null);
 const boardColumnElement = ref<HTMLElement | null>(null);
@@ -93,6 +102,7 @@ let headingResizeObserver: ResizeObserver | null = null;
 
 const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
 const countdownAudioLengthMs = 60_000;
+const victoryRedirectDelayMs = 4_000;
 const cheerClientId = typeof globalThis.crypto?.randomUUID === "function"
   ? globalThis.crypto.randomUUID()
   : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -372,6 +382,19 @@ watch(() => gameData.value?.engine_data?.white ?? null, (analysis) => {
 watch(() => gameData.value?.engine_data?.black ?? null, (analysis) => {
   if (analysis) blackAnalysis.value = analysis;
 }, { immediate: true });
+watch(finaleComplete, (complete) => {
+  if (props.view !== "arena" || !complete) {
+    if (victoryRedirectTimer !== undefined) window.clearTimeout(victoryRedirectTimer);
+    victoryRedirectTimer = undefined;
+    return;
+  }
+  if (victoryRedirectTimer !== undefined) return;
+  victoryRedirectTimer = window.setTimeout(() => {
+    victoryRedirectTimer = undefined;
+    closeStream();
+    void router.replace({ name: "event", params: { slug: props.detail.event.slug } });
+  }, victoryRedirectDelayMs);
+}, { immediate: true });
 
 onMounted(() => {
   selectInitial();
@@ -400,6 +423,7 @@ onBeforeUnmount(() => {
   closeStream();
   if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
   if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  if (victoryRedirectTimer !== undefined) window.clearTimeout(victoryRedirectTimer);
   document.removeEventListener("visibilitychange", handleCountdownResume);
   window.removeEventListener("focus", handleCountdownResume);
   window.removeEventListener("pageshow", handleCountdownResume);
@@ -412,6 +436,8 @@ onBeforeUnmount(() => {
   headingResizeObserver?.disconnect();
   window.removeEventListener("resize", scheduleArenaFit);
   window.visualViewport?.removeEventListener("resize", scheduleArenaFit);
+  if (cheerBatchTimer !== undefined) window.clearTimeout(cheerBatchTimer);
+  queuedCheers.length = 0;
   for (const timer of cheerTimers) window.clearTimeout(timer);
   cheerTimers.clear();
   releaseCountdownAudio();
@@ -672,14 +698,14 @@ function setGamePage(page: number): void {
   void router.push({ query: { ...route.query, page: String(page), tab: "games" } });
 }
 
-async function cheer(team: RelayTeam | null): Promise<void> {
+async function cheer(team: RelayTeam | null, side?: "left" | "right"): Promise<void> {
   if (!team) return;
   const now = Date.now();
   if (now - lastCheerRequestAt < 350) return;
   lastCheerRequestAt = now;
   try {
     await api.post(`/api/events/${encodeURIComponent(props.detail.event.slug)}/engine-relay/cheers`, {
-      body: { team_id: team.id },
+      body: { team_id: team.id, side },
       headers: { "X-Cope-Cheer-Client": cheerClientId },
     });
   } catch {
@@ -687,49 +713,88 @@ async function cheer(team: RelayTeam | null): Promise<void> {
   }
 }
 
+function cheerFromFinale(team: RelayTeam | null, side: "left" | "right", event: MouseEvent): void {
+  if (!team || !(event.currentTarget instanceof HTMLElement)) return;
+  void cheer(team, side);
+}
+
 function handleCheerEvent(event: Event): void {
-  const detail = (event as CustomEvent<{ id?: string; team_id?: number }>).detail;
+  const detail = (event as CustomEvent<{ id?: string; team_id?: number; side?: string | null }>).detail;
   const teamId = Number(detail?.team_id);
   const cheerId = typeof detail?.id === "string" ? detail.id : "";
   if (!Number.isFinite(teamId) || !cheerId || seenCheerIds.has(cheerId)) return;
   seenCheerIds.add(cheerId);
   if (seenCheerIds.size > 128) seenCheerIds.delete(seenCheerIds.values().next().value!);
-  launchCheer(teamId, cheerId);
+  queuedCheers.push({ id: cheerId, teamId, side: detail.side === "left" || detail.side === "right" ? detail.side : null });
+  if (cheerBatchTimer === undefined) cheerBatchTimer = window.setTimeout(flushCheerEvents, 75);
 }
 
-function launchCheer(teamId: number, cheerId: string): void {
+function flushCheerEvents(): void {
+  cheerBatchTimer = undefined;
+  const batches = new Map<string, QueuedCheer[]>();
+  for (const cheerEvent of queuedCheers.splice(0)) {
+    const fallbackSide = cheerEvent.id.charCodeAt(cheerEvent.id.length - 1) % 2 === 0 ? "left" : "right";
+    const side = cheerEvent.side ?? fallbackSide;
+    const key = `${cheerEvent.teamId}:${finaleComplete.value ? side : "team"}`;
+    const batch = batches.get(key) ?? [];
+    batch.push({ ...cheerEvent, side });
+    batches.set(key, batch);
+  }
+  for (const batch of batches.values()) {
+    const first = batch[0];
+    if (!first) continue;
+    if (finaleComplete.value) {
+      const side = first.side ?? "left";
+      const button = document.querySelector<HTMLElement>(`.finale-cheer--${side}`);
+      const bounds = button?.getBoundingClientRect();
+      launchCheer(first.teamId, first.id, {
+        side,
+        x: bounds ? ((bounds.left + bounds.width / 2) / window.innerWidth) * 100 : side === "left" ? 4 : 96,
+        y: bounds ? ((bounds.top + bounds.height / 2) / window.innerHeight) * 100 : 94,
+        large: true,
+        count: batch.length,
+      });
+    } else {
+      launchCheer(first.teamId, first.id, { count: batch.length });
+    }
+  }
+}
+
+function launchCheer(teamId: number, cheerId: string, origin?: { side?: "left" | "right"; x?: number; y?: number; large?: boolean; count: number }): void {
   const team = payload.value.teams.find((item) => item.id === teamId);
   if (!team || !confettiEnabled.value || cheerBursts.value.length >= 6) return;
-  const side = team.id === blackTeam.value?.id ? "right" : "left";
+  const side = origin?.side ?? (team.id === blackTeam.value?.id ? "right" : "left");
   const teamCard = document.querySelector<HTMLElement>(`[data-relay-team-id="${teamId}"]`);
   const cardBounds = teamCard?.getBoundingClientRect();
+  const large = origin?.large ?? false;
+  const count = origin?.count ?? 1;
   const burst: CheerBurst = {
     id: cheerId,
     color: team.primary_color,
     side,
-    x: cardBounds
+    x: origin?.x ?? (cardBounds
       ? ((cardBounds.left + cardBounds.width * (.38 + Math.random() * .24)) / window.innerWidth) * 100
-      : side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13,
-    y: cardBounds
+      : side === "left" ? 4 + Math.random() * 13 : 83 + Math.random() * 13),
+    y: origin?.y ?? (cardBounds
       ? ((cardBounds.top + cardBounds.height * (.32 + Math.random() * .28)) / window.innerHeight) * 100
-      : 18 + Math.random() * 65,
-    pieces: Array.from({ length: 12 }, (_, index) => ({
+      : 18 + Math.random() * 65),
+    pieces: Array.from({ length: large ? Math.min(60, 30 + count * 6) : Math.min(24, 10 + count * 4) }, (_, index) => ({
       id: index,
-      startX: -1.4 + Math.random() * 2.8,
-      startY: -.7 + Math.random() * 1.4,
-      endX: -5.8 + Math.random() * 11.6,
-      endY: -3.2 - Math.random() * 5.6,
-      rotation: -260 + Math.random() * 520,
-      delay: Math.random() * 140,
-      duration: 720 + Math.random() * 330,
-      size: .18 + Math.random() * .2,
+      startX: (large ? -2.2 : -1.4) + Math.random() * (large ? 4.4 : 2.8),
+      startY: (large ? -1.1 : -.7) + Math.random() * (large ? 2.2 : 1.4),
+      endX: large ? (side === "left" ? 1.5 + Math.random() * 14 : -15.5 + Math.random() * 14) : -5.8 + Math.random() * 11.6,
+      endY: large ? -5 - Math.random() * 12 : -3.2 - Math.random() * 5.6,
+      rotation: (large ? -520 : -260) + Math.random() * (large ? 1_040 : 520),
+      delay: Math.random() * (large ? 220 : 140),
+      duration: (large ? 950 : 720) + Math.random() * (large ? 520 : 330),
+      size: (large ? .22 : .18) + Math.random() * (large ? .24 : .2),
     })),
   };
   cheerBursts.value.push(burst);
   const timer = window.setTimeout(() => {
     cheerTimers.delete(timer);
     cheerBursts.value = cheerBursts.value.filter((item) => item.id !== burst.id);
-  }, 1_250);
+  }, large ? 1_850 : 1_250);
   cheerTimers.add(timer);
 }
 
@@ -1025,11 +1090,12 @@ function handleUserActivation(): void {
         <p>Engine Relay Finale champions</p>
         <h1 id="finale-winner-title">{{ winningTeam?.name }}</h1>
         <div class="finale-winning-bench">
-          <article v-for="(member, index) in winningTeam?.roster ?? []" :key="member.id"><span>{{ index + 1 }}</span><div><strong>{{ member.name }}</strong><small>{{ member.version }}</small></div></article>
+          <article v-for="member in winningTeam?.roster ?? []" :key="member.id"><strong>{{ member.name }}</strong></article>
         </div>
-        <div class="finale-podium__stand"><span>Winning bench</span><strong>{{ winningTeam?.short_name || winningTeam?.name }}</strong></div>
-        <button type="button" class="finale-cheer" :data-relay-team-id="winningTeam?.id" @click="cheer(winningTeam)"><AppIcon name="trophy" :size="20" /> Cheer the champions</button>
+        <div class="finale-podium__stand" aria-hidden="true"></div>
       </div>
+      <button type="button" class="finale-cheer finale-cheer--left" :style="teamStyle(winningTeam)" :data-relay-team-id="winningTeam?.id" aria-label="Cheer for the champions from the left" @click="cheerFromFinale(winningTeam, 'left', $event)">🎉</button>
+      <button type="button" class="finale-cheer finale-cheer--right" :style="teamStyle(winningTeam)" :data-relay-team-id="winningTeam?.id" aria-label="Cheer for the champions from the right" @click="cheerFromFinale(winningTeam, 'right', $event)">🎉</button>
     </section>
     <section v-else-if="props.view === 'event'" class="clash-hero" aria-labelledby="clash-title">
       <div class="clash-hero__wash" aria-hidden="true"></div>
@@ -1829,10 +1895,11 @@ function handleUserActivation(): void {
 .finale-podium { position: relative; display: grid; min-height: calc(100dvh - 2.85rem); overflow: hidden; place-items: center; padding: 4rem 1rem 5rem; background: radial-gradient(ellipse 45% 42% at 50% 42%, rgb(216 168 67 / 19%), transparent 72%), linear-gradient(145deg, #12100c, #070604 58%, #131009); color: #f3e7ca; }
 .finale-podium__glow { position: absolute; inset: 12% 23%; border-radius: 50%; background: #b98123; filter: blur(8rem); opacity: .13; }
 .finale-podium__symbols { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(4, 1fr); align-items: center; color: #d4a748; font-size: clamp(3rem, 8vw, 8rem); opacity: .035; filter: grayscale(1) sepia(1); }.finale-podium__symbols span:nth-child(even) { align-self: end; transform: rotate(14deg); }.finale-podium__symbols span:nth-child(3n) { align-self: start; transform: rotate(-14deg); }
-.finale-podium__content { position: relative; z-index: 1; display: grid; width: min(64rem, 100%); justify-items: center; text-align: center; }.finale-podium__medal { font-size: clamp(3.5rem, 7vw, 5.5rem); filter: grayscale(.25) drop-shadow(0 1rem 1.4rem rgb(0 0 0 / 44%)); }.finale-podium__content > p { margin: .65rem 0 0; color: #c7a75f; font-size: .7rem; font-weight: 850; letter-spacing: .2em; text-transform: uppercase; }.finale-podium__content h1 { margin: .55rem 0 1.8rem; background: linear-gradient(180deg, #fff5d3, #d5a84e); color: #e7c46f; font-size: clamp(3rem, 8vw, 6.5rem); line-height: .95; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-.finale-winning-bench { display: flex; flex-wrap: wrap; justify-content: center; gap: .7rem; width: 100%; }.finale-winning-bench article { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .7rem; min-width: 12rem; padding: .85rem 1rem; border: 1px solid rgb(215 170 78 / 20%); border-radius: .8rem; background: linear-gradient(145deg, rgb(34 29 19 / 94%), rgb(14 12 8 / 96%)); box-shadow: 0 .8rem 1.8rem rgb(0 0 0 / 28%); text-align: left; }.finale-winning-bench article > span { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid #ca9d42; border-radius: 50%; background: #171108; color: #e5c16d; font-size: .7rem; font-weight: 850; }.finale-winning-bench article div { display: grid; }.finale-winning-bench strong { color: #f6edd9; font-size: .8rem; }.finale-winning-bench small { color: #8f8268; font-size: .62rem; }
-.finale-podium__stand { display: grid; width: min(36rem, 85%); min-height: 6.5rem; margin-top: 1.1rem; place-content: center; border: 1px solid rgb(229 188 98 / 28%); border-radius: .8rem .8rem 0 0; background: linear-gradient(145deg, #a97721, #4d330d); box-shadow: inset 0 1px rgb(255 238 187 / 16%), 0 1.2rem 2.4rem rgb(0 0 0 / 37%); }.finale-podium__stand span { color: #ead18f; font-size: .62rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }.finale-podium__stand strong { margin-top: .25rem; color: #fff4d5; font-size: 1.3rem; }.finale-cheer { display: inline-flex; align-items: center; gap: .55rem; min-height: 3.15rem; margin-top: 1.25rem; padding: 0 1.4rem; border: 1px solid #c6963d; border-radius: 999px; background: linear-gradient(145deg, #e1bb65, #9a6716); color: #171006; cursor: pointer; font: inherit; font-size: .78rem; font-weight: 850; box-shadow: 0 .8rem 1.8rem rgb(0 0 0 / 32%); }
+.finale-podium__content { position: relative; z-index: 1; display: grid; width: min(64rem, 100%); justify-items: center; text-align: center; transform: translateY(-2.6rem); }.finale-podium__medal { font-size: clamp(3.5rem, 7vw, 5.5rem); filter: grayscale(.25) drop-shadow(0 1rem 1.4rem rgb(0 0 0 / 44%)); }.finale-podium__content > p { margin: .65rem 0 0; color: #c7a75f; font-size: .7rem; font-weight: 850; letter-spacing: .2em; text-transform: uppercase; }.finale-podium__content h1 { margin: .55rem 0 1.8rem; background: linear-gradient(180deg, color-mix(in srgb, var(--relay-secondary) 72%, white), var(--relay-primary)); color: var(--relay-primary); font-size: clamp(3rem, 8vw, 6.5rem); line-height: .95; text-shadow: 0 .3rem 2rem color-mix(in srgb, var(--relay-primary) 22%, transparent); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.finale-winning-bench { display: flex; flex-wrap: wrap; justify-content: center; gap: .45rem; width: 100%; }.finale-winning-bench article { min-width: 8.5rem; padding: .55rem .85rem; border: 1px solid rgb(215 170 78 / 10%); border-radius: .55rem; background: rgb(13 11 8 / 52%); box-shadow: none; text-align: center; }.finale-winning-bench strong { color: #c9c1b1; font-size: .68rem; font-weight: 650; }
+.finale-podium__stand { position: absolute; z-index: -1; top: calc(100% + .85rem); left: 50%; width: min(36rem, 72vw); height: 100dvh; overflow: hidden; border: 1px solid #95886d; border-bottom: 0; border-radius: .8rem .8rem 0 0; background-color: #665f52; background-image: linear-gradient(335deg, #625b4e 1.45rem, transparent 1.45rem), linear-gradient(155deg, #827763 1.45rem, transparent 1.45rem), linear-gradient(335deg, #575248 1.45rem, transparent 1.45rem), linear-gradient(155deg, #746a58 1.45rem, transparent 1.45rem); background-position: 0 .1rem, .25rem 2.2rem, 1.8rem 1.95rem, 2.1rem .4rem; background-size: 3.65rem 3.65rem; box-shadow: inset 0 1px rgb(255 242 205 / 26%), inset 0 0 4rem rgb(31 27 21 / 30%), 0 1.2rem 2.4rem rgb(0 0 0 / 37%); transform: translateX(-50%); }.finale-podium__stand::after { position: absolute; inset: 0; border-radius: inherit; background: radial-gradient(circle at 18% 22%, rgb(255 244 213 / 18%) 0 1px, transparent 1.5px), radial-gradient(circle at 72% 64%, rgb(27 23 18 / 28%) 0 1px, transparent 1.7px), radial-gradient(circle at 42% 78%, rgb(223 201 153 / 12%) 0 1.5px, transparent 2px); background-size: 2.7rem 2.3rem, 3.4rem 3rem, 4.1rem 3.7rem; box-shadow: inset 0 0 3rem rgb(25 21 16 / 22%); content: ""; opacity: .72; pointer-events: none; }.finale-cheer { position: absolute; z-index: 3; bottom: 1.5rem; display: grid; width: 4rem; height: 4rem; place-items: center; padding: 0; border: 1px solid color-mix(in srgb, var(--relay-primary) 58%, #b9a678); border-radius: 50%; background: color-mix(in srgb, var(--relay-primary) 20%, #14100a); box-shadow: inset 0 1px rgb(255 255 255 / 16%), 0 .8rem 1.8rem color-mix(in srgb, var(--relay-primary) 18%, transparent); color: white; cursor: pointer; font: inherit; font-size: 1.55rem; transition: transform 150ms ease, background 150ms ease; }.finale-cheer:hover { background: color-mix(in srgb, var(--relay-primary) 32%, #171108); transform: translateY(-.2rem) scale(1.04); }.finale-cheer:active { transform: scale(.94); }.finale-cheer--left { left: 1.5rem; }.finale-cheer--right { right: 1.5rem; transform: scaleX(-1); }.finale-cheer--right:hover { transform: translateY(-.2rem) scaleX(-1) scale(1.04); }.finale-cheer--right:active { transform: scaleX(-1) scale(.94); }
 @media (max-width: 60rem) { .engine-clash-page--finale .clash-hero__content { padding-bottom: 2rem; }.engine-clash-page--finale .clash-orbit { height: auto; margin-top: 2rem; }.engine-clash-page--finale .clash-orbit::after { display: none; }.engine-clash-page--finale .clash-node { width: auto; }.engine-clash-page--finale .clash-node__card { width: min(100%, 18rem); }.engine-clash-page--finale .clash-actions { margin-top: 1.5rem; }.engine-clash-page--finale .clash-cheer-rail { margin-bottom: 1rem; } }
+@media (max-width: 54rem) { .finale-podium__stand { width: min(34rem, 86vw); } }
 .board-column { position: relative; }.kibitzer-bar { position: absolute; z-index: 5; top: 0; bottom: 0; left: -2.35rem; width: 1.8rem; overflow: hidden; border: 1px solid #31343a; border-radius: .35rem; background: #f4f4f2; box-shadow: 0 .25rem .7rem rgb(0 0 0 / 18%); }.kibitzer-bar__black { position: absolute; top: 0; right: 0; left: 0; min-height: 2%; background: #202124; transition: height .3s ease; }.kibitzer-bar strong { position: absolute; z-index: 1; top: 50%; left: 50%; padding: .18rem .12rem; border-radius: .2rem; background: rgb(255 255 255 / 82%); color: #111; font-size: .52rem; transform: translate(-50%, -50%) rotate(-90deg); white-space: nowrap; }.kibitzer-bar small { position: absolute; z-index: 1; bottom: .35rem; left: 50%; color: #777; font-size: .43rem; font-weight: 800; letter-spacing: .04em; transform: translateX(-50%) rotate(-90deg); transform-origin: center; white-space: nowrap; }
 @media (max-width: 38rem) { .finale-winning-bench article { min-width: min(100%, 9rem); }.kibitzer-bar { left: .25rem; opacity: .88; } }
 @media (prefers-reduced-motion: reduce) { .countdown-pulse-layer { display: none; } }

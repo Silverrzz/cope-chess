@@ -12,7 +12,7 @@ from websockets.server import WebSocketServerProtocol, serve
 
 from cope.core.benchmark import benchmark_hardware_key
 from cope.core.models import (
-    PROTOCOL_VERSION,
+    BENCHMARK_PROTOCOL_VERSION,
     BenchmarkAssignment,
     BenchmarkFailed,
     BenchmarkProgress,
@@ -26,10 +26,10 @@ from cope.core.models import (
 from cope.core.protocol import (
     ProtocolError,
     ProtocolValidationError,
-    decode_envelope,
-    decode_message,
+    decode_benchmark_envelope,
+    decode_benchmark_message,
     encode_message,
-    make_message,
+    make_benchmark_message,
 )
 from cope.db import (
     DEFAULT_DATABASE_URL,
@@ -172,7 +172,7 @@ class BenchmarkServer:
             if path is not None and path != DEFAULT_BENCHMARKER_PATH:
                 await websocket.close(code=4004, reason="unknown websocket path")
                 return
-            hello = decode_message(
+            hello = decode_benchmark_message(
                 await websocket.recv(),
                 "benchmark_hello",
                 BenchmarkerTokenHello | BenchmarkerSessionHello,
@@ -209,7 +209,7 @@ class BenchmarkServer:
             )
             await websocket.send(
                 encode_message(
-                    make_message(
+                    make_benchmark_message(
                         "benchmark_welcome",
                         welcome.model_dump(mode="json", exclude_none=True),
                     )
@@ -233,7 +233,7 @@ class BenchmarkServer:
                 if pending_update is not None:
                     await websocket.send(
                         encode_message(
-                            make_message("benchmarker_update", pending_update)
+                            make_benchmark_message("benchmarker_update", pending_update)
                         )
                     )
                     await self._serve_benchmarker_update(
@@ -275,10 +275,15 @@ class BenchmarkServer:
                     ),
                 )
                 await websocket.send(
-                    encode_message(make_message("benchmark_assignment", assignment_payload))
+                    encode_message(
+                        make_benchmark_message(
+                            "benchmark_assignment",
+                            assignment_payload,
+                        )
+                    )
                 )
                 while True:
-                    envelope = decode_envelope(
+                    envelope = decode_benchmark_envelope(
                         await asyncio.wait_for(
                             websocket.recv(),
                             timeout=max(self._config.response_timeout_s, 1),
@@ -383,7 +388,7 @@ class BenchmarkServer:
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
-                protocol_version=PROTOCOL_VERSION,
+                protocol_version=BENCHMARK_PROTOCOL_VERSION,
                 machine_id=hello.machine_id,
                 hardware_key=hello.hardware_key,
                 hw=hello.hw,
@@ -475,7 +480,7 @@ class BenchmarkServer:
         command: BenchmarkerUpdateCommand,
     ) -> None:
         while True:
-            status = decode_message(
+            status = decode_benchmark_message(
                 await websocket.recv(),
                 "benchmarker_update_status",
                 BenchmarkerUpdateStatus,
