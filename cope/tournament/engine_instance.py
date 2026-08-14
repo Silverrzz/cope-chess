@@ -344,10 +344,11 @@ class EngineInstance:
         self._last_search_result = result
         return result.bestmove
 
-    def stop_search(self):
+    def stop_search(self, *, wait: bool = False):
         if self._search_future is None:
             return
 
+        search_future = self._search_future
         if self._is_remote():
             try:
                 stop_search = getattr(self._host, "stop_engine_search", None)
@@ -357,7 +358,12 @@ class EngineInstance:
                     self._send_remote_command("stop")
             except Exception:
                 pass
-            self._search_future.cancel()
+            if wait:
+                try:
+                    search_future.result(timeout=5.0)
+                except Exception:
+                    pass
+            search_future.cancel()
             self._search_executor.shutdown(wait=False, cancel_futures=True)
             self._search_executor = ThreadPoolExecutor(max_workers=1)
             self._search_future = None
@@ -367,8 +373,14 @@ class EngineInstance:
             self._send_uci_command("stop")
         except Exception:
             pass
-        self._search_future.cancel()
-        self._terminate_process()
+        if wait:
+            try:
+                search_future.result(timeout=2.5)
+            except Exception:
+                self._terminate_process()
+        else:
+            self._terminate_process()
+        search_future.cancel()
         self._search_executor.shutdown(wait=False, cancel_futures=True)
         self._search_executor = ThreadPoolExecutor(max_workers=1)
         self._search_future = None

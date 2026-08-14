@@ -121,6 +121,7 @@ const blackMember = computed(() => currentMember("black"));
 const whiteAnalysis = ref<EngineAnalysis | null>(null);
 const blackAnalysis = ref<EngineAnalysis | null>(null);
 const isLatestPly = computed(() => selectedPly.value >= moves.value.length);
+const latestPositionFen = computed(() => positionFen(buildPositions(opening.value.fen, moves.value.map((move) => move.uci)).at(-1)!));
 const displayedWhiteAnalysis = computed(() => isFinale.value ? analysisForSide("white") : whiteAnalysis.value);
 const displayedBlackAnalysis = computed(() => isFinale.value ? analysisForSide("black") : blackAnalysis.value);
 const whiteCardMember = computed(() => memberForAnalysis("white", displayedWhiteAnalysis.value) ?? whiteMember.value);
@@ -132,7 +133,10 @@ const winningTeam = computed(() => {
   return payload.value.teams.find((team) => team.id === winnerId) ?? null;
 });
 const finaleComplete = computed(() => isFinale.value && props.detail.event.status === "completed" && winningTeam.value !== null);
-const kibitzerAnalysis = computed(() => gameData.value?.engine_data?.kibitzer ?? null);
+const kibitzerAnalysis = computed(() => {
+  const analysis = gameData.value?.engine_data?.kibitzer;
+  return isLatestPly.value && analysis && samePosition(analysis.root_fen, latestPositionFen.value) ? analysis : null;
+});
 const kibitzerLabel = computed(() => {
   const analysis = kibitzerAnalysis.value;
   if (!analysis) return "—";
@@ -369,7 +373,7 @@ function normalizedUci(value: string): string {
 
 function samePosition(left: string | null | undefined, right: string): boolean {
   if (!left) return false;
-  return left.trim().split(/\s+/).slice(0, 3).join(" ") === right.trim().split(/\s+/).slice(0, 3).join(" ");
+  return left.trim().split(/\s+/).slice(0, 4).join(" ") === right.trim().split(/\s+/).slice(0, 4).join(" ");
 }
 
 watch(gameId, () => {
@@ -478,7 +482,7 @@ async function fitArenaToViewport(): Promise<void> {
   const arena = arenaElement.value;
   const boardColumn = boardColumnElement.value;
   if (!arena || !boardColumn) return;
-  const viewer = boardColumn.firstElementChild as HTMLElement | null;
+  const viewer = boardColumn.querySelector<HTMLElement>(".viewer-shell");
   const board = viewer?.querySelector<HTMLElement>(".board-mount");
   if (!viewer || !board) return;
   const viewport = window.visualViewport;
@@ -645,6 +649,9 @@ function handleMove(event: Event): void {
   }
   records.sort((left, right) => left.ply - right.ply);
   gameData.value.viewer_moves = records;
+  const engineData = { ...gameData.value.engine_data };
+  delete engineData.kibitzer;
+  gameData.value.engine_data = engineData;
   if (wasLatest) selectedPly.value = records.length;
   if (gameData.value.clock_state) gameData.value.clock_state = { ...gameData.value.clock_state, running: false };
 }
@@ -652,6 +659,7 @@ function handleMove(event: Event): void {
 function handleEngineInfo(event: Event): void {
   const data = eventPayload<{ game_id?: Identifier; side?: "white" | "black" | "kibitzer"; engine_data?: EngineAnalysis }>(event);
   if (!data?.side || !data.engine_data || String(data.game_id) !== gameId.value || !gameData.value) return;
+  if (data.side === "kibitzer" && !samePosition(data.engine_data.root_fen, latestPositionFen.value)) return;
   gameData.value.engine_data = {
     ...gameData.value.engine_data,
     [data.side]: { ...gameData.value.engine_data?.[data.side], ...data.engine_data },

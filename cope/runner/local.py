@@ -538,12 +538,6 @@ def run_worker_assignment_game(
                         info,
                     )
                 )
-        if kibitzer is not None:
-            kibitzer.set_info_listener(
-                lambda line, info: live_reporter.publish_engine_info(
-                    "kibitzer", kibitzer, line, info
-                )
-            )
     runner = GameRunner(
         game,
         on_clock_sync=live_reporter.publish_clock_sync,
@@ -693,13 +687,18 @@ def run_worker_assignment_game(
         if game.state.is_finished()
         else _adjudication_result(tournament.config.adjudication, moves)
     )
+    if (
+        kibitzer is not None
+        and not game.state.is_finished()
+        and adjudicated is None
+        and board.ply() < assignment.max_plies
+    ):
+        _start_kibitzer_search(kibitzer, board, live_reporter)
     while (
         not game.state.is_finished()
         and adjudicated is None
         and board.ply() < assignment.max_plies
     ):
-        if kibitzer is not None and kibitzer.is_searching():
-            kibitzer.stop_search()
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
         if relay is not None:
@@ -717,7 +716,11 @@ def run_worker_assignment_game(
         else:
             engine = white if side_to_move == chess.WHITE else black
         board_before_move = board.copy(stack=False)
-        move = runner.run_next_move()
+        try:
+            move = runner.run_next_move()
+        finally:
+            if kibitzer is not None:
+                kibitzer.stop_search(wait=True)
         if move is None:
             break
         search = engine.get_last_search_result()
@@ -767,8 +770,6 @@ def run_worker_assignment_game(
                 clock_after_ms,
             ),
         )
-        if kibitzer is not None and not game.state.is_finished() and adjudicated is None:
-            kibitzer.start_search(board.copy(stack=False), "go infinite")
         if board.ply() <= 10 or board.ply() % 10 == 0:
             LOG.debug(
                 "recorded move game_id=%s ply=%s move=%s",
@@ -776,9 +777,16 @@ def run_worker_assignment_game(
                 board.ply(),
                 move.uci(),
             )
+        if (
+            kibitzer is not None
+            and not game.state.is_finished()
+            and adjudicated is None
+            and board.ply() < assignment.max_plies
+        ):
+            _start_kibitzer_search(kibitzer, board, live_reporter)
 
-    if kibitzer is not None and kibitzer.is_searching():
-        kibitzer.stop_search()
+    if kibitzer is not None:
+        kibitzer.stop_search(wait=True)
     _validated_assignment_record(connection, assignment)
     progress(
         "play",
@@ -862,6 +870,36 @@ def _relay_member_for_moves(
     return team.members[moves_played % len(team.members)]
 
 
+def _wait_for_worker_search_start(engine: EngineInstance, timeout_s: float = 2.0) -> None:
+    if not engine.uses_worker_search_clock():
+        return
+    deadline = time.monotonic() + timeout_s
+    while engine.is_searching() and engine.get_worker_search_elapsed_ms() is None:
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.005)
+
+
+def _start_kibitzer_search(
+    kibitzer: EngineInstance,
+    board: chess.Board,
+    live_reporter: _LiveGameReporter,
+) -> None:
+    kibitzer_board = board.copy(stack=False)
+    kibitzer_root_fen = kibitzer_board.fen()
+    kibitzer.set_info_listener(
+        lambda line, info: live_reporter.publish_engine_info(
+            "kibitzer",
+            kibitzer,
+            line,
+            info,
+            root_fen=kibitzer_root_fen,
+        )
+    )
+    kibitzer.start_search(kibitzer_board, "go infinite")
+    _wait_for_worker_search_start(kibitzer)
+
+
 def _relay_moves_played(
     moves: Sequence[MoveRecord],
     color: ColorSlot,
@@ -920,8 +958,10 @@ class _LiveGameReporter:
         engine: EngineInstance,
         line: str,
         info: EngineSearchInfo,
+        *,
+        root_fen: str | None = None,
     ) -> None:
-        self._publish_engine_info(side, engine, line, info)
+        self._publish_engine_info(side, engine, line, info, root_fen=root_fen)
 
     def publish_final_engine_info(
         self,

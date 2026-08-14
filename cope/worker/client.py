@@ -835,9 +835,7 @@ async def _serve_assignment(
                 complete = AssignmentComplete.model_validate(envelope.data)
                 _validate_assignment_message(complete, assignment, "assignment_complete")
                 for engine_id, task in tuple(infinite_searches.items()):
-                    await asyncio.to_thread(engines[engine_id].stop_search)
-                    with contextlib.suppress(Exception):
-                        await task
+                    await _stop_infinite_engine_search(engines[engine_id], task)
                 infinite_searches.clear()
                 completion_received = True
                 LOG.info(
@@ -857,8 +855,7 @@ async def _serve_assignment(
                     )
                 task = infinite_searches.pop(stop.engine_id, None)
                 if task is not None:
-                    await asyncio.to_thread(engines[stop.engine_id].stop_search)
-                    await task
+                    await _stop_infinite_engine_search(engines[stop.engine_id], task)
                 continue
 
             if envelope.type != "engine_command":
@@ -1306,6 +1303,7 @@ async def _run_infinite_engine_search(
         clock_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await clock_task
+        await telemetry.flush()
         telemetry.discard(command.assignment_id, command.engine_id)
     await _send_message(
         websocket,
@@ -1317,6 +1315,23 @@ async def _run_infinite_engine_search(
         ),
         lock=send_lock,
     )
+
+
+async def _stop_infinite_engine_search(
+    engine: UciEngineProcess,
+    task: asyncio.Task,
+) -> None:
+    await asyncio.to_thread(engine.stop_search)
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+    except asyncio.TimeoutError:
+        await asyncio.to_thread(engine.close)
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except asyncio.TimeoutError:
+            task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 class _AssignmentProgressPublisher:
