@@ -30,8 +30,17 @@ const text = ref('')
 const submitting = ref(false)
 const submitError = ref('')
 
-const chatMessages = computed(() => props.messages.filter((message) => message.display_name !== 'System'))
-const systemMessages = computed(() => props.messages.filter((message) => message.display_name === 'System'))
+const orderedMessages = computed(() => [...props.messages].sort((left, right) => {
+  const leftId = Number(left.id)
+  const rightId = Number(right.id)
+  if (Number.isFinite(leftId) && Number.isFinite(rightId)) return leftId - rightId
+  const leftTime = Date.parse(left.at || '')
+  const rightTime = Date.parse(right.at || '')
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime - rightTime
+  return 0
+}))
+const chatMessages = computed(() => orderedMessages.value.filter((message) => message.display_name !== 'System'))
+const systemMessages = computed(() => orderedMessages.value.filter((message) => message.display_name === 'System'))
 const visibleMessages = computed(() => activeTab.value === 'chat' ? chatMessages.value : systemMessages.value)
 const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
