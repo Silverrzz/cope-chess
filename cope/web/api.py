@@ -79,6 +79,7 @@ from cope.db import (
     get_worker_by_session_id,
     get_tool_job,
     invalidate_game_pair,
+    invalidate_rating_list_engine_games,
     list_deployment_jobs,
     list_deployment_targets,
     latest_dockerfile_pull_job,
@@ -106,6 +107,7 @@ from cope.db import (
     list_active_games,
     list_opening_suites,
     list_rating_lists,
+    list_rating_list_engine_ids,
     list_rating_rows,
     list_service_heartbeats,
     list_suite_openings,
@@ -679,6 +681,11 @@ class WhoHasThisPayload(BaseModel):
         if not cleaned or any(ord(character) < 32 for character in cleaned):
             raise ValueError("enter a valid UCI option name")
         return cleaned
+
+
+class InvalidateRatingListEnginePayload(BaseModel):
+    engine_id: int = Field(gt=0)
+    rating_list_id: int = Field(gt=0)
 
 
 class WorkerSettingsPayload(BaseModel):
@@ -3325,7 +3332,14 @@ def register_api_routes(app: FastAPI) -> None:
                         "description": "Inspect engine UCI handshakes across any selection of versions.",
                         "href": "/admin/tools/who-has-this",
                         "status": "available",
-                    }
+                    },
+                    {
+                        "name": "invalidate_rating_list_engine",
+                        "label": "Invalidate engine games",
+                        "description": "Uncommit one engine's games from every affected rating list, then invalidate them.",
+                        "href": "/admin/tools/invalidate-engine-games",
+                        "status": "available",
+                    },
                 ],
                 "recent_jobs": [
                     _tool_job_api_payload(connection, job, include_items=False)
@@ -3335,6 +3349,84 @@ def register_api_routes(app: FastAPI) -> None:
                     worker.status in {"connected", "ready", "busy"}
                     for worker in workers
                 ),
+            }
+        )
+
+    @app.get("/api/admin/tools/invalidate-engine-games")
+    def admin_invalidate_engine_games_context(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine_ids_by_list = list_rating_list_engine_ids(connection)
+        relevant_engine_ids = {
+            engine_id
+            for engine_ids in engine_ids_by_list.values()
+            for engine_id in engine_ids
+        }
+        return _json(
+            {
+                "rating_lists": [
+                    {
+                        "id": rating_list.id,
+                        "name": rating_list.name,
+                        "engine_ids": engine_ids_by_list.get(rating_list.id, ()),
+                    }
+                    for rating_list in list_rating_lists(connection)
+                ],
+                "engines": [
+                    {
+                        "id": engine.id,
+                        "name": engine.name,
+                        "version": engine.version,
+                        "author": engine.author,
+                    }
+                    for engine in list_engine_records(connection)
+                    if engine.id in relevant_engine_ids
+                ],
+            }
+        )
+
+    @app.post("/api/admin/tools/invalidate-engine-games")
+    def admin_invalidate_engine_games(
+        payload: InvalidateRatingListEnginePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = get_engine_record(connection, payload.engine_id)
+        if engine is None:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        rating_list = get_rating_list(connection, payload.rating_list_id)
+        if rating_list is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        try:
+            result = invalidate_rating_list_engine_games(
+                connection,
+                payload.rating_list_id,
+                payload.engine_id,
+            )
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception(
+                "rating-list engine invalidation failed rating_list_id=%s engine_id=%s",
+                payload.rating_list_id,
+                payload.engine_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not invalidate the engine games. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        game_count = len(result.game_ids)
+        return _json(
+            {
+                "message": f"Invalidated {game_count} game{'s' if game_count != 1 else ''} for {engine.name} {engine.version}.",
+                "games_invalidated": game_count,
+                "tournaments_affected": len(result.tournament_ids),
+                "rating_lists_affected": len(result.rating_list_ids),
+                "list_memberships_removed": result.list_memberships_removed,
             }
         )
 

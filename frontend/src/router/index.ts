@@ -218,6 +218,12 @@ const router = createRouter({
           meta: { title: "Who Has This" },
         },
         {
+          path: "tools/invalidate-engine-games",
+          name: "admin-tool-invalidate-engine-games",
+          component: () => import("@/pages/admin/InvalidateEngineGamesPage.vue"),
+          meta: { title: "Invalidate engine games" },
+        },
+        {
           path: "updates",
           name: "admin-updates",
           component: () => import("@/pages/admin/DeploymentsPage.vue"),

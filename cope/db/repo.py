@@ -56,6 +56,14 @@ class TournamentParticipantGameRemoval:
 
 
 @dataclass(frozen=True, slots=True)
+class RatingListEngineInvalidation:
+    game_ids: tuple[int, ...]
+    tournament_ids: tuple[int, ...]
+    rating_list_ids: tuple[int, ...]
+    list_memberships_removed: int
+
+
+@dataclass(frozen=True, slots=True)
 class GameRecord:
     id: int
     tournament_id: int
@@ -1796,6 +1804,76 @@ def invalidate_tournament_participant_games(
         finished=counts["finished"],
         abandoned=counts["abandoned"],
     )
+
+
+def invalidate_rating_list_engine_games(
+    connection: sqlite3.Connection,
+    rating_list_id: int,
+    engine_id: int,
+) -> RatingListEngineInvalidation:
+    rows = connection.execute(
+        """
+        SELECT games.id, games.tournament_id
+        FROM rating_list_history history
+        JOIN games ON games.id = history.game_id
+        WHERE history.engine_id = ? AND history.rating_list_id = ?
+        FOR UPDATE
+        """,
+        (engine_id, rating_list_id),
+    ).fetchall()
+    game_ids = tuple(sorted(int(row["id"]) for row in rows))
+    if not game_ids:
+        raise ValueError("this engine has no committed games in the selected rating list")
+    placeholders = ", ".join("?" for _ in game_ids)
+    membership_rows = connection.execute(
+        f"""
+        SELECT DISTINCT game_id, rating_list_id
+        FROM rating_list_history
+        WHERE game_id IN ({placeholders})
+        ORDER BY game_id, rating_list_id
+        """,
+        game_ids,
+    ).fetchall()
+    connection.execute(
+        f"DELETE FROM rating_list_history WHERE game_id IN ({placeholders})",
+        game_ids,
+    )
+    tournament_ids = tuple(sorted({int(row["tournament_id"]) for row in rows}))
+    for tournament_id in tournament_ids:
+        tournament_game_ids = tuple(
+            int(row["id"])
+            for row in rows
+            if int(row["tournament_id"]) == tournament_id
+        )
+        _delete_system_chat_events(
+            connection,
+            tournament_id,
+            (*tuple(f"game.{game_id}.finished" for game_id in tournament_game_ids), "tournament.finished"),
+        )
+    connection.execute(f"DELETE FROM games WHERE id IN ({placeholders})", game_ids)
+    return RatingListEngineInvalidation(
+        game_ids=game_ids,
+        tournament_ids=tournament_ids,
+        rating_list_ids=tuple(
+            sorted({int(row["rating_list_id"]) for row in membership_rows})
+        ),
+        list_memberships_removed=len(membership_rows),
+    )
+
+
+def list_rating_list_engine_ids(
+    connection: sqlite3.Connection,
+) -> dict[int, tuple[int, ...]]:
+    grouped: dict[int, list[int]] = {}
+    for row in connection.execute(
+        """
+        SELECT DISTINCT rating_list_id, engine_id
+        FROM rating_list_history
+        ORDER BY rating_list_id, engine_id
+        """
+    ):
+        grouped.setdefault(int(row["rating_list_id"]), []).append(int(row["engine_id"]))
+    return {rating_list_id: tuple(engine_ids) for rating_list_id, engine_ids in grouped.items()}
 
 
 def _ensure_games_are_not_committed(
