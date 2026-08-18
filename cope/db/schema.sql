@@ -694,8 +694,8 @@ CREATE TABLE IF NOT EXISTS moves (
   score_bound TEXT CHECK (score_bound IN ('lowerbound', 'upperbound')),
   depth INTEGER,
   seldepth INTEGER,
-  nodes INTEGER,
-  nps INTEGER,
+  nodes BIGINT,
+  nps BIGINT,
   hashfull INTEGER,
   pv TEXT,
   info_line TEXT,
@@ -713,6 +713,9 @@ ALTER TABLE moves ADD COLUMN IF NOT EXISTS score_bound TEXT CHECK (score_bound I
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS seldepth INTEGER;
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS hashfull INTEGER;
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS engine_version_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL;
+ALTER TABLE moves
+  ALTER COLUMN nodes TYPE BIGINT,
+  ALTER COLUMN nps TYPE BIGINT;
 
 CREATE TABLE IF NOT EXISTS rating_lists (
   id BIGSERIAL PRIMARY KEY,
@@ -948,7 +951,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 40)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 41)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

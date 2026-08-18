@@ -81,6 +81,7 @@ services:
     environment:
       <<: *cope-environment
       COPE_SERVICE_NAME: migrate
+      COPE_DATABASE_STATEMENT_TIMEOUT_MS: ${COPE_MIGRATION_STATEMENT_TIMEOUT_MS:-1800000}
     command: ["db", "migrate"]
     depends_on:
       db:
