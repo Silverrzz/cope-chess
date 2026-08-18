@@ -1027,7 +1027,12 @@ def restore_tournament(connection: sqlite3.Connection, tournament_id: int) -> No
             (tournament_id,),
         )
     )
-    _reset_games_for_replay(connection, game_ids, include_abandoned=True)
+    _reset_games_for_replay(
+        connection,
+        game_ids,
+        include_abandoned=True,
+        reason="tournament restored after abort",
+    )
     connection.execute(
         """
         UPDATE tournaments
@@ -2382,16 +2387,22 @@ def fail_game_assignment(
     assignment = get_game_assignment(connection, assignment_id)
     if assignment is None or assignment.assignment_key != assignment_key:
         return
+    now = utc_now()
     cursor = connection.execute(
         """
         UPDATE game_assignments
         SET status = 'abandoned', finished_at = ?, last_error = ?
         WHERE id = ? AND assignment_key = ? AND status IN ('assigned', 'acked', 'live')
         """,
-        (utc_now(), error[:500], assignment_id, assignment_key),
+        (now, error[:500], assignment_id, assignment_key),
     )
     if cursor.rowcount == 1:
-        _reset_games_for_replay(connection, (assignment.game_id,))
+        _reset_games_for_replay(
+            connection,
+            (assignment.game_id,),
+            reason=error,
+            occurred_at=now,
+        )
 
 
 def create_worker(
@@ -3198,14 +3209,13 @@ def _release_worker_active_assignments(
         UPDATE game_assignments
         SET status = 'abandoned',
             finished_at = ?,
-            last_error = ?,
-            worker_id = NULL
+            last_error = ?
         WHERE worker_id = ?
           AND status IN ('assigned', 'acked', 'live')
         """,
         (now, reason[:500], worker_id),
     )
-    _reset_games_for_replay(connection, game_ids)
+    _reset_games_for_replay(connection, game_ids, reason=reason, occurred_at=now)
 
 
 def _active_worker_game_ids(
@@ -3231,12 +3241,71 @@ def _reset_games_for_replay(
     game_ids: Iterable[int],
     *,
     include_abandoned: bool = False,
+    reason: str = "game reset for replay",
+    occurred_at: str | None = None,
 ) -> None:
     """Discard every attempt-scoped artifact before games are reassigned."""
     ids = tuple(dict.fromkeys(int(game_id) for game_id in game_ids))
     if not ids:
         return
     placeholders = ", ".join("?" for _ in ids)
+    connection.execute(
+        f"""
+        INSERT INTO game_assignment_progress (
+          assignment_id, assignment_key, game_id, source,
+          stage, stage_label, stage_order, substage, status, detail,
+          engine_id, engine_name, current_value, total_value, metadata, occurred_at
+        )
+        SELECT assignment.id,
+               assignment.assignment_key,
+               assignment.game_id,
+               'server',
+               'assignment',
+               'Assignment',
+               0,
+               'attempt_replayed',
+               'failed',
+               LEFT(?, 4000),
+               NULL,
+               NULL,
+               attempt.last_ply,
+               NULL,
+               json_build_object(
+                 'worker_id', assignment.worker_id,
+                 'worker_label', worker.label,
+                 'machine_id', worker.machine_id,
+                 'worker_session_id', worker.session_id,
+                 'worker_app_commit', worker.app_commit,
+                 'assignment_status', assignment.status,
+                 'sent_at', assignment.sent_at,
+                 'acked_at', assignment.acked_at,
+                 'finished_at', assignment.finished_at,
+                 'last_error', assignment.last_error,
+                 'game_started_at', game.started_at,
+                 'move_count', attempt.move_count,
+                 'last_ply', attempt.last_ply
+               )::text,
+               ?
+        FROM game_assignments AS assignment
+        JOIN games AS game ON game.id = assignment.game_id
+        LEFT JOIN workers AS worker ON worker.id = assignment.worker_id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS move_count, MAX(ply) AS last_ply
+          FROM moves
+          WHERE moves.game_id = assignment.game_id
+        ) AS attempt ON TRUE
+        WHERE assignment.game_id IN ({placeholders})
+          AND assignment.status IN ('assigned', 'acked', 'live', 'abandoned', 'expired')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM game_assignment_progress AS progress
+            WHERE progress.assignment_id = assignment.id
+              AND progress.assignment_key = assignment.assignment_key
+              AND progress.substage = 'attempt_replayed'
+          )
+        """,
+        (reason[:4000], occurred_at or utc_now(), *ids),
+    )
     connection.execute(f"DELETE FROM moves WHERE game_id IN ({placeholders})", ids)
     connection.execute(
         f"DELETE FROM game_pause_checkpoints WHERE game_id IN ({placeholders})",
@@ -3272,6 +3341,7 @@ def _reset_games_for_replay(
 def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
     """Delete a worker and return its active assignments to the pending pool."""
     game_ids = _active_worker_game_ids(connection, worker_id)
+    now = utc_now()
     connection.execute(
         """
         UPDATE game_assignments
@@ -3283,12 +3353,20 @@ def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
               WHEN status IN ('assigned', 'acked', 'live') THEN ?
               ELSE finished_at
             END,
-            worker_id = NULL
+            last_error = CASE
+              WHEN status IN ('assigned', 'acked', 'live') THEN 'worker deleted'
+              ELSE last_error
+            END
         WHERE worker_id = ?
         """,
-        (utc_now(), worker_id),
+        (now, worker_id),
     )
-    _reset_games_for_replay(connection, game_ids)
+    _reset_games_for_replay(
+        connection,
+        game_ids,
+        reason="worker deleted",
+        occurred_at=now,
+    )
     connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 
