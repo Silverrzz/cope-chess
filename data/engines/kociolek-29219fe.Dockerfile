@@ -14,9 +14,9 @@ RUN echo "76265d0f846f508ab4a3c91b75d70854ce15cc2e21a400d519cd8b8c2be6be9b  768-
         -DNDEBUG \
         -pthread \
         -static \
-        -DEVALFILE='\"768-1024x2-1-8.bin\"' \
-        -DPOLICYFILE='\"quantised-dual-layer-hard-2048.bin\"' \
-        -DPOLICYFILE_SMALL='\"quantised-64.bin\"' \
+        -DEVALFILE='"768-1024x2-1-8.bin"' \
+        -DPOLICYFILE='"quantised-dual-layer-hard-2048.bin"' \
+        -DPOLICYFILE_SMALL='"quantised-64.bin"' \
         -DKOCIOLEK_POLICY_HL=2048 \
         -DPOLICY_SMALL_HL=64 \
         src/*.cpp \
