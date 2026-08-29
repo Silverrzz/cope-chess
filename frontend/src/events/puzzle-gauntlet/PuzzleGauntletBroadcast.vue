@@ -237,6 +237,7 @@ watch(
   () => {
     infoByEngine.value = {};
     fenCopied.value = false;
+    connectStream();
   },
 );
 
@@ -360,6 +361,10 @@ function connectStream(): void {
     if (!entry?.attempt) return;
     entry.attempt.move_uci = move;
     if (data.move?.time_ms !== undefined) entry.attempt.elapsed_ms = data.move.time_ms;
+  });
+  stream.addEventListener("spectators.changed", (raw) => {
+    const count = streamData<{ spectator_count?: number }>(raw).spectator_count;
+    if (count !== undefined) props.detail.spectator_count = count;
   });
 }
 

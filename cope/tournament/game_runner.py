@@ -1,7 +1,7 @@
 import chess
 from collections.abc import Callable, Iterable
 
-from .engine_instance import EngineInstance
+from .engine_instance import EngineInstance, EngineSearchResult
 from .game_state import GameState
 from .time_control import TimeControlCategory, TimeManager, TimeOutError
 from .tournament import Game
@@ -113,12 +113,7 @@ class GameRunner:
                 if result is not None:
                     move = result.bestmove
         except TimeOutError:
-            result = (
-                engine.capture_latest_info_result(board)
-                if self._use_latest_info_move_on_timeout
-                else None
-            )
-            engine.stop_search()
+            result = self._capture_search_result(engine, board)
             if result is not None:
                 move = result.bestmove
                 move_captured_at_timeout = True
@@ -132,12 +127,19 @@ class GameRunner:
                     self._on_clock_sync(side_to_move, False, 0)
                 return None
         except Exception as error:
-            engine.stop_search()
-            clock.stop_clock_after_timeout()
-            self._get_game_state().record_engine_error(side_to_move, error)
-            if self._on_clock_sync is not None:
-                self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
-            return None
+            result = self._capture_search_result(engine, board)
+            if result is not None:
+                move = result.bestmove
+                move_captured_at_timeout = True
+                clock.stop_clock_after_timeout()
+                if self._on_clock_sync is not None:
+                    self._on_clock_sync(side_to_move, False, 0)
+            else:
+                clock.stop_clock_after_timeout()
+                self._get_game_state().record_engine_error(side_to_move, error)
+                if self._on_clock_sync is not None:
+                    self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
+                return None
         finally:
             if not self._get_game_state().is_finished() and not move_captured_at_timeout:
                 try:
@@ -182,6 +184,23 @@ class GameRunner:
 
         self._get_game_state().update_from_board()
         return move
+
+    def _capture_search_result(
+        self,
+        engine: EngineInstance,
+        board: chess.Board,
+    ) -> EngineSearchResult | None:
+        result = (
+            engine.capture_latest_info_result(board)
+            if self._use_latest_info_move_on_timeout
+            else None
+        )
+        engine.stop_search(wait=self._search_until_timeout)
+        if result is None and self._use_latest_info_move_on_timeout:
+            result = engine.capture_latest_info_result(board)
+        if result is None and self._search_until_timeout:
+            result = engine.get_last_search_result()
+        return result
 
     def _start_game(self):
         if self._game_started:

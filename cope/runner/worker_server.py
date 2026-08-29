@@ -114,7 +114,9 @@ PREPARATION_FAILURE_INITIAL_BACKOFF_S = 60.0
 PREPARATION_FAILURE_MAX_BACKOFF_S = 3600.0
 RETIRED_ASSIGNMENT_GRACE_S = 60.0
 LATE_ASSIGNMENT_MESSAGE_TYPES = {
+    "assignment_failed",
     "assignment_progress",
+    "assignment_ready",
     "assignment_cleanup_complete",
     "engine_command_result",
     "engine_command_started",
@@ -938,7 +940,9 @@ class WorkerHandshakeServer:
     @staticmethod
     def _validate_late_assignment_message(message_type: str, payload: dict) -> None:
         models = {
+            "assignment_failed": AssignmentFailed,
             "assignment_progress": AssignmentProgress,
+            "assignment_ready": AssignmentReady,
             "assignment_cleanup_complete": AssignmentCleanupComplete,
             "engine_command_result": EngineCommandResult,
             "engine_command_started": EngineCommandStarted,
@@ -2108,6 +2112,28 @@ class WorkerHandshakeServer:
                 if reply.engine_id not in assignment.engines:
                     raise ProtocolValidationError(
                         "assignment command reply references unknown engine"
+                    )
+                continue
+            if envelope.type == "assignment_ready":
+                ready = AssignmentReady.model_validate(envelope.data)
+                if not ready.matches_assignment(assignment.assignment):
+                    raise ProtocolValidationError("assignment_ready assignment mismatch")
+                if set(ready.prepared_engine_ids) != set(assignment.engines):
+                    raise ProtocolValidationError(
+                        "assignment_ready must include every assigned engine"
+                    )
+                continue
+            if envelope.type == "assignment_failed":
+                failure = AssignmentFailed.model_validate(envelope.data)
+                if not failure.matches_assignment(assignment.assignment):
+                    raise ProtocolValidationError("assignment failure mismatch")
+                if failure.engine_id not in assignment.engines:
+                    raise ProtocolValidationError(
+                        "assignment failure references unknown engine"
+                    )
+                if failure.engine_name != assignment.engines[failure.engine_id].name:
+                    raise ProtocolValidationError(
+                        "assignment failure engine name mismatch"
                     )
                 continue
             if envelope.type != "assignment_cleanup_complete":
