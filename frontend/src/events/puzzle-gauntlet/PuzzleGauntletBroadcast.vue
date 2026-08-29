@@ -57,7 +57,7 @@ const props = defineProps<{
   view?: "event" | "arena";
 }>();
 
-const { confettiEnabled } = useViewerSettings();
+const { confettiEnabled, eventMusicEnabled, setEventMusicEnabled } = useViewerSettings();
 const router = useRouter();
 const payload = computed(() => props.detail.custom as GauntletPayload);
 const focusedId = ref<number | null>(null);
@@ -264,7 +264,7 @@ onMounted(() => {
   scheduleArenaFit();
   if (props.view !== "event") return;
   restoreCountdownCompletion();
-  prepareCountdownAudio();
+  if (eventMusicEnabled.value) prepareCountdownAudio();
   syncCountdown();
   countdownTimer = window.setInterval(syncCountdown, 100);
   document.addEventListener("visibilitychange", handleCountdownResume);
@@ -473,7 +473,7 @@ function resetCountdownForTarget(): void {
 }
 
 function prepareCountdownAudio(force = false): void {
-  if (countdownFinished.value || typeof Audio === "undefined") return;
+  if (!eventMusicEnabled.value || countdownFinished.value || typeof Audio === "undefined") return;
   if (countdownAudio && !force) return;
   if (countdownAudio) releaseCountdownAudio();
   const audio = new Audio();
@@ -522,6 +522,7 @@ function seekCountdownAudio(audio: HTMLAudioElement, expected: number): void {
 }
 
 async function playCountdownAudio(expected: number, force = false): Promise<void> {
+  if (!eventMusicEnabled.value) return;
   prepareCountdownAudio(soundState.value === "unavailable");
   const audio = countdownAudio;
   if (!audio || audioPlayPending || countdownAudioStarted || countdownFinished.value || !audio.paused) return;
@@ -533,7 +534,7 @@ async function playCountdownAudio(expected: number, force = false): Promise<void
   audioPlayPending = true;
   try {
     await audio.play();
-    if (countdownAudio !== audio || countdownFinished.value) return;
+    if (countdownAudio !== audio || countdownFinished.value || !eventMusicEnabled.value) return;
     countdownAudioStarted = true;
     soundPrimed.value = true;
     soundState.value = "playing";
@@ -564,6 +565,7 @@ function syncCountdown(forceAudio = false): void {
   scheduleCountdownFrame();
   const beat = Math.floor(expected + .025);
   if (beat !== countdownBeat.value) countdownBeat.value = beat;
+  if (!eventMusicEnabled.value) return;
   if (countdownAudioStarted || (countdownAudio && !countdownAudio.paused)) {
     soundState.value = "playing";
     return;
@@ -598,7 +600,11 @@ function finishCountdown(): void {
 }
 
 async function enableCountdownSound(dismiss = false): Promise<void> {
-  if (dismiss) soundRequested.value = true;
+  if (dismiss) {
+    soundRequested.value = true;
+    setEventMusicEnabled(true);
+  }
+  if (!eventMusicEnabled.value) return;
   if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
   prepareCountdownAudio(soundState.value === "unavailable");
   const expected = expectedCountdownAudioTime();
@@ -624,6 +630,19 @@ async function enableCountdownSound(dismiss = false): Promise<void> {
     audio.volume = 1;
     audioPlayPending = false;
   }
+}
+
+function toggleEventMusic(): void {
+  const enabled = !eventMusicEnabled.value;
+  setEventMusicEnabled(enabled);
+  if (!enabled) {
+    releaseCountdownAudio();
+    soundRequested.value = false;
+    soundPrimed.value = false;
+    soundState.value = "loading";
+    return;
+  }
+  if (countdownVisible.value) void enableCountdownSound();
 }
 
 function handleCountdownResume(): void {
@@ -696,6 +715,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
         <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--confetti-start-x': `${piece.startX}rem`, '--confetti-start-y': `${piece.startY}rem`, '--confetti-end-x': `${piece.endX}rem`, '--confetti-end-y': `${piece.endY}rem`, '--confetti-rotation': `${piece.rotation}deg`, '--confetti-delay': `${piece.delay}ms`, '--confetti-duration': `${piece.duration}ms`, '--confetti-size': `${piece.size}rem` }"></i>
       </span>
     </div>
+    <button v-if="view === 'event'" type="button" class="event-music-toggle" role="switch" :aria-checked="eventMusicEnabled" :aria-label="`Event music ${eventMusicEnabled ? 'on' : 'off'}`" @click="toggleEventMusic"><AppIcon name="radio" :size="16" /><span>Event music</span><i aria-hidden="true"></i></button>
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--left" aria-label="Celebrate from the left" @click="celebrate('left')">🎉</button>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--right" aria-label="Celebrate from the right" @click="celebrate('right')">🎉</button>
@@ -903,7 +923,15 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .puzzle-board-column { display: grid; align-content: center; justify-items: center; min-width: 0; padding: clamp(1rem, 2vw, 2rem); background: radial-gradient(circle at 50% 48%, rgb(139 92 246 / 13%), transparent 44%); }.puzzle-heading { display: flex; align-items: end; justify-content: space-between; width: min(70vh, 100%); margin-bottom: .65rem; }.puzzle-heading > div:first-child { display: grid; gap: .18rem; }.puzzle-heading strong { font-size: .76rem; }.search-clock { display: grid; grid-template-columns: auto auto; align-items: baseline; gap: .15rem .55rem; text-align: right; }.search-clock small { color: #777180; font-size: .5rem; text-transform: uppercase; }.search-clock strong { color: #e6ddff; font-family: ui-monospace, monospace; font-size: 1.1rem; font-variant-numeric: tabular-nums; }.search-clock > i { grid-column: 1 / -1; width: 7rem; height: .2rem; overflow: hidden; border-radius: 999px; background: #272230; }.search-clock > i span { display: block; height: 100%; background: linear-gradient(90deg, var(--violet), var(--cyan)); transition: width .1s linear; }.search-clock.urgent strong { color: #fb7185; }.search-clock.urgent > i span { background: #fb7185; }.board-frame { position: relative; width: min(70vh, 100%); padding: .55rem; border: 1px solid rgb(167 139 250 / 20%); background: #110d20; box-shadow: 0 1.8rem 5rem rgb(0 0 0 / 36%), 0 0 3rem rgb(139 92 246 / 10%); }.board-shell { position: relative; width: 100%; }.board-shell :deep(.chess-viewer), .board-shell :deep(.board-mount) { width: 100%; }.corner { position: absolute; z-index: 3; width: 1rem; height: 1rem; border-color: var(--cyan); opacity: .7; }.corner--tl { top: -.25rem; left: -.25rem; border-top: 1px solid; border-left: 1px solid; }.corner--tr { top: -.25rem; right: -.25rem; border-top: 1px solid; border-right: 1px solid; }.corner--bl { bottom: -.25rem; left: -.25rem; border-bottom: 1px solid; border-left: 1px solid; }.corner--br { right: -.25rem; bottom: -.25rem; border-right: 1px solid; border-bottom: 1px solid; }.move-count { position: absolute; z-index: 8; display: grid; width: clamp(1.15rem, 3.4%, 1.75rem); aspect-ratio: 1; place-items: center; border: 1px solid rgb(255 255 255 / 30%); border-radius: 50%; background: #444451; color: white; font-size: clamp(.48rem, 1vw, .68rem); font-weight: 900; box-shadow: 0 .15rem .5rem rgb(0 0 0 / 45%); transform: translate(-50%, -50%); }.move-count.focused { background: var(--violet); color: #100b1d; box-shadow: 0 0 1rem rgb(167 139 250 / 70%); }.consensus-bar { display: grid; grid-template-columns: auto minmax(5rem, 1fr) auto; align-items: center; gap: .7rem; width: min(70vh, 100%); margin-top: .7rem; }.consensus-bar > div { display: flex; height: .25rem; overflow: hidden; gap: 2px; border-radius: 999px; background: #211d2b; }.consensus-bar > div i { height: 100%; background: #777181; }.consensus-bar > div i:first-child { background: var(--violet); }.consensus-bar strong { color: #7e778b; font-size: .52rem; font-weight: 700; }
 .calculation-panel { display: grid; grid-template-rows: auto auto auto auto 1fr auto; border-left: 1px solid rgb(255 255 255 / 8%); }.calculation-panel > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; padding: .9rem 1rem; border-bottom: 1px solid rgb(255 255 255 / 8%); }.focus-avatar { display: grid; width: 2.6rem; aspect-ratio: 1; place-items: center; border-radius: .55rem; background: color-mix(in srgb, var(--engine) 18%, #181325); color: var(--engine); font-size: .65rem; font-weight: 900; }.calculation-panel header > div { display: grid; min-width: 0; gap: .05rem; }.calculation-panel header strong, .calculation-panel header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.calculation-panel header strong { font-size: .72rem; }.calculation-panel header div span { color: #736d7d; font-size: .54rem; }.focus-live { width: .4rem; aspect-ratio: 1; border-radius: 50%; background: var(--engine); box-shadow: 0 0 .7rem var(--engine); }.principal-move { display: grid; padding: 1rem; border-bottom: 1px solid rgb(255 255 255 / 8%); }.principal-move strong { margin-top: .2rem; color: var(--engine); font-family: ui-monospace, monospace; font-size: clamp(1.7rem, 3vw, 2.4rem); letter-spacing: -.06em; }.principal-move small { margin-top: .2rem; overflow: hidden; color: #8a8394; font-size: .56rem; text-overflow: ellipsis; white-space: nowrap; }.engine-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 0; border-bottom: 1px solid rgb(255 255 255 / 8%); background: rgb(255 255 255 / 7%); }.engine-metrics div { display: grid; gap: .16rem; padding: .65rem; background: #0d0a18; }.engine-metrics dt { color: #676170; font-size: .48rem; font-weight: 750; text-transform: uppercase; }.engine-metrics dd { margin: 0; color: #d9d4e3; font-family: ui-monospace, monospace; font-size: .64rem; }.engine-metrics dd small { color: #746d7d; }.engine-metrics .status-value { color: var(--engine); font-family: inherit; text-transform: capitalize; }.pv-line { min-width: 0; padding: .85rem 1rem; border-bottom: 1px solid rgb(255 255 255 / 8%); }.pv-line p { margin: .4rem 0 0; overflow: hidden; color: #b2acbd; font-family: ui-monospace, monospace; font-size: .58rem; line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }.uci-console { display: grid; grid-template-rows: auto 1fr; min-height: 8rem; overflow: hidden; background: #07050d; }.uci-console header { display: flex; align-items: center; justify-content: space-between; padding: .55rem .75rem; border-bottom: 1px solid rgb(255 255 255 / 6%); }.uci-console header span { color: #736d7c; font-size: .5rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }.uci-console header i { width: .35rem; aspect-ratio: 1; border-radius: 50%; background: var(--engine); }.uci-console pre { margin: 0; overflow: auto; padding: .75rem; color: #8ee3d4; font-family: ui-monospace, monospace; font-size: .52rem; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }.calculation-panel > footer { display: flex; align-items: center; justify-content: space-between; padding: .65rem .8rem; border-top: 1px solid rgb(255 255 255 / 8%); color: #615b69; font-size: .5rem; }
 .puzzle-pattern { position: absolute; z-index: -1; inset: 0; background-color: #090713; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 80'%3E%3Cpath d='M40 0v14c0 3-2 5-5 5h-2c-4 0-7 3-7 7s3 7 7 7h2c3 0 5 2 5 5v16c0 3 2 5 5 5h2c4 0 7 3 7 7s-3 7-7 7h-2c-3 0-5 2-5 5v2M0 40h14c3 0 5 2 5 5v2c0 4 3 7 7 7s7-3 7-7v-2c0-3 2-5 5-5h16c3 0 5-2 5-5v-2c0-4 3-7 7-7s7 3 7 7v2c0 3 2 5 5 5h2' fill='none' stroke='%2333274d' stroke-width='1'/%3E%3C/svg%3E"); background-position: center; background-size: 5rem 5rem; }
-.rules-trigger { position: absolute; z-index: 5; top: 1rem; left: 1rem; display: grid; width: 2.5rem; height: 2.5rem; place-items: center; padding: 0; border: 1px solid rgb(167 139 250 / 32%); border-radius: 50%; background: rgb(14 10 27 / 88%); box-shadow: 0 .6rem 1.5rem rgb(0 0 0 / 24%); color: #c8b8ff; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, transform 150ms ease; }
+.event-music-toggle { position: absolute; z-index: 5; top: 1rem; left: 1rem; display: inline-flex; min-height: 2.5rem; align-items: center; gap: .45rem; padding: 0 .55rem 0 .7rem; border: 1px solid rgb(167 139 250 / 32%); border-radius: 999px; background: rgb(14 10 27 / 88%); box-shadow: 0 .6rem 1.5rem rgb(0 0 0 / 24%); color: #938ba4; cursor: pointer; font: inherit; font-size: .64rem; font-weight: 760; transition: border-color 150ms ease, background 150ms ease, color 150ms ease, transform 150ms ease; }
+.event-music-toggle > i { position: relative; width: 1.85rem; height: 1rem; border-radius: 999px; background: #312a3d; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 7%); transition: background 150ms ease; }
+.event-music-toggle > i::after { position: absolute; top: .15rem; left: .15rem; width: .7rem; height: .7rem; border-radius: 50%; background: #8a8296; content: ""; transition: background 150ms ease, transform 150ms ease; }
+.event-music-toggle[aria-checked="true"] { border-color: rgb(167 139 250 / 58%); color: #d9ccff; }
+.event-music-toggle[aria-checked="true"] > i { background: rgb(139 92 246 / 46%); }
+.event-music-toggle[aria-checked="true"] > i::after { background: #d9ccff; transform: translateX(.85rem); }
+.event-music-toggle:hover { border-color: var(--violet); background: #211833; color: #d9ccff; transform: translateY(-1px); }
+.event-music-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.rules-trigger { position: absolute; z-index: 5; top: 1rem; right: 1rem; display: grid; width: 2.5rem; height: 2.5rem; place-items: center; padding: 0; border: 1px solid rgb(167 139 250 / 32%); border-radius: 50%; background: rgb(14 10 27 / 88%); box-shadow: 0 .6rem 1.5rem rgb(0 0 0 / 24%); color: #c8b8ff; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, transform 150ms ease; }
 .rules-trigger:hover { border-color: var(--violet); background: #211833; transform: translateY(-1px); }
 .rules-trigger:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
 .rules-overlay { position: fixed; z-index: 70; inset: 0; }
