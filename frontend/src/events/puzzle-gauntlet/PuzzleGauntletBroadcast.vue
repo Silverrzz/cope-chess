@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
+import { api } from "@/api/client";
 import ChessBoard from "@/components/chess/ChessBoard.vue";
 import type { BoardArrow, Color } from "@/components/chess/chess";
 import ChatPanel from "@/components/public/ChatPanel.vue";
@@ -76,11 +77,16 @@ let countdownFrame: number | undefined;
 let countdownAudio: HTMLAudioElement | null = null;
 let audioPlayPending = false;
 let countdownAudioStarted = false;
+let lastConfettiRequestAt = 0;
+const seenConfettiIds = new Set<string>();
 const confettiTimers = new Set<number>();
 let fenCopyTimer: number | undefined;
 let arenaFitFrame: number | undefined;
 const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
 const countdownAudioLengthMs = 60_000;
+const confettiClientId = typeof globalThis.crypto?.randomUUID === "function"
+  ? globalThis.crypto.randomUUID()
+  : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 
 const isComplete = computed(() => props.detail.event.status === "completed" || props.detail.event.status === "cancelled" || payload.value.phase === "completed");
 const isLive = computed(() => {
@@ -247,6 +253,7 @@ watch(targetTime, (value, previous) => {
 watch(isLive, scheduleArenaFit, { flush: "post" });
 
 onMounted(() => {
+  window.addEventListener("cope:event-cheer", handleConfettiEvent as EventListener);
   window.addEventListener("resize", scheduleArenaFit);
   window.visualViewport?.addEventListener("resize", scheduleArenaFit);
   scheduleArenaFit();
@@ -263,6 +270,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("cope:event-cheer", handleConfettiEvent as EventListener);
   window.clearInterval(ticker);
   if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
   if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
@@ -609,14 +617,37 @@ function handleUserActivation(): void {
   if (!soundPrimed.value || finalMinuteActive.value || ["blocked", "unavailable"].includes(soundState.value)) void enableCountdownSound();
 }
 
-function launchConfetti(side: "left" | "right", event: MouseEvent): void {
-  if (!confettiEnabled.value || !(event.currentTarget instanceof HTMLElement) || confettiBursts.value.length >= 6) return;
-  const bounds = event.currentTarget.getBoundingClientRect();
+async function celebrate(side: "left" | "right"): Promise<void> {
+  const requestedAt = Date.now();
+  if (requestedAt - lastConfettiRequestAt < 350) return;
+  lastConfettiRequestAt = requestedAt;
+  try {
+    await api.post(`/api/events/${encodeURIComponent(props.detail.event.slug)}/puzzle-gauntlet/cheers`, {
+      body: { side },
+      headers: { "X-Cope-Cheer-Client": confettiClientId },
+    });
+  } catch {
+    return;
+  }
+}
+
+function handleConfettiEvent(event: Event): void {
+  const detail = (event as CustomEvent<{ id?: string; side?: string }>).detail;
+  const confettiId = typeof detail?.id === "string" ? detail.id : "";
+  if (!confettiId || (detail.side !== "left" && detail.side !== "right") || seenConfettiIds.has(confettiId)) return;
+  seenConfettiIds.add(confettiId);
+  if (seenConfettiIds.size > 128) seenConfettiIds.delete(seenConfettiIds.values().next().value!);
+  launchConfetti(detail.side, confettiId);
+}
+
+function launchConfetti(side: "left" | "right", confettiId: string): void {
+  if (!confettiEnabled.value || confettiBursts.value.length >= 6) return;
+  const bounds = document.querySelector<HTMLElement>(`.tada-button--${side}`)?.getBoundingClientRect();
   const burst: ConfettiBurst = {
-    id: typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    id: confettiId,
     side,
-    x: ((bounds.left + bounds.width / 2) / window.innerWidth) * 100,
-    y: ((bounds.top + bounds.height / 2) / window.innerHeight) * 100,
+    x: bounds ? ((bounds.left + bounds.width / 2) / window.innerWidth) * 100 : side === "left" ? 4 : 96,
+    y: bounds ? ((bounds.top + bounds.height / 2) / window.innerHeight) * 100 : 94,
     pieces: Array.from({ length: 42 }, (_, index) => ({
       id: index,
       startX: -2.2 + Math.random() * 4.4,
@@ -647,8 +678,8 @@ function launchConfetti(side: "left" | "right", event: MouseEvent): void {
       </span>
     </div>
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
-    <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--left" aria-label="Celebrate from the left" @click="launchConfetti('left', $event)">🎉</button>
-    <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--right" aria-label="Celebrate from the right" @click="launchConfetti('right', $event)">🎉</button>
+    <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--left" aria-label="Celebrate from the left" @click="celebrate('left')">🎉</button>
+    <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--right" aria-label="Celebrate from the right" @click="celebrate('right')">🎉</button>
     <button v-if="!isLive && !isComplete" type="button" class="rules-trigger" aria-controls="gauntlet-rules-panel" :aria-expanded="rulesOpen" aria-label="How Puzzle Gauntlet works" @click="rulesOpen = true" @keydown.esc="rulesOpen = false"><AppIcon name="info" :size="18" /></button>
 
     <Teleport to="body">

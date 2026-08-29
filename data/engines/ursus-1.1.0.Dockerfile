@@ -18,12 +18,12 @@ RUN --mount=type=cache,target=/root/.cache/zig \
     --mount=type=cache,target=/build/.zig-cache \
     zig build \
         -Doptimize=ReleaseFast \
-        -Dtarget=x86_64-linux-musl \
+        -Dtarget=x86_64-linux-gnu \
         -Dcpu=x86_64_v3 \
     && install -Dm755 zig-out/bin/Ursus /opt/cope/engine \
     && strip /opt/cope/engine
 
-FROM scratch
+FROM debian:bookworm-slim
 
 WORKDIR /opt/cope
 COPY --from=builder /opt/cope/engine ./engine

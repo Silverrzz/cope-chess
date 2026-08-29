@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 from io import StringIO
 from datetime import UTC, datetime, timedelta
@@ -47,6 +48,7 @@ MODULE_KEY = "puzzle-gauntlet"
 MODULE_VERSION = 1
 PUZZLE_GAUNTLET_TRANSITION_MS = 5000
 _UCI_MOVE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$", re.IGNORECASE)
+_CHEER_CLIENT = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 
 
 class PuzzleInput(BaseModel):
@@ -121,6 +123,10 @@ class GauntletVisibilityInput(BaseModel):
 
 class GauntletActionInput(BaseModel):
     action: Literal["pause", "resume", "abort"]
+
+
+class GauntletCheerPayload(BaseModel):
+    side: Literal["left", "right"]
 
 
 def _required_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
@@ -785,6 +791,54 @@ def _register_api(app: FastAPI) -> None:
         if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
             raise HTTPException(status_code=401, detail="Admin session required.")
         return _json(_public_payload(connection, event))
+
+    @app.post("/api/events/{slug}/puzzle-gauntlet/cheers")
+    def cheer_for_gauntlet(
+        slug: str,
+        payload: GauntletCheerPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        hub = request.app.state.stream_hub
+        client_host = request.client.host if request.client is not None else "unknown"
+        supplied_client = request.headers.get("x-cope-cheer-client", "")
+        client_key = supplied_client if _CHEER_CLIENT.fullmatch(supplied_client) else client_host
+        if not hub.allow_ephemeral(
+            f"cheer-host:{slug}:{client_host}",
+            rate=12.0,
+            burst=24,
+        ):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
+        if not hub.allow_ephemeral(
+            f"cheer-client:{slug}:{client_host}:{client_key}",
+            rate=4.0,
+            burst=8,
+        ):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
+        event = get_event_by_slug(connection, slug)
+        if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
+            raise HTTPException(status_code=404, detail="Puzzle Gauntlet event not found.")
+        if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
+            raise HTTPException(status_code=401, detail="Admin session required.")
+        if not hub.allow_ephemeral(
+            f"cheer-event:{event.id}",
+            rate=20.0,
+            burst=30,
+        ):
+            raise HTTPException(status_code=429, detail="The crowd is cheering too quickly.")
+        cheer = {
+            "id": secrets.token_hex(8),
+            "event_id": event.id,
+            "side": payload.side,
+        }
+        hub.publish(
+            f"event.{event.id}",
+            "event.cheer",
+            cheer,
+            source="web",
+            ephemeral=True,
+        )
+        return _json({"accepted": True, "cheer_id": cheer["id"]}, 202)
 
     @app.post("/api/admin/events/{event_id}/puzzle-gauntlet/puzzles")
     def add_puzzle(
