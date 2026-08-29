@@ -293,9 +293,15 @@ def _attempt_rows(
         int(row["cast_member_id"]): row
         for row in connection.execute(
             """
-            SELECT attempt.*, game.status AS game_status, game.started_at, game.finished_at
+            SELECT attempt.*, game.status AS game_status, game.started_at, game.finished_at,
+                   move.uci AS recorded_move_uci, move.time_ms AS recorded_elapsed_ms
             FROM puzzle_gauntlet_attempts attempt
             JOIN games game ON game.id = attempt.game_id
+            LEFT JOIN LATERAL (
+              SELECT uci, time_ms FROM moves
+              WHERE game_id = attempt.game_id AND is_book = 0
+              ORDER BY ply LIMIT 1
+            ) move ON TRUE
             WHERE attempt.event_id = ?
               AND attempt.puzzle_id = ?
             """,
@@ -342,8 +348,12 @@ def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool)
                     "game_id": int(attempt["game_id"]),
                     "game_status": attempt["game_status"],
                     "outcome": attempt["outcome"],
-                    "move_uci": attempt["move_uci"],
-                    "elapsed_ms": attempt["elapsed_ms"],
+                    "move_uci": attempt["move_uci"] or attempt["recorded_move_uci"],
+                    "elapsed_ms": (
+                        attempt["elapsed_ms"]
+                        if attempt["elapsed_ms"] is not None
+                        else attempt["recorded_elapsed_ms"]
+                    ),
                     "started_at": attempt["started_at"],
                     "finished_at": attempt["finished_at"],
                 },

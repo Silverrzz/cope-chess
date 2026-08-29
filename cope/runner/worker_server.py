@@ -116,6 +116,8 @@ RETIRED_ASSIGNMENT_GRACE_S = 60.0
 LATE_ASSIGNMENT_MESSAGE_TYPES = {
     "assignment_progress",
     "assignment_cleanup_complete",
+    "engine_command_result",
+    "engine_command_started",
     "engine_clock",
     "engine_info",
 }
@@ -938,6 +940,8 @@ class WorkerHandshakeServer:
         models = {
             "assignment_progress": AssignmentProgress,
             "assignment_cleanup_complete": AssignmentCleanupComplete,
+            "engine_command_result": EngineCommandResult,
+            "engine_command_started": EngineCommandStarted,
             "engine_clock": EngineClock,
             "engine_info": EngineInfo,
         }
@@ -2091,6 +2095,20 @@ class WorkerHandshakeServer:
                 telemetry = model.model_validate(envelope.data)
                 if not telemetry.matches_assignment(assignment.assignment):
                     raise ProtocolValidationError("assignment telemetry mismatch")
+                continue
+            if envelope.type in {"engine_command_started", "engine_command_result"}:
+                model = (
+                    EngineCommandStarted
+                    if envelope.type == "engine_command_started"
+                    else EngineCommandResult
+                )
+                reply = model.model_validate(envelope.data)
+                if not reply.matches_assignment(assignment.assignment):
+                    raise ProtocolValidationError("assignment command reply mismatch")
+                if reply.engine_id not in assignment.engines:
+                    raise ProtocolValidationError(
+                        "assignment command reply references unknown engine"
+                    )
                 continue
             if envelope.type != "assignment_cleanup_complete":
                 raise ProtocolValidationError(

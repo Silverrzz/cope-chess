@@ -1058,7 +1058,11 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         event = _require_viewable_event(connection, slug, request)
-        return _json(_event_detail_payload(connection, event, admin=False))
+        payload = _event_detail_payload(connection, event, admin=False)
+        payload["spectator_count"] = request.app.state.stream_hub.event_spectator_count(
+            event.id
+        )
+        return _json(payload)
 
     @app.post("/api/events/{slug}/chat")
     async def public_event_chat(

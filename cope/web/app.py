@@ -2935,6 +2935,38 @@ def _move_payload(move: MoveRecord, root_fen: str | None) -> dict[str, Any]:
         "engine_version_id": move.engine_version_id,
     }
 
+
+def _live_engine_info_payloads(live: dict[Any, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(live, dict):
+        return []
+    payloads: list[dict[str, Any]] = []
+    for raw_game_id, game_live in live.items():
+        if not isinstance(game_live, dict):
+            continue
+        game_id = _positive_int(game_live.get("game_id")) or _positive_int(raw_game_id)
+        engine_data_by_side = game_live.get("engine_data")
+        if game_id is None or not isinstance(engine_data_by_side, dict):
+            continue
+        for side in ("white", "black", "kibitzer"):
+            engine_data = engine_data_by_side.get(side)
+            if not isinstance(engine_data, dict):
+                continue
+            engine_id = _positive_int(engine_data.get("engine_id"))
+            if engine_id is None:
+                continue
+            payloads.append(
+                {
+                    "game_id": game_id,
+                    "engine_id": engine_id,
+                    "side": side,
+                    "raw": str(engine_data.get("info") or ""),
+                    "root_fen": str(engine_data.get("root_fen") or ""),
+                    "engine_data": dict(engine_data),
+                }
+            )
+    return payloads
+
+
 def _tournament_live_payload(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
@@ -2977,6 +3009,7 @@ def _tournament_live_payload(
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
+        "engine_infos": _live_engine_info_payloads(live),
         "standings": _standings(connection, tournament, engines),
         "active_games": [_game_payload(game, engines, live=True) for game in active_games],
     }

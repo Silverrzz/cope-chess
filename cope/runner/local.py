@@ -714,6 +714,7 @@ def run_worker_assignment_game(
         lag_compensation_ms=tournament.config.lag_compensation_ms,
         use_worker_search_clock=puzzle_gauntlet_puzzle_id is None,
         use_latest_info_move_on_timeout=puzzle_gauntlet_puzzle_id is not None,
+        search_until_timeout=puzzle_gauntlet_puzzle_id is not None,
     )
     progress(
         "startup",

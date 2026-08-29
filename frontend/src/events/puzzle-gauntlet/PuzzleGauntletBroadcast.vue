@@ -44,6 +44,10 @@ interface GauntletMoveEvent {
   };
 }
 
+interface GauntletStreamSnapshot {
+  engine_infos?: GauntletEngineInfo[];
+}
+
 const COPE_BLUE = "#2d63bf";
 const KNOCKOUT_GRAY = "#7b8495";
 
@@ -332,6 +336,16 @@ function connectStream(): void {
   stream = new EventSource(`/events/${encodeURIComponent(props.detail.event.slug)}/tournaments/${tournamentId}/stream?spectator=0`);
   stream.onopen = () => { streamState.value = "live"; };
   stream.onerror = () => { streamState.value = "offline"; };
+  stream.addEventListener("tournament.snapshot", (raw) => {
+    const data = streamData<GauntletStreamSnapshot>(raw);
+    const snapshot: Record<number, GauntletEngineInfo> = {};
+    for (const info of data.engine_infos ?? []) {
+      const entry = payload.value.entries.find((item) => String(item.attempt?.game_id) === String(info.game_id));
+      if (!entry || Number(entry.engine_id) !== Number(info.engine_id)) continue;
+      snapshot[info.engine_id] = info;
+    }
+    infoByEngine.value = snapshot;
+  });
   stream.addEventListener("engine.info", (raw) => {
     const data = streamData<GauntletEngineInfo>(raw);
     const entry = payload.value.entries.find((item) => String(item.attempt?.game_id) === String(data.game_id));

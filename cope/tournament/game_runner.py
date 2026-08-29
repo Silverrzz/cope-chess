@@ -18,12 +18,14 @@ class GameRunner:
         use_latest_info_move_on_timeout: bool = False,
         on_tick: Callable[[chess.Color, int | None], None] | None = None,
         on_clock_sync: Callable[[chess.Color, bool, int | None], None] | None = None,
+        search_until_timeout: bool = False,
     ):
         self._game = game
         self._clock_probe_interval = clock_probe_interval
         self._lag_compensation_ms = max(0, lag_compensation_ms)
         self._use_worker_search_clock = use_worker_search_clock
         self._use_latest_info_move_on_timeout = use_latest_info_move_on_timeout
+        self._search_until_timeout = search_until_timeout
         self._game_started = False
         self._on_tick = on_tick
         self._on_clock_sync = on_clock_sync
@@ -62,7 +64,10 @@ class GameRunner:
         worker_clock_synced = False
 
         clock.start_clock()
-        engine.start_search(board, self._build_go_command(clock))
+        engine.start_search(
+            board,
+            "go infinite" if self._search_until_timeout else self._build_go_command(clock),
+        )
         if self._on_clock_sync is not None:
             self._on_clock_sync(side_to_move, True, _clock_remaining_ms(clock))
 
@@ -103,6 +108,10 @@ class GameRunner:
                 engine.wait_for_search(self._clock_probe_interval)
 
             move = engine.get_search_move()
+            if self._search_until_timeout:
+                result = engine.capture_latest_info_result(board)
+                if result is not None:
+                    move = result.bestmove
         except TimeOutError:
             result = (
                 engine.capture_latest_info_result(board)
