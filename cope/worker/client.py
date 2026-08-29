@@ -62,7 +62,11 @@ from cope.core.stream import (
 )
 from cope.worker.update import install_worker_release
 
-from .uci_engine import EnginePreparationError, UciEngineProcess
+from .uci_engine import (
+    EnginePreparationError,
+    UciEngineProcess,
+    discover_worker_local_engine_keys,
+)
 
 
 LOG = logging.getLogger("cope.worker")
@@ -426,6 +430,7 @@ def _build_hello(
         )
 
     machine_id = config.machine_id or _detect_machine_id()
+    worker_local_engine_keys = discover_worker_local_engine_keys()
 
     if config.token is not None:
         return WorkerTokenHello(
@@ -434,6 +439,7 @@ def _build_hello(
             hw=hw,
             app_version=config.app_version,
             machine_id=machine_id,
+            worker_local_engine_keys=worker_local_engine_keys,
         )
 
     return WorkerSessionHello(
@@ -441,6 +447,7 @@ def _build_hello(
         hw=hw,
         app_version=config.app_version,
         machine_id=machine_id,
+        worker_local_engine_keys=worker_local_engine_keys,
     )
 
 
@@ -920,18 +927,26 @@ async def _serve_assignment(
             total=len(engines),
         )
         hardware_scores: dict[int, EngineHardwareScore] = {}
+        benchmark_reference = assignment.benchmark_reference
+        benchmark_engine_ids = (
+            ()
+            if benchmark_reference is None
+            else tuple(sorted(benchmark_reference.engine_nps))
+        )
         await progress.publish(
             "benchmark",
             "benchmark_all",
             "running",
-            f"Benchmarking {len(engines)} assigned engines",
+            f"Benchmarking {len(benchmark_engine_ids)} managed engines",
             current=0,
-            total=len(engines),
+            total=max(1, len(benchmark_engine_ids)),
         )
-        for position, engine_id in enumerate(sorted(engines), start=1):
+        for position, engine_id in enumerate(benchmark_engine_ids, start=1):
             engine = engines[engine_id]
             spec = assignment.engines[engine_id]
-            reference_nps = assignment.benchmark_reference.engine_nps[engine_id]
+            if benchmark_reference is None:
+                raise ProtocolValidationError("managed engine has no benchmark reference")
+            reference_nps = benchmark_reference.engine_nps[engine_id]
             await progress.publish(
                 "benchmark",
                 "engine_benchmark",
@@ -939,12 +954,12 @@ async def _serve_assignment(
                 f"Benchmarking {spec.name}",
                 engine=spec,
                 current=position - 1,
-                total=len(engines),
+                total=len(benchmark_engine_ids),
             )
             worker_nps, elapsed_ms = await benchmark_cache.benchmark(
                 engine,
                 spec,
-                assignment.benchmark_reference.timeout_s,
+                benchmark_reference.timeout_s,
             )
             hardware_score = worker_nps / reference_nps
             hardware_scores[engine_id] = EngineHardwareScore(
@@ -960,7 +975,7 @@ async def _serve_assignment(
                 f"Benchmarked {spec.name} at {worker_nps} NPS",
                 engine=spec,
                 current=position,
-                total=len(engines),
+                total=len(benchmark_engine_ids),
                 metadata={
                     "benchmark_nps": reference_nps,
                     "worker_nps": worker_nps,
@@ -972,9 +987,13 @@ async def _serve_assignment(
             "benchmark",
             "benchmark_all",
             "completed",
-            f"Benchmarked all {len(engines)} assigned engines",
-            current=len(engines),
-            total=len(engines),
+            (
+                f"Benchmarked all {len(benchmark_engine_ids)} managed engines"
+                if benchmark_engine_ids
+                else "No managed engines required a hardware benchmark"
+            ),
+            current=len(benchmark_engine_ids),
+            total=max(1, len(benchmark_engine_ids)),
         )
         ready = AssignmentReady(
             **assignment.assignment.message_fields(),

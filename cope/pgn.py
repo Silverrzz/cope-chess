@@ -281,6 +281,7 @@ def _list_export_moves(
 
 def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int | str]]:
     conditions = [
+        "game.record_eligible = 1",
         "game.status = 'finished'",
         "game.result IS NOT NULL",
         "tournament.status <> 'draft'",

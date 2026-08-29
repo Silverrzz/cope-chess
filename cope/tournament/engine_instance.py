@@ -80,6 +80,7 @@ class EngineInstance:
         self._search_executor = ThreadPoolExecutor(max_workers=1)
         self._search_future: Future | None = None
         self._last_search_result: EngineSearchResult | None = None
+        self._captured_search_result: EngineSearchResult | None = None
         self._current_search_info: EngineSearchInfo | None = None
         self._current_info_line: str | None = None
         self._info_listener: Callable[[str, EngineSearchInfo], None] | None = None
@@ -175,6 +176,7 @@ class EngineInstance:
             raise RuntimeError(f"{self._name} is already searching")
 
         self._last_search_result = None
+        self._captured_search_result = None
         self._current_search_info = None
         self._current_info_line = None
         if self._is_remote():
@@ -188,7 +190,41 @@ class EngineInstance:
         )
 
     def get_last_search_result(self) -> EngineSearchResult | None:
-        return self._last_search_result
+        return self._captured_search_result or self._last_search_result
+
+    def capture_latest_info_result(
+        self,
+        board: chess.Board,
+    ) -> EngineSearchResult | None:
+        info = self._current_search_info
+        if info is None or not info.pv:
+            return None
+        move_uci = info.pv.split(maxsplit=1)[0]
+        if len(move_uci) == 5 and move_uci[4] in "QRBN":
+            move_uci = f"{move_uci[:4]}{move_uci[4].lower()}"
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except ValueError:
+            return None
+        if move not in board.legal_moves:
+            return None
+        result = EngineSearchResult(
+            bestmove=move,
+            eval_cp=info.eval_cp,
+            eval_mate=info.eval_mate,
+            score_bound=info.score_bound,
+            depth=info.depth,
+            seldepth=info.seldepth,
+            nodes=info.nodes,
+            nps=info.nps,
+            hashfull=info.hashfull,
+            time_ms=info.time_ms,
+            pv=info.pv,
+            info_line=self._current_info_line,
+        )
+        self._captured_search_result = result
+        self._last_search_result = result
+        return result
 
     def get_current_search_info(self) -> EngineSearchInfo | None:
         return self._current_search_info

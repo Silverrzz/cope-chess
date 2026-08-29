@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -101,7 +100,7 @@ def list_active_games(
     tournament_id: int | None = None,
     limit: int | None = None,
 ) -> tuple[GameRecord, ...]:
-    conditions = "status IN ('live', 'assigned')"
+    conditions = "record_eligible = 1 AND status IN ('live', 'assigned')"
     parameters: list[int] = []
     if tournament_id is not None:
         conditions += " AND tournament_id = ?"
@@ -148,6 +147,7 @@ def list_upcoming_games(
         SELECT games.* FROM games
         JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE games.status = 'pending'
+          AND games.record_eligible = 1
           AND tournaments.status IN ('scheduled', 'running')
           AND NOT EXISTS (
             SELECT 1 FROM engine_relay_fixtures fixture
@@ -173,7 +173,7 @@ def list_games_by_status(
     rows = connection.execute(
         """
         SELECT * FROM games
-        WHERE status = ?
+        WHERE record_eligible = 1 AND status = ?
         ORDER BY id DESC
         LIMIT ?
         """,
@@ -193,6 +193,8 @@ def list_engine_games(
     side_filter: str | None = None,
 ) -> tuple[GameRecord, ...]:
     conditions = [
+        "games.record_eligible = 1",
+        "games.status = 'finished'",
         "games.result IS NOT NULL",
         "(games.white_engine_id = ? OR games.black_engine_id = ?)",
     ]
@@ -260,7 +262,8 @@ def engine_game_filter_options(
                tournaments.config AS tournament_config
         FROM games
         JOIN tournaments ON tournaments.id = games.tournament_id
-        WHERE games.result IS NOT NULL
+        WHERE games.record_eligible = 1
+          AND games.status = 'finished' AND games.result IS NOT NULL
           AND (games.white_engine_id = ? OR games.black_engine_id = ?)
         """,
         (engine_id, engine_id),
@@ -345,7 +348,7 @@ def engine_result_summary(
             ELSE 0
           END), 0) AS losses
         FROM games
-        WHERE result IS NOT NULL
+        WHERE record_eligible = 1 AND status = 'finished' AND result IS NOT NULL
           AND (white_engine_id = ? OR black_engine_id = ?)
         """,
         (engine_id, engine_id, engine_id, engine_id, engine_id, engine_id),
@@ -358,20 +361,107 @@ def engine_result_summary(
     }
 
 
+def list_engine_result_summaries(
+    connection: sqlite3.Connection,
+) -> dict[int, dict[str, int]]:
+    rows = connection.execute(
+        """
+        SELECT participant.engine_id,
+               COUNT(*) AS games,
+               COUNT(*) FILTER (WHERE participant.outcome = 'win') AS wins,
+               COUNT(*) FILTER (WHERE participant.outcome = 'draw') AS draws,
+               COUNT(*) FILTER (WHERE participant.outcome = 'loss') AS losses
+        FROM games game
+        CROSS JOIN LATERAL (
+          VALUES
+            (
+              game.white_engine_id,
+              CASE game.result
+                WHEN '1-0' THEN 'win'
+                WHEN '0-1' THEN 'loss'
+                ELSE 'draw'
+              END
+            ),
+            (
+              game.black_engine_id,
+              CASE game.result
+                WHEN '0-1' THEN 'win'
+                WHEN '1-0' THEN 'loss'
+                ELSE 'draw'
+              END
+            )
+        ) participant(engine_id, outcome)
+        WHERE game.record_eligible = 1
+          AND game.status = 'finished' AND game.result IS NOT NULL
+        GROUP BY participant.engine_id
+        """
+    )
+    return {
+        int(row["engine_id"]): {
+            "wins": int(row["wins"]),
+            "draws": int(row["draws"]),
+            "losses": int(row["losses"]),
+            "games": int(row["games"]),
+        }
+        for row in rows
+    }
+
+
+def list_engine_game_counts(
+    connection: sqlite3.Connection,
+    engine_ids: Iterable[int] | None = None,
+) -> dict[int, int]:
+    selected = None
+    if engine_ids is not None:
+        selected = tuple(dict.fromkeys(int(engine_id) for engine_id in engine_ids))
+        if not selected:
+            return {}
+    if selected is not None:
+        placeholders = ", ".join("?" for _ in selected)
+        rows = connection.execute(
+            f"""
+            SELECT participant.engine_id, COUNT(*) AS games
+            FROM (
+              SELECT white_engine_id AS engine_id
+              FROM games
+              WHERE record_eligible = 1 AND white_engine_id IN ({placeholders})
+              UNION ALL
+              SELECT black_engine_id AS engine_id
+              FROM games
+              WHERE record_eligible = 1 AND black_engine_id IN ({placeholders})
+            ) participant
+            GROUP BY participant.engine_id
+            """,
+            selected + selected,
+        )
+        return {int(row["engine_id"]): int(row["games"]) for row in rows}
+    rows = connection.execute(
+        """
+        SELECT participant.engine_id, COUNT(*) AS games
+        FROM games game
+        CROSS JOIN LATERAL (
+          VALUES (game.white_engine_id), (game.black_engine_id)
+        ) participant(engine_id)
+        WHERE game.record_eligible = 1
+        GROUP BY participant.engine_id
+        """,
+    )
+    return {int(row["engine_id"]): int(row["games"]) for row in rows}
+
+
 def list_rating_rows(
     connection: sqlite3.Connection,
     rating_list_id: int,
 ) -> tuple[RatingRowRecord, ...]:
-    if not _table_exists(connection, "rating_list_ratings"):
-        return ()
-
     rows = connection.execute(
         """
         SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
                artifact.artifact_sha256, artifact.artifact_size,
                artifact.artifact_format, artifact.entrypoint,
                artifact.platform, artifact.storage_key,
-               ratings.elo, ratings.games_played, ratings.updated_at
+               ratings.elo, ratings.games_played, ratings.updated_at,
+               ratings.error_margin, ratings.average_opponent_elo,
+               ratings.average_opponent_elo_delta
         FROM rating_list_ratings ratings
         JOIN engine_versions version ON version.id = ratings.engine_id
         JOIN engines engine ON engine.id = version.engine_id
@@ -381,80 +471,30 @@ def list_rating_rows(
         """,
         (rating_list_id,),
     )
-    history = connection.execute(
-        """
-        SELECT
-          rating_history.engine_id,
-          rating_history.elo_before AS engine_elo,
-          rating_history.expected_score,
-          opponent.elo_before AS opponent_elo
-        FROM rating_list_history rating_history
-        JOIN rating_list_history AS opponent
-          ON opponent.game_id = rating_history.game_id
-         AND opponent.rating_list_id = rating_history.rating_list_id
-         AND opponent.engine_id = rating_history.opponent_engine_id
-        WHERE rating_history.rating_list_id = ?
-        """,
-        (rating_list_id,),
-    )
-    metrics: dict[int, dict[str, float]] = {}
-    for item in history:
-        if item["engine_elo"] is None or item["opponent_elo"] is None:
-            continue
-        values = metrics.setdefault(
-            item["engine_id"],
-            {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0, "information": 0.0},
-        )
-        engine_elo = float(item["engine_elo"])
-        opponent_elo = float(item["opponent_elo"])
-        expected = (
-            float(item["expected_score"])
-            if item["expected_score"] is not None
-            else 1.0 / (
-                1.0
-                + 10.0
-                ** (max(-4000.0, min(4000.0, opponent_elo - engine_elo)) / 400.0)
-            )
-        )
-        values["count"] += 1
-        values["opponent_total"] += opponent_elo
-        values["delta_total"] += opponent_elo - engine_elo
-        values["information"] += expected * (1.0 - expected)
-
     return tuple(
         RatingRowRecord(
             engine=_engine_from_row(row),
-            elo=row["elo"],
-            error_margin=_rating_error_margin(metrics.get(row["id"])),
-            games_played=row["games_played"],
-            average_opponent_elo=_rating_metric_average(
-                metrics.get(row["id"]),
-                "opponent_total",
+            elo=float(row["elo"]),
+            error_margin=(
+                float(row["error_margin"])
+                if row["error_margin"] is not None
+                else None
             ),
-            average_opponent_elo_delta=_rating_metric_average(
-                metrics.get(row["id"]),
-                "delta_total",
+            games_played=int(row["games_played"]),
+            average_opponent_elo=(
+                float(row["average_opponent_elo"])
+                if row["average_opponent_elo"] is not None
+                else None
+            ),
+            average_opponent_elo_delta=(
+                float(row["average_opponent_elo_delta"])
+                if row["average_opponent_elo_delta"] is not None
+                else None
             ),
             updated_at=row["updated_at"],
         )
         for row in rows
     )
-
-
-def _rating_metric_average(
-    values: dict[str, float] | None,
-    field: str,
-) -> float | None:
-    if not values or values["count"] <= 0:
-        return None
-    return round(values[field] / values["count"], 6)
-
-
-def _rating_error_margin(values: dict[str, float] | None) -> float | None:
-    if not values or values["information"] <= 0:
-        return None
-    standard_error = (400.0 / math.log(10.0)) / math.sqrt(values["information"])
-    return round(1.96 * standard_error, 6)
 
 
 def get_worker_activity(
@@ -595,7 +635,19 @@ def active_engine_hardware_profiles(
 
 
 def database_stats(connection: sqlite3.Connection) -> dict[str, int]:
-    return {table_name: _count_rows(connection, table_name) for table_name in _DB_STAT_TABLES}
+    row = connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM rating_lists) AS rating_lists,
+          (SELECT COUNT(*) FROM engines) AS engines,
+          (SELECT COUNT(*) FROM tournaments) AS tournaments,
+          (SELECT COUNT(*) FROM events) AS events,
+          (SELECT COUNT(*) FROM games WHERE record_eligible = 1) AS games,
+          (SELECT COUNT(*) FROM workers) AS workers,
+          (SELECT COUNT(*) FROM opening_suites) AS opening_suites
+        """
+    ).fetchone()
+    return {table_name: int(row[table_name]) for table_name in _DB_STAT_TABLES}
 
 
 def list_uncommitted_finished_tournaments(
@@ -629,25 +681,6 @@ def list_uncommitted_finished_tournaments(
         )
         and tournament.id not in active_or_applied_ids
     )
-
-
-def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
-    row = connection.execute(
-        """
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name = ?
-        """,
-        (table_name,),
-    ).fetchone()
-    return row is not None
-
-
-def _count_rows(connection: sqlite3.Connection, table_name: str) -> int:
-    if not _table_exists(connection, table_name):
-        return 0
-    row = connection.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
-    return int(row["count"])
 
 
 def _hardware_from_json(value: str | None) -> HardwareInfo | None:

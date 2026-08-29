@@ -9,13 +9,8 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText, formatNumber } from '@/components/admin/format'
 import { useToast } from '@/composables/useToast'
 
-interface RatingList { id: number; name: string; created_at: string }
-interface RatingRow { games_played: number }
-interface Response {
-  rating_lists: RatingList[]
-  ratings: Record<string, RatingRow[]>
-  tournaments: Array<{ rating_list_id: number; games: number }>
-}
+interface RatingList { id: number; name: string; created_at: string; engine_versions: number; games: number; tournaments: number }
+interface Response { rating_lists: RatingList[] }
 
 const router = useRouter()
 const toast = useToast()
@@ -26,17 +21,7 @@ const error = ref('')
 const showCreate = ref(false)
 const name = ref('')
 
-const totalRatedEngines = computed(() => Object.values(data.value?.ratings ?? {}).reduce((sum, rows) => sum + rows.length, 0))
-
-function listStats(id: number) {
-  const rows = data.value?.ratings[String(id)] ?? []
-  const commits = data.value?.tournaments.filter((item) => item.rating_list_id === id) ?? []
-  return {
-    engines: rows.length,
-    games: Math.round(rows.reduce((sum, row) => sum + row.games_played, 0) / 2),
-    tournaments: commits.length,
-  }
-}
+const totalRatedEngines = computed(() => (data.value?.rating_lists ?? []).reduce((sum, item) => sum + item.engine_versions, 0))
 
 async function load(): Promise<void> {
   loading.value = true
@@ -77,7 +62,7 @@ onMounted(load)
     <section v-else-if="data?.rating_lists.length" class="list-grid">
       <RouterLink v-for="ratingList in data.rating_lists" :key="ratingList.id" class="panel list-card" :to="`/admin/ratings/${ratingList.id}`">
         <div><h2>{{ ratingList.name }}</h2><span>Open rating list →</span></div>
-        <dl><div><dt>Engine versions</dt><dd>{{ formatNumber(listStats(ratingList.id).engines) }}</dd></div><div><dt>Games</dt><dd>{{ formatNumber(listStats(ratingList.id).games) }}</dd></div><div><dt>Tournaments</dt><dd>{{ formatNumber(listStats(ratingList.id).tournaments) }}</dd></div></dl>
+        <dl><div><dt>Engine versions</dt><dd>{{ formatNumber(ratingList.engine_versions) }}</dd></div><div><dt>Games</dt><dd>{{ formatNumber(ratingList.games) }}</dd></div><div><dt>Tournaments</dt><dd>{{ formatNumber(ratingList.tournaments) }}</dd></div></dl>
       </RouterLink>
     </section>
     <AdminEmptyState v-else title="No rating lists"><button class="button button--primary button--small" @click="showCreate = true">Create the first list</button></AdminEmptyState>

@@ -19,6 +19,7 @@ interface EngineRecordSummary {
 interface EngineVersionSummary {
   id: number
   version: string
+  distribution: 'managed' | 'worker_local'
   source_kind: 'release' | 'commit'
   source_ref: string
   repository_full_name: string
@@ -45,7 +46,7 @@ interface EnginesResponse {
 }
 
 type AvailabilityFilter = 'all' | 'available' | 'unavailable'
-type SourceFilter = 'all' | 'release' | 'commit'
+type SourceFilter = 'all' | 'release' | 'commit' | 'worker_local'
 type SortOption = 'name' | 'games' | 'score' | 'newest'
 
 const data = ref<EnginesResponse | null>(null)
@@ -66,6 +67,7 @@ const sourceOptions = [
   { value: 'all', label: 'All sources' },
   { value: 'release', label: 'Releases' },
   { value: 'commit', label: 'Commits' },
+  { value: 'worker_local', label: 'Worker-local' },
 ]
 const sortOptions = [
   { value: 'name', label: 'Name' },
@@ -80,7 +82,7 @@ const displayedEngines = computed(() => {
   const engines = (data.value?.engines ?? []).filter((engine) => {
     if (availability.value === 'available' && !engine.active) return false
     if (availability.value === 'unavailable' && engine.active) return false
-    if (source.value !== 'all' && !engine.versions.some((version) => version.source_kind === source.value)) return false
+    if (source.value !== 'all' && !engine.versions.some((version) => source.value === 'worker_local' ? version.distribution === 'worker_local' : version.distribution === 'managed' && version.source_kind === source.value)) return false
     if (!needle) return true
     return [
       engine.name,
@@ -198,7 +200,7 @@ function clearFilters(): void {
               <span v-if="engine.versions.length > 3">+{{ engine.versions.length - 3 }}</span>
             </div>
             <footer class="engine-card__footer">
-              <span>{{ engine.versions[0]?.repository_full_name || 'Repository unavailable' }}</span>
+              <span>{{ engine.versions[0]?.distribution === 'worker_local' ? 'Worker-local binary' : engine.versions[0]?.repository_full_name || 'Repository unavailable' }}</span>
               <span class="engine-card__open">View family <AppIcon name="arrow-right" :size="16" /></span>
             </footer>
           </article>

@@ -23,10 +23,13 @@ export interface Engine {
   dockerfile_path: string
   dockerfile: string
   build_hash: string
+  distribution: 'managed' | 'worker_local'
+  worker_local_key: string | null
   artifact: EngineArtifact | null
   uci_options: Record<string, string | number | boolean>
   active: boolean
   benchmark_current?: boolean
+  worker_local_count?: number
   engine_active?: boolean
   created_at?: string
 }
@@ -53,6 +56,14 @@ export interface EngineFamily {
   author?: string
   active: boolean
   versions: Engine[]
+}
+
+export interface Badge {
+  id: Id
+  name: string
+  emoji: string
+  description: string
+  created_at: string
 }
 
 export interface OpeningSuite {

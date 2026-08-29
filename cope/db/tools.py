@@ -159,12 +159,26 @@ def claim_tool_job(
 ) -> ToolJobRecord | None:
     row = connection.execute(
         """
-        SELECT id FROM tool_jobs
-        WHERE status = 'queued'
-        ORDER BY created_at, id
+        SELECT job.id FROM tool_jobs job
+        WHERE job.status = 'queued'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM tool_job_items item
+            JOIN engine_versions version ON version.id = item.engine_version_id
+            WHERE item.job_id = job.id
+              AND version.distribution = 'worker_local'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM worker_engine_discoveries discovery
+                WHERE discovery.worker_id = ?
+                  AND discovery.local_key = version.worker_local_key
+              )
+          )
+        ORDER BY job.created_at, job.id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
-        """
+        """,
+        (worker_id,),
     ).fetchone()
     if row is None:
         return None

@@ -6,12 +6,16 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-WORKER_PROTOCOL_VERSION = 18
+WORKER_PROTOCOL_VERSION = 19
 BENCHMARK_PROTOCOL_VERSION = 16
 PROTOCOL_VERSION = WORKER_PROTOCOL_VERSION
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
 WORKER_MEMORY_RESERVE_MIN_MB = 2048
 UciOptionValue = str | int | bool
+WorkerLocalEngineKey = Annotated[
+    str,
+    Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"),
+]
 
 
 def worker_memory_capacity_mb(total_ram_mb: int) -> int:
@@ -130,12 +134,28 @@ class EngineSpec(StrictModel):
     name: str = Field(min_length=1, max_length=80)
     author: str = Field(default="", max_length=120)
     version: str = Field(min_length=1, max_length=80)
-    repository_url: str = Field(min_length=1, max_length=1000)
-    source_ref: str = Field(min_length=1, max_length=200)
+    repository_url: str = Field(default="", max_length=1000)
+    source_ref: str = Field(default="", max_length=200)
     dockerfile: str = Field(default="", max_length=100_000)
     build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    distribution: Literal["managed", "worker_local"] = "managed"
+    worker_local_key: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
+    )
     artifact: EngineArtifactSpec | None = None
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_distribution(self) -> EngineSpec:
+        if self.distribution == "worker_local":
+            if self.worker_local_key is None:
+                raise ValueError("worker-local engines require a local key")
+            if self.artifact is not None:
+                raise ValueError("worker-local engines cannot have a published artifact")
+        elif self.worker_local_key is not None:
+            raise ValueError("managed engines cannot have a worker-local key")
+        return self
 
     @field_validator("uci_options")
     @classmethod
@@ -398,7 +418,7 @@ class WorkerGameAssignment(StrictModel):
     max_plies: int = Field(gt=0)
     engines: dict[int, EngineSpec]
     required_resources: WorkerResources
-    benchmark_reference: GameBenchmarkReference
+    benchmark_reference: GameBenchmarkReference | None = None
     workflow: tuple[WorkflowStep, ...] = Field(default_factory=game_setup_workflow)
 
     @field_validator("engines")
@@ -426,8 +446,18 @@ class WorkerGameAssignment(StrictModel):
 
     @model_validator(mode="after")
     def validate_benchmark_reference(self) -> WorkerGameAssignment:
-        if set(self.benchmark_reference.engine_nps) != set(self.engines):
-            raise ValueError("benchmark reference must include every assigned engine")
+        benchmark_engine_ids = {
+            engine_id
+            for engine_id, engine in self.engines.items()
+            if engine.distribution == "managed"
+        }
+        reference_engine_ids = (
+            set()
+            if self.benchmark_reference is None
+            else set(self.benchmark_reference.engine_nps)
+        )
+        if reference_engine_ids != benchmark_engine_ids:
+            raise ValueError("benchmark reference must include every managed engine")
         return self
 
 
@@ -527,14 +557,14 @@ class AssignmentReady(AssignmentMessage):
         cls,
         value: dict[int, EngineHardwareScore],
     ) -> dict[int, EngineHardwareScore]:
-        if not value or any(engine_id <= 0 for engine_id in value):
+        if any(engine_id <= 0 for engine_id in value):
             raise ValueError("hardware scores require positive engine ids")
         return value
 
     @model_validator(mode="after")
     def validate_ready_engines(self) -> AssignmentReady:
-        if set(self.prepared_engine_ids) != set(self.hardware_scores):
-            raise ValueError("prepared engines and hardware scores must match")
+        if not set(self.hardware_scores).issubset(self.prepared_engine_ids):
+            raise ValueError("hardware scores must reference prepared engines")
         return self
 
 
@@ -590,12 +620,40 @@ class WorkerTokenHello(WorkerActiveAssignmentsMixin):
     label_hint: str = Field(default="", max_length=80)
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
+    worker_local_engine_keys: tuple[WorkerLocalEngineKey, ...] = Field(
+        default_factory=tuple,
+        max_length=500,
+    )
+
+    @field_validator("worker_local_engine_keys")
+    @classmethod
+    def validate_worker_local_engine_keys(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("worker-local engine keys must be unique")
+        return value
 
 
 class WorkerSessionHello(WorkerActiveAssignmentsMixin):
     session_id: str = Field(min_length=1)
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
+    worker_local_engine_keys: tuple[WorkerLocalEngineKey, ...] = Field(
+        default_factory=tuple,
+        max_length=500,
+    )
+
+    @field_validator("worker_local_engine_keys")
+    @classmethod
+    def validate_worker_local_engine_keys(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("worker-local engine keys must be unique")
+        return value
 
 
 class WorkerUpdateCommand(StrictModel):
@@ -753,7 +811,7 @@ class _EnvelopeBase(StrictModel):
 
 
 class Envelope(_EnvelopeBase):
-    v: Literal[18] = WORKER_PROTOCOL_VERSION
+    v: Literal[19] = WORKER_PROTOCOL_VERSION
 
 
 class BenchmarkEnvelope(_EnvelopeBase):

@@ -251,6 +251,30 @@ class TournamentEstimator:
         return grouped
 
 
+def completed_tournament_estimate(
+    tournament: TournamentRecord,
+    *,
+    total_games: int,
+    median_game_seconds: float | None,
+    sample_size: int,
+) -> TournamentEstimate:
+    basis = "tournament" if sample_size else "unavailable"
+    return TournamentEstimate(
+        estimated_finish_at=None,
+        estimated_remaining_seconds=0,
+        median_game_seconds=(
+            round(median_game_seconds) if median_game_seconds is not None else None
+        ),
+        sample_size=sample_size,
+        remaining_games=0,
+        projected_total_games=max(total_games, _projected_game_total(tournament.config)),
+        concurrency=max(1, tournament.config.concurrency),
+        confidence=_confidence(basis, sample_size),
+        basis=basis,
+        state="complete",
+    )
+
+
 def _remaining_runtime_seconds(
     games: tuple[GameRecord, ...],
     *,

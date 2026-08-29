@@ -195,11 +195,17 @@ def _start_tournament(
     set_tournament_status(connection, tournament.id, "running")
     running = _refresh_tournament(connection, tournament)
     advance = advance_tournament(connection, running)
-    announce_tournament_started(
-        connection,
-        running,
-        scheduled_games=len(list_games(connection, tournament.id)),
+    record_games = tuple(
+        game
+        for game in list_games(connection, tournament.id)
+        if game.record_eligible
     )
+    if record_games:
+        announce_tournament_started(
+            connection,
+            running,
+            scheduled_games=len(record_games),
+        )
     return TournamentPreparation(
         tournament_id=tournament.id,
         tournament_name=tournament.name,

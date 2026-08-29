@@ -23,8 +23,6 @@ const arrowBrushes: DrawBrushes = {
   yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
   engineBlack: { key: 'engine-black', color: '#000000', opacity: 0.56, lineWidth: 14 },
   engineWhite: { key: 'engine-white', color: '#ffffff', opacity: 0.72, lineWidth: 8 },
-  engineBlackOutline: { key: 'engine-black-outline', color: '#050505', opacity: 0.98, lineWidth: 19 },
-  engineWhiteOutline: { key: 'engine-white-outline', color: '#ffffff', opacity: 0.98, lineWidth: 19 },
 }
 
 const props = withDefaults(defineProps<{
@@ -38,6 +36,7 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   label?: string
   arrows?: BoardArrow[]
+  lastMove?: string
 }>(), {
   fen: 'startpos',
   moves: () => [],
@@ -48,6 +47,7 @@ const props = withDefaults(defineProps<{
   compact: false,
   label: 'Chess game viewer',
   arrows: () => [],
+  lastMove: '',
 })
 
 const emit = defineEmits<{
@@ -64,9 +64,9 @@ const positions = computed(() => buildPositions(props.fen, props.moves))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const currentFen = computed(() => positionFen(position.value))
 const material = computed(() => materialSummary(position.value))
-const lastMove = computed(() => selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : '')
+const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
-  if (!props.moves.length) return 'Start position'
+  if (!props.moves.length) return props.lastMove ? 'Current position' : 'Start position'
   if (selectedPly.value === 0) return `Start position, 0 of ${props.moves.length} moves`
   const san = props.sanMoves[selectedPly.value - 1]
   return `Ply ${selectedPly.value} of ${props.moves.length}${san ? `, ${san}` : ''}`
@@ -100,7 +100,7 @@ watch([
   lastMove,
   () => props.orientation,
   () => props.coordinates,
-  () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}`).join('|'),
+  () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}:${arrow.outlineColor || ''}:${arrow.label || ''}`).join('|'),
 ], renderBoard)
 
 onMounted(() => {
@@ -143,19 +143,29 @@ function renderBoard(): void {
   const arrows = props.arrows
     .filter((arrow) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(arrow.move.toLowerCase()))
     .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
-  const teamArrows = arrows.filter((arrow) => arrow.fillColor)
-  const outlinedShapes = teamArrows.map<DrawShape>((arrow) => ({
+  const styledArrows = arrows.filter((arrow) => arrow.fillColor)
+  const outlinedArrows = styledArrows.filter((arrow) => arrow.outlineColor)
+  const outlinedShapes = outlinedArrows.map<DrawShape>((arrow, index) => ({
     orig: arrow.move.slice(0, 2).toLowerCase() as Key,
     dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-    brush: arrow.color === 'white' ? 'engineWhiteOutline' : 'engineBlackOutline',
+    brush: `engineOutline${index}`,
   }))
-  const fillBrushes = Object.fromEntries(teamArrows.map((arrow, index) => [
+  const fillBrushes = Object.fromEntries(styledArrows.map((arrow, index) => [
     `engineTeam${index}`,
     {
       key: `engine-team-${index}-${arrow.fillColor!.replace(/[^a-z0-9]/gi, '')}`,
       color: arrow.fillColor!,
-      opacity: 0.58,
+      opacity: 0.72,
       lineWidth: 11,
+    },
+  ]))
+  const outlineBrushes = Object.fromEntries(outlinedArrows.map((arrow, index) => [
+    `engineOutline${index}`,
+    {
+      key: `engine-outline-${index}-${arrow.outlineColor!.replace(/[^a-z0-9]/gi, '')}`,
+      color: arrow.outlineColor!,
+      opacity: 1,
+      lineWidth: 17,
     },
   ]))
   const autoShapes = [
@@ -164,8 +174,9 @@ function renderBoard(): void {
       orig: arrow.move.slice(0, 2).toLowerCase() as Key,
       dest: arrow.move.slice(2, 4).toLowerCase() as Key,
       brush: arrow.fillColor
-        ? `engineTeam${teamArrows.indexOf(arrow)}`
+        ? `engineTeam${styledArrows.indexOf(arrow)}`
         : arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
+      ...(arrow.label ? { label: { text: arrow.label } } : {}),
     })),
   ]
   const config: ChessgroundConfig = {
@@ -173,7 +184,7 @@ function renderBoard(): void {
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
-    drawable: { autoShapes, brushes: { ...arrowBrushes, ...fillBrushes } },
+    drawable: { autoShapes, brushes: { ...arrowBrushes, ...fillBrushes, ...outlineBrushes } },
   }
   ground.set(config)
 }

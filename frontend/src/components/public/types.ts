@@ -44,6 +44,22 @@ export interface GameRecord {
   finished_at?: string | null
 }
 
+export interface CrossTableGame extends GameRecord {
+  fen: string
+  last_move?: string | null
+  ply: number
+  clocks_ms: Partial<Record<'white' | 'black', number | null>>
+  evaluations?: Partial<Record<'white' | 'black', CrossTableEvaluation | null>>
+  active_side?: 'white' | 'black' | null
+  running?: boolean
+}
+
+export interface CrossTableEvaluation {
+  eval_cp?: number | null
+  eval_mate?: number | null
+  score_bound?: 'lowerbound' | 'upperbound' | null
+}
+
 export type EngineGameResultFilter = '' | 'win' | 'draw' | 'loss'
 export type EngineGameSideFilter = '' | 'white' | 'black'
 
@@ -98,6 +114,7 @@ export interface EngineRecord {
   repository_full_name?: string | null
   source_ref?: string | null
   source_kind?: "release" | "commit" | null
+  distribution?: "managed" | "worker_local"
   build_hash?: string | null
   created_at?: string | null
   uci_options?: Record<string, unknown>
@@ -236,6 +253,7 @@ export interface TournamentDetailResponse {
   estimate?: TournamentEstimate
   games: GameRecord[]
   active_games: GameRecord[]
+  cross_table_games?: CrossTableGame[]
   game_pagination: GamePagination
   engines: Record<string, string>
   viewer_game: GameRecord | null
@@ -263,6 +281,7 @@ export interface LiveSnapshot {
   clock_state?: ClockState | null
   standings?: StandingRecord[]
   active_games?: GameRecord[]
+  cross_table_games?: CrossTableGame[]
 }
 
 export interface GamePagination {

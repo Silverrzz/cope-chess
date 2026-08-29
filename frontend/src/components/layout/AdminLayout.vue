@@ -48,6 +48,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     label: "Assets",
     items: [
       { label: "Engines", to: "/admin/engines", icon: "engine" },
+      { label: "Badges", to: "/admin/badges", icon: "trophy" },
       { label: "Opening suites", to: "/admin/openings", icon: "book-open" },
     ],
   },

@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,7 @@ TERMINAL_GAME_STATUSES = {"finished", "abandoned"}
 MAX_LEGAL_GAME_PLIES = 17_697
 ENGINE_INFO_PUBLISH_INTERVAL_S = 0.5
 DEFAULT_MAX_MOVES_DECISIVE_CP = 800
+PUZZLE_GAUNTLET_START_LEAD_MS = 250
 LOG = logging.getLogger("cope.runner")
 
 
@@ -331,30 +333,66 @@ def _next_tournament_worker_assignment(
     )
     if game is None:
         return None
-    engines = _assignment_engines(
-        connection,
-        game,
-        preload_event_engines=preload_event_engines,
+    runtime_engines = _assignment_engines(connection, game)
+    engines = (
+        _assignment_engines(
+            connection,
+            game,
+            preload_event_engines=True,
+        )
+        if preload_event_engines
+        else runtime_engines
     )
-    if excluded_engine_ids.intersection(engines):
+    validate_event_roster = claim_event_fixture or preload_event_engines
+    compatibility_engines = (
+        _assignment_engines(
+            connection,
+            game,
+            preload_event_engines=True,
+        )
+        if validate_event_roster and not preload_event_engines
+        else engines
+    )
+    if excluded_engine_ids.intersection(compatibility_engines):
+        return None
+    if not _worker_has_local_engines(
+        connection,
+        worker.id,
+        tuple(compatibility_engines.values()),
+    ):
         return None
     required_resources = _tournament_required_resources(
         connection,
         tournament,
-        engine_count=len(engines),
+        engine_count=len(runtime_engines),
         participant_engine_ids=(game.white_engine_id, game.black_engine_id),
+    )
+    capacity_required = (
+        _event_preload_required_resources(
+            connection,
+            tournament,
+            compatibility_engines,
+        )
+        if validate_event_roster
+        else required_resources
     )
     available_threads, available_hash_mb = available_resources
     if (
-        available_threads < required_resources.threads
-        or available_hash_mb < required_resources.hash_mb
+        available_threads < capacity_required.threads
+        or available_hash_mb < capacity_required.hash_mb
     ):
         return None
-    benchmark_reference = get_common_benchmark_reference(
-        connection,
-        tuple(engines.values()),
+    managed_engines = tuple(
+        engine
+        for engine in engines.values()
+        if engine.distribution == "managed"
     )
-    if benchmark_reference is None:
+    benchmark_reference = (
+        get_common_benchmark_reference(connection, managed_engines)
+        if managed_engines
+        else None
+    )
+    if managed_engines and benchmark_reference is None:
         return None
     claimed = None
     if claim_event_fixture:
@@ -389,6 +427,7 @@ def _next_tournament_worker_assignment(
         assignment_record,
         opening,
         engines,
+        required_resources,
         benchmark_reference,
     )
 
@@ -406,6 +445,100 @@ def mark_worker_assignment_live(
         )
     mark_game_assignment_live(connection, assignment.id)
     mark_game_live(connection, assignment.game_id)
+
+
+def _puzzle_gauntlet_puzzle_id(
+    connection: sqlite3.Connection,
+    tournament_id: int,
+    game_id: int,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT attempt.puzzle_id
+        FROM puzzle_gauntlet_attempts attempt
+        JOIN puzzle_gauntlet_events gauntlet ON gauntlet.event_id = attempt.event_id
+        WHERE gauntlet.tournament_id = ? AND attempt.game_id = ?
+        """,
+        (tournament_id, game_id),
+    ).fetchone()
+    return None if row is None else int(row["puzzle_id"])
+
+
+def _start_puzzle_gauntlet_round(
+    connection: sqlite3.Connection,
+    assignment_id: int,
+    tournament_id: int,
+    puzzle_id: int,
+) -> datetime:
+    mark_game_assignment_live(connection, assignment_id)
+    connection.commit()
+    while True:
+        readiness = connection.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE assignment.status = 'live') AS ready,
+                   COUNT(*) FILTER (WHERE game.status = 'live') AS started,
+                   MIN(game.started_at) FILTER (WHERE game.status = 'live') AS starts_at,
+                   (SELECT status FROM tournaments WHERE id = ?) AS tournament_status,
+                   (SELECT status FROM game_assignments WHERE id = ?) AS assignment_status
+            FROM puzzle_gauntlet_attempts attempt
+            JOIN games game ON game.id = attempt.game_id
+            LEFT JOIN game_assignments assignment ON assignment.game_id = game.id
+            WHERE attempt.puzzle_id = ?
+            """,
+            (tournament_id, assignment_id, puzzle_id),
+        ).fetchone()
+        total = 0 if readiness is None else int(readiness["total"])
+        ready = 0 if readiness is None else int(readiness["ready"])
+        started = 0 if readiness is None else int(readiness["started"])
+        tournament_status = None if readiness is None else readiness["tournament_status"]
+        assignment_status = None if readiness is None else readiness["assignment_status"]
+        if total == 0 or tournament_status not in {"running", "paused"}:
+            raise RuntimeError("puzzle gauntlet round is no longer active")
+        if assignment_status not in {"assigned", "acked", "live"}:
+            raise RuntimeError("puzzle gauntlet assignment was withdrawn")
+        if total > 0 and started == total:
+            starts_at = readiness["starts_at"]
+            if starts_at is None:
+                raise RuntimeError("puzzle gauntlet round has no synchronized start time")
+            synchronized_start = datetime.fromisoformat(str(starts_at))
+            connection.commit()
+            delay = (synchronized_start - datetime.now(UTC)).total_seconds()
+            if delay > 0:
+                time.sleep(delay)
+            return synchronized_start
+        if tournament_status == "running" and ready == total:
+            from cope.events.puzzle_gauntlet import release_puzzle_gauntlet_round
+
+            release_status = release_puzzle_gauntlet_round(
+                connection,
+                tournament_id,
+                puzzle_id,
+            )
+            if release_status == "waiting":
+                connection.rollback()
+                time.sleep(0.05)
+                continue
+            if release_status != "ready":
+                raise RuntimeError("puzzle gauntlet round is no longer active")
+            starts_at = datetime.now(UTC) + timedelta(
+                milliseconds=PUZZLE_GAUNTLET_START_LEAD_MS
+            )
+            connection.execute(
+                """
+                UPDATE games
+                SET status = 'live', started_at = ?
+                WHERE status = 'assigned'
+                  AND id IN (
+                    SELECT game_id FROM puzzle_gauntlet_attempts WHERE puzzle_id = ?
+                  )
+                """,
+                (starts_at.isoformat(timespec="milliseconds"), puzzle_id),
+            )
+            connection.commit()
+            continue
+        connection.rollback()
+        time.sleep(0.05)
 
 
 def run_worker_assignment_game(
@@ -442,6 +575,11 @@ def run_worker_assignment_game(
     _validated_assignment_record(connection, assignment)
     game_record = _validated_game(connection, assignment.assignment.game_id)
     tournament = _validated_tournament(connection, game_record.tournament_id)
+    puzzle_gauntlet_puzzle_id = _puzzle_gauntlet_puzzle_id(
+        connection,
+        tournament.id,
+        game_record.id,
+    )
 
     def should_pause() -> bool:
         if pause_requested is None or not pause_requested():
@@ -574,6 +712,8 @@ def run_worker_assignment_game(
         game,
         on_clock_sync=live_reporter.publish_clock_sync,
         lag_compensation_ms=tournament.config.lag_compensation_ms,
+        use_worker_search_clock=puzzle_gauntlet_puzzle_id is None,
+        use_latest_info_move_on_timeout=puzzle_gauntlet_puzzle_id is not None,
     )
     progress(
         "startup",
@@ -706,7 +846,33 @@ def run_worker_assignment_game(
         },
     )
 
-    mark_worker_assignment_live(connection, assignment.assignment.assignment_id)
+    puzzle_gauntlet_deadline: datetime | None = None
+    if puzzle_gauntlet_puzzle_id is None:
+        mark_worker_assignment_live(connection, assignment.assignment.assignment_id)
+    else:
+        progress(
+            "play",
+            "round_sync",
+            "running",
+            "Waiting for every puzzle engine to be ready",
+        )
+        synchronized_start = _start_puzzle_gauntlet_round(
+            connection,
+            assignment.assignment.assignment_id,
+            tournament.id,
+            puzzle_gauntlet_puzzle_id,
+        )
+        time_control = tournament.config.time_control
+        if isinstance(time_control, MoveTimeControl):
+            puzzle_gauntlet_deadline = synchronized_start + timedelta(
+                milliseconds=time_control.move_time_ms
+            )
+        progress(
+            "play",
+            "round_sync",
+            "completed",
+            "Every puzzle engine is ready and the shared clock has started",
+        )
     _validated_assignment_record(connection, assignment)
     connection.commit()
     publish_tournament_event(tournament.id)
@@ -756,6 +922,15 @@ def run_worker_assignment_game(
         else:
             engine = white if side_to_move == chess.WHITE else black
         board_before_move = board.copy(stack=False)
+        clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
+        if puzzle_gauntlet_deadline is not None:
+            remaining_ms = max(
+                1,
+                round((puzzle_gauntlet_deadline - datetime.now(UTC)).total_seconds() * 1000),
+            )
+            clock_state = clock.snapshot()
+            clock_state["remaining_move_time"] = remaining_ms
+            clock.restore(clock_state)
         try:
             move = runner.run_next_move()
         finally:
@@ -771,7 +946,6 @@ def run_worker_assignment_game(
                 search,
                 board_before_move.fen(),
             )
-        clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         clock_after_ms = _clock_time_ms(clock)
         move_record = record_move(
             connection,
@@ -912,13 +1086,14 @@ def run_worker_assignment_game(
         termination=termination,
         pgn=pgn,
     )
-    announce_game_finished(
-        connection,
-        tournament,
-        game_record,
-        result=result,
-        termination=termination,
-    )
+    if game_record.record_eligible:
+        announce_game_finished(
+            connection,
+            tournament,
+            game_record,
+            result=result,
+            termination=termination,
+        )
     _finish_tournament_if_complete(connection, tournament)
     connection.commit()
     progress(
@@ -1192,7 +1367,8 @@ def _worker_assignment_payload(
     assignment: GameAssignmentRecord,
     opening: OpeningPositionRecord | None,
     engines: dict[int, EngineSpec],
-    benchmark_reference: GameBenchmarkReferenceRecord,
+    required_resources: WorkerResources,
+    benchmark_reference: GameBenchmarkReferenceRecord | None,
 ) -> WorkerGameAssignment:
     from cope.events.engine_relay import relay_assignment_for_game
 
@@ -1218,17 +1394,16 @@ def _worker_assignment_payload(
         initial_fen=_starting_board(opening).fen(),
         opening_name=None if opening is None else opening.name,
         opening_moves=() if opening is None else opening.moves,
-        max_plies=_max_plies(tournament),
+        max_plies=_assignment_max_plies(connection, tournament, opening),
         engines=engines,
-        required_resources=_tournament_required_resources(
-            connection,
-            tournament,
-            engine_count=len(engines),
-            participant_engine_ids=(game.white_engine_id, game.black_engine_id),
-        ),
-        benchmark_reference=GameBenchmarkReference(
-            hardware_key=benchmark_reference.hardware_key,
-            engine_nps=benchmark_reference.engine_nps,
+        required_resources=required_resources,
+        benchmark_reference=(
+            None
+            if benchmark_reference is None
+            else GameBenchmarkReference(
+                hardware_key=benchmark_reference.hardware_key,
+                engine_nps=benchmark_reference.engine_nps,
+            )
         ),
     )
 
@@ -1243,6 +1418,7 @@ def _assignment_engines(
         relay_engine_ids_for_game,
         relay_engine_ids_for_tournament,
     )
+    from cope.events.puzzle_gauntlet import puzzle_gauntlet_engine_ids_for_tournament
 
     engines: dict[int, EngineSpec] = {}
     engine_ids = {
@@ -1253,6 +1429,9 @@ def _assignment_engines(
     if preload_event_engines:
         engine_ids.update(
             relay_engine_ids_for_tournament(connection, game.tournament_id)
+        )
+        engine_ids.update(
+            puzzle_gauntlet_engine_ids_for_tournament(connection, game.tournament_id)
         )
     for engine_id in engine_ids:
         engine = get_engine(connection, engine_id)
@@ -1303,7 +1482,34 @@ def _tournament_required_resources(
         hash_mb=(
             tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
         )
-        * max(2, engine_count),
+        * max(1, engine_count),
+    )
+
+
+def _event_preload_required_resources(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+    engines: dict[int, EngineSpec],
+) -> WorkerResources:
+    from cope.events.puzzle_gauntlet import puzzle_gauntlet_engine_ids_for_tournament
+
+    gauntlet_engine_ids = puzzle_gauntlet_engine_ids_for_tournament(
+        connection,
+        tournament.id,
+    )
+    if gauntlet_engine_ids:
+        engine_count = len(set(gauntlet_engine_ids))
+        return WorkerResources(
+            threads=tournament.config.engine_threads * engine_count,
+            hash_mb=(
+                tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB
+            )
+            * engine_count,
+        )
+    return _tournament_required_resources(
+        connection,
+        tournament,
+        engine_count=len(engines),
     )
 
 
@@ -1469,9 +1675,23 @@ def _next_playable_game_for_worker(
     excluded_engine_ids: frozenset[int] = frozenset(),
     excluded_game_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
-    del worker
     conditions = "tournament_id = ? AND status = 'pending'"
     parameters: list[int] = [tournament_id]
+    conditions += """
+      AND NOT EXISTS (
+        SELECT 1
+        FROM engine_versions local_version
+        WHERE local_version.id IN (games.white_engine_id, games.black_engine_id)
+          AND local_version.distribution = 'worker_local'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM worker_engine_discoveries discovery
+            WHERE discovery.worker_id = ?
+              AND discovery.local_key = local_version.worker_local_key
+          )
+      )
+    """
+    parameters.append(worker.id)
     if excluded_engine_ids:
         blocked = tuple(sorted(excluded_engine_ids))
         placeholders = ", ".join("?" for _ in blocked)
@@ -1497,6 +1717,31 @@ def _next_playable_game_for_worker(
         parameters,
     ).fetchone()
     return None if row is None else get_game(connection, int(row["id"]))
+
+
+def _worker_has_local_engines(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    engines: tuple[EngineSpec, ...],
+) -> bool:
+    required = {
+        engine.worker_local_key
+        for engine in engines
+        if engine.distribution == "worker_local"
+        and engine.worker_local_key is not None
+    }
+    if not required:
+        return True
+    placeholders = ", ".join("?" for _ in required)
+    discovered = {
+        str(row["local_key"])
+        for row in connection.execute(
+            f"""SELECT local_key FROM worker_engine_discoveries
+                WHERE worker_id = ? AND local_key IN ({placeholders})""",
+            (worker_id, *sorted(required)),
+        )
+    }
+    return discovered == required
 
 
 def _active_game_count(connection: sqlite3.Connection, tournament_id: int) -> int:
@@ -1571,6 +1816,11 @@ def _finish_tournament_if_complete(
             or int(counts["unfinished"]) > 0
         ):
             return False
+        from cope.events.puzzle_gauntlet import advance_puzzle_gauntlet
+
+        gauntlet_result = advance_puzzle_gauntlet(connection, tournament.id)
+        if gauntlet_result == "advanced":
+            return False
 
     current = lock_tournament(connection, tournament.id)
     if current is None or current.status != "running":
@@ -1589,7 +1839,8 @@ def _finish_tournament_if_complete(
             return False
         set_tournament_status(connection, current.id, "finished")
         finished = get_tournament(connection, current.id) or current
-        announce_tournament_finished(connection, finished)
+        if any(game.record_eligible for game in games):
+            announce_tournament_finished(connection, finished)
         return True
 
     advance = advance_tournament(connection, current)
@@ -1599,7 +1850,8 @@ def _finish_tournament_if_complete(
 
     set_tournament_status(connection, current.id, "finished")
     finished = get_tournament(connection, current.id) or current
-    announce_tournament_finished(connection, finished)
+    if any(game.record_eligible for game in games):
+        announce_tournament_finished(connection, finished)
     return True
 
 
@@ -1625,6 +1877,20 @@ def _max_plies(tournament: TournamentRecord) -> int:
     if max_moves is not None:
         return max_moves * 2
     return MAX_LEGAL_GAME_PLIES
+
+
+def _assignment_max_plies(
+    connection: sqlite3.Connection,
+    tournament: TournamentRecord,
+    opening: OpeningPositionRecord | None,
+) -> int:
+    gauntlet = connection.execute(
+        "SELECT 1 FROM puzzle_gauntlet_events WHERE tournament_id = ?",
+        (tournament.id,),
+    ).fetchone()
+    if gauntlet is not None:
+        return _starting_board(opening).ply() + 1
+    return _max_plies(tournament)
 
 
 def _adjudication_result(

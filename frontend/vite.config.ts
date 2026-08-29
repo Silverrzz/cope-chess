@@ -5,7 +5,15 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   base: "/",
-  plugins: [vue()],
+  plugins: [
+    vue({
+      template: {
+        compilerOptions: {
+          isCustomElement: (tag) => tag === "emoji-picker",
+        },
+      },
+    }),
+  ],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

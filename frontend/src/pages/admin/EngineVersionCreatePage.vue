@@ -49,6 +49,8 @@ const selectedHostIds = ref<number[]>([])
 const repositories = ref<Repository[]>([])
 const selected = ref<Repository | null>(null)
 const releases = ref<Release[]>([])
+const distribution = ref<'managed' | 'worker_local'>('managed')
+const workerLocalKey = ref('')
 const sourceKind = ref<'release' | 'commit'>('release')
 const sourceRef = ref('')
 const version = ref('')
@@ -166,6 +168,36 @@ function chooseRelease(): void {
 }
 
 async function create(): Promise<void> {
+  if (distribution.value === 'worker_local') {
+    if (!version.value.trim()) {
+      error.value = 'Enter a version label.'
+      return
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(workerLocalKey.value.trim())) {
+      error.value = 'Enter a local key using letters, numbers, dots, underscores, or hyphens.'
+      return
+    }
+    creating.value = true
+    error.value = ''
+    try {
+      const response = await api.post<{ id: number; message: string }>(`/api/admin/engines/${engineId.value}/versions`, {
+        body: {
+          version: version.value.trim(),
+          distribution: 'worker_local',
+          worker_local_key: workerLocalKey.value.trim(),
+          uci_options: {},
+        },
+      })
+      toast.success(response.message)
+      await router.push(`/admin/engine-versions/${response.id}`)
+    } catch (cause) {
+      error.value = errorText(cause)
+      toast.error(cause)
+    } finally {
+      creating.value = false
+    }
+    return
+  }
   if (!selected.value) {
     error.value = 'Choose a repository.'
     return
@@ -184,6 +216,7 @@ async function create(): Promise<void> {
     const response = await api.post<{ id: number; message: string }>(`/api/admin/engines/${engineId.value}/versions`, {
       body: {
         version: version.value.trim(),
+        distribution: 'managed',
         git_host_id: selected.value.host_id,
         repository_full_name: selected.value.full_name,
         source_ref: sourceRef.value.trim(),
@@ -210,7 +243,25 @@ async function create(): Promise<void> {
     </AdminPageHeader>
     <InlineFeedback :message="error" />
 
-    <section class="panel search-panel">
+    <section class="panel source-type-panel">
+      <div><h2>Binary availability</h2><p>Choose how workers obtain this engine version.</p></div>
+      <div class="source-choice">
+        <label :class="{ selected: distribution === 'managed' }"><input v-model="distribution" type="radio" value="managed"><span><strong>Published artifact</strong><small>Build, benchmark, and distribute from source</small></span></label>
+        <label :class="{ selected: distribution === 'worker_local' }"><input v-model="distribution" type="radio" value="worker_local"><span><strong>Worker-local binary</strong><small>Run only where a private binary is discovered</small></span></label>
+      </div>
+    </section>
+
+    <form v-if="distribution === 'worker_local'" class="panel source-panel" @submit.prevent="create">
+      <div><h2>Register a worker-local version</h2><p>The server stores no source or artifact and never sends this engine to a benchmarker.</p></div>
+      <div class="form-grid">
+        <label class="field"><span>Version label</span><input v-model="version" class="input" required maxlength="80" placeholder="Torch 1"></label>
+        <label class="field"><span>Worker-local key</span><input v-model="workerLocalKey" class="input" required maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" placeholder="torch-1"><small>Place it at <code>~/.cope-worker/engines/local/{{ workerLocalKey || 'torch-1' }}/engine</code>, or below <code>COPE_WORKER_ENGINE_DIR</code>.</small></label>
+        <p class="activation-note">Only workers reporting this exact key can receive games involving this version. No benchmark command is run for it.</p>
+      </div>
+      <div class="form-actions"><button class="button button--primary" type="submit" :disabled="creating">{{ creating ? 'Creating…' : 'Create local version' }}</button></div>
+    </form>
+
+    <section v-if="distribution === 'managed'" class="panel search-panel">
       <div><h2>Find the source repository</h2><p>Choose which enabled Git hosts COPE should search.</p></div>
       <form class="search-form" @submit.prevent="search">
         <input v-model="query" class="input" type="search" placeholder="Stockfish or Silverrzz/sable" autofocus>
@@ -228,7 +279,7 @@ async function create(): Promise<void> {
       </fieldset>
     </section>
 
-    <section v-if="repositories.length && !selected" class="result-section">
+    <section v-if="distribution === 'managed' && repositories.length && !selected" class="result-section">
       <div class="section-heading"><h2>Repositories</h2><span>{{ repositories.length }} results</span></div>
       <div class="repository-grid">
         <button v-for="repository in repositories" :key="`${repository.host_id}:${repository.full_name}`" class="panel repository-card" type="button" @click="selectRepository(repository)">
@@ -240,7 +291,7 @@ async function create(): Promise<void> {
       </div>
     </section>
 
-    <form v-if="selected" class="panel source-panel" @submit.prevent="create">
+    <form v-if="distribution === 'managed' && selected" class="panel source-panel" @submit.prevent="create">
       <div class="selected-repository">
         <div><span>{{ selected.host_name }}</span><h2>{{ selected.full_name }}</h2><p>{{ selected.description }}</p></div>
         <button class="button button--ghost button--small" type="button" @click="selected = null">Change</button>
@@ -269,7 +320,7 @@ async function create(): Promise<void> {
 </template>
 
 <style scoped>
-.search-panel,.source-panel{display:grid;gap:1rem;padding:1.1rem}.search-panel h2,.source-panel h2,.section-heading h2{font-size:.95rem;margin:0}.search-panel p,.selected-repository p{color:var(--color-text-muted);font-size:.72rem;margin:.2rem 0 0}.search-form{display:flex;gap:.6rem}.search-form .input{flex:1}.result-section{display:grid;gap:.75rem}.section-heading{align-items:center;display:flex;justify-content:space-between}.section-heading span{color:var(--color-text-muted);font-size:.7rem}.repository-grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))}.repository-card{color:inherit;cursor:pointer;display:grid;gap:.6rem;padding:1rem;text-align:left}.repository-card:hover{border-color:var(--color-accent)}.repository-card>div{display:flex;justify-content:space-between}.host,.stars,.select-label{color:var(--color-text-muted);font-size:.67rem}.repository-card h3{font-size:.85rem;margin:0}.repository-card p{color:var(--color-text-muted);display:-webkit-box;font-size:.7rem;line-height:1.4;margin:0;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}.select-label{color:var(--color-accent);font-weight:650}.selected-repository{align-items:start;border-bottom:1px solid var(--color-border);display:flex;gap:1rem;justify-content:space-between;padding-bottom:1rem}.selected-repository span{color:var(--color-accent);font-size:.65rem;font-weight:650}.source-choice{display:grid;gap:.65rem;grid-template-columns:repeat(2,minmax(0,1fr))}.source-choice label{border:1px solid var(--color-border);border-radius:var(--radius-md);cursor:pointer;display:flex;gap:.6rem;padding:.8rem}.source-choice label.selected{border-color:var(--color-accent);background:var(--color-accent-soft)}.source-choice span,.switch-row span{display:grid}.source-choice strong,.switch-row strong{font-size:.78rem}.source-choice small,.switch-row small{color:var(--color-text-muted);font-size:.67rem}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem}.field>span{font-size:.76rem;font-weight:650}.switch-row{align-items:center;cursor:pointer;display:flex;gap:.6rem;grid-column:1/-1}.form-actions{display:flex;justify-content:flex-end}.loading-row{color:var(--color-text-muted);font-size:.75rem;padding:.75rem 0}@media(max-width:40rem){.search-form,.selected-repository{align-items:stretch;flex-direction:column}.source-choice,.form-grid{grid-template-columns:1fr}.switch-row{grid-column:auto}}
+.search-panel,.source-panel,.source-type-panel{display:grid;gap:1rem;padding:1.1rem}.search-panel h2,.source-panel h2,.source-type-panel h2,.section-heading h2{font-size:.95rem;margin:0}.search-panel p,.source-panel>div>p,.source-type-panel p,.selected-repository p{color:var(--color-text-muted);font-size:.72rem;margin:.2rem 0 0}.search-form{display:flex;gap:.6rem}.search-form .input{flex:1}.result-section{display:grid;gap:.75rem}.section-heading{align-items:center;display:flex;justify-content:space-between}.section-heading span{color:var(--color-text-muted);font-size:.7rem}.repository-grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))}.repository-card{color:inherit;cursor:pointer;display:grid;gap:.6rem;padding:1rem;text-align:left}.repository-card:hover{border-color:var(--color-accent)}.repository-card>div{display:flex;justify-content:space-between}.host,.stars,.select-label{color:var(--color-text-muted);font-size:.67rem}.repository-card h3{font-size:.85rem;margin:0}.repository-card p{color:var(--color-text-muted);display:-webkit-box;font-size:.7rem;line-height:1.4;margin:0;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}.select-label{color:var(--color-accent);font-weight:650}.selected-repository{align-items:start;border-bottom:1px solid var(--color-border);display:flex;gap:1rem;justify-content:space-between;padding-bottom:1rem}.selected-repository span{color:var(--color-accent);font-size:.65rem;font-weight:650}.source-choice{display:grid;gap:.65rem;grid-template-columns:repeat(2,minmax(0,1fr))}.source-choice label{border:1px solid var(--color-border);border-radius:var(--radius-md);cursor:pointer;display:flex;gap:.6rem;padding:.8rem}.source-choice label.selected{border-color:var(--color-accent);background:var(--color-accent-soft)}.source-choice span,.switch-row span{display:grid}.source-choice strong,.switch-row strong{font-size:.78rem}.source-choice small,.switch-row small{color:var(--color-text-muted);font-size:.67rem}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem}.field>span{font-size:.76rem;font-weight:650}.switch-row{align-items:center;cursor:pointer;display:flex;gap:.6rem;grid-column:1/-1}.form-actions{display:flex;justify-content:flex-end}.loading-row{color:var(--color-text-muted);font-size:.75rem;padding:.75rem 0}@media(max-width:40rem){.search-form,.selected-repository{align-items:stretch;flex-direction:column}.source-choice,.form-grid{grid-template-columns:1fr}.switch-row{grid-column:auto}}
 .host-filter{border:0;margin:0;min-width:0;padding:0}.host-filter legend{font-size:.72rem;font-weight:650;margin-bottom:.5rem;padding:0}.host-grid{display:grid;gap:.55rem;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr))}.host-grid label{align-items:center;border:1px solid var(--color-border);border-radius:var(--radius-md);cursor:pointer;display:flex;gap:.55rem;padding:.65rem .7rem}.host-grid label.selected{background:var(--color-accent-soft);border-color:var(--color-accent)}.host-grid label>span{display:grid;gap:.1rem}.host-grid strong{font-size:.73rem}.host-grid small{color:var(--color-text-muted);font-size:.63rem;text-transform:capitalize}.host-empty{grid-column:1/-1!important;margin:0!important}
 .form-span-full{grid-column:1/-1}.field small{color:var(--color-text-muted);font-size:.67rem}.dockerfile-viewer{background:#0f172a;border-radius:var(--radius-md);color:#e2e8f0;font-family:var(--font-mono);font-size:.68rem;line-height:1.5;margin:0;max-height:24rem;overflow:auto;padding:.8rem;tab-size:2;white-space:pre}
 .activation-note{color:var(--color-text-muted);font-size:.72rem;grid-column:1/-1;margin:0}

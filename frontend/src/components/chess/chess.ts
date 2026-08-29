@@ -7,6 +7,8 @@ export interface BoardArrow {
   move: string
   color: Color
   fillColor?: string
+  outlineColor?: string
+  label?: string
 }
 
 export interface Position {

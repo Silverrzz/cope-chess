@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { api } from '@/api/client'
 
-import { errorMessage } from './format'
+import { errorMessage, formatDate } from './format'
 import type { ChatMessage, ChatSettings, Identifier } from './types'
 
 const props = withDefaults(defineProps<{
@@ -127,7 +127,7 @@ async function scrollToLatest(): Promise<void> {
         <li v-for="(message, index) in visibleMessages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': activeTab === 'system' }">
           <div>
             <strong v-if="activeTab === 'chat'">{{ message.display_name }}</strong>
-            <time v-if="message.at" :datetime="message.at">{{ new Date(message.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+            <time v-if="message.at" :datetime="message.at">{{ formatDate(message.at, true) }}</time>
           </div>
           <p>{{ message.text }}</p>
         </li>
@@ -232,6 +232,7 @@ async function scrollToLatest(): Promise<void> {
 
 .chat-log li > div {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 0.45rem;
 }

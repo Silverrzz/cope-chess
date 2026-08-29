@@ -40,9 +40,11 @@ from cope.db import (
     create_tool_job,
     connect_database,
     count_games,
+    create_badge,
     database_stats,
     database_schema_version,
     delete_chat_message,
+    delete_badge,
     delete_engine,
     delete_engine_version,
     delete_event,
@@ -51,7 +53,6 @@ from cope.db import (
     delete_rating_list,
     delete_tournament,
     delete_worker,
-    engine_game_count,
     engine_game_filter_options,
     engine_build_is_benchmarked,
     engine_result_summary,
@@ -61,6 +62,7 @@ from cope.db import (
     forget_failed_benchmark_job,
     get_benchmarker,
     get_benchmarker_by_session_id,
+    get_badge,
     get_deployment_job,
     get_chat_settings,
     get_engine_record,
@@ -82,11 +84,16 @@ from cope.db import (
     invalidate_rating_list_engine_games,
     list_deployment_jobs,
     list_deployment_targets,
+    list_deployment_targets_for_jobs,
     latest_dockerfile_pull_job,
+    list_badge_engine_ids,
+    list_badges,
     list_benchmarkers,
     list_benchmark_hardware,
     list_chat_messages,
     list_engine_games,
+    list_engine_badges,
+    list_engine_game_counts,
     list_event_awards,
     list_event_cast,
     list_event_contest_cast,
@@ -96,6 +103,7 @@ from cope.db import (
     list_event_updates,
     list_events,
     list_engine_records,
+    list_engine_result_summaries,
     list_engine_benchmark_jobs,
     list_engines,
     list_engine_families,
@@ -120,6 +128,7 @@ from cope.db import (
     mint_benchmarker_token,
     mint_worker_token_for_worker,
     replace_suite_openings,
+    replace_badge_engines,
     replay_game,
     reset_event,
     record_manual_benchmark,
@@ -134,6 +143,7 @@ from cope.db import (
     set_tournament_status,
     suite_opening_count,
     update_chat_settings,
+    update_badge,
     update_engine,
     update_engine_version,
     update_git_host,
@@ -410,70 +420,118 @@ def _benchmark_activity(output: str) -> dict[str, str] | None:
     }
 
 
-def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
-    rating_lists = list_rating_lists(connection)
-    tournaments: list[dict[str, Any]] = []
-    commits = connection.execute(
+def _admin_rating_list_summaries(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
         """
-        SELECT rating_commit.*, tournament.name AS tournament_name,
-               tournament.status AS tournament_status,
-               rating_list.name AS rating_list_name
-        FROM tournament_rating_list_commits rating_commit
-        JOIN tournaments tournament ON tournament.id = rating_commit.tournament_id
-        JOIN rating_lists rating_list ON rating_list.id = rating_commit.rating_list_id
-        WHERE rating_commit.status = 'applied'
-        ORDER BY COALESCE(rating_commit.applied_at, rating_commit.requested_at) DESC,
-                 rating_commit.tournament_id DESC
+        WITH rating_stats AS (
+          SELECT rating_list_id,
+                 COUNT(*) AS engine_versions,
+                 COALESCE(SUM(games_played), 0) / 2 AS games
+          FROM rating_list_ratings
+          GROUP BY rating_list_id
+        ),
+        commit_stats AS (
+          SELECT rating_list_id, COUNT(*) AS tournaments
+          FROM tournament_rating_list_commits
+          WHERE status = 'applied'
+          GROUP BY rating_list_id
+        )
+        SELECT rating_list.*,
+               COALESCE(rating_stats.engine_versions, 0) AS engine_versions,
+               COALESCE(rating_stats.games, 0) AS games,
+               COALESCE(commit_stats.tournaments, 0) AS tournaments
+        FROM rating_lists rating_list
+        LEFT JOIN rating_stats ON rating_stats.rating_list_id = rating_list.id
+        LEFT JOIN commit_stats ON commit_stats.rating_list_id = rating_list.id
+        ORDER BY rating_list.name, rating_list.id
         """
     )
-    for commit in commits:
-        games = connection.execute(
-            """
-            SELECT id FROM games
-            WHERE tournament_id = ? AND status = 'finished'
-              AND result IN ('1-0', '0-1', '1/2-1/2')
-            ORDER BY id
-            """,
-            (commit["tournament_id"],),
-        ).fetchall()
-        game_ids = tuple(int(game["id"]) for game in games)
-        complete_hardware_games = 0
-        if game_ids:
-            placeholders = ", ".join("?" for _ in game_ids)
-            complete_hardware_games = int(
-                connection.execute(
-                    f"""
-                    SELECT COUNT(*) AS count FROM (
-                      SELECT game_id FROM game_hardware_scores
-                      WHERE game_id IN ({placeholders})
-                      GROUP BY game_id HAVING COUNT(*) = 2
-                    ) scores
-                    """,
-                    game_ids,
-                ).fetchone()["count"]
+    return [
+        {
+            "id": int(row["id"]),
+            "name": str(row["name"]),
+            "anchor_engine_id": row["anchor_engine_id"],
+            "anchor_elo": float(row["anchor_elo"]),
+            "created_at": str(row["created_at"]),
+            "engine_versions": int(row["engine_versions"]),
+            "games": int(row["games"]),
+            "tournaments": int(row["tournaments"]),
+        }
+        for row in rows
+    ]
+
+
+def _admin_rating_list_tournaments(
+    connection: sqlite3.Connection,
+    rating_list_id: int | None = None,
+) -> list[dict[str, Any]]:
+    rating_list_filter = ""
+    parameters: tuple[int, ...] = ()
+    if rating_list_id is not None:
+        rating_list_filter = " AND rating_commit.rating_list_id = ?"
+        parameters = (rating_list_id,)
+    rows = connection.execute(
+        f"""
+        WITH selected_commits AS (
+          SELECT *
+          FROM tournament_rating_list_commits rating_commit
+          WHERE rating_commit.status = 'applied'{rating_list_filter}
+        ),
+        hardware_by_game AS (
+          SELECT score.game_id, COUNT(*) AS score_count
+          FROM game_hardware_scores score
+          JOIN games game ON game.id = score.game_id
+          WHERE game.tournament_id IN (
+            SELECT tournament_id FROM selected_commits
+          )
+          GROUP BY score.game_id
+        ),
+        game_stats AS (
+          SELECT game.tournament_id,
+                 COUNT(*) AS games,
+                 COUNT(*) FILTER (WHERE hardware.score_count = 2) AS hardware_games
+          FROM games game
+          LEFT JOIN hardware_by_game hardware ON hardware.game_id = game.id
+          WHERE game.status = 'finished'
+            AND game.result IN ('1-0', '0-1', '1/2-1/2')
+            AND game.tournament_id IN (
+              SELECT tournament_id FROM selected_commits
             )
-        tournaments.append(
-            {
-                "tournament_id": commit["tournament_id"],
-                "tournament_name": commit["tournament_name"],
-                "tournament_status": commit["tournament_status"],
-                "rating_list_id": commit["rating_list_id"],
-                "rating_list_name": commit["rating_list_name"],
-                "requested_at": commit["requested_at"],
-                "applied_at": commit["applied_at"],
-                "games": len(game_ids),
-                "hardware_games": complete_hardware_games,
-                "missing_hardware_games": len(game_ids) - complete_hardware_games,
-            }
+          GROUP BY game.tournament_id
         )
-    return {
-        "rating_lists": jsonable_encoder(rating_lists),
-        "tournaments": tournaments,
-        "ratings": {
-            str(rating_list.id): jsonable_encoder(list_rating_rows(connection, rating_list.id))
-            for rating_list in rating_lists
-        },
-    }
+        SELECT rating_commit.*, tournament.name AS tournament_name,
+               tournament.status AS tournament_status,
+               rating_list.name AS rating_list_name,
+               COALESCE(game_stats.games, 0) AS games,
+               COALESCE(game_stats.hardware_games, 0) AS hardware_games
+        FROM selected_commits rating_commit
+        JOIN tournaments tournament ON tournament.id = rating_commit.tournament_id
+        JOIN rating_lists rating_list ON rating_list.id = rating_commit.rating_list_id
+        LEFT JOIN game_stats ON game_stats.tournament_id = rating_commit.tournament_id
+        ORDER BY COALESCE(rating_commit.applied_at, rating_commit.requested_at) DESC,
+                 rating_commit.tournament_id DESC
+        """,
+        parameters,
+    )
+    return [
+        {
+            "tournament_id": int(row["tournament_id"]),
+            "tournament_name": str(row["tournament_name"]),
+            "tournament_status": str(row["tournament_status"]),
+            "rating_list_id": int(row["rating_list_id"]),
+            "rating_list_name": str(row["rating_list_name"]),
+            "requested_at": str(row["requested_at"]),
+            "applied_at": row["applied_at"],
+            "games": int(row["games"]),
+            "hardware_games": int(row["hardware_games"]),
+            "missing_hardware_games": int(row["games"]) - int(row["hardware_games"]),
+        }
+        for row in rows
+    ]
+
+
+def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    return {"rating_lists": _admin_rating_list_summaries(connection)}
 
 
 class TournamentPayload(BaseModel):
@@ -555,12 +613,47 @@ class EnginePayload(BaseModel):
         return value.strip()
 
 
+class BadgePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    emoji: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=240)
+    engine_ids: list[int] = Field(default_factory=list, max_length=10_000)
+
+    @field_validator("name")
+    @classmethod
+    def strip_badge_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("badge name cannot be blank")
+        return value
+
+    @field_validator("emoji")
+    @classmethod
+    def strip_badge_emoji(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("select an emoji")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def strip_badge_description(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("engine_ids")
+    @classmethod
+    def normalize_badge_engine_ids(cls, value: list[int]) -> list[int]:
+        if any(engine_id < 1 for engine_id in value):
+            raise ValueError("engine ids must be positive")
+        return list(dict.fromkeys(value))
+
+
 class EngineVersionUpdatePayload(BaseModel):
     version: str = Field(min_length=1, max_length=80)
-    dockerfile_path: str = Field(min_length=1, max_length=500)
+    dockerfile_path: str = Field(default="", max_length=500)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
 
-    @field_validator("version", "dockerfile_path")
+    @field_validator("version")
     @classmethod
     def strip_value(cls, value: str) -> str:
         value = value.strip()
@@ -590,20 +683,44 @@ class RatingCalculationPayload(BaseModel):
 
 class EngineVersionCreatePayload(BaseModel):
     version: str = Field(min_length=1, max_length=80)
-    git_host_id: int = Field(gt=0)
-    repository_full_name: str = Field(min_length=3, max_length=300)
-    source_ref: str = Field(min_length=1, max_length=200)
-    source_kind: str = Field(pattern=r"^(release|commit)$")
-    dockerfile_path: str = Field(min_length=1, max_length=500)
+    distribution: Literal["managed", "worker_local"] = "managed"
+    worker_local_key: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
+    )
+    git_host_id: int | None = Field(default=None, gt=0)
+    repository_full_name: str = Field(default="", max_length=300)
+    source_ref: str = Field(default="", max_length=200)
+    source_kind: str = Field(default="commit", pattern=r"^(release|commit)$")
+    dockerfile_path: str = Field(default="", max_length=500)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
 
-    @field_validator("version", "repository_full_name", "source_ref", "dockerfile_path")
+    @field_validator("version")
     @classmethod
     def strip_value(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("value cannot be blank")
         return value
+
+    @field_validator("repository_full_name", "source_ref", "dockerfile_path")
+    @classmethod
+    def strip_optional_value(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_distribution(self):
+        if self.distribution == "worker_local":
+            if self.worker_local_key is None:
+                raise ValueError("Enter a worker-local engine key.")
+            return self
+        if self.git_host_id is None:
+            raise ValueError("Choose a Git host.")
+        if not self.repository_full_name or not self.source_ref or not self.dockerfile_path:
+            raise ValueError("Managed versions require a repository, source, and Dockerfile.")
+        if self.worker_local_key is not None:
+            raise ValueError("Managed versions cannot have a worker-local key.")
+        return self
 
 
 class GitHostPayload(BaseModel):
@@ -894,16 +1011,17 @@ def register_api_routes(app: FastAPI) -> None:
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
         event_tournament_ids = web_app._event_linked_tournament_ids(connection)
-        items = [
-            web_app._tournament_summary(
-                connection,
-                tournament,
-                engines,
-                estimator=estimator,
-            )
+        tournaments = tuple(
+            tournament
             for tournament in list_tournaments(connection)
             if tournament.status != "draft" and tournament.id not in event_tournament_ids
-        ]
+        )
+        items = web_app._tournament_summaries(
+            connection,
+            tournaments,
+            engines,
+            estimator=estimator,
+        )
         for item in items:
             item["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
                 item["record"].id
@@ -977,6 +1095,7 @@ def register_api_routes(app: FastAPI) -> None:
         slug: str | None = None,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=25, le=200),
+        cross_table: bool = Query(default=False),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
@@ -993,6 +1112,11 @@ def register_api_routes(app: FastAPI) -> None:
         if tournament.status == "draft":
             raise HTTPException(status_code=404, detail="Tournament not found.")
         engines = web_app._engine_names(connection)
+        tournament_overview = web_app._tournament_summaries(
+            connection,
+            (tournament,),
+            engines,
+        )[0]
         total_games = count_games(connection, tournament.id, status="finished")
         games = list_games_page(
             connection,
@@ -1004,7 +1128,7 @@ def register_api_routes(app: FastAPI) -> None:
         active_games = list_active_games(
             connection,
             tournament_id=tournament.id,
-            limit=500,
+            limit=None if cross_table else 500,
         )
         raw_game_id = request.query_params.get("game_id")
         if raw_game_id is not None:
@@ -1017,7 +1141,9 @@ def register_api_routes(app: FastAPI) -> None:
         else:
             viewer_game = web_app._tournament_viewer_game(active_games)
         viewer_moves = (
-            web_app.list_moves(connection, viewer_game.id) if viewer_game else ()
+            web_app.list_moves(connection, viewer_game.id)
+            if viewer_game and not cross_table
+            else ()
         )
         viewer_locked = bool(
             request.query_params.get("game_id") is not None
@@ -1025,14 +1151,14 @@ def register_api_routes(app: FastAPI) -> None:
             and viewer_game.status not in {"assigned", "live"}
         )
         chat_settings = get_chat_settings(connection)
-        game_live = (
-            request.app.state.stream_hub.tournament_live(tournament.id, viewer_game.id)
-            if viewer_game
-            else None
+        tournament_live = request.app.state.stream_hub.tournament_live(tournament.id)
+        game_live = None if cross_table else web_app._live_for_game(
+            tournament_live,
+            viewer_game.id if viewer_game else None,
         )
         opening = (
             web_app._opening_view(connection, viewer_game.opening_id)
-            if viewer_game
+            if viewer_game and not cross_table
             else None
         )
         engine_data = web_app._engine_data(viewer_game, viewer_moves, opening)
@@ -1046,17 +1172,13 @@ def register_api_routes(app: FastAPI) -> None:
             clocks = web_app._merge_clock_data(clocks, game_live.get("clocks"))
             if isinstance(game_live.get("clock_state"), dict):
                 clock_state = game_live["clock_state"]
-        estimate = TournamentEstimator(connection).estimate(
-            tournament,
-            list_games(connection, tournament.id),
-        )
         return _json(
             {
                 "tournament": tournament,
                 "spectator_count": request.app.state.stream_hub.tournament_spectator_count(
                     tournament.id
                 ),
-                "estimate": estimate.to_dict(),
+                "estimate": tournament_overview["estimate"],
                 "games": [
                     web_app._game_payload(game, engines, live=True)
                     for game in games
@@ -1065,6 +1187,16 @@ def register_api_routes(app: FastAPI) -> None:
                     web_app._game_payload(game, engines, live=True)
                     for game in active_games
                 ],
+                "cross_table_games": (
+                    web_app._cross_table_games_payload(
+                        connection,
+                        active_games,
+                        engines,
+                        tournament_live,
+                    )
+                    if cross_table
+                    else []
+                ),
                 "game_pagination": {
                     "page": page,
                     "page_size": page_size,
@@ -1140,18 +1272,26 @@ def register_api_routes(app: FastAPI) -> None:
     def public_engines(
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        families = list_engine_families(connection)
         versions = list_engine_records(connection)
-        versions_by_family = {
-            family.id: [version for version in versions if version.engine_id == family.id]
-            for family in list_engine_families(connection)
-        }
+        badges_by_family = list_engine_badges(connection)
+        versions_by_family = {family.id: [] for family in families}
+        for version in versions:
+            versions_by_family.setdefault(version.engine_id, []).append(version)
+        result_summaries = list_engine_result_summaries(connection)
         engine_rows = []
-        for family in list_engine_families(connection):
+        for family in families:
             family_versions = versions_by_family[family.id]
             if not family_versions:
                 continue
             latest = family_versions[0]
-            records = [engine_result_summary(connection, version.id) for version in family_versions]
+            records = [
+                result_summaries.get(
+                    version.id,
+                    {"wins": 0, "draws": 0, "losses": 0, "games": 0},
+                )
+                for version in family_versions
+            ]
             engine_rows.append(
                 {
                     "id": family.id,
@@ -1162,10 +1302,12 @@ def register_api_routes(app: FastAPI) -> None:
                     "latest_version": latest.version,
                     "created_at": latest.created_at,
                     "version_count": len(family_versions),
+                    "badges": badges_by_family.get(family.id, ()),
                     "versions": [
                         {
                             "id": version.id,
                             "version": version.version,
+                            "distribution": version.distribution,
                             "source_kind": version.source_kind,
                             "source_ref": version.source_ref,
                             "repository_full_name": version.repository_full_name,
@@ -1180,9 +1322,9 @@ def register_api_routes(app: FastAPI) -> None:
                     },
                 }
             )
-        completed_games = connection.execute(
-            "SELECT COUNT(*) AS count FROM games WHERE result IS NOT NULL"
-        ).fetchone()
+        completed_games = sum(
+            summary["games"] for summary in result_summaries.values()
+        ) // 2
         return _json(
             {
                 "engines": engine_rows,
@@ -1190,7 +1332,7 @@ def register_api_routes(app: FastAPI) -> None:
                     "families": len(engine_rows),
                     "versions": len(versions),
                     "available": sum(1 for engine in engine_rows if engine["active"]),
-                    "games": int(completed_games["count"]),
+                    "games": completed_games,
                 },
             }
         )
@@ -1208,7 +1350,11 @@ def register_api_routes(app: FastAPI) -> None:
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
         family = get_engine_family(connection, engine.engine_id)
-        versions = list_engine_versions(connection, engine.engine_id)
+        engine_records = list_engine_records(connection)
+        versions = tuple(
+            version for version in engine_records
+            if version.engine_id == engine.engine_id
+        )
         games = list_engine_games(
             connection,
             engine_id,
@@ -1223,7 +1369,10 @@ def register_api_routes(app: FastAPI) -> None:
                 "family": family,
                 "versions": versions,
                 "games": games,
-                "engines": web_app._engine_names(connection),
+                "engines": {
+                    version.id: web_app._engine_display_name(version.name, version.version)
+                    for version in engine_records
+                },
                 "engine_options": [
                     {
                         "id": version.id,
@@ -1231,15 +1380,16 @@ def register_api_routes(app: FastAPI) -> None:
                         "name": version.name,
                         "author": version.author,
                         "version": version.version,
+                        "distribution": version.distribution,
                         "source_kind": version.source_kind,
                         "active": version.active,
                     }
-                    for version in list_engine_records(connection)
+                    for version in engine_records
                 ],
                 "record": engine_result_summary(connection, engine_id),
                 "filter_options": engine_game_filter_options(connection, engine_id),
                 "ratings": _public_engine_ratings(connection, engine_id),
-                "badges": [],
+                "badges": list_engine_badges(connection).get(engine.engine_id, ()),
             }
         )
 
@@ -1370,6 +1520,7 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/admin/dashboard")
     def admin_dashboard(connection: sqlite3.Connection = Depends(web_app._database)):
         tournaments = list_tournaments(connection)
+        event_tournament_ids = web_app._puzzle_gauntlet_tournament_ids(connection)
         return _json(
             {
                 "workers": web_app._worker_admin_rows(connection, limit=20),
@@ -1380,6 +1531,7 @@ def register_api_routes(app: FastAPI) -> None:
                     tournament
                     for tournament in tournaments
                     if tournament.status in {"scheduled", "running", "paused"}
+                    and tournament.id not in event_tournament_ids
                 ],
                 "complete_tournaments": list_uncommitted_finished_tournaments(connection),
                 "recent_games": list_games_by_status(connection, "finished", limit=6),
@@ -1447,10 +1599,19 @@ def register_api_routes(app: FastAPI) -> None:
         linked_tournaments = [
             get_tournament(connection, int(row["tournament_id"]))
             for row in connection.execute(
-                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
-                (event_id,),
+                """
+                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
+                UNION
+                SELECT tournament_id FROM puzzle_gauntlet_events
+                WHERE event_id = ? AND tournament_id IS NOT NULL
+                """,
+                (event_id, event_id),
             )
         ]
+        gauntlet = connection.execute(
+            "SELECT opening_suite_id FROM puzzle_gauntlet_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
         active = [
             tournament
             for tournament in linked_tournaments
@@ -1463,9 +1624,13 @@ def register_api_routes(app: FastAPI) -> None:
             )
         try:
             for tournament in linked_tournaments:
-                if tournament is not None and tournament.status in {"draft", "scheduled"}:
+                if tournament is not None and (
+                    tournament.status in {"draft", "scheduled"} or gauntlet is not None
+                ):
                     delete_tournament(connection, tournament.id)
             delete_event(connection, event_id)
+            if gauntlet is not None:
+                delete_opening_suite(connection, int(gauntlet["opening_suite_id"]))
             connection.commit()
         except (sqlite3.IntegrityError, ValueError) as exc:
             connection.rollback()
@@ -1486,8 +1651,13 @@ def register_api_routes(app: FastAPI) -> None:
         linked_tournaments = [
             get_tournament(connection, int(row["tournament_id"]))
             for row in connection.execute(
-                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
-                (event_id,),
+                """
+                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
+                UNION
+                SELECT tournament_id FROM puzzle_gauntlet_events
+                WHERE event_id = ? AND tournament_id IS NOT NULL
+                """,
+                (event_id, event_id),
             )
         ]
         active = [
@@ -1505,6 +1675,10 @@ def register_api_routes(app: FastAPI) -> None:
                 if tournament is not None:
                     delete_tournament(connection, tournament.id)
             reset_event(connection, event_id)
+            if event.handler_key == "puzzle-gauntlet":
+                from cope.events.puzzle_gauntlet import reset_puzzle_gauntlet
+
+                reset_puzzle_gauntlet(connection, event_id)
             connection.commit()
         except (sqlite3.IntegrityError, ValueError) as exc:
             connection.rollback()
@@ -1582,18 +1756,25 @@ def register_api_routes(app: FastAPI) -> None:
         rating_list = get_rating_list(connection, rating_list_id)
         if rating_list is None:
             raise HTTPException(status_code=404, detail="Rating list not found.")
-        payload = _admin_ratings_payload(connection)
         return _json({
             "rating_list": rating_list,
             "ratings": list_rating_rows(connection, rating_list_id),
             "engine_versions": [
-                {"id": version.id, "name": version.name, "version": version.version}
-                for version in list_engine_records(connection)
+                {
+                    "id": int(version["id"]),
+                    "name": str(version["name"]),
+                    "version": str(version["version"]),
+                }
+                for version in connection.execute(
+                    """
+                    SELECT version.id, engine.name, version.version
+                    FROM engine_versions version
+                    JOIN engines engine ON engine.id = version.engine_id
+                    ORDER BY engine.name, version.created_at DESC, version.id DESC
+                    """
+                )
             ],
-            "tournaments": [
-                item for item in payload["tournaments"]
-                if item["rating_list_id"] == rating_list_id
-            ],
+            "tournaments": _admin_rating_list_tournaments(connection, rating_list_id),
         })
 
     @app.delete("/api/admin/rating-lists/{rating_list_id}")
@@ -1692,6 +1873,10 @@ def register_api_routes(app: FastAPI) -> None:
             for item in list_service_heartbeats(connection)
         }
         jobs = list_deployment_jobs(connection, limit=25)
+        targets_by_job = list_deployment_targets_for_jobs(
+            connection,
+            (job.id for job in jobs),
+        )
         return _json(
             {
                 "current_version": app_version(),
@@ -1725,7 +1910,7 @@ def register_api_routes(app: FastAPI) -> None:
                     {
                         **jsonable_encoder(job),
                         "targets": jsonable_encoder(
-                            list_deployment_targets(connection, job.id)
+                            targets_by_job.get(job.id, ())
                         ),
                     }
                     for job in jobs
@@ -1855,16 +2040,19 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
-        items = [
-            web_app._tournament_summary(
-                connection,
-                tournament,
-                engines,
-                estimator=estimator,
-            )
+        event_tournament_ids = web_app._puzzle_gauntlet_tournament_ids(connection)
+        tournaments = tuple(
+            tournament
             for tournament in list_tournaments(connection)
-            if not status or tournament.status == status
-        ]
+            if tournament.id not in event_tournament_ids
+            and (not status or tournament.status == status)
+        )
+        items = web_app._tournament_summaries(
+            connection,
+            tournaments,
+            engines,
+            estimator=estimator,
+        )
         return _json(
             {
                 "tournaments": items,
@@ -1939,7 +2127,12 @@ def register_api_routes(app: FastAPI) -> None:
                 detail=f"Unknown game result type: {sorted(invalid_result_types)[0]}",
             )
         tournament = _require_tournament(connection, tournament_id)
-        all_games = list_games(connection, tournament.id)
+        engines = web_app._engine_names(connection)
+        tournament_overview = web_app._tournament_summaries(
+            connection,
+            (tournament,),
+            engines,
+        )[0]
         total_games = count_games(
             connection,
             tournament.id,
@@ -1960,15 +2153,9 @@ def register_api_routes(app: FastAPI) -> None:
                 "total": total_games,
                 "pages": max(1, (total_games + page_size - 1) // page_size),
             },
-            "game_summary": web_app._tournament_game_summary(
-                connection,
-                tournament.id,
-            ),
-            "estimate": TournamentEstimator(connection).estimate(
-                tournament,
-                all_games,
-            ).to_dict(),
-            "engines": web_app._engine_names(connection),
+            "game_summary": tournament_overview["summary"],
+            "estimate": tournament_overview["estimate"],
+            "engines": engines,
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
             "rating_lists": list_rating_lists(connection),
@@ -2573,6 +2760,7 @@ def register_api_routes(app: FastAPI) -> None:
             }
             for version in list_engine_records(connection)
             if version.version.strip()
+            and version.distribution == "managed"
             and not version.benchmark_current
             and version.build_hash not in queued_build_hashes
         ]
@@ -2716,22 +2904,152 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return _json({"releases": releases})
 
+    @app.get("/api/admin/badges")
+    def admin_badges(connection: sqlite3.Connection = Depends(web_app._database)):
+        badges = list_badges(connection)
+        engine_counts = {
+            int(row["badge_id"]): int(row["count"])
+            for row in connection.execute(
+                "SELECT badge_id, COUNT(*) AS count FROM engine_badges GROUP BY badge_id"
+            )
+        }
+        return _json(
+            {
+                "badges": [
+                    {
+                        **jsonable_encoder(badge),
+                        "engine_count": engine_counts.get(badge.id, 0),
+                    }
+                    for badge in badges
+                ]
+            }
+        )
+
+    @app.get("/api/admin/badges/form")
+    def admin_badge_form(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        return _json(
+            {
+                "badge": None,
+                "engine_ids": [],
+                "engines": list_engine_families(connection),
+            }
+        )
+
+    @app.get("/api/admin/badges/{badge_id}")
+    def admin_badge(
+        badge_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        badge = get_badge(connection, badge_id)
+        if badge is None:
+            raise HTTPException(status_code=404, detail="Badge not found.")
+        return _json(
+            {
+                "badge": badge,
+                "engine_ids": list_badge_engine_ids(connection, badge_id),
+                "engines": list_engine_families(connection),
+            }
+        )
+
+    @app.post("/api/admin/badges")
+    def admin_create_badge(
+        payload: BadgePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            badge_id = create_badge(
+                connection,
+                name=payload.name,
+                emoji=payload.emoji,
+                description=payload.description,
+            )
+            replace_badge_engines(connection, badge_id, payload.engine_ids)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            detail = (
+                "A badge with that name already exists."
+                if "badges_name_key" in str(exc)
+                else web_app._friendly_error(exc)
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {"id": badge_id, "message": "Badge created."},
+            status_code=201,
+        )
+
+    @app.put("/api/admin/badges/{badge_id}")
+    def admin_update_badge(
+        badge_id: int,
+        payload: BadgePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_badge(connection, badge_id) is None:
+            raise HTTPException(status_code=404, detail="Badge not found.")
+        try:
+            update_badge(
+                connection,
+                badge_id,
+                name=payload.name,
+                emoji=payload.emoji,
+                description=payload.description,
+            )
+            replace_badge_engines(connection, badge_id, payload.engine_ids)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            detail = (
+                "A badge with that name already exists."
+                if "badges_name_key" in str(exc)
+                else web_app._friendly_error(exc)
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"id": badge_id, "message": "Badge updated."})
+
+    @app.delete("/api/admin/badges/{badge_id}")
+    def admin_delete_badge(
+        badge_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        badge = get_badge(connection, badge_id)
+        if badge is None:
+            raise HTTPException(status_code=404, detail="Badge not found.")
+        delete_badge(connection, badge_id)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Badge deleted."})
+
     # Engines
 
     @app.get("/api/admin/engines")
     def admin_engines(connection: sqlite3.Connection = Depends(web_app._database)):
         engines = list_engine_families(connection)
+        versions = list_engine_records(connection)
+        versions_by_family = {engine.id: [] for engine in engines}
+        for version in versions:
+            versions_by_family.setdefault(version.engine_id, []).append(version)
         return _json(
             {
                 "engines": [
                     {
                         **jsonable_encoder(engine),
-                        "versions": [_engine_version_admin_payload(version) for version in list_engine_versions(connection, engine.id)],
+                        "versions": [
+                            _engine_version_admin_payload(version)
+                            for version in versions_by_family[engine.id]
+                        ],
                     }
                     for engine in engines
                 ],
-                "game_counts": {version.id: engine_game_count(connection, version.id)
-                                for version in list_engine_records(connection)},
+                "game_counts": list_engine_game_counts(connection),
             }
         )
 
@@ -2756,14 +3074,15 @@ def register_api_routes(app: FastAPI) -> None:
         engine = get_engine_family(connection, engine_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
+        versions = list_engine_versions(connection, engine_id)
         return _json(
             {
                 "engine": engine,
-                "versions": [_engine_version_admin_payload(version) for version in list_engine_versions(connection, engine_id)],
-                "game_counts": {
-                    version.id: engine_game_count(connection, version.id)
-                    for version in list_engine_versions(connection, engine_id)
-                },
+                "versions": [_engine_version_admin_payload(version) for version in versions],
+                "game_counts": list_engine_game_counts(
+                    connection,
+                    (version.id for version in versions),
+                ),
             }
         )
 
@@ -2834,39 +3153,55 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         if get_engine_family(connection, engine_id) is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
-        host = get_git_host(connection, payload.git_host_id)
-        if host is None or not host.enabled:
-            raise HTTPException(status_code=404, detail="Git host is unavailable.")
-        if payload.source_kind == "commit":
-            if not re.fullmatch(r"[0-9a-fA-F]{7,64}", payload.source_ref):
-                raise HTTPException(status_code=422, detail="Enter a valid commit hash.")
+        if payload.distribution == "worker_local":
+            git_host_id = None
+            repository_url = ""
+            repository_full_name = ""
+            source_ref = ""
+            source_kind = "commit"
+            dockerfile_path = ""
+            dockerfile = ""
         else:
             try:
-                release_tags = {
-                    release["tag"]
-                    for release in list_releases(host, payload.repository_full_name)
-                }
+                host = get_git_host(connection, payload.git_host_id)
+                if host is None or not host.enabled:
+                    raise HTTPException(status_code=404, detail="Git host is unavailable.")
+                if payload.source_kind == "commit":
+                    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", payload.source_ref):
+                        raise HTTPException(status_code=422, detail="Enter a valid commit hash.")
+                else:
+                    release_tags = {
+                        release["tag"]
+                        for release in list_releases(host, payload.repository_full_name)
+                    }
+                    if payload.source_ref not in release_tags:
+                        raise HTTPException(status_code=422, detail="Choose a public release.")
+                repository_url = canonical_repository_url(
+                    host,
+                    payload.repository_full_name,
+                )
             except SourceServiceError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
-            if payload.source_ref not in release_tags:
-                raise HTTPException(status_code=422, detail="Choose a public release.")
-        try:
-            repository_url = canonical_repository_url(host, payload.repository_full_name)
-        except SourceServiceError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            git_host_id = host.id
+            repository_full_name = payload.repository_full_name
+            source_ref = payload.source_ref
+            source_kind = payload.source_kind
+            dockerfile_path = payload.dockerfile_path
+            dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
         try:
             version_id = create_engine_version(
                 connection,
                 engine_id=engine_id,
                 version=payload.version,
-                git_host_id=host.id,
+                git_host_id=git_host_id,
                 repository_url=repository_url,
-                repository_full_name=payload.repository_full_name,
-                source_ref=payload.source_ref,
-                source_kind=payload.source_kind,
-                dockerfile_path=payload.dockerfile_path,
+                repository_full_name=repository_full_name,
+                source_ref=source_ref,
+                source_kind=source_kind,
+                dockerfile_path=dockerfile_path,
                 dockerfile=dockerfile,
+                distribution=payload.distribution,
+                worker_local_key=payload.worker_local_key,
                 uci_options=payload.uci_options,
                 active=True,
             )
@@ -2908,13 +3243,20 @@ def register_api_routes(app: FastAPI) -> None:
         options = payload.uci_options
         if any(not str(name).strip() for name in options):
             raise HTTPException(status_code=422, detail="Default UCI options must be an object with non-empty names.")
-        dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
+        if version.distribution == "worker_local":
+            dockerfile_path = ""
+            dockerfile = ""
+        else:
+            if not payload.dockerfile_path:
+                raise HTTPException(status_code=422, detail="Choose a Dockerfile.")
+            dockerfile_path = payload.dockerfile_path
+            dockerfile = _load_engine_dockerfile(payload.dockerfile_path)
         try:
             update_engine_version(
                 connection,
                 version_id,
                 version=payload.version,
-                dockerfile_path=payload.dockerfile_path,
+                dockerfile_path=dockerfile_path,
                 dockerfile=dockerfile,
                 uci_options=options,
                 active=True,
@@ -2934,6 +3276,11 @@ def register_api_routes(app: FastAPI) -> None:
         version = get_engine_version_record(connection, version_id)
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
+        if version.distribution == "worker_local":
+            raise HTTPException(
+                status_code=409,
+                detail="Worker-local engines do not accept uploaded artifacts.",
+            )
         if not version.dockerfile_path:
             raise HTTPException(
                 status_code=409,
@@ -2978,12 +3325,14 @@ def register_api_routes(app: FastAPI) -> None:
                         "artifact": None,
                         "benchmark_current": False,
                         "active": False,
+                        "worker_local_count": 0,
                         "benchmarks": [],
                     }
                 return {
                     "artifact": jsonable_encoder(version.artifact),
                     "benchmark_current": version.benchmark_current,
                     "active": version.active,
+                    "worker_local_count": version.worker_local_count,
                     "benchmarks": [
                         _benchmark_job_admin_payload(item)
                         for item in list_engine_benchmark_jobs(
@@ -3021,6 +3370,8 @@ def register_api_routes(app: FastAPI) -> None:
         version = get_engine_version_record(connection, version_id)
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
+        if version.distribution == "worker_local":
+            raise HTTPException(status_code=409, detail="Worker-local engines cannot be benchmarked.")
         if not version.dockerfile_path:
             raise HTTPException(
                 status_code=409,
@@ -3071,6 +3422,8 @@ def register_api_routes(app: FastAPI) -> None:
         version = get_engine_version_record(connection, version_id)
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
+        if version.distribution == "worker_local":
+            raise HTTPException(status_code=409, detail="Worker-local engines cannot be benchmarked.")
         if not version.dockerfile_path:
             raise HTTPException(
                 status_code=409,
@@ -3156,19 +3509,22 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_openings(connection: sqlite3.Connection = Depends(web_app._database)):
         suites = list_opening_suites(connection)
         tournaments = list_tournaments(connection)
+        opening_counts = {
+            int(row["suite_id"]): int(row["count"])
+            for row in connection.execute(
+                "SELECT suite_id, COUNT(*) AS count FROM openings GROUP BY suite_id"
+            )
+        }
+        usage_counts = {suite.id: 0 for suite in suites}
+        for tournament in tournaments:
+            suite_id = tournament.config.opening_suite_id
+            if suite_id in usage_counts:
+                usage_counts[suite_id] += 1
         return _json(
             {
                 "suites": suites,
-                "opening_counts": {
-                    suite.id: suite_opening_count(connection, suite.id) for suite in suites
-                },
-                "usage_counts": {
-                    suite.id: sum(
-                        tournament.config.opening_suite_id == suite.id
-                        for tournament in tournaments
-                    )
-                    for suite in suites
-                },
+                "opening_counts": opening_counts,
+                "usage_counts": usage_counts,
             }
         )
 
@@ -3445,6 +3801,7 @@ def register_api_routes(app: FastAPI) -> None:
                         "author": engine.author,
                         "version": engine.version,
                         "repository": engine.repository_full_name,
+                        "distribution": engine.distribution,
                         "artifact_ready": engine.artifact is not None,
                         "active": engine.engine_active,
                     }
@@ -3901,59 +4258,78 @@ def _public_engine_ratings(
     connection: sqlite3.Connection,
     engine_id: int,
 ) -> list[dict[str, Any]]:
+    ratings = connection.execute(
+        """
+        WITH ranked AS (
+          SELECT rating.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY rating.rating_list_id
+                   ORDER BY rating.elo DESC, engine.name, version.version
+                 ) AS rating_rank,
+                 COUNT(*) OVER (
+                   PARTITION BY rating.rating_list_id
+                 ) AS field_size
+          FROM rating_list_ratings rating
+          JOIN engine_versions version ON version.id = rating.engine_id
+          JOIN engines engine ON engine.id = version.engine_id
+        )
+        SELECT rating_list.*, ranked.elo, ranked.games_played,
+               ranked.updated_at, ranked.rating_rank, ranked.field_size,
+               ranked.error_margin
+        FROM ranked
+        JOIN rating_lists rating_list ON rating_list.id = ranked.rating_list_id
+        WHERE ranked.engine_id = ?
+        ORDER BY rating_list.name, rating_list.id
+        """,
+        (engine_id,),
+    ).fetchall()
+    raw_history = connection.execute(
+        """
+        SELECT rating_list_id, elo, calculated_at
+        FROM engine_elo_history
+        WHERE engine_id = ?
+        ORDER BY rating_list_id, id
+        """,
+        (engine_id,),
+    )
+    history_by_list: dict[int, list[dict[str, Any]]] = {}
+    for item in raw_history:
+        rating_list_id = int(item["rating_list_id"])
+        history = history_by_list.setdefault(rating_list_id, [])
+        elo = float(item["elo"])
+        history.append(
+            {
+                "elo": elo,
+                "change": elo - history[-1]["elo"] if history else 0.0,
+                "at": item["calculated_at"],
+            }
+        )
     result: list[dict[str, Any]] = []
-    for rating_list in list_rating_lists(connection):
-        rows = list_rating_rows(connection, rating_list.id)
-        selected = next(
-            (row for row in rows if row.engine.engine_id == engine_id),
-            None,
-        )
-        if selected is None:
-            continue
-        raw_history = list(
-            connection.execute(
-                """
-                SELECT elo_before, elo, elo_change, at
-                FROM rating_list_history
-                WHERE rating_list_id = ? AND engine_id = ?
-                ORDER BY id
-                """,
-                (rating_list.id, engine_id),
-            )
-        )
-        history = []
-        if raw_history:
-            history.append(
-                {
-                    "elo": float(raw_history[0]["elo_before"]),
-                    "change": 0.0,
-                    "at": raw_history[0]["at"],
-                }
-            )
-            history.extend(
-                {
-                    "elo": float(item["elo"]),
-                    "change": float(item["elo_change"]),
-                    "at": item["at"],
-                }
-                for item in raw_history
-            )
+    for row in ratings:
+        history = history_by_list.get(int(row["id"]), [])
+        elo = float(row["elo"])
         result.append(
             {
-                "rating_list": rating_list,
-                "elo": selected.elo,
-                "rank": next(
-                    index + 1
-                    for index, row in enumerate(rows)
-                    if row.engine.engine_id == engine_id
+                "rating_list": {
+                    "id": int(row["id"]),
+                    "name": str(row["name"]),
+                    "anchor_engine_id": row["anchor_engine_id"],
+                    "anchor_elo": float(row["anchor_elo"]),
+                    "created_at": str(row["created_at"]),
+                },
+                "elo": elo,
+                "rank": int(row["rating_rank"]),
+                "field_size": int(row["field_size"]),
+                "games_played": int(row["games_played"]),
+                "error_margin": (
+                    float(row["error_margin"])
+                    if row["error_margin"] is not None
+                    else None
                 ),
-                "field_size": len(rows),
-                "games_played": selected.games_played,
-                "error_margin": selected.error_margin,
-                "updated_at": selected.updated_at,
+                "updated_at": row["updated_at"],
                 "peak_elo": max(
                     (point["elo"] for point in history),
-                    default=selected.elo,
+                    default=elo,
                 ),
                 "history": history,
             }
@@ -4020,11 +4396,14 @@ def _validate_live_participant_engine(
     if (
         not record.active
         or not record.engine_active
-        or not record.benchmark_current
+        or (
+            record.distribution == "managed"
+            and not record.benchmark_current
+        )
     ):
         raise HTTPException(
             status_code=422,
-            detail="Choose an active engine version with a current benchmark.",
+            detail="Choose an active engine version that is ready to run.",
         )
 
 
@@ -4048,7 +4427,10 @@ def _live_tournament_roster_payload(
             if engine.id not in participant_ids
             and engine.active
             and engine.engine_active
-            and engine.benchmark_current
+            and (
+                engine.distribution == "worker_local"
+                or engine.benchmark_current
+            )
         ]
         if editable
         else []

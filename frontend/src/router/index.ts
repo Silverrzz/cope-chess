@@ -167,6 +167,25 @@ const router = createRouter({
           meta: { title: "New engine version" },
         },
         {
+          path: "badges",
+          name: "admin-badges",
+          component: () => import("@/pages/admin/BadgesPage.vue"),
+          meta: { title: "Badges" },
+        },
+        {
+          path: "badges/new",
+          name: "admin-badge-new",
+          component: () => import("@/pages/admin/BadgeFormPage.vue"),
+          meta: { title: "Create badge" },
+        },
+        {
+          path: "badges/:id",
+          name: "admin-badge",
+          component: () => import("@/pages/admin/BadgeFormPage.vue"),
+          props: true,
+          meta: { title: "Badge" },
+        },
+        {
           path: "engine-versions/:versionId",
           name: "admin-engine-version",
           component: () => import("@/pages/admin/EngineVersionPage.vue"),

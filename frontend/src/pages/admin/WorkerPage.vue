@@ -20,7 +20,8 @@ interface WorkerSettings { core_limit: number | null; effective_cores: number | 
 interface ResourceSample { sampled_at: string; cpu_percent: number; memory_used_mb: number; memory_total_mb: number; memory_available_mb: number; coordinator_cpu_cores: number; coordinator_memory_mb: number; engine_cpu_cores: number; engine_memory_mb: number; disk_used_mb: number; disk_free_mb: number; disk_total_mb: number }
 interface ResourceAllocation { assignment_id: number; game_id: number; status: string; tournament_id: number; tournament_name: string; white_engine: string; black_engine: string; threads: number; engine_hash_mb: number; process_memory_mb: number; memory_mb: number }
 interface WorkerResources { latest: ResourceSample | null; samples: ResourceSample[]; allocations: ResourceAllocation[] }
-interface Response { row: WorkerRow; worker: Worker; settings: WorkerSettings; resources: WorkerResources; worker_launch_command?: string | null; failures: WorkerFailure[] }
+interface LocalEngine { local_key: string; discovered_at: string; engine_version_id: number | null; engine_name: string | null; engine_version: string | null }
+interface Response { row: WorkerRow; worker: Worker; settings: WorkerSettings; resources: WorkerResources; local_engines: LocalEngine[]; worker_launch_command?: string | null; failures: WorkerFailure[] }
 interface Minted { token: string; expires_at: string; start_command?: string; message: string }
 interface WorkerTokenBindings { token: string; expiresAt: string; startCommand?: string }
 type WorkerView = 'overview' | 'resources' | 'system'
@@ -463,6 +464,11 @@ onBeforeUnmount(() => source?.close())
             <header><span><AppIcon name="server" :size="17" /></span><div><h2>Hardware profile</h2><p>Detected directly from the machine.</p></div></header>
             <dl v-if="data.worker.hw" class="compact-facts hardware-facts"><div><dt>Processor</dt><dd>{{ data.worker.hw.cpu_model }}</dd></div><div><dt>Topology</dt><dd>{{ data.worker.hw.physical_cores }} physical · {{ data.worker.hw.logical_cores }} logical</dd></div><div><dt>Memory</dt><dd>{{ formatResource(detectedMemoryMb) }}</dd></div><div><dt>Operating system</dt><dd>{{ data.worker.hw.os ?? 'Not reported' }}</dd></div><div v-if="data.worker.hw.gpu"><dt>GPU</dt><dd>{{ data.worker.hw.gpu }}</dd></div><div v-if="data.worker.hw.bench?.nps_probe"><dt>Benchmark</dt><dd>{{ formatNumber(data.worker.hw.bench.nps_probe) }} NPS</dd></div></dl>
             <div v-else class="system-empty">Hardware will appear after the first connection.</div>
+          </section>
+          <section class="panel system-card">
+            <header><span><AppIcon name="server" :size="17" /></span><div><h2>Worker-local engines</h2><p>Private binaries discovered on the latest connection.</p></div></header>
+            <dl v-if="data.local_engines.length" class="compact-facts"><div v-for="engine in data.local_engines" :key="engine.local_key"><dt><code>{{ engine.local_key }}</code></dt><dd>{{ engine.engine_name ? `${engine.engine_name} ${engine.engine_version}` : 'No registered version' }}</dd></div></dl>
+            <div v-else class="system-empty">No executable binaries were discovered below the local engine directory.</div>
           </section>
           <section class="panel system-card">
             <header><span><AppIcon name="radio" :size="17" /></span><div><h2>Connection chain</h2><p>Every link required for live work.</p></div></header>

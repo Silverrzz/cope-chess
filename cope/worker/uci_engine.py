@@ -4,6 +4,7 @@ import logging
 import hashlib
 import os
 import queue
+import re
 import signal
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ _ARTIFACT_LOCKS: dict[Path, threading.Lock] = {}
 _ARTIFACT_LOCKS_GUARD = threading.Lock()
 _COMMAND_OUTPUT_QUEUE_SIZE = 256
 _DEFAULT_ENGINE_BUILD_JOBS = 4
+_WORKER_LOCAL_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 
 class EnginePreparationError(RuntimeError):
@@ -517,6 +519,32 @@ class UciEngineProcess:
             self._prepared = True
 
     def _ensure_artifact(self) -> None:
+        if self._spec.distribution == "worker_local":
+            try:
+                binary_ready = (
+                    self._binary_path.is_file()
+                    and self._binary_path.stat().st_size > 0
+                )
+            except OSError as exc:
+                raise EnginePreparationError(
+                    self._spec,
+                    "worker_local",
+                    f"worker-local engine cannot be inspected: {self._binary_path}: {exc}",
+                ) from exc
+            if not binary_ready:
+                raise EnginePreparationError(
+                    self._spec,
+                    "worker_local",
+                    f"worker-local engine is missing: {self._binary_path}",
+                )
+            if os.name == "posix" and not os.access(self._binary_path, os.X_OK):
+                raise EnginePreparationError(
+                    self._spec,
+                    "worker_local",
+                    f"worker-local engine is not executable: {self._binary_path}",
+                )
+            self._prepared = True
+            return
         if self._spec.artifact is not None:
             self._ensure_downloaded_artifact()
             return
@@ -927,14 +955,51 @@ class UciEngineProcess:
 
 
 def _engine_source_dir(spec: EngineSpec) -> Path:
-    configured_cache_root = os.environ.get("COPE_WORKER_ENGINE_DIR")
-    if configured_cache_root:
-        cache_root = Path(configured_cache_root).expanduser().resolve()
-    else:
-        cache_root = (_effective_home_dir() / ".cope-worker" / "engines").resolve()
+    cache_root = _engine_cache_root()
+    if spec.distribution == "worker_local":
+        if spec.worker_local_key is None:
+            raise ValueError("worker-local engine has no local key")
+        return cache_root / "local" / spec.worker_local_key
     cache_key = spec.build_hash if spec.artifact is None else spec.artifact.sha256
     prefix = "build" if spec.artifact is None else "artifact"
     return cache_root / f"{prefix}-{cache_key}"
+
+
+def _engine_cache_root() -> Path:
+    configured_cache_root = os.environ.get("COPE_WORKER_ENGINE_DIR")
+    if configured_cache_root:
+        return Path(configured_cache_root).expanduser().resolve()
+    return (_effective_home_dir() / ".cope-worker" / "engines").resolve()
+
+
+def discover_worker_local_engine_keys() -> tuple[str, ...]:
+    root = _engine_cache_root() / "local"
+    if not root.is_dir():
+        return ()
+    try:
+        directories = tuple(root.iterdir())
+    except OSError:
+        LOG.exception("could not inspect worker-local engine directory %s", root)
+        return ()
+    keys: list[str] = []
+    for directory in directories:
+        try:
+            directory_ready = directory.is_dir()
+        except OSError:
+            continue
+        if not directory_ready or _WORKER_LOCAL_KEY.fullmatch(directory.name) is None:
+            continue
+        binary = directory / "engine"
+        try:
+            binary_ready = binary.is_file() and binary.stat().st_size > 0
+        except OSError:
+            continue
+        if not binary_ready:
+            continue
+        if os.name == "posix" and not os.access(binary, os.X_OK):
+            continue
+        keys.append(directory.name)
+    return tuple(sorted(keys))
 
 
 def _process_exit_description(return_code: int) -> str:

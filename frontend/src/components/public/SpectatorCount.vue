@@ -8,12 +8,13 @@ const props = defineProps<{
 }>()
 
 const label = computed(() => `${props.count} ${props.count === 1 ? 'spectator' : 'spectators'}`)
+const displayCount = computed(() => props.count.toLocaleString())
 </script>
 
 <template>
   <span class="spectator-count" :aria-label="label" :title="label">
     <AppIcon name="eye" :size="14" :stroke-width="1.9" />
-    <span>{{ count }}</span>
+    <span>{{ displayCount }}</span>
   </span>
 </template>
 

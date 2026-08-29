@@ -340,6 +340,8 @@ def schedule_benchmark_jobs(
     scheduled = 0
     now = _utc_now()
     for engine in engines:
+        if engine.distribution == "worker_local":
+            continue
         cursor = connection.execute(
             """
             INSERT INTO benchmark_jobs (
@@ -654,6 +656,8 @@ def record_manual_benchmark(
 ) -> int:
     from cope.core.benchmark import benchmark_hardware_key
 
+    if engine.distribution == "worker_local":
+        raise ValueError("Worker-local engines cannot be benchmarked.")
     if engine.artifact is None:
         raise ValueError("The engine must have a published artifact before a benchmark can be recorded.")
     if nps <= 0:
@@ -804,6 +808,8 @@ def reschedule_engine_benchmarks(
     that result rather than fabricating multiple competing references for the
     same build/profile pair.
     """
+    if engine.distribution == "worker_local":
+        raise ValueError("Worker-local engines cannot be benchmarked.")
     now = _utc_now()
     running = connection.execute(
         """

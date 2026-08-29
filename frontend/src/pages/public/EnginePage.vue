@@ -34,6 +34,7 @@ interface EngineOption {
   author?: string
   version: string
   source_kind?: string
+  distribution?: 'managed' | 'worker_local'
   active?: boolean
 }
 
@@ -65,7 +66,7 @@ interface EngineResponse {
   record: EngineRecordSummary
   filter_options: EngineGameFilterOptions
   ratings: EngineRating[]
-  badges: Array<{ id: string; name: string; description?: string }>
+  badges: Array<{ id: number; name: string; emoji: string; description: string }>
 }
 
 type FilterKey = keyof EngineGameFilters
@@ -91,7 +92,7 @@ const activeFilterCount = computed(() => Object.values(gameFilters.value).filter
 const versionOptions = computed(() => (data.value?.versions ?? []).map((version, index) => ({
   value: String(version.id),
   label: version.version || `Version ${version.id}`,
-  description: `${version.source_kind === 'commit' ? 'Commit' : 'Release'}${index === 0 ? ' · latest' : ''}`,
+  description: `${version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'commit' ? 'Commit' : 'Release'}${index === 0 ? ' · latest' : ''}`,
 })))
 const ratingListOptions = computed(() => (data.value?.ratings ?? []).map((rating) => ({
   value: String(rating.rating_list.id),
@@ -347,19 +348,19 @@ async function load(): Promise<void> {
 
           <section class="panel badges-panel" aria-labelledby="badges-title">
             <header><div><p class="section-kicker">Milestones</p><h2 id="badges-title">Badges</h2></div><span>{{ data.badges.length }}</span></header>
-            <div v-if="data.badges.length" class="badge-list"><span v-for="badge in data.badges" :key="badge.id"><AppIcon name="trophy" :size="17" /><strong>{{ badge.name }}</strong></span></div>
+            <div v-if="data.badges.length" class="badge-list"><article v-for="badge in data.badges" :key="badge.id"><span aria-hidden="true">{{ badge.emoji }}</span><div><strong>{{ badge.name }}</strong><small v-if="badge.description">{{ badge.description }}</small></div></article></div>
             <div v-else class="badges-empty"><span><AppIcon name="trophy" :size="20" /></span><div><strong>Ready for future achievements</strong><p>Milestones and tournament awards will appear here.</p></div></div>
           </section>
         </aside>
       </div>
 
       <details class="panel technical-panel">
-        <summary><span><AppIcon name="info" :size="17" /><strong>Version details</strong><small>Source, build, and {{ uciOptions.length }} custom UCI option{{ uciOptions.length === 1 ? '' : 's' }}</small></span><AppIcon name="chevron-down" :size="17" /></summary>
+        <summary><span><AppIcon name="info" :size="17" /><strong>Version details</strong><small>{{ data.engine.distribution === 'worker_local' ? 'Worker-local availability' : 'Source and build' }}, and {{ uciOptions.length }} custom UCI option{{ uciOptions.length === 1 ? '' : 's' }}</small></span><AppIcon name="chevron-down" :size="17" /></summary>
         <div class="technical-content">
           <dl>
             <div><dt>Version</dt><dd>{{ data.engine.version || '—' }}</dd></div>
-            <div><dt>Source</dt><dd>{{ data.engine.source_kind || '—' }} · <code>{{ data.engine.source_ref || '—' }}</code></dd></div>
-            <div><dt>Repository</dt><dd><a v-if="data.engine.repository_url" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>—</span></dd></div>
+            <div><dt>Source</dt><dd v-if="data.engine.distribution === 'worker_local'">Worker-local private binary</dd><dd v-else>{{ data.engine.source_kind || '—' }} · <code>{{ data.engine.source_ref || '—' }}</code></dd></div>
+            <div v-if="data.engine.distribution !== 'worker_local'"><dt>Repository</dt><dd><a v-if="data.engine.repository_url" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>—</span></dd></div>
             <div><dt>Added</dt><dd>{{ formatDate(data.engine.created_at) }}</dd></div>
           </dl>
           <div v-if="uciOptions.length" class="uci-options"><span v-for="([name, value]) in uciOptions" :key="name"><strong>{{ name }}</strong><code>{{ String(value) }}</code></span></div>
@@ -450,9 +451,12 @@ async function load(): Promise<void> {
 .badges-empty div { display: grid; gap: .12rem; }
 .badges-empty strong { font-size: .73rem; }
 .badges-empty p { color: var(--color-text-muted); font-size: .66rem; line-height: 1.45; }
-.badge-list { display: flex; flex-wrap: wrap; gap: .5rem; padding: 1rem; }
-.badge-list span { align-items: center; background: var(--color-warning-soft); border-radius: var(--radius-md); color: var(--color-warning); display: flex; gap: .4rem; padding: .55rem .65rem; }
+.badge-list { display: grid; gap: .5rem; padding: .75rem; }
+.badge-list article { align-items:center; background:linear-gradient(135deg,color-mix(in srgb,var(--color-warning-soft) 70%,var(--color-surface)) 0%,var(--color-surface-sunken) 100%); border:1px solid color-mix(in srgb,var(--color-warning) 18%,var(--color-border)); border-radius:var(--radius-md); display:grid; gap:.6rem; grid-template-columns:auto minmax(0,1fr); padding:.6rem .7rem; }
+.badge-list article>span { align-items:center; background:var(--color-surface-raised); border:1px solid var(--color-border); border-radius:.65rem; display:flex; font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif; font-size:1.3rem; height:2.25rem; justify-content:center; width:2.25rem; }
+.badge-list article>div { display:grid; gap:.1rem; min-width:0; }
 .badge-list strong { color: var(--color-text); font-size: .7rem; }
+.badge-list small { color:var(--color-text-muted); font-size:.62rem; line-height:1.35; }
 .panel-empty { color: var(--color-text-muted); font-size: .74rem; padding: 1.5rem 1rem; text-align: center; }
 .technical-panel summary { align-items: center; cursor: pointer; display: flex; justify-content: space-between; list-style: none; padding: .85rem 1rem; }
 .technical-panel summary::-webkit-details-marker { display: none; }

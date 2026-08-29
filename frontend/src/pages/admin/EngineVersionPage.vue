@@ -68,6 +68,7 @@ const manualRamGb = ref<number | null>(null)
 const manualGpu = ref('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 let activitySignature = ''
+const isWorkerLocal = computed(() => version.value?.distribution === 'worker_local')
 
 const progressStages = [
   { label: 'Assigned', substages: ['assignment'] },
@@ -182,7 +183,7 @@ const lastActivityText = computed(() => {
   const seconds = Math.max(0, Math.floor((nowMs.value - lastActivityMs.value) / 1000))
   return seconds < 2 ? 'Updated just now' : `Updated ${formatDuration(seconds)} ago`
 })
-const { state: streamState } = useEventStream<{ artifact: EngineArtifact | null; benchmark_current: boolean; active: boolean; benchmarks: EngineBenchmarkJob[] }>(
+const { state: streamState } = useEventStream<{ artifact: EngineArtifact | null; benchmark_current: boolean; active: boolean; worker_local_count: number; benchmarks: EngineBenchmarkJob[] }>(
   computed(() => `/api/admin/engine-versions/${id.value}/events`),
   {
     event: 'engine-version.snapshot',
@@ -190,7 +191,8 @@ const { state: streamState } = useEventStream<{ artifact: EngineArtifact | null;
       benchmarks.value = snapshot.benchmarks
       if (version.value) {
         version.value.artifact = snapshot.artifact
-        if (dockerfileDirty.value) {
+        version.value.worker_local_count = snapshot.worker_local_count
+        if (!isWorkerLocal.value && dockerfileDirty.value) {
           version.value.benchmark_current = false
           version.value.active = false
           return
@@ -216,7 +218,7 @@ async function load(): Promise<void> {
     savedDockerfilePath.value = response.version.dockerfile_path
     dockerfileContent.value = response.version.dockerfile
     dockerfileDirty.value = false
-    await loadDockerfile()
+    if (!isWorkerLocal.value) await loadDockerfile()
   } catch (cause) {
     error.value = errorText(cause)
   } finally {
@@ -226,7 +228,7 @@ async function load(): Promise<void> {
 
 async function save(): Promise<void> {
   if (!version.value) return
-  if (!version.value.dockerfile_path) {
+  if (!isWorkerLocal.value && !version.value.dockerfile_path) {
     error.value = 'Choose a Dockerfile from data/engines.'
     return
   }
@@ -236,7 +238,7 @@ async function save(): Promise<void> {
     const response = await api.put<{ message: string }>(`/api/admin/engine-versions/${id.value}`, {
       body: {
         version: version.value.version.trim(),
-        dockerfile_path: version.value.dockerfile_path,
+        dockerfile_path: isWorkerLocal.value ? '' : version.value.dockerfile_path,
         uci_options: version.value.uci_options,
       },
     })
@@ -488,17 +490,19 @@ onBeforeUnmount(() => {
     <div v-if="loading" class="panel loading-card">Loading version…</div>
     <form v-else-if="version" class="page-stack" @submit.prevent="save">
       <section class="panel detail-card">
-        <div class="detail-heading"><div><h2>Source</h2><p>The benchmarker checks out this exact source to build the published worker artifact.</p></div><div class="availability" :class="{ 'availability--active': version.active }"><strong>{{ version.active ? 'Active' : 'Inactive' }}</strong><small>{{ version.benchmark_current ? (version.engine_active ? 'Current artifact benchmarked' : 'Engine disabled') : 'Current artifact needs a benchmark' }}</small></div></div>
+        <div class="detail-heading"><div><h2>{{ isWorkerLocal ? 'Worker-local binary' : 'Source' }}</h2><p>{{ isWorkerLocal ? 'This private version is never stored, distributed, or benchmarked by the server.' : 'The benchmarker checks out this exact source to build the published worker artifact.' }}</p></div><div class="availability" :class="{ 'availability--active': version.active }"><strong>{{ version.active ? 'Active' : 'Inactive' }}</strong><small>{{ isWorkerLocal ? `${version.worker_local_count ?? 0} connected worker${version.worker_local_count === 1 ? '' : 's'} discovered it` : version.benchmark_current ? (version.engine_active ? 'Current artifact benchmarked' : 'Engine disabled') : 'Current artifact needs a benchmark' }}</small></div></div>
         <div class="form-grid">
           <label class="field"><span>Version label</span><input v-model="version.version" class="input" required maxlength="80"></label>
-          <div class="field"><span>Repository</span><a class="readonly-value" :href="version.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ version.repository_full_name }}</a></div>
-          <div class="field"><span>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }}</span><code class="readonly-value">{{ version.source_ref }}</code></div>
-          <div class="field"><span>Build cache key</span><code class="readonly-value" :title="version.build_hash">{{ version.build_hash }}</code></div>
+          <div v-if="isWorkerLocal" class="field"><span>Worker-local key</span><code class="readonly-value">{{ version.worker_local_key }}</code></div>
+          <div v-if="isWorkerLocal" class="field"><span>Required path</span><code class="readonly-value">~/.cope-worker/engines/local/{{ version.worker_local_key }}/engine</code></div>
+          <div v-if="!isWorkerLocal" class="field"><span>Repository</span><a class="readonly-value" :href="version.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ version.repository_full_name }}</a></div>
+          <div v-if="!isWorkerLocal" class="field"><span>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }}</span><code class="readonly-value">{{ version.source_ref }}</code></div>
+          <div v-if="!isWorkerLocal" class="field"><span>Build cache key</span><code class="readonly-value" :title="version.build_hash">{{ version.build_hash }}</code></div>
           <div class="field"><span>Created</span><span class="readonly-value">{{ formatDate(version.created_at) }}</span></div>
         </div>
       </section>
 
-      <section class="panel artifact-card" aria-labelledby="artifact-title">
+      <section v-if="!isWorkerLocal" class="panel artifact-card" aria-labelledby="artifact-title">
         <div class="detail-heading">
           <div><h2 id="artifact-title">Worker artifact</h2><p>The portable engine bundle used by regular Docker-free Vast.ai workers.</p></div>
           <span class="artifact-state" :class="`artifact-state--${artifactStatus.tone}`">{{ artifactStatus.label }}</span>
@@ -523,7 +527,7 @@ onBeforeUnmount(() => {
       </section>
 
       <div class="version-settings-grid">
-        <section class="panel detail-card">
+        <section v-if="!isWorkerLocal" class="panel detail-card">
           <div class="detail-heading"><div><h2>Benchmarker build recipe</h2><p>This Dockerfile runs only on the benchmarker. Game workers download the resulting artifact.</p></div></div>
           <div class="field"><span>File in <code>data/engines</code></span><DockerfilePicker v-model="version.dockerfile_path" :files="dockerfiles" @change="loadDockerfile" /></div>
           <details class="dockerfile-preview">
@@ -539,7 +543,7 @@ onBeforeUnmount(() => {
         </section>
       </div>
 
-      <section class="panel benchmark-card" aria-labelledby="benchmarks-title">
+      <section v-if="!isWorkerLocal" class="panel benchmark-card" aria-labelledby="benchmarks-title">
         <div class="detail-heading">
           <div><h2 id="benchmarks-title">Benchmarking</h2><p>Build and <code>bench</code> results stream live from the benchmark service.</p></div>
           <div class="benchmark-actions"><StreamStatus :state="streamState" label="Live benchmark updates" /><span class="benchmark-state" :class="`benchmark-state--${currentBenchmark?.status ?? 'missing'}`">{{ currentBenchmark ? humanize(currentBenchmark.status) : 'Not benchmarked' }}</span><button v-if="currentBenchmark" class="button button--danger button--small" type="button" :disabled="forgetting || rescheduling || recordingManual || currentBenchmark.status === 'running'" @click="forgetBenchmark">{{ forgetting ? 'Forgetting…' : 'Forget' }}</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || recordingManual || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="openManualBenchmark">Add manual result</button><button class="button button--secondary button--small" type="button" :disabled="rescheduling || forgetting || recordingManual || currentBenchmark?.status === 'running' || !version.dockerfile_path || dockerfileDirty" @click="reschedule">{{ dockerfileDirty ? 'Save before benchmarking' : rescheduling ? 'Queueing…' : currentBenchmark ? 'Re-run benchmark' : 'Benchmark' }}</button></div>

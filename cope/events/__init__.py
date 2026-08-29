@@ -8,6 +8,7 @@ from .registry import (
     register_event_module,
 )
 from . import engine_relay as _engine_relay
+from . import puzzle_gauntlet as _puzzle_gauntlet
 
 __all__ = [
     "EventModule",

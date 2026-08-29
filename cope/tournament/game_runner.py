@@ -14,12 +14,16 @@ class GameRunner:
         game: Game,
         clock_probe_interval: float = 0.01,
         lag_compensation_ms: int = 0,
+        use_worker_search_clock: bool = True,
+        use_latest_info_move_on_timeout: bool = False,
         on_tick: Callable[[chess.Color, int | None], None] | None = None,
         on_clock_sync: Callable[[chess.Color, bool, int | None], None] | None = None,
     ):
         self._game = game
         self._clock_probe_interval = clock_probe_interval
         self._lag_compensation_ms = max(0, lag_compensation_ms)
+        self._use_worker_search_clock = use_worker_search_clock
+        self._use_latest_info_move_on_timeout = use_latest_info_move_on_timeout
         self._game_started = False
         self._on_tick = on_tick
         self._on_clock_sync = on_clock_sync
@@ -54,6 +58,7 @@ class GameRunner:
         engine = self.get_engine_to_move()
         clock = self.get_clock_to_move()
         move = None
+        move_captured_at_timeout = False
         worker_clock_synced = False
 
         clock.start_clock()
@@ -65,7 +70,8 @@ class GameRunner:
             while engine.is_searching():
                 worker_elapsed_ms = (
                     engine.get_worker_search_elapsed_ms()
-                    if engine.uses_worker_search_clock()
+                    if self._use_worker_search_clock
+                    and engine.uses_worker_search_clock()
                     else None
                 )
                 if worker_elapsed_ms is not None:
@@ -76,7 +82,13 @@ class GameRunner:
                 try:
                     remaining = clock.probe_clock(worker_elapsed_ms)
                 except TimeOutError:
-                    if not engine.uses_worker_search_clock() or worker_elapsed_ms is not None:
+                    if (
+                        not (
+                            self._use_worker_search_clock
+                            and engine.uses_worker_search_clock()
+                        )
+                        or worker_elapsed_ms is not None
+                    ):
                         raise
                     remaining = 0
                 if (
@@ -92,12 +104,24 @@ class GameRunner:
 
             move = engine.get_search_move()
         except TimeOutError:
+            result = (
+                engine.capture_latest_info_result(board)
+                if self._use_latest_info_move_on_timeout
+                else None
+            )
             engine.stop_search()
-            clock.stop_clock_after_timeout()
-            self._get_game_state().record_timeout(side_to_move)
-            if self._on_clock_sync is not None:
-                self._on_clock_sync(side_to_move, False, 0)
-            return None
+            if result is not None:
+                move = result.bestmove
+                move_captured_at_timeout = True
+                clock.stop_clock_after_timeout()
+                if self._on_clock_sync is not None:
+                    self._on_clock_sync(side_to_move, False, 0)
+            else:
+                clock.stop_clock_after_timeout()
+                self._get_game_state().record_timeout(side_to_move)
+                if self._on_clock_sync is not None:
+                    self._on_clock_sync(side_to_move, False, 0)
+                return None
         except Exception as error:
             engine.stop_search()
             clock.stop_clock_after_timeout()
@@ -106,12 +130,14 @@ class GameRunner:
                 self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
             return None
         finally:
-            if not self._get_game_state().is_finished():
+            if not self._get_game_state().is_finished() and not move_captured_at_timeout:
                 try:
                     search = engine.get_last_search_result()
                     elapsed_ms = (
                         search.command_elapsed_ms
-                        if search is not None and engine.uses_worker_search_clock()
+                        if search is not None
+                        and self._use_worker_search_clock
+                        and engine.uses_worker_search_clock()
                         else None
                     )
                     if elapsed_ms is not None:
@@ -120,9 +146,20 @@ class GameRunner:
                     if self._on_clock_sync is not None:
                         self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
                 except TimeOutError:
-                    self._get_game_state().record_timeout(side_to_move)
-                    if self._on_clock_sync is not None:
-                        self._on_clock_sync(side_to_move, False, 0)
+                    result = (
+                        engine.capture_latest_info_result(board)
+                        if self._use_latest_info_move_on_timeout
+                        else None
+                    )
+                    if result is not None:
+                        move = result.bestmove
+                        move_captured_at_timeout = True
+                        if self._on_clock_sync is not None:
+                            self._on_clock_sync(side_to_move, False, 0)
+                    else:
+                        self._get_game_state().record_timeout(side_to_move)
+                        if self._on_clock_sync is not None:
+                            self._on_clock_sync(side_to_move, False, 0)
 
         if self._get_game_state().is_finished():
             return None

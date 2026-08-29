@@ -79,6 +79,7 @@ from cope.db import (
     record_worker_resource_sample,
     record_game_hardware_score,
     record_game_assignment_progress_batch,
+    replace_worker_engine_discoveries,
     release_worker_tool_jobs,
     reset_tool_jobs,
     release_event_fixture_worker,
@@ -1199,7 +1200,11 @@ class WorkerHandshakeServer:
                 stage="benchmark",
                 substage="ready_barrier",
                 status="completed",
-                detail=f"Worker {worker.id} hardware scores were validated and stored",
+                detail=(
+                    f"Worker {worker.id} hardware scores were validated and stored"
+                    if ready.hardware_scores
+                    else f"Worker {worker.id} requires no managed-engine benchmark"
+                ),
                 current=len(ready.hardware_scores),
                 total=len(assignment.engines),
                 metadata={
@@ -1207,7 +1212,11 @@ class WorkerHandshakeServer:
                         str(engine_id): score.model_dump(mode="json")
                         for engine_id, score in ready.hardware_scores.items()
                     },
-                    "benchmark_hardware_key": assignment.benchmark_reference.hardware_key,
+                    "benchmark_hardware_key": (
+                        None
+                        if assignment.benchmark_reference is None
+                        else assignment.benchmark_reference.hardware_key
+                    ),
                 },
             )
             await self._wait_for_event_fixture_start_or_withdrawn(
@@ -1791,6 +1800,11 @@ class WorkerHandshakeServer:
                 machine_id=hello.machine_id,
                 hw=hello.hw,
             )
+            replace_worker_engine_discoveries(
+                connection,
+                current.id,
+                hello.worker_local_engine_keys,
+            )
             current = get_worker(connection, worker.id)
             if current is None or current.status == "revoked" or current.session_id != session_id:
                 raise ProtocolValidationError("worker registration was revoked")
@@ -1802,6 +1816,10 @@ class WorkerHandshakeServer:
             connection.close()
         for tournament_id in tournament_ids:
             publish_tournament_event(tournament_id)
+        self._worker_capabilities[worker.id] = (
+            worker.id,
+            hello.worker_local_engine_keys,
+        )
         return current
 
     def _validate_worker_machine(
@@ -2034,11 +2052,18 @@ class WorkerHandshakeServer:
             raise ProtocolValidationError(
                 "assignment_ready must include every assigned engine"
             )
-        if set(ready.hardware_scores) != expected:
+        expected_scores = (
+            set()
+            if assignment.benchmark_reference is None
+            else set(assignment.benchmark_reference.engine_nps)
+        )
+        if set(ready.hardware_scores) != expected_scores:
             raise ProtocolValidationError(
-                "assignment_ready must include hardware scores for every assigned engine"
+                "assignment_ready hardware scores do not match managed engines"
             )
         for engine_id, score in ready.hardware_scores.items():
+            if assignment.benchmark_reference is None:
+                raise ProtocolValidationError("assignment_ready has unexpected hardware scores")
             benchmark_nps = assignment.benchmark_reference.engine_nps[engine_id]
             if score.benchmark_nps != benchmark_nps:
                 raise ProtocolValidationError("assignment_ready benchmark NPS mismatch")
@@ -2060,6 +2085,12 @@ class WorkerHandshakeServer:
                 progress = AssignmentProgress.model_validate(envelope.data)
                 if record_progress:
                     self._record_worker_progress(assignment, progress)
+                continue
+            if envelope.type in {"engine_clock", "engine_info"}:
+                model = EngineClock if envelope.type == "engine_clock" else EngineInfo
+                telemetry = model.model_validate(envelope.data)
+                if not telemetry.matches_assignment(assignment.assignment):
+                    raise ProtocolValidationError("assignment telemetry mismatch")
                 continue
             if envelope.type != "assignment_cleanup_complete":
                 raise ProtocolValidationError(

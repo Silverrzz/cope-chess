@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from math import log
+from math import log, sqrt
 from typing import Iterable
 
 from cope.db.repo import (
@@ -165,14 +165,6 @@ def recalculate_ratings(
         )
         for row in anchor_rows
     }
-    connection.execute(
-        f"DELETE FROM rating_list_history WHERE rating_list_id IN ({placeholders})",
-        selected,
-    )
-    connection.execute(
-        f"DELETE FROM rating_list_ratings WHERE rating_list_id IN ({placeholders})",
-        selected,
-    )
     commits = connection.execute(
         f"""
         SELECT * FROM tournament_rating_list_commits
@@ -217,6 +209,7 @@ def recalculate_ratings(
 
     ratings: dict[int, dict[int, float]] = {}
     games_played: dict[int, dict[int, int]] = {}
+    rating_metrics: dict[int, dict[int, dict[str, float]]] = {}
     for rating_list_id in selected:
         anchor_engine_id, anchor_elo = anchors[rating_list_id]
         category_games = games_by_list[rating_list_id]
@@ -228,6 +221,7 @@ def recalculate_ratings(
         ratings[rating_list_id] = category_ratings
         games_played[rating_list_id] = category_counts
         rated_engine_ids = category_ratings.keys()
+        category_metrics: dict[int, dict[str, float]] = {}
         history_rows = []
         for tournament_id, game, history_at in category_games:
             if (
@@ -239,6 +233,22 @@ def recalculate_ratings(
             black_rating = category_ratings[game.black_engine_id]
             white_score = _white_score(game.result)
             white_expected = expected_score(white_rating, black_rating)
+            white_metrics = category_metrics.setdefault(
+                game.white_engine_id,
+                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0, "information": 0.0},
+            )
+            white_metrics["count"] += 1.0
+            white_metrics["opponent_total"] += black_rating
+            white_metrics["delta_total"] += black_rating - white_rating
+            white_metrics["information"] += white_expected * (1.0 - white_expected)
+            black_metrics = category_metrics.setdefault(
+                game.black_engine_id,
+                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0, "information": 0.0},
+            )
+            black_metrics["count"] += 1.0
+            black_metrics["opponent_total"] += white_rating
+            black_metrics["delta_total"] += white_rating - black_rating
+            black_metrics["information"] += white_expected * (1.0 - white_expected)
             history_rows.append(
                 _history_row(
                     engine_id=game.white_engine_id,
@@ -276,20 +286,50 @@ def recalculate_ratings(
                   hardware_score, opponent_hardware_score, game_id, at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (rating_list_id, game_id, engine_id) DO UPDATE SET
+                  tournament_id = EXCLUDED.tournament_id,
+                  opponent_engine_id = EXCLUDED.opponent_engine_id,
+                  elo_before = EXCLUDED.elo_before,
+                  elo = EXCLUDED.elo,
+                  elo_change = EXCLUDED.elo_change,
+                  score = EXCLUDED.score,
+                  expected_score = EXCLUDED.expected_score,
+                  hardware_score = EXCLUDED.hardware_score,
+                  opponent_hardware_score = EXCLUDED.opponent_hardware_score,
+                  at = EXCLUDED.at
                 """,
                 history_rows,
             )
+        rating_metrics[rating_list_id] = category_metrics
 
     engines_updated = 0
     rating_rows = []
     for rating_list_id, category_ratings in ratings.items():
         for engine_id, elo in category_ratings.items():
+            metrics = rating_metrics[rating_list_id].get(engine_id)
+            count = metrics["count"] if metrics is not None else 0.0
+            information = metrics["information"] if metrics is not None else 0.0
             rating_rows.append(
                 (
                     engine_id,
                     rating_list_id,
                     elo,
                     games_played[rating_list_id][engine_id],
+                    (
+                        round(1.96 / ELO_LOGISTIC_FACTOR / sqrt(information), 6)
+                        if information > 0
+                        else None
+                    ),
+                    (
+                        round(metrics["opponent_total"] / count, 6)
+                        if metrics is not None and count > 0
+                        else None
+                    ),
+                    (
+                        round(metrics["delta_total"] / count, 6)
+                        if metrics is not None and count > 0
+                        else None
+                    ),
                     applied_at,
                 )
             )
@@ -298,12 +338,50 @@ def recalculate_ratings(
         connection.executemany(
             """
             INSERT INTO rating_list_ratings (
-              engine_id, rating_list_id, elo, games_played, updated_at
+              engine_id, rating_list_id, elo, games_played,
+              error_margin, average_opponent_elo,
+              average_opponent_elo_delta, updated_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (engine_id, rating_list_id) DO UPDATE SET
+              elo = EXCLUDED.elo,
+              games_played = EXCLUDED.games_played,
+              error_margin = EXCLUDED.error_margin,
+              average_opponent_elo = EXCLUDED.average_opponent_elo,
+              average_opponent_elo_delta = EXCLUDED.average_opponent_elo_delta,
+              updated_at = EXCLUDED.updated_at
             """,
             rating_rows,
         )
+        connection.executemany(
+            """
+            INSERT INTO engine_elo_history (
+              engine_id, rating_list_id, elo, games_played, calculated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                (engine_id, rating_list_id, elo, games, applied_at)
+                for engine_id, rating_list_id, elo, games, *_ in rating_rows
+            ),
+        )
+
+    for rating_list_id, category_ratings in ratings.items():
+        engine_ids = tuple(category_ratings)
+        if engine_ids:
+            engine_placeholders = ", ".join("?" for _ in engine_ids)
+            connection.execute(
+                f"""
+                DELETE FROM rating_list_ratings
+                WHERE rating_list_id = ? AND engine_id NOT IN ({engine_placeholders})
+                """,
+                (rating_list_id, *engine_ids),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM rating_list_ratings WHERE rating_list_id = ?",
+                (rating_list_id,),
+            )
 
     return RatingRecalculationResult(
         lists_updated=len(selected),
@@ -343,6 +421,7 @@ def uncommit_tournament_ratings(
 
 
 def _committable_games(tournament, games: tuple) -> tuple:
+    games = tuple(game for game in games if game.record_eligible)
     if tournament.status == "aborted":
         return tuple(game for game in games if game.status == "finished")
     return games

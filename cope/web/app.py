@@ -61,6 +61,7 @@ from cope.db import (
     list_engine_records,
     list_engines,
     list_games,
+    list_games_for_tournaments,
     list_events,
     list_moves,
     list_tournaments,
@@ -73,6 +74,7 @@ from cope.db import (
     list_worker_resource_samples,
     list_worker_activities,
     list_worker_event_ids,
+    list_worker_engine_discoveries,
     touch_service_heartbeat,
 )
 from cope.core.san import pv_to_san
@@ -98,7 +100,7 @@ from cope.network import (
 )
 from cope.web.forms import form_value
 from cope.version import app_version
-from cope.tournament.estimates import TournamentEstimator
+from cope.tournament.estimates import TournamentEstimator, completed_tournament_estimate
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -124,13 +126,20 @@ class StreamBacklogExceeded(RuntimeError):
 
 
 class StreamSubscription:
-    def __init__(self, topics: tuple[str, ...], *, max_queue: int) -> None:
+    def __init__(
+        self,
+        topics: tuple[str, ...],
+        *,
+        max_queue: int,
+        excluded_types: frozenset[str] = frozenset(),
+    ) -> None:
         self.topics = topics
         self.queue: asyncio.Queue[StreamEnvelope | None] = asyncio.Queue(maxsize=max_queue)
         self.closed = False
+        self.excluded_types = excluded_types
 
     def enqueue(self, event: StreamEnvelope) -> None:
-        if self.closed:
+        if self.closed or event.type in self.excluded_types:
             return
         if self.queue.full():
             self.closed = True
@@ -142,7 +151,11 @@ class StreamSubscription:
         self.queue.put_nowait(event)
 
     def enqueue_ephemeral(self, event: StreamEnvelope) -> None:
-        if self.closed or self.queue.qsize() >= max(1, self.queue.maxsize // 8):
+        if (
+            self.closed
+            or event.type in self.excluded_types
+            or self.queue.qsize() >= max(1, self.queue.maxsize // 8)
+        ):
             return
         with contextlib.suppress(asyncio.QueueFull):
             self.queue.put_nowait(event)
@@ -169,12 +182,21 @@ class StreamHub:
         with self._lock:
             self._loop = loop
 
-    def subscribe(self, *topics: str, spectator: bool = True) -> StreamSubscription:
+    def subscribe(
+        self,
+        *topics: str,
+        spectator: bool = True,
+        excluded_types: frozenset[str] | None = None,
+    ) -> StreamSubscription:
         with self._lock:
             count = sum(len(items) for items in self._subscribers.values())
             if count >= self._max_subscribers:
                 raise StreamBacklogExceeded("too many stream subscribers")
-            subscription = StreamSubscription(tuple(topics), max_queue=self._max_queue)
+            subscription = StreamSubscription(
+                tuple(topics),
+                max_queue=self._max_queue,
+                excluded_types=excluded_types or frozenset(),
+            )
             for topic in topics:
                 self._subscribers.setdefault(topic, set()).add(subscription)
             if not spectator:
@@ -719,6 +741,7 @@ def create_app(
                 await asyncio.to_thread(_event_tournament_ids, request.app, event_id),
             )
         selected_game_id = _positive_int(request.query_params.get("game_id"))
+        cross_table = request.query_params.get("cross_table") == "1"
         counts_as_spectator = request.query_params.get("spectator", "1") != "0"
 
         if not await asyncio.to_thread(
@@ -744,13 +767,18 @@ def create_app(
                     tournament,
                     live,
                     selected_game_id=selected_game_id,
+                    cross_table=cross_table,
                 )
             finally:
                 connection.close()
 
         async def stream():
             topic = f"tournament.{tournament_id}"
-            subscription = hub.subscribe(topic, spectator=counts_as_spectator)
+            subscription = hub.subscribe(
+                topic,
+                spectator=counts_as_spectator,
+                excluded_types=frozenset({"engine.info"}) if cross_table else None,
+            )
             if counts_as_spectator:
                 hub.publish_tournament_spectators(tournament_id)
             try:
@@ -1178,15 +1206,33 @@ def _event_linked_tournament_ids(connection: sqlite3.Connection) -> set[int]:
     return {
         int(row["tournament_id"])
         for row in connection.execute(
-            "SELECT tournament_id FROM engine_relay_fixtures"
+            """
+            SELECT tournament_id FROM engine_relay_fixtures
+            UNION
+            SELECT tournament_id FROM puzzle_gauntlet_events WHERE tournament_id IS NOT NULL
+            """
+        )
+    }
+
+
+def _puzzle_gauntlet_tournament_ids(connection: sqlite3.Connection) -> set[int]:
+    return {
+        int(row["tournament_id"])
+        for row in connection.execute(
+            "SELECT tournament_id FROM puzzle_gauntlet_events WHERE tournament_id IS NOT NULL"
         )
     }
 
 
 def _is_event_tournament(connection: sqlite3.Connection, tournament_id: int) -> bool:
     return connection.execute(
-        "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
-        (tournament_id,),
+        """
+        SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?
+        UNION ALL
+        SELECT 1 FROM puzzle_gauntlet_events WHERE tournament_id = ?
+        LIMIT 1
+        """,
+        (tournament_id, tournament_id),
     ).fetchone() is not None
 
 
@@ -1196,8 +1242,13 @@ def _event_has_tournament(
     tournament_id: int,
 ) -> bool:
     return connection.execute(
-        "SELECT 1 FROM engine_relay_fixtures WHERE event_id = ? AND tournament_id = ?",
-        (event_id, tournament_id),
+        """
+        SELECT 1 FROM engine_relay_fixtures WHERE event_id = ? AND tournament_id = ?
+        UNION ALL
+        SELECT 1 FROM puzzle_gauntlet_events WHERE event_id = ? AND tournament_id = ?
+        LIMIT 1
+        """,
+        (event_id, tournament_id, event_id, tournament_id),
     ).fetchone() is not None
 
 
@@ -1206,8 +1257,13 @@ def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:
     try:
         try:
             rows = connection.execute(
-                "SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?",
-                (event_id,),
+                """
+                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
+                UNION
+                SELECT tournament_id FROM puzzle_gauntlet_events
+                WHERE event_id = ? AND tournament_id IS NOT NULL
+                """,
+                (event_id, event_id),
             ).fetchall()
         except sqlite3.OperationalError:
             return ()
@@ -1221,8 +1277,12 @@ def _tournament_event_ids(app: FastAPI, tournament_id: int) -> tuple[int, ...]:
     try:
         try:
             rows = connection.execute(
-                "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
-                (tournament_id,),
+                """
+                SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?
+                UNION
+                SELECT event_id FROM puzzle_gauntlet_events WHERE tournament_id = ?
+                """,
+                (tournament_id, tournament_id),
             ).fetchall()
         except sqlite3.OperationalError:
             return ()
@@ -1259,7 +1319,11 @@ def _social_preview_html(request: Request) -> str | None:
         if match is None:
             return None
         tournament = get_tournament(connection, int(match.group(1)))
-        if tournament is None or tournament.status == "draft":
+        if (
+            tournament is None
+            or tournament.status == "draft"
+            or _is_event_tournament(connection, tournament.id)
+        ):
             return None
 
         games = list_games(connection, tournament.id)
@@ -1481,7 +1545,7 @@ def _tournament_snapshot_for_broadcast(
     connection = connect_database(app.state.db_path)
     try:
         row = connection.execute(
-            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ?",
+            "SELECT COUNT(*) AS count FROM games WHERE tournament_id = ? AND record_eligible = 1",
             (tournament_id,),
         ).fetchone()
         if row is not None and int(row["count"]) > MAX_BROADCAST_SNAPSHOT_GAMES:
@@ -2159,6 +2223,7 @@ def _worker_admin_api_payload(
             ],
             "allocations": _worker_allocations_payload(connection, worker.id),
         },
+        "local_engines": list_worker_engine_discoveries(connection, worker.id),
         "worker_launch_command": _worker_launch_command(worker, worker_server_url)
         if worker_server_url is not None
         else None,
@@ -2733,7 +2798,10 @@ def _home_tournament_cards(
 ) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     estimator = TournamentEstimator(connection)
+    event_tournament_ids = _puzzle_gauntlet_tournament_ids(connection)
     for tournament in list_tournaments(connection):
+        if tournament.id in event_tournament_ids:
+            continue
         if tournament.status not in {"running", "paused"}:
             continue
         active_games = list_active_games(
@@ -2873,30 +2941,31 @@ def _tournament_live_payload(
     live: dict[Any, Any] | None = None,
     *,
     selected_game_id: int | None = None,
+    cross_table: bool = False,
 ) -> dict[str, Any]:
     engines = _engine_names(connection)
     active_games = list_active_games(
         connection,
         tournament_id=tournament.id,
-        limit=500,
+        limit=None if cross_table else 500,
     )
     viewer_game = get_game(connection, selected_game_id) if selected_game_id is not None else None
     if viewer_game is not None and viewer_game.tournament_id != tournament.id:
         viewer_game = None
     if viewer_game is None:
         viewer_game = _tournament_viewer_game(active_games)
-    viewer_moves = list_moves(connection, viewer_game.id) if viewer_game else ()
-    opening = _opening_view(connection, viewer_game.opening_id) if viewer_game else None
+    viewer_moves = list_moves(connection, viewer_game.id) if viewer_game and not cross_table else ()
+    opening = _opening_view(connection, viewer_game.opening_id) if viewer_game and not cross_table else None
     engine_data = _engine_data(viewer_game, viewer_moves, opening)
     clocks = _clock_data(viewer_moves)
     clock_state = _persisted_clock_state(viewer_game, viewer_moves)
-    game_live = _live_for_game(live, viewer_game.id if viewer_game else None)
+    game_live = None if cross_table else _live_for_game(live, viewer_game.id if viewer_game else None)
     if game_live is not None and viewer_game is not None:
         engine_data = _merge_engine_data(engine_data, game_live.get("engine_data"))
         clocks = _merge_clock_data(clocks, game_live.get("clocks"))
         if isinstance(game_live.get("clock_state"), dict):
             clock_state = dict(game_live["clock_state"])
-    return {
+    payload = {
         "tournament": {
             "id": tournament.id,
             "status": tournament.status,
@@ -2911,6 +2980,121 @@ def _tournament_live_payload(
         "standings": _standings(connection, tournament, engines),
         "active_games": [_game_payload(game, engines, live=True) for game in active_games],
     }
+    return payload
+
+
+def _cross_table_games_payload(
+    connection: sqlite3.Connection,
+    games: tuple[GameRecord, ...],
+    engines: dict[int, str],
+    live: dict[Any, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not games:
+        return []
+    tournament_id = games[0].tournament_id
+    opening_fens = {
+        int(row["id"]): row["start_fen"] or "startpos"
+        for row in connection.execute(
+            """
+            SELECT DISTINCT openings.id, openings.start_fen
+            FROM openings
+            JOIN games ON games.opening_id = openings.id
+            WHERE games.tournament_id = ? AND games.status IN ('live', 'assigned')
+            """,
+            (tournament_id,),
+        )
+    }
+    boards: dict[int, chess.Board] = {}
+    clocks_by_game: dict[int, dict[str, int | None]] = {}
+    evaluations_by_game: dict[int, dict[str, dict[str, Any] | None]] = {}
+    last_moves: dict[int, str | None] = {}
+    plies: dict[int, int] = {}
+    for game in games:
+        start_fen = opening_fens.get(game.opening_id, "startpos")
+        try:
+            boards[game.id] = chess.Board() if start_fen == "startpos" else chess.Board(start_fen)
+        except ValueError:
+            boards[game.id] = chess.Board()
+        clocks_by_game[game.id] = {"white": None, "black": None}
+        evaluations_by_game[game.id] = {"white": None, "black": None}
+        last_moves[game.id] = None
+        plies[game.id] = 0
+    for row in connection.execute(
+        """
+        SELECT moves.game_id, moves.ply, moves.uci, moves.clock_after_ms,
+               moves.eval_cp, moves.eval_mate, moves.score_bound
+        FROM moves
+        JOIN games ON games.id = moves.game_id
+        WHERE games.tournament_id = ? AND games.status IN ('live', 'assigned')
+        ORDER BY moves.game_id, moves.ply
+        """,
+        (tournament_id,),
+    ):
+        game_id = int(row["game_id"])
+        if game_id not in boards:
+            continue
+        move_ply = int(row["ply"])
+        move = row["uci"]
+        side = "white" if move_ply % 2 == 1 else "black"
+        clocks_by_game[game_id][side] = int(row["clock_after_ms"])
+        evaluations_by_game[game_id][side] = {
+            "eval_cp": row["eval_cp"],
+            "eval_mate": row["eval_mate"],
+            "score_bound": row["score_bound"],
+        }
+        last_moves[game_id] = move
+        plies[game_id] = move_ply
+        try:
+            boards[game_id].push_uci(move)
+        except ValueError:
+            continue
+
+    payloads: list[dict[str, Any]] = []
+    for game in games:
+        board = boards[game.id]
+        clocks_ms = clocks_by_game[game.id]
+        clock_state = {
+            "active_side": "white" if board.turn == chess.WHITE else "black",
+            "running": False,
+            "clocks_ms": clocks_ms,
+        }
+        live_game = _live_for_game(live, game.id)
+        evaluations = evaluations_by_game[game.id]
+        if live_game is not None and isinstance(live_game.get("clock_state"), dict):
+            live_clock_state = live_game["clock_state"]
+            live_clocks = live_clock_state.get("clocks_ms")
+            if isinstance(live_clocks, dict):
+                clock_state["clocks_ms"] = {
+                    **clocks_ms,
+                    **{side: live_clocks.get(side) for side in ("white", "black")},
+                }
+            if live_clock_state.get("active_side") in {"white", "black"}:
+                clock_state["active_side"] = live_clock_state["active_side"]
+            clock_state["running"] = bool(live_clock_state.get("running"))
+        if live_game is not None and isinstance(live_game.get("engine_data"), dict):
+            for side in ("white", "black"):
+                live_evaluation = live_game["engine_data"].get(side)
+                if not isinstance(live_evaluation, dict):
+                    continue
+                if (
+                    live_evaluation.get("eval_cp") is None
+                    and live_evaluation.get("eval_mate") is None
+                ):
+                    continue
+                evaluations[side] = {
+                    "eval_cp": live_evaluation.get("eval_cp"),
+                    "eval_mate": live_evaluation.get("eval_mate"),
+                    "score_bound": live_evaluation.get("score_bound"),
+                }
+        payloads.append({
+            **_game_payload(game, engines, live=True),
+            "fen": board.fen(),
+            "last_move": last_moves[game.id],
+            "ply": plies[game.id],
+            "evaluations": evaluations,
+            **clock_state,
+        })
+    return payloads
 
 
 def _live_for_game(
@@ -3183,7 +3367,7 @@ def _standings(
             """
             SELECT white_engine_id, black_engine_id, result
             FROM games
-            WHERE tournament_id = ? AND result IS NOT NULL
+            WHERE tournament_id = ? AND record_eligible = 1 AND result IS NOT NULL
             """,
             (tournament.id,),
         )
@@ -3302,25 +3486,31 @@ def _tournament_rating_summaries(
         """,
         (tournament_id,),
     ).fetchall()
+    history_by_list: dict[int, list[dict[str, Any]]] = {}
+    for item in connection.execute(
+        """
+        SELECT rating_history.id, rating_history.rating_list_id,
+               rating_history.engine_id, rating_history.elo_before,
+               rating_history.elo, rating_history.elo_change,
+               rating_history.score, opponent.elo_before AS opponent_elo
+        FROM rating_list_history rating_history
+        JOIN rating_list_history opponent
+          ON opponent.game_id = rating_history.game_id
+         AND opponent.rating_list_id = rating_history.rating_list_id
+         AND opponent.engine_id = rating_history.opponent_engine_id
+        JOIN tournament_rating_list_commits rating_commit
+          ON rating_commit.tournament_id = rating_history.tournament_id
+         AND rating_commit.rating_list_id = rating_history.rating_list_id
+         AND rating_commit.status = 'applied'
+        WHERE rating_history.tournament_id = ?
+        ORDER BY rating_history.rating_list_id, rating_history.id
+        """,
+        (tournament_id,),
+    ):
+        history_by_list.setdefault(int(item["rating_list_id"]), []).append(item)
     summaries: list[dict[str, Any]] = []
     for commit in commits:
-        history = connection.execute(
-            """
-            SELECT rating_history.id, rating_history.engine_id,
-                   rating_history.elo_before, rating_history.elo,
-                   rating_history.elo_change, rating_history.score,
-                   opponent.elo_before AS opponent_elo
-            FROM rating_list_history rating_history
-            JOIN rating_list_history opponent
-              ON opponent.game_id = rating_history.game_id
-             AND opponent.rating_list_id = rating_history.rating_list_id
-             AND opponent.engine_id = rating_history.opponent_engine_id
-            WHERE rating_history.tournament_id = ?
-              AND rating_history.rating_list_id = ?
-            ORDER BY rating_history.id
-            """,
-            (tournament_id, commit["rating_list_id"]),
-        ).fetchall()
+        history = history_by_list.get(int(commit["rating_list_id"]), ())
         by_engine: dict[int, dict[str, Any]] = {}
         for item in history:
             engine_id = int(item["engine_id"])
@@ -3402,19 +3592,31 @@ def _tournament_summary(
     engines: dict[int, str],
     *,
     estimator: TournamentEstimator | None = None,
+    games: tuple[GameRecord, ...] | None = None,
+    summary: dict[str, int] | None = None,
+    estimate: Any | None = None,
 ) -> dict[str, Any]:
-    games = list_games(connection, tournament.id)
-    summary = _summarize_games(games)
-    estimate = (estimator or TournamentEstimator(connection)).estimate(tournament, games)
+    tournament_games = tuple(
+        game
+        for game in (
+            games if games is not None else list_games(connection, tournament.id)
+        )
+        if game.record_eligible
+    )
+    game_summary = summary if summary is not None else _summarize_games(tournament_games)
+    tournament_estimate = estimate or (estimator or TournamentEstimator(connection)).estimate(
+        tournament,
+        tournament_games,
+    )
     participant_names = [
         engines.get(engine_id, f"Engine {engine_id}")
         for engine_id in tournament.config.participants
     ]
-    total_games = summary["total"]
-    finished_games = summary["finished"]
+    total_games = game_summary["total"]
+    finished_games = game_summary["finished"]
     return {
         "record": tournament,
-        "summary": summary,
+        "summary": game_summary,
         "participant_names": participant_names,
         "participant_preview": participant_names[:6],
         "participant_overflow": max(0, len(participant_names) - 6),
@@ -3422,8 +3624,135 @@ def _tournament_summary(
         "progress_percent": round(finished_games / total_games * 100) if total_games else 0,
         "time_control": _time_control_label(tournament.config.time_control),
         "format": tournament.config.format.value.replace("_", " ").title(),
-        "estimate": estimate.to_dict(),
+        "estimate": tournament_estimate.to_dict(),
     }
+
+
+def _tournament_summaries(
+    connection: sqlite3.Connection,
+    tournaments: tuple[TournamentRecord, ...],
+    engines: dict[int, str],
+    *,
+    estimator: TournamentEstimator | None = None,
+) -> list[dict[str, Any]]:
+    if not tournaments:
+        return []
+    tournament_ids = tuple(tournament.id for tournament in tournaments)
+    placeholders = ", ".join("?" for _ in tournament_ids)
+    rows = connection.execute(
+        f"""
+        SELECT tournament_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+               COUNT(*) FILTER (WHERE status = 'assigned') AS assigned,
+               COUNT(*) FILTER (WHERE status = 'live') AS live,
+               COUNT(*) FILTER (WHERE status = 'finished') AS finished,
+               COUNT(*) FILTER (WHERE status = 'abandoned') AS abandoned,
+               COUNT(DISTINCT (
+                 LEAST(white_engine_id, black_engine_id),
+                 GREATEST(white_engine_id, black_engine_id),
+                 opening_id,
+                 match_id,
+                 (game_number - 1) / 2,
+                 tiebreak_kind
+               )) AS pairs,
+               COUNT(*) FILTER (
+                 WHERE status = 'finished'
+                   AND started_at IS NOT NULL
+                   AND finished_at IS NOT NULL
+                   AND finished_at::timestamptz > started_at::timestamptz
+                   AND finished_at::timestamptz
+                     <= started_at::timestamptz + INTERVAL '7 days'
+               ) AS duration_sample,
+               percentile_cont(0.5) WITHIN GROUP (
+                 ORDER BY EXTRACT(
+                   EPOCH FROM (
+                     finished_at::timestamptz - started_at::timestamptz
+                   )
+                 )
+               ) FILTER (
+                 WHERE status = 'finished'
+                   AND started_at IS NOT NULL
+                   AND finished_at IS NOT NULL
+                   AND finished_at::timestamptz > started_at::timestamptz
+                   AND finished_at::timestamptz
+                     <= started_at::timestamptz + INTERVAL '7 days'
+               ) AS median_game_seconds
+        FROM games
+        WHERE tournament_id IN ({placeholders}) AND record_eligible = 1
+        GROUP BY tournament_id
+        """,
+        tournament_ids,
+    )
+    stats = {
+        int(row["tournament_id"]): {
+            "summary": {
+                "total": int(row["total"]),
+                "pairs": int(row["pairs"]),
+                "pending": int(row["pending"]),
+                "assigned": int(row["assigned"]),
+                "live": int(row["live"]),
+                "finished": int(row["finished"]),
+                "abandoned": int(row["abandoned"]),
+            },
+            "duration_sample": int(row["duration_sample"]),
+            "median_game_seconds": (
+                float(row["median_game_seconds"])
+                if row["median_game_seconds"] is not None
+                else None
+            ),
+        }
+        for row in rows
+    }
+    active_ids = tuple(
+        tournament.id
+        for tournament in tournaments
+        if tournament.status not in {"finished", "aborted"}
+    )
+    games_by_tournament: dict[int, list[GameRecord]] = {
+        tournament_id: [] for tournament_id in active_ids
+    }
+    for game in list_games_for_tournaments(connection, active_ids):
+        if game.record_eligible:
+            games_by_tournament[game.tournament_id].append(game)
+    shared_estimator = estimator or TournamentEstimator(connection)
+    result: list[dict[str, Any]] = []
+    empty_summary = {
+        "total": 0,
+        "pairs": 0,
+        "pending": 0,
+        "assigned": 0,
+        "live": 0,
+        "finished": 0,
+        "abandoned": 0,
+    }
+    for tournament in tournaments:
+        values = stats.get(tournament.id)
+        game_summary = dict(values["summary"]) if values is not None else dict(empty_summary)
+        tournament_games = tuple(games_by_tournament.get(tournament.id, ()))
+        if tournament.status in {"finished", "aborted"}:
+            tournament_estimate = completed_tournament_estimate(
+                tournament,
+                total_games=game_summary["total"],
+                median_game_seconds=(
+                    values["median_game_seconds"] if values is not None else None
+                ),
+                sample_size=(values["duration_sample"] if values is not None else 0),
+            )
+        else:
+            tournament_estimate = shared_estimator.estimate(tournament, tournament_games)
+        result.append(
+            _tournament_summary(
+                connection,
+                tournament,
+                engines,
+                estimator=shared_estimator,
+                games=tournament_games,
+                summary=game_summary,
+                estimate=tournament_estimate,
+            )
+        )
+    return result
 
 
 def _summarize_games(games: tuple[GameRecord, ...]) -> dict[str, int]:
@@ -3458,7 +3787,7 @@ def _tournament_game_summary(
         """
         SELECT status, COUNT(*) AS count
         FROM games
-        WHERE tournament_id = ?
+        WHERE tournament_id = ? AND record_eligible = 1
         GROUP BY status
         """,
         (tournament_id,),
@@ -3473,7 +3802,7 @@ def _tournament_game_summary(
         FROM (
           SELECT 1
           FROM games
-          WHERE tournament_id = ?
+          WHERE tournament_id = ? AND record_eligible = 1
           GROUP BY
             LEAST(white_engine_id, black_engine_id),
             GREATEST(white_engine_id, black_engine_id),

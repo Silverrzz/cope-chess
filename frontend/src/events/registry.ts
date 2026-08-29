@@ -1,6 +1,8 @@
 import type { Component } from "vue";
 import EngineRelayBroadcast from "./engine-relay/EngineRelayBroadcast.vue";
 import EngineRelayControlRoom from "./engine-relay/EngineRelayControlRoom.vue";
+import PuzzleGauntletBroadcast from "./puzzle-gauntlet/PuzzleGauntletBroadcast.vue";
+import PuzzleGauntletControlRoom from "./puzzle-gauntlet/PuzzleGauntletControlRoom.vue";
 
 const publicComponents: Record<string, Component> = {};
 const publicPresentations: Record<string, "embedded" | "immersive"> = {};
@@ -41,4 +43,10 @@ registerEventComponents("engine-relay-finale", {
   public: EngineRelayBroadcast,
   publicPresentation: "immersive",
   admin: EngineRelayControlRoom,
+});
+
+registerEventComponents("puzzle-gauntlet", {
+  public: PuzzleGauntletBroadcast,
+  publicPresentation: "immersive",
+  admin: PuzzleGauntletControlRoom,
 });

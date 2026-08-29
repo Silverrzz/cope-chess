@@ -22,6 +22,24 @@ CREATE TABLE IF NOT EXISTS engines (
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
 );
 
+CREATE TABLE IF NOT EXISTS badges (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  emoji TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS engine_badges (
+  badge_id BIGINT NOT NULL REFERENCES badges(id) ON DELETE CASCADE,
+  engine_id BIGINT NOT NULL REFERENCES engines(id) ON DELETE CASCADE,
+  assigned_at TEXT NOT NULL,
+  PRIMARY KEY (badge_id, engine_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_engine_badges_engine
+  ON engine_badges(engine_id, badge_id);
+
 DROP TABLE IF EXISTS app_settings;
 
 CREATE TABLE IF NOT EXISTS git_hosts (
@@ -51,6 +69,9 @@ CREATE TABLE IF NOT EXISTS engine_versions (
   dockerfile_path TEXT NOT NULL DEFAULT '',
   dockerfile TEXT NOT NULL,
   build_hash TEXT NOT NULL CHECK (build_hash ~ '^[0-9a-f]{64}$'),
+  distribution TEXT NOT NULL DEFAULT 'managed'
+    CHECK (distribution IN ('managed', 'worker_local')),
+  worker_local_key TEXT,
   uci_options TEXT NOT NULL DEFAULT '{}',
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
   created_at TEXT NOT NULL,
@@ -65,6 +86,23 @@ ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_kind TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS dockerfile_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS dockerfile TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS build_hash TEXT;
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS distribution TEXT NOT NULL DEFAULT 'managed';
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS worker_local_key TEXT;
+ALTER TABLE engine_versions DROP CONSTRAINT IF EXISTS engine_versions_distribution_check;
+ALTER TABLE engine_versions ADD CONSTRAINT engine_versions_distribution_check
+  CHECK (distribution IN ('managed', 'worker_local'));
+ALTER TABLE engine_versions DROP CONSTRAINT IF EXISTS engine_versions_worker_local_key_check;
+ALTER TABLE engine_versions ADD CONSTRAINT engine_versions_worker_local_key_check
+  CHECK (
+    (distribution = 'managed' AND worker_local_key IS NULL)
+    OR (
+      distribution = 'worker_local'
+      AND worker_local_key ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'
+    )
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_engine_versions_worker_local_key
+  ON engine_versions(worker_local_key)
+  WHERE worker_local_key IS NOT NULL;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'engine_versions' AND column_name = 'binary_filename') THEN
@@ -76,7 +114,8 @@ BEGIN
 END $$;
 UPDATE engine_versions
 SET active = 0
-WHERE repository_url IS NULL OR source_ref IS NULL OR dockerfile IS NULL OR build_hash IS NULL;
+WHERE distribution = 'managed'
+  AND (repository_url IS NULL OR source_ref IS NULL OR dockerfile IS NULL OR build_hash IS NULL);
 
 CREATE TABLE IF NOT EXISTS engine_artifacts (
   build_hash TEXT PRIMARY KEY CHECK (build_hash ~ '^[0-9a-f]{64}$'),
@@ -356,6 +395,8 @@ CREATE TABLE IF NOT EXISTS games (
   opening_id BIGINT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'assigned', 'live', 'finished', 'abandoned')),
+  record_eligible INTEGER NOT NULL DEFAULT 1
+    CHECK (record_eligible IN (0, 1)),
   result TEXT CHECK (result IS NULL OR result IN ('1-0', '0-1', '1/2-1/2')),
   termination TEXT,
   pgn TEXT,
@@ -384,6 +425,9 @@ CREATE TABLE IF NOT EXISTS workers (
   last_seen TEXT
 );
 
+ALTER TABLE games ADD COLUMN IF NOT EXISTS record_eligible INTEGER NOT NULL DEFAULT 1
+  CHECK (record_eligible IN (0, 1));
+
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS core_limit INTEGER
   CHECK (core_limit IS NULL OR core_limit > 0);
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS tournament_scope TEXT NOT NULL DEFAULT 'all'
@@ -400,6 +444,16 @@ CREATE TABLE IF NOT EXISTS worker_event_permissions (
   event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   PRIMARY KEY (worker_id, event_id)
 );
+
+CREATE TABLE IF NOT EXISTS worker_engine_discoveries (
+  worker_id BIGINT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+  local_key TEXT NOT NULL CHECK (local_key ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'),
+  discovered_at TEXT NOT NULL,
+  PRIMARY KEY (worker_id, local_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_engine_discoveries_key
+  ON worker_engine_discoveries(local_key, worker_id);
 
 CREATE TABLE IF NOT EXISTS event_fixture_workers (
   tournament_id BIGINT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
@@ -737,8 +791,36 @@ CREATE TABLE IF NOT EXISTS rating_list_ratings (
   rating_list_id BIGINT NOT NULL REFERENCES rating_lists(id) ON DELETE CASCADE,
   elo REAL NOT NULL DEFAULT 1500,
   games_played INTEGER NOT NULL DEFAULT 0,
+  error_margin REAL,
+  average_opponent_elo REAL,
+  average_opponent_elo_delta REAL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (engine_id, rating_list_id)
+);
+
+ALTER TABLE rating_list_ratings ADD COLUMN IF NOT EXISTS error_margin REAL;
+ALTER TABLE rating_list_ratings ADD COLUMN IF NOT EXISTS average_opponent_elo REAL;
+ALTER TABLE rating_list_ratings ADD COLUMN IF NOT EXISTS average_opponent_elo_delta REAL;
+
+CREATE TABLE IF NOT EXISTS engine_elo_history (
+  id BIGSERIAL PRIMARY KEY,
+  engine_id BIGINT NOT NULL REFERENCES engine_versions(id) ON DELETE CASCADE,
+  rating_list_id BIGINT NOT NULL REFERENCES rating_lists(id) ON DELETE CASCADE,
+  elo REAL NOT NULL,
+  games_played INTEGER NOT NULL CHECK (games_played >= 0),
+  calculated_at TEXT NOT NULL
+);
+
+INSERT INTO engine_elo_history (
+  engine_id, rating_list_id, elo, games_played, calculated_at
+)
+SELECT rating.engine_id, rating.rating_list_id, rating.elo,
+       rating.games_played, rating.updated_at
+FROM rating_list_ratings rating
+WHERE NOT EXISTS (
+  SELECT 1 FROM engine_elo_history history
+  WHERE history.engine_id = rating.engine_id
+    AND history.rating_list_id = rating.rating_list_id
 );
 
 CREATE TABLE IF NOT EXISTS rating_list_history (
@@ -769,6 +851,43 @@ CREATE TABLE IF NOT EXISTS tournament_rating_list_commits (
   error TEXT,
   PRIMARY KEY (tournament_id, rating_list_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_rating_list_history_list_game_engine
+  ON rating_list_history(rating_list_id, game_id, engine_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rating_list_history_unique_game_engine
+  ON rating_list_history(rating_list_id, game_id, engine_id);
+
+WITH metrics AS (
+  SELECT history.rating_list_id,
+         history.engine_id,
+         AVG(opponent.elo_before) AS average_opponent_elo,
+         AVG(opponent.elo_before - history.elo_before) AS average_opponent_elo_delta,
+         SUM(
+           history.expected_score * (1.0 - history.expected_score)
+         ) AS information
+  FROM rating_list_history history
+  JOIN rating_list_history opponent
+    ON opponent.rating_list_id = history.rating_list_id
+   AND opponent.game_id = history.game_id
+   AND opponent.engine_id = history.opponent_engine_id
+  GROUP BY history.rating_list_id, history.engine_id
+)
+UPDATE rating_list_ratings rating
+SET error_margin = CASE
+      WHEN metrics.information > 0
+      THEN 1.96 * (400.0 / LN(10.0)) / SQRT(metrics.information)
+      ELSE NULL
+    END,
+    average_opponent_elo = metrics.average_opponent_elo,
+    average_opponent_elo_delta = metrics.average_opponent_elo_delta
+FROM metrics
+WHERE rating.rating_list_id = metrics.rating_list_id
+  AND rating.engine_id = metrics.engine_id
+  AND (
+    rating.error_margin IS NULL
+    OR rating.average_opponent_elo IS NULL
+    OR rating.average_opponent_elo_delta IS NULL
+  );
 
 CREATE TABLE IF NOT EXISTS service_endpoints (
   service TEXT PRIMARY KEY,
@@ -817,6 +936,51 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   CONSTRAINT chat_messages_subject_check
     CHECK ((tournament_id IS NOT NULL)::integer + (event_id IS NOT NULL)::integer = 1)
 );
+
+CREATE TABLE IF NOT EXISTS puzzle_gauntlet_events (
+  event_id BIGINT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  tournament_id BIGINT UNIQUE REFERENCES tournaments(id) ON DELETE SET NULL,
+  opening_suite_id BIGINT NOT NULL UNIQUE REFERENCES opening_suites(id),
+  start_time_ms INTEGER NOT NULL DEFAULT 30000 CHECK (start_time_ms > 0),
+  decrement_ms INTEGER NOT NULL DEFAULT 2000 CHECK (decrement_ms >= 0),
+  minimum_time_ms INTEGER NOT NULL DEFAULT 5000 CHECK (minimum_time_ms > 0),
+  threads INTEGER NOT NULL DEFAULT 1 CHECK (threads > 0),
+  hash_mb INTEGER NOT NULL DEFAULT 256 CHECK (hash_mb > 0)
+);
+
+ALTER TABLE puzzle_gauntlet_events
+  DROP CONSTRAINT IF EXISTS puzzle_gauntlet_events_decrement_ms_check;
+ALTER TABLE puzzle_gauntlet_events
+  ADD CONSTRAINT puzzle_gauntlet_events_decrement_ms_check
+  CHECK (decrement_ms >= 0);
+
+CREATE TABLE IF NOT EXISTS puzzle_gauntlet_puzzles (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  opening_id BIGINT NOT NULL UNIQUE REFERENCES openings(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  title TEXT NOT NULL DEFAULT '',
+  fen TEXT NOT NULL,
+  solutions TEXT NOT NULL,
+  UNIQUE (event_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS puzzle_gauntlet_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  puzzle_id BIGINT NOT NULL REFERENCES puzzle_gauntlet_puzzles(id) ON DELETE CASCADE,
+  cast_member_id BIGINT NOT NULL REFERENCES event_cast_members(id) ON DELETE CASCADE,
+  game_id BIGINT NOT NULL UNIQUE REFERENCES games(id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL DEFAULT 'pending'
+    CHECK (outcome IN ('pending', 'correct', 'incorrect', 'saved')),
+  move_uci TEXT,
+  elapsed_ms INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms >= 0),
+  UNIQUE (puzzle_id, cast_member_id)
+);
+
+UPDATE games
+SET record_eligible = 0
+WHERE id IN (SELECT game_id FROM puzzle_gauntlet_attempts);
 
 ALTER TABLE chat_messages ALTER COLUMN tournament_id DROP NOT NULL;
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS event_id BIGINT REFERENCES events(id) ON DELETE CASCADE;
@@ -918,6 +1082,8 @@ ALTER TABLE deployment_targets ADD CONSTRAINT deployment_targets_target_kind_che
 CREATE INDEX IF NOT EXISTS idx_games_tournament_status ON games(tournament_id, status);
 CREATE INDEX IF NOT EXISTS idx_games_round_pair ON games(tournament_id, round, pair_index);
 CREATE INDEX IF NOT EXISTS idx_games_tournament_id_desc ON games(tournament_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_games_white_engine ON games(white_engine_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_games_black_engine ON games(black_engine_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_games_finished_white_export
   ON games(white_engine_id, tournament_id, id)
   WHERE status = 'finished' AND result IS NOT NULL;
@@ -927,6 +1093,18 @@ CREATE INDEX IF NOT EXISTS idx_games_finished_black_export
 CREATE INDEX IF NOT EXISTS idx_tournament_matches_round ON tournament_matches(tournament_id, round, match_index);
 CREATE INDEX IF NOT EXISTS idx_rating_list_history_engine_list_at
   ON rating_list_history(engine_id, rating_list_id, at);
+CREATE INDEX IF NOT EXISTS idx_engine_elo_history_engine_list_id
+  ON engine_elo_history(engine_id, rating_list_id, id);
+CREATE INDEX IF NOT EXISTS idx_rating_list_ratings_list_elo
+  ON rating_list_ratings(rating_list_id, elo DESC, engine_id);
+CREATE INDEX IF NOT EXISTS idx_rating_list_history_list_engine_id
+  ON rating_list_history(rating_list_id, engine_id, id);
+CREATE INDEX IF NOT EXISTS idx_rating_list_history_tournament_list_game
+  ON rating_list_history(tournament_id, rating_list_id, game_id, engine_id);
+CREATE INDEX IF NOT EXISTS idx_tournament_rating_commits_list_status
+  ON tournament_rating_list_commits(rating_list_id, status, tournament_id);
+CREATE INDEX IF NOT EXISTS idx_engine_versions_family_created
+  ON engine_versions(engine_id, created_at DESC, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_tournaments_scheduled_start
   ON tournaments(status, scheduled_start_at);
@@ -946,12 +1124,15 @@ CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_a ON engine_relay_fixt
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixtures_team_b ON engine_relay_fixtures(team_b_id);
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_team ON engine_relay_fixture_teams(team_id);
 CREATE INDEX IF NOT EXISTS idx_engine_relay_fixture_teams_anchor ON engine_relay_fixture_teams(anchor_engine_id);
+CREATE INDEX IF NOT EXISTS idx_puzzle_gauntlet_puzzles_event_position ON puzzle_gauntlet_puzzles(event_id, position);
+CREATE INDEX IF NOT EXISTS idx_puzzle_gauntlet_attempts_event_puzzle ON puzzle_gauntlet_attempts(event_id, puzzle_id);
+CREATE INDEX IF NOT EXISTS idx_puzzle_gauntlet_attempts_cast ON puzzle_gauntlet_attempts(cast_member_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id, id DESC)
   WHERE event_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 41)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 48)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

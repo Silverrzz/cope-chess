@@ -17,6 +17,7 @@ interface EngineChoice {
   author: string
   version: string
   repository: string
+  distribution: 'managed' | 'worker_local'
   artifact_ready: boolean
   active: boolean
 }
@@ -242,7 +243,7 @@ onBeforeUnmount(stopPolling)
               <span class="engine-mark">{{ engine.name.charAt(0).toUpperCase() }}</span>
               <span class="engine-copy"><strong>{{ engine.name }}</strong><small>{{ engine.author || 'Unknown author' }}</small></span>
               <span class="version-pill">{{ engine.version }}</span>
-              <span class="cache-state" :class="{ 'cache-state--build': !engine.artifact_ready }"><AppIcon :name="engine.artifact_ready ? 'archive' : 'refresh'" :size="13" />{{ engine.artifact_ready ? 'Artifact' : 'Build' }}</span>
+              <span class="cache-state" :class="{ 'cache-state--build': !engine.artifact_ready }"><AppIcon :name="engine.artifact_ready ? 'archive' : 'refresh'" :size="13" />{{ engine.distribution === 'worker_local' ? 'Worker-local' : engine.artifact_ready ? 'Artifact' : 'Build' }}</span>
             </label>
             <span v-if="!filteredEngines.length">No engine versions match this filter.</span>
           </div>

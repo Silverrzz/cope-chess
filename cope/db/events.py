@@ -587,10 +587,62 @@ def reconcile_engine_relay_events_for_tournament(
             (tournament_id,),
         )
     )
-    return tuple(
+    reconciled = [
         reconcile_engine_relay_event(connection, event_id)
         for event_id in event_ids
-    )
+    ]
+    gauntlet = connection.execute(
+        """
+        SELECT gauntlet.event_id, tournament.status
+        FROM puzzle_gauntlet_events gauntlet
+        JOIN tournaments tournament ON tournament.id = gauntlet.tournament_id
+        WHERE gauntlet.tournament_id = ?
+        """,
+        (tournament_id,),
+    ).fetchone()
+    if gauntlet is not None:
+        event = get_event(connection, int(gauntlet["event_id"]))
+        if event is not None:
+            status_map = {
+                "scheduled": "scheduled",
+                "running": "live",
+                "paused": "intermission",
+                "finished": "completed",
+                "aborted": "cancelled",
+            }
+            phase_map = {
+                "scheduled": "countdown",
+                "running": "live",
+                "paused": "live",
+                "finished": "completed",
+                "aborted": "completed",
+            }
+            tournament_status = str(gauntlet["status"])
+            state = {**event.state, "phase": phase_map.get(tournament_status, event.state.get("phase", "countdown"))}
+            connection.execute(
+                """
+                UPDATE events
+                SET status = ?, state = ?,
+                    started_at = CASE WHEN ? = 'live' THEN COALESCE(started_at, ?) ELSE started_at END,
+                    finished_at = CASE WHEN ? IN ('completed', 'cancelled') THEN COALESCE(finished_at, ?) ELSE finished_at END,
+                    revision = revision + 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status_map.get(tournament_status, event.status),
+                    _json_dump(state),
+                    status_map.get(tournament_status, event.status),
+                    utc_now(),
+                    status_map.get(tournament_status, event.status),
+                    utc_now(),
+                    utc_now(),
+                    event.id,
+                ),
+            )
+            updated = get_event(connection, event.id)
+            if updated is not None:
+                reconciled.append(updated)
+    return tuple(reconciled)
 
 
 def reconcile_all_engine_relay_events(

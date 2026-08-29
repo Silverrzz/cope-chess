@@ -775,10 +775,15 @@ def _validate_member_compatibility(
         if fixture.kibitzer_engine_id is not None:
             engine_ids.add(fixture.kibitzer_engine_id)
         engines = tuple(get_engine(connection, value) for value in engine_ids)
-        if any(item is None for item in engines) or get_common_benchmark_reference(
-            connection,
-            tuple(item for item in engines if item is not None),
-        ) is None:
+        managed_engines = tuple(
+            item
+            for item in engines
+            if item is not None and item.distribution == "managed"
+        )
+        if any(item is None for item in engines) or (
+            managed_engines
+            and get_common_benchmark_reference(connection, managed_engines) is None
+        ):
             raise HTTPException(
                 status_code=409,
                 detail=f"This engine does not share a benchmark hardware reference with fixture {fixture.title}.",
@@ -1142,7 +1147,12 @@ def _register_api(app: FastAPI) -> None:
         engines = tuple(get_engine(connection, engine_id) for engine_id in engine_ids)
         if any(engine is None for engine in engines):
             raise HTTPException(status_code=422, detail="Every relay engine must still be available.")
-        if get_common_benchmark_reference(connection, tuple(engine for engine in engines if engine is not None)) is None:
+        managed_engines = tuple(
+            engine
+            for engine in engines
+            if engine is not None and engine.distribution == "managed"
+        )
+        if managed_engines and get_common_benchmark_reference(connection, managed_engines) is None:
             raise HTTPException(status_code=409, detail="The full relay roster does not share a benchmark hardware reference yet.")
         anchors = [team.members[0].engine_id for team in relay_teams]
         config = TournamentConfig(

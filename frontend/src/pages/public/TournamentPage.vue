@@ -5,7 +5,7 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { ApiError, api } from '@/api/client'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
-import { buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
+import { applyUci, buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
 import ChatPanel from '@/components/public/ChatPanel.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EnginePanel from '@/components/public/EnginePanel.vue'
@@ -14,6 +14,7 @@ import GameTable from '@/components/public/GameTable.vue'
 import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import StreamIndicator from '@/components/public/StreamIndicator.vue'
+import TournamentCrossTable from '@/components/public/TournamentCrossTable.vue'
 import {
   clockLabel,
   engineName,
@@ -30,6 +31,7 @@ import type {
   ChatMessage,
   ChatSettings,
   ClockState,
+  CrossTableGame,
   EngineAnalysis,
   GameRecord,
   Identifier,
@@ -40,6 +42,7 @@ import type {
 } from '@/components/public/types'
 
 type TabKey = 'standings' | 'games' | 'settings'
+type ViewerMode = 'focus' | 'cross'
 type StreamState = 'connecting' | 'live' | 'reconnecting' | 'closed'
 type FollowState = 'off' | 'paused' | 'live' | 'preparing' | 'fallback' | 'waiting'
 type GameNavigationSource = 'follow' | 'manual'
@@ -123,6 +126,8 @@ let streamKey = ''
 let refreshTimer: number | undefined
 let clockFrame: number | undefined
 let arenaFitFrame: number | undefined
+let streamNeedsRefresh = false
+let crossTableGameIndex = new Map<string, number>()
 let preloadedGameNavigationId = ''
 let pendingGameNavigationId = ''
 let automaticGameNavigationId = ''
@@ -132,6 +137,7 @@ let viewportBeforeUpdate: ViewportPosition | null = null
 const tournamentId = computed(() => String(route.params.id || ''))
 const routeGameId = computed(() => queryValue(route.query.game_id))
 const gamePage = computed(() => Math.max(1, Number(queryValue(route.query.page)) || 1))
+const viewerMode = computed<ViewerMode>(() => queryValue(route.query.view) === 'cross' ? 'cross' : 'focus')
 const selectedGameId = computed(() => routeGameId.value || String(data.value?.viewer_game?.id || ''))
 const tournamentComplete = computed(() => ['finished', 'aborted'].includes(data.value?.tournament.status || ''))
 const activeTab = computed<TabKey>(() => {
@@ -141,6 +147,7 @@ const activeTab = computed<TabKey>(() => {
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
 const viewerGames = computed(() => data.value?.active_games || [])
+const crossTableGames = computed(() => data.value?.cross_table_games || [])
 const participantEngines = computed(() => (data.value?.tournament.config?.participants || [])
   .map((engineId) => ({
     id: String(engineId),
@@ -270,7 +277,7 @@ watch(routeGameId, (gameId, previousGameId) => {
 })
 
 watch(
-  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}`,
+  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${viewerMode.value}`,
   () => {
     if (pendingGameNavigationId && routeGameId.value === pendingGameNavigationId) pendingGameNavigationId = ''
     if (
@@ -304,7 +311,7 @@ watch(headingElement, (next, previous) => {
   scheduleArenaFit()
 }, { flush: 'post' })
 
-watch([arenaElement, boardColumnElement], () => scheduleArenaFit(), { flush: 'post' })
+watch([arenaElement, boardColumnElement, viewerMode], () => scheduleArenaFit(), { flush: 'post' })
 
 onMounted(() => {
   headingResizeObserver = new ResizeObserver(scheduleArenaFit)
@@ -399,13 +406,14 @@ async function loadDetail(background: boolean): Promise<void> {
       query: {
         game_id: requestedGameId || undefined,
         page: gamePage.value,
+        cross_table: viewerMode.value === 'cross' || undefined,
       },
       signal: controller.signal,
     })
     applyDetail(response)
     loadError.value = ''
 
-    if (!routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
+    if (viewerMode.value === 'focus' && !routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
       const preloadedGameId = String(response.viewer_game.id)
       if (followedEngineId.value && !followManuallyPaused.value) {
         rememberAutomaticallyFollowedGame(preloadedGameId)
@@ -438,6 +446,7 @@ function applyDetail(response: TournamentDetailResponse): void {
   const existingMessages = data.value?.chat_messages || []
   response.chat_messages = mergeMessages(response.chat_messages || [], existingMessages)
   data.value = response
+  indexCrossTableGames(response.cross_table_games || [])
 
   if (String(previousGame ?? '') !== String(response.viewer_game?.id ?? '') || followedLatest) {
     selectedPly.value = response.viewer_moves.length
@@ -461,16 +470,28 @@ function applyDetail(response: TournamentDetailResponse): void {
 
 function connectStream(): void {
   if (typeof EventSource === 'undefined' || !data.value) return
-  const nextKey = `${tournamentId.value}:${selectedGameId.value}`
+  const nextKey = viewerMode.value === 'cross'
+    ? `${tournamentId.value}:cross`
+    : `${tournamentId.value}:${selectedGameId.value}`
   if (eventSource && streamKey === nextKey) return
 
   closeStream()
   streamKey = nextKey
+  streamNeedsRefresh = false
   streamState.value = 'connecting'
-  const query = selectedGameId.value ? `?game_id=${encodeURIComponent(selectedGameId.value)}` : ''
+  const query = viewerMode.value === 'cross'
+    ? '?cross_table=1'
+    : selectedGameId.value ? `?game_id=${encodeURIComponent(selectedGameId.value)}` : ''
   eventSource = new EventSource(`/tournaments/${encodeURIComponent(tournamentId.value)}/events${query}`)
-  eventSource.onopen = () => { streamState.value = 'live' }
-  eventSource.onerror = () => { streamState.value = 'reconnecting' }
+  eventSource.onopen = () => {
+    streamState.value = 'live'
+    if (viewerMode.value === 'cross' && streamNeedsRefresh) scheduleSnapshotRefresh()
+    streamNeedsRefresh = false
+  }
+  eventSource.onerror = () => {
+    streamState.value = 'reconnecting'
+    streamNeedsRefresh = true
+  }
   eventSource.addEventListener('tournament.snapshot', handleSnapshot)
   eventSource.addEventListener('game.move', handleGameMove)
   eventSource.addEventListener('engine.info', handleEngineInfo)
@@ -499,6 +520,10 @@ function handleSnapshot(event: Event): void {
 function handleGameMove(event: Event): void {
   const envelope = parseEnvelope<GameMoveEvent>(event)
   const payload = envelope?.data
+  if (payload && viewerMode.value === 'cross') {
+    applyCrossTableMove(payload)
+    return
+  }
   if (!payload || !sameId(payload.game_id, selectedGameId.value)) return
   if (clockRuntime.value) clockRuntime.value = { ...clockRuntime.value, running: false }
   stopClock()
@@ -541,6 +566,41 @@ function handleGameMove(event: Event): void {
   }
 }
 
+function applyCrossTableMove(payload: GameMoveEvent): void {
+  if (!data.value || payload.game_id === undefined) return
+  const games = data.value.cross_table_games || []
+  const index = crossTableGameIndex.get(String(payload.game_id))
+  if (index === undefined || !payload.move || payload.move.ply !== payload.ply) {
+    scheduleSnapshotRefresh()
+    return
+  }
+  const game = games[index]!
+  if (payload.ply === undefined || payload.ply <= game.ply) return
+  if (payload.ply !== game.ply + 1) {
+    scheduleSnapshotRefresh()
+    return
+  }
+  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci)
+  const activeSide = nextPosition.turn === 'w' ? 'white' : 'black'
+  const moverSide = payload.ply % 2 === 1 ? 'white' : 'black'
+  Object.assign(game, {
+    fen: positionFen(nextPosition),
+    last_move: payload.move.uci,
+    ply: payload.ply,
+    evaluations: {
+      ...game.evaluations,
+      [moverSide]: {
+        eval_cp: payload.move.eval_cp ?? null,
+        eval_mate: payload.move.eval_mate ?? null,
+        score_bound: payload.move.score_bound ?? null,
+      },
+    },
+    active_side: activeSide,
+    running: false,
+    clocks_ms: payload.clocks_ms ? { ...game.clocks_ms, ...payload.clocks_ms } : game.clocks_ms,
+  })
+}
+
 function handleEngineInfo(event: Event): void {
   const envelope = parseEnvelope<EngineInfoEvent>(event)
   const payload = envelope?.data
@@ -556,8 +616,25 @@ function handleEngineInfo(event: Event): void {
 
 function handleClockSync(event: Event): void {
   const envelope = parseEnvelope<ClockState>(event)
+  if (envelope && viewerMode.value === 'cross') {
+    applyCrossTableClock(envelope.data)
+    return
+  }
   if (!envelope || !sameId(envelope.data.game_id, selectedGameId.value)) return
   applyClockState(envelope.data, envelope.sent_at)
+}
+
+function applyCrossTableClock(state: ClockState): void {
+  if (!data.value || state.game_id === undefined) return
+  const games = data.value.cross_table_games || []
+  const index = crossTableGameIndex.get(String(state.game_id))
+  if (index === undefined) return
+  const game = games[index]!
+  Object.assign(game, {
+    clocks_ms: state.clocks_ms ? { ...game.clocks_ms, ...state.clocks_ms } : game.clocks_ms,
+    active_side: state.active_side !== undefined ? state.active_side : game.active_side ?? null,
+    running: state.running !== undefined ? state.running : Boolean(game.running),
+  })
 }
 
 function handleChatMessage(event: Event): void {
@@ -594,6 +671,21 @@ function handleSpectatorsChanged(event: Event): void {
 function applySnapshot(snapshot: LiveSnapshot): void {
   if (!data.value) return
   loadError.value = ''
+  if (viewerMode.value === 'cross') {
+    if (snapshot.tournament) data.value.tournament = { ...data.value.tournament, ...snapshot.tournament }
+    if (snapshot.active_games) {
+      data.value.active_games = snapshot.active_games
+      data.value.games = updateGames(data.value.games, snapshot.active_games)
+    }
+    if (snapshot.cross_table_games) {
+      data.value.cross_table_games = snapshot.cross_table_games
+      indexCrossTableGames(snapshot.cross_table_games)
+    } else if (snapshot.active_games && !sameGameSet(snapshot.active_games, data.value.cross_table_games || [])) {
+      scheduleSnapshotRefresh()
+    }
+    if (snapshot.standings) data.value.standings = snapshot.standings
+    return
+  }
   const displayedGame = data.value.viewer_game
   const selectedGameLeftActiveSet = Boolean(
     displayedGame
@@ -652,7 +744,7 @@ function gameIncludesEngine(game: GameRecord, engineId: Identifier): boolean {
 }
 
 function reconcileFollowedGame(): void {
-  if (!data.value || !followedEngineId.value || followManuallyPaused.value || pendingGameNavigationId) return
+  if (viewerMode.value === 'cross' || !data.value || !followedEngineId.value || followManuallyPaused.value || pendingGameNavigationId) return
   const activeGames = data.value.active_games
     .filter((game): game is GameRecord => isActiveGame(game))
     .filter((game, index, games) => games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
@@ -884,6 +976,13 @@ function tabTarget(tab: TabKey): RouteLocationRaw {
   return { query: { ...route.query, tab } }
 }
 
+function viewTarget(mode: ViewerMode): RouteLocationRaw {
+  const query = { ...route.query }
+  if (mode === 'cross') query.view = 'cross'
+  else delete query.view
+  return { query }
+}
+
 function setGamePage(page: number): void {
   if (page < 1 || page > gamePages.value || page === gamePage.value) return
   void router.push({ query: { ...route.query, page: String(page), tab: 'games' } })
@@ -921,6 +1020,16 @@ function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
 function updateGames(existing: GameRecord[], incoming: GameRecord[]): GameRecord[] {
   const byId = new Map(incoming.map((game) => [String(game.id), game]))
   return existing.map((game) => ({ ...game, ...byId.get(String(game.id)) } as GameRecord))
+}
+
+function sameGameSet(left: GameRecord[], right: CrossTableGame[]): boolean {
+  if (left.length !== right.length) return false
+  const rightIds = new Set(right.map((game) => String(game.id)))
+  return left.every((game) => rightIds.has(String(game.id)))
+}
+
+function indexCrossTableGames(games: CrossTableGame[]): void {
+  crossTableGameIndex = new Map(games.map((game, index) => [String(game.id), index]))
 }
 
 function parseEnvelope<T>(event: Event): StreamEnvelope<T> | null {
@@ -1038,18 +1147,22 @@ function forgetManualFollowPauseGame(): void {
           <p>
             {{ format ? statusLabel(format) : 'Tournament' }}
             <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
-            <template v-if="viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
+            <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
             <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>
             <template v-else-if="data.tournament.status === 'running' && data.estimate?.estimated_finish_at"> / Estimated finish {{ formatDate(data.estimate.estimated_finish_at, true) }}</template>
           </p>
         </div>
 
         <div class="tournament-heading__controls">
+          <nav class="view-toggle" aria-label="Tournament viewer mode">
+            <RouterLink :to="viewTarget('focus')" :aria-current="viewerMode === 'focus' ? 'page' : undefined">Game</RouterLink>
+            <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Cross-table</RouterLink>
+          </nav>
           <div v-if="gameTotal" class="pgn-downloads">
             <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
-            <a v-if="gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
+            <a v-if="viewerMode === 'focus' && gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
           </div>
-          <label v-if="viewerGames.length" class="game-picker">
+          <label v-if="viewerMode === 'focus' && viewerGames.length" class="game-picker">
             <span class="game-picker__heading">
               <span>Active games</span>
               <StreamIndicator v-if="!tournamentComplete" :state="streamState" />
@@ -1060,7 +1173,7 @@ function forgetManualFollowPauseGame(): void {
             </select>
           </label>
           <FollowEnginePicker
-            v-if="participantEngines.length"
+            v-if="viewerMode === 'focus' && participantEngines.length"
             v-model="followedEngineId"
             :engines="participantEngines"
             :state="followState"
@@ -1072,7 +1185,9 @@ function forgetManualFollowPauseGame(): void {
 
       <p v-if="loadError" class="inline-error" role="alert">{{ loadError }} <button type="button" @click="loadDetail(true)">Try again</button></p>
 
-      <section ref="arenaElement" v-if="viewerGame" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <TournamentCrossTable v-if="viewerMode === 'cross'" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
+
+      <section v-else-if="viewerGame" ref="arenaElement" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
             side="black"
@@ -1265,8 +1380,47 @@ function forgetManualFollowPauseGame(): void {
 
 .tournament-heading__controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
+  justify-content: flex-end;
   gap: 0.65rem;
+}
+
+.view-toggle {
+  display: flex;
+  gap: 0.12rem;
+  padding: 0.16rem;
+  border: 1px solid var(--color-border, #d5dbe1);
+  border-radius: var(--radius-sm, 0.35rem);
+  background: var(--color-surface-sunken, #edf2f7);
+}
+
+.view-toggle a {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  padding-inline: 0.65rem;
+  border-radius: calc(var(--radius-sm, 0.35rem) - 0.12rem);
+  color: var(--color-text-muted, #607080);
+  font-size: 0.7rem;
+  font-weight: 750;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.view-toggle a:hover {
+  color: var(--color-text, #17202a);
+}
+
+.view-toggle a[aria-current='page'] {
+  background: var(--color-surface, #fff);
+  box-shadow: var(--shadow-xs, 0 1px 2px rgb(0 0 0 / 6%));
+  color: var(--color-accent, #2f78c4);
+}
+
+.view-toggle a:focus-visible {
+  outline: 2px solid var(--color-accent, #2f78c4);
+  outline-offset: 1px;
 }
 
 .pgn-download {
@@ -1569,6 +1723,8 @@ function forgetManualFollowPauseGame(): void {
 
 @media (max-width: 40rem) {
   .tournament-heading__controls { align-items: stretch; flex-direction: column-reverse; }
+  .view-toggle { order: 1; }
+  .view-toggle a { flex: 1; justify-content: center; }
   .tournament-heading__controls > label,
   .follow-engine-picker { width: 100%; }
   .engine-column { grid-template-columns: 1fr; }

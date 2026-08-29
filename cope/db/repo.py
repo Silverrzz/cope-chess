@@ -76,6 +76,7 @@ class GameRecord:
     tiebreak_kind: str | None
     opening_id: int | None
     status: str
+    record_eligible: bool
     result: str | None
     termination: str | None
     pgn: str | None
@@ -233,6 +234,15 @@ class EngineRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BadgeRecord:
+    id: int
+    name: str
+    emoji: str
+    description: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class EngineVersionRecord:
     id: int
     engine_id: int
@@ -247,10 +257,13 @@ class EngineVersionRecord:
     dockerfile_path: str
     dockerfile: str
     build_hash: str
+    distribution: str
+    worker_local_key: str | None
     uci_options: dict[str, Any]
     artifact: EngineArtifactSpec | None
     active: bool
     benchmark_current: bool
+    worker_local_count: int
     engine_active: bool
     created_at: str
 
@@ -521,6 +534,99 @@ def update_engine(
     )
 
 
+def create_badge(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    emoji: str,
+    description: str,
+) -> int:
+    cursor = connection.execute(
+        "INSERT INTO badges (name, emoji, description, created_at) VALUES (?, ?, ?, ?)",
+        (name, emoji, description, utc_now()),
+    )
+    return int(cursor.lastrowid)
+
+
+def update_badge(
+    connection: sqlite3.Connection,
+    badge_id: int,
+    *,
+    name: str,
+    emoji: str,
+    description: str,
+) -> None:
+    connection.execute(
+        "UPDATE badges SET name = ?, emoji = ?, description = ? WHERE id = ?",
+        (name, emoji, description, badge_id),
+    )
+
+
+def delete_badge(connection: sqlite3.Connection, badge_id: int) -> None:
+    connection.execute("DELETE FROM badges WHERE id = ?", (badge_id,))
+
+
+def get_badge(connection: sqlite3.Connection, badge_id: int) -> BadgeRecord | None:
+    row = connection.execute("SELECT * FROM badges WHERE id = ?", (badge_id,)).fetchone()
+    return None if row is None else _badge_from_row(row)
+
+
+def list_badges(connection: sqlite3.Connection) -> tuple[BadgeRecord, ...]:
+    return tuple(
+        _badge_from_row(row)
+        for row in connection.execute("SELECT * FROM badges ORDER BY name, id")
+    )
+
+
+def list_badge_engine_ids(connection: sqlite3.Connection, badge_id: int) -> tuple[int, ...]:
+    return tuple(
+        int(row["engine_id"])
+        for row in connection.execute(
+            "SELECT engine_id FROM engine_badges WHERE badge_id = ? ORDER BY engine_id",
+            (badge_id,),
+        )
+    )
+
+
+def list_engine_badges(
+    connection: sqlite3.Connection,
+) -> dict[int, tuple[BadgeRecord, ...]]:
+    grouped: dict[int, list[BadgeRecord]] = {}
+    rows = connection.execute(
+        """SELECT badge.*, assignment.engine_id
+           FROM engine_badges assignment
+           JOIN badges badge ON badge.id = assignment.badge_id
+           ORDER BY assignment.engine_id, badge.name, badge.id"""
+    )
+    for row in rows:
+        grouped.setdefault(int(row["engine_id"]), []).append(_badge_from_row(row))
+    return {engine_id: tuple(badges) for engine_id, badges in grouped.items()}
+
+
+def replace_badge_engines(
+    connection: sqlite3.Connection,
+    badge_id: int,
+    engine_ids: Iterable[int],
+) -> None:
+    selected = tuple(dict.fromkeys(int(engine_id) for engine_id in engine_ids))
+    if selected:
+        placeholders = ", ".join("?" for _ in selected)
+        rows = connection.execute(
+            f"SELECT id FROM engines WHERE id IN ({placeholders})",
+            selected,
+        ).fetchall()
+        found = {int(row["id"]) for row in rows}
+        if found != set(selected):
+            raise ValueError("one or more engines were not found")
+    connection.execute("DELETE FROM engine_badges WHERE badge_id = ?", (badge_id,))
+    if selected:
+        assigned_at = utc_now()
+        connection.executemany(
+            "INSERT INTO engine_badges (badge_id, engine_id, assigned_at) VALUES (?, ?, ?)",
+            ((badge_id, engine_id, assigned_at) for engine_id in selected),
+        )
+
+
 def create_engine_version(
     connection: sqlite3.Connection,
     *,
@@ -533,16 +639,22 @@ def create_engine_version(
     source_kind: str,
     dockerfile_path: str,
     dockerfile: str,
+    distribution: str = "managed",
+    worker_local_key: str | None = None,
     uci_options: dict[str, Any] | None = None,
     active: bool = True,
 ) -> int:
-    build_hash = engine_build_hash(repository_url, source_ref, dockerfile)
+    build_hash = (
+        hashlib.sha256(f"worker-local:{worker_local_key}".encode("utf-8")).hexdigest()
+        if distribution == "worker_local"
+        else engine_build_hash(repository_url, source_ref, dockerfile)
+    )
     cursor = connection.execute(
         """INSERT INTO engine_versions
            (engine_id, version, git_host_id, repository_url, repository_full_name,
-            source_ref, source_kind, dockerfile_path, dockerfile, build_hash, uci_options,
-            active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            source_ref, source_kind, dockerfile_path, dockerfile, build_hash,
+            distribution, worker_local_key, uci_options, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             engine_id,
             version,
@@ -554,6 +666,8 @@ def create_engine_version(
             dockerfile_path,
             dockerfile,
             build_hash,
+            distribution,
+            worker_local_key,
             _json_dump(uci_options or {}),
             int(active),
             utc_now(),
@@ -575,7 +689,11 @@ def update_engine_version(
     current = get_engine_version_record(connection, version_id)
     if current is None:
         raise ValueError("engine version not found")
-    build_hash = engine_build_hash(current.repository_url, current.source_ref, dockerfile)
+    build_hash = (
+        current.build_hash
+        if current.distribution == "worker_local"
+        else engine_build_hash(current.repository_url, current.source_ref, dockerfile)
+    )
     connection.execute(
         """UPDATE engine_versions
            SET version = ?, dockerfile_path = ?, dockerfile = ?, build_hash = ?,
@@ -819,7 +937,14 @@ def get_engine_version_record(connection: sqlite3.Connection, version_id: int) -
                     SELECT 1 FROM engine_benchmarks benchmark
                     WHERE benchmark.build_hash = version.build_hash
                       AND benchmark.artifact_sha256 = artifact.artifact_sha256
-                  ) AS benchmark_current
+                  ) AS benchmark_current,
+                  (
+                    SELECT COUNT(*)
+                    FROM worker_engine_discoveries discovery
+                    JOIN workers worker ON worker.id = discovery.worker_id
+                    WHERE discovery.local_key = version.worker_local_key
+                      AND worker.status IN ('connected', 'downloading', 'ready', 'busy')
+                  ) AS worker_local_count
            FROM engine_versions version
            JOIN engines engine ON engine.id = version.engine_id
            LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
@@ -850,7 +975,14 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
                         SELECT 1 FROM engine_benchmarks benchmark
                         WHERE benchmark.build_hash = version.build_hash
                           AND benchmark.artifact_sha256 = artifact.artifact_sha256
-                      ) AS benchmark_current
+                      ) AS benchmark_current,
+                      (
+                        SELECT COUNT(*)
+                        FROM worker_engine_discoveries discovery
+                        JOIN workers worker ON worker.id = discovery.worker_id
+                        WHERE discovery.local_key = version.worker_local_key
+                          AND worker.status IN ('connected', 'downloading', 'ready', 'busy')
+                      ) AS worker_local_count
                FROM engine_versions version
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
@@ -860,7 +992,33 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
 
 
 def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tuple[EngineVersionRecord, ...]:
-    return tuple(record for record in list_engine_records(connection) if record.engine_id == engine_id)
+    return tuple(
+        _engine_version_from_row(row)
+        for row in connection.execute(
+            """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+                      artifact.artifact_sha256, artifact.artifact_size,
+                      artifact.artifact_format, artifact.entrypoint,
+                      artifact.platform, artifact.storage_key,
+                      EXISTS (
+                        SELECT 1 FROM engine_benchmarks benchmark
+                        WHERE benchmark.build_hash = version.build_hash
+                          AND benchmark.artifact_sha256 = artifact.artifact_sha256
+                      ) AS benchmark_current,
+                      (
+                        SELECT COUNT(*)
+                        FROM worker_engine_discoveries discovery
+                        JOIN workers worker ON worker.id = discovery.worker_id
+                        WHERE discovery.local_key = version.worker_local_key
+                          AND worker.status IN ('connected', 'downloading', 'ready', 'busy')
+                      ) AS worker_local_count
+               FROM engine_versions version
+               JOIN engines engine ON engine.id = version.engine_id
+               LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
+               WHERE version.engine_id = ?
+               ORDER BY version.created_at DESC, version.id DESC""",
+            (engine_id,),
+        )
+    )
 
 
 def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | None:
@@ -890,11 +1048,16 @@ def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -
              LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash"""
     params: tuple[Any, ...] = ()
     if active_only:
-        sql = f"""{sql} WHERE engine.active = ? AND artifact.build_hash IS NOT NULL
-                 AND EXISTS (
-                   SELECT 1 FROM engine_benchmarks benchmark
-                   WHERE benchmark.build_hash = version.build_hash
-                     AND benchmark.artifact_sha256 = artifact.artifact_sha256
+        sql = f"""{sql} WHERE engine.active = ? AND (
+                   version.distribution = 'worker_local'
+                   OR (
+                     artifact.build_hash IS NOT NULL
+                     AND EXISTS (
+                       SELECT 1 FROM engine_benchmarks benchmark
+                       WHERE benchmark.build_hash = version.build_hash
+                         AND benchmark.artifact_sha256 = artifact.artifact_sha256
+                     )
+                   )
                  )"""
         params = (1,)
     sql = f"{sql} ORDER BY version.id"
@@ -1356,14 +1519,15 @@ def create_game(
     tiebreak_kind: str | None = None,
     opening_id: int | None = None,
     status: str = "pending",
+    record_eligible: bool = True,
 ) -> int:
     cursor = connection.execute(
         """
         INSERT INTO games (
           tournament_id, round, pair_index, white_engine_id, black_engine_id,
-          match_id, game_number, tiebreak_kind, opening_id, status
+          match_id, game_number, tiebreak_kind, opening_id, status, record_eligible
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             tournament_id,
@@ -1376,6 +1540,7 @@ def create_game(
             tiebreak_kind,
             opening_id,
             status,
+            int(record_eligible),
         ),
     )
     return int(cursor.lastrowid)
@@ -1478,7 +1643,7 @@ def list_games(
         if include_pgn
         else """
         id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
-        match_id, game_number, tiebreak_kind, opening_id, status, result,
+        match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
         termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
         """
     )
@@ -1515,7 +1680,7 @@ def list_games_for_tournaments(
         f"""
         SELECT
           id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
-          match_id, game_number, tiebreak_kind, opening_id, status, result,
+          match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
           termination, NULL::text AS pgn, started_at, finished_at
         FROM games
         WHERE tournament_id IN ({placeholders})
@@ -1603,7 +1768,7 @@ def count_games(
     status: str | None = None,
     result_types: Iterable[str] | None = None,
 ) -> int:
-    conditions = "tournament_id = ?"
+    conditions = "tournament_id = ? AND record_eligible = 1"
     parameters: list[Any] = [tournament_id]
     if status is not None:
         conditions += " AND status = ?"
@@ -1629,11 +1794,11 @@ def list_games_page(
 ) -> tuple[GameRecord, ...]:
     columns = """
       id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
-      match_id, game_number, tiebreak_kind, opening_id, status, result,
+      match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
       termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
     """
     offset = (page - 1) * page_size
-    conditions = "tournament_id = ?"
+    conditions = "tournament_id = ? AND record_eligible = 1"
     parameters: list[Any] = [tournament_id]
     if status is not None:
         conditions += " AND status = ?"
@@ -2656,6 +2821,58 @@ def list_workers(connection: sqlite3.Connection) -> tuple[WorkerRecord, ...]:
     )
 
 
+def replace_worker_engine_discoveries(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    local_keys: Iterable[str],
+) -> None:
+    selected = tuple(dict.fromkeys(local_keys))
+    connection.execute(
+        "DELETE FROM worker_engine_discoveries WHERE worker_id = ?",
+        (worker_id,),
+    )
+    if selected:
+        discovered_at = utc_now()
+        connection.executemany(
+            """INSERT INTO worker_engine_discoveries
+               (worker_id, local_key, discovered_at) VALUES (?, ?, ?)""",
+            (
+                (worker_id, local_key, discovered_at)
+                for local_key in selected
+            ),
+        )
+
+
+def list_worker_engine_discoveries(
+    connection: sqlite3.Connection,
+    worker_id: int,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "local_key": str(row["local_key"]),
+            "discovered_at": str(row["discovered_at"]),
+            "engine_version_id": row["engine_version_id"],
+            "engine_name": row["engine_name"],
+            "engine_version": row["engine_version"],
+        }
+        for row in connection.execute(
+            """
+            SELECT discovery.local_key, discovery.discovered_at,
+                   version.id AS engine_version_id,
+                   engine.name AS engine_name,
+                   version.version AS engine_version
+            FROM worker_engine_discoveries discovery
+            LEFT JOIN engine_versions version
+              ON version.worker_local_key = discovery.local_key
+            LEFT JOIN engines engine ON engine.id = version.engine_id
+            WHERE discovery.worker_id = ?
+            ORDER BY discovery.local_key
+            """,
+            (worker_id,),
+        )
+    )
+
+
 def list_worker_tournament_ids(
     connection: sqlite3.Connection,
     worker_id: int,
@@ -2729,8 +2946,16 @@ def list_worker_event_fixture_candidates(
         int(row["tournament_id"])
         for row in connection.execute(
             """
+            WITH event_fixtures AS (
+              SELECT tournament_id, event_id, position, id
+              FROM engine_relay_fixtures
+              UNION ALL
+              SELECT tournament_id, event_id, 0 AS position, event_id AS id
+              FROM puzzle_gauntlet_events
+              WHERE tournament_id IS NOT NULL
+            )
             SELECT fixture.tournament_id
-            FROM engine_relay_fixtures fixture
+            FROM event_fixtures fixture
             JOIN events event ON event.id = fixture.event_id
             JOIN tournaments tournament ON tournament.id = fixture.tournament_id
             LEFT JOIN event_fixture_workers claim
@@ -2785,8 +3010,16 @@ def event_fixture_has_worker_permissions(
 ) -> bool:
     row = connection.execute(
         """
+        WITH event_fixtures AS (
+          SELECT tournament_id, event_id
+          FROM engine_relay_fixtures
+          UNION ALL
+          SELECT tournament_id, event_id
+          FROM puzzle_gauntlet_events
+          WHERE tournament_id IS NOT NULL
+        )
         SELECT 1
-        FROM engine_relay_fixtures fixture
+        FROM event_fixtures fixture
         WHERE fixture.tournament_id = ?
           AND (
             EXISTS (
@@ -2816,11 +3049,19 @@ def claim_event_fixture_worker(
 ) -> EventFixtureWorkerRecord | None:
     connection.execute(
         """
+        WITH event_fixtures AS (
+          SELECT tournament_id, event_id
+          FROM engine_relay_fixtures
+          UNION ALL
+          SELECT tournament_id, event_id
+          FROM puzzle_gauntlet_events
+          WHERE tournament_id IS NOT NULL
+        )
         INSERT INTO event_fixture_workers (
           tournament_id, event_id, worker_id, claimed_at
         )
         SELECT fixture.tournament_id, fixture.event_id, ?, ?
-        FROM engine_relay_fixtures fixture
+        FROM event_fixtures fixture
         JOIN tournaments tournament ON tournament.id = fixture.tournament_id
         WHERE fixture.tournament_id = ?
           AND tournament.status IN ('scheduled', 'running')
@@ -3327,6 +3568,26 @@ def _reset_games_for_replay(
     if not ids:
         return
     placeholders = ", ".join("?" for _ in ids)
+    resettable_statuses = (
+        "'pending', 'assigned', 'live', 'abandoned'"
+        if include_abandoned
+        else "'pending', 'assigned', 'live'"
+    )
+    ids = tuple(
+        int(row["id"])
+        for row in connection.execute(
+            f"""
+            SELECT id FROM games
+            WHERE id IN ({placeholders})
+              AND status IN ({resettable_statuses})
+            FOR UPDATE
+            """,
+            ids,
+        )
+    )
+    if not ids:
+        return
+    placeholders = ", ".join("?" for _ in ids)
     connection.execute(
         f"""
         INSERT INTO game_assignment_progress (
@@ -3392,11 +3653,6 @@ def _reset_games_for_replay(
     connection.execute(
         f"DELETE FROM game_hardware_scores WHERE game_id IN ({placeholders})",
         ids,
-    )
-    resettable_statuses = (
-        "'pending', 'assigned', 'live', 'abandoned'"
-        if include_abandoned
-        else "'pending', 'assigned', 'live'"
     )
     connection.execute(
         f"""
@@ -4034,6 +4290,32 @@ def list_deployment_targets(
     return tuple(_deployment_target_from_row(row) for row in rows)
 
 
+def list_deployment_targets_for_jobs(
+    connection: sqlite3.Connection,
+    job_ids: Iterable[int],
+) -> dict[int, tuple[DeploymentTargetRecord, ...]]:
+    selected = tuple(dict.fromkeys(int(job_id) for job_id in job_ids))
+    if not selected:
+        return {}
+    placeholders = ", ".join("?" for _ in selected)
+    grouped: dict[int, list[DeploymentTargetRecord]] = {
+        job_id: [] for job_id in selected
+    }
+    rows = connection.execute(
+        f"""
+        SELECT * FROM deployment_targets
+        WHERE job_id IN ({placeholders})
+        ORDER BY job_id,
+                 CASE target_kind WHEN 'server' THEN 0 ELSE 1 END,
+                 id
+        """,
+        selected,
+    )
+    for row in rows:
+        grouped[int(row["job_id"])].append(_deployment_target_from_row(row))
+    return {job_id: tuple(targets) for job_id, targets in grouped.items()}
+
+
 def claim_deployment_job(
     connection: sqlite3.Connection,
 ) -> DeploymentJobRecord | None:
@@ -4608,6 +4890,8 @@ def _engine_from_row(row: sqlite3.Row) -> EngineSpec:
         source_ref=row["source_ref"],
         dockerfile=row["dockerfile"],
         build_hash=row["build_hash"],
+        distribution=row["distribution"],
+        worker_local_key=row["worker_local_key"],
         artifact=_artifact_spec_from_row(row),
         uci_options=json.loads(row["uci_options"]),
     )
@@ -4622,9 +4906,20 @@ def _engine_record_from_row(row: sqlite3.Row) -> EngineRecord:
     )
 
 
+def _badge_from_row(row: sqlite3.Row) -> BadgeRecord:
+    return BadgeRecord(
+        id=row["id"],
+        name=row["name"],
+        emoji=row["emoji"],
+        description=row["description"],
+        created_at=row["created_at"],
+    )
+
+
 def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
     benchmark_current = bool(row["benchmark_current"])
     engine_active = bool(row["engine_active"])
+    distribution = row["distribution"] or "managed"
     return EngineVersionRecord(
         id=row["id"], engine_id=row["engine_id"], name=row["name"], author=row["author"],
         version=row["version"], git_host_id=row["git_host_id"],
@@ -4635,10 +4930,15 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         dockerfile_path=row["dockerfile_path"] or "",
         dockerfile=row["dockerfile"] or "",
         build_hash=row["build_hash"] or "",
+        distribution=distribution,
+        worker_local_key=row["worker_local_key"],
         uci_options=json.loads(row["uci_options"]),
         artifact=_artifact_spec_from_row(row),
-        active=engine_active and benchmark_current,
+        active=engine_active and (
+            distribution == "worker_local" or benchmark_current
+        ),
         benchmark_current=benchmark_current,
+        worker_local_count=int(row["worker_local_count"]),
         engine_active=engine_active,
         created_at=row["created_at"],
     )
@@ -4731,6 +5031,7 @@ def _game_from_row(row: sqlite3.Row) -> GameRecord:
         tiebreak_kind=row["tiebreak_kind"],
         opening_id=row["opening_id"],
         status=row["status"],
+        record_eligible=bool(row["record_eligible"]),
         result=row["result"],
         termination=row["termination"],
         pgn=row["pgn"],

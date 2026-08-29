@@ -1,3 +1,4 @@
+import { localDateFormatter, timestampDate } from '@/utils/time'
 import type { GameRecord, Identifier, MoveRecord, TimeControl } from './types'
 
 export function recordValue<T>(record: Record<string, T> | undefined, id: Identifier): T | undefined {
@@ -82,9 +83,9 @@ export function formatNps(value?: string | number | null): string {
 
 export function formatDate(value?: string | null, includeTime = false): string {
   if (!value) return '-'
-  const date = new Date(value)
+  const date = timestampDate(value)
   if (Number.isNaN(date.valueOf())) return value
-  return new Intl.DateTimeFormat(undefined, {
+  return localDateFormatter({
     dateStyle: 'medium',
     ...(includeTime ? { timeStyle: 'short' as const } : {}),
   }).format(date)

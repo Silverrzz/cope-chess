@@ -1,3 +1,4 @@
+import { localDateFormatter, timestampDate } from '@/utils/time'
 import type {
   FormSeed,
   TimeControl,
@@ -17,9 +18,9 @@ export function humanize(value: string | null | undefined): string {
 
 export function formatDate(value: string | null | undefined): string {
   if (!value) return 'Never'
-  const date = new Date(value)
+  const date = timestampDate(value)
   if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat(undefined, {
+  return localDateFormatter({
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date)
@@ -137,7 +138,7 @@ export function formatDuration(seconds: number | null | undefined): string {
 
 export function formatRelativeDate(value: string | null | undefined, now = Date.now()): string {
   if (!value) return ''
-  const timestamp = new Date(value).getTime()
+  const timestamp = timestampDate(value).getTime()
   if (!Number.isFinite(timestamp)) return ''
   const seconds = Math.round((timestamp - now) / 1000)
   const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
