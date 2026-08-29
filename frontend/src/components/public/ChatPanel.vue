@@ -143,7 +143,7 @@ async function scrollToLatest(): Promise<void> {
       </label>
       <label>
         <span>Message</span>
-        <textarea v-model="text" name="text" :maxlength="maxLength" rows="2" required placeholder="Write a message"></textarea>
+        <textarea v-model="text" name="text" :maxlength="maxLength" rows="2" required placeholder="Write a message" @keydown.enter.prevent="submit"></textarea>
       </label>
       <div class="chat-form__footer">
         <span>{{ text.length }} / {{ maxLength }}</span>

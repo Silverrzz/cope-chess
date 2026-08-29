@@ -636,7 +636,7 @@ def create_app(
             ):
                 return JSONResponse({"detail": "Too many login attempts."}, status_code=429)
             if path.endswith("/chat") and _rate_limited(
-                request, "chat", limit=12, window_s=60
+                request, "chat", limit=120, window_s=60
             ):
                 return JSONResponse({"detail": "Chat rate limit exceeded."}, status_code=429)
         private_event_page = (
