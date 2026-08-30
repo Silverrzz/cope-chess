@@ -72,7 +72,7 @@ COPY --from=frontend-build /src/cope/web/frontend_dist/ ./cope/web/frontend_dist
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     printf '%s\n' "${COPE_BUILD_VERSION}" > cope/BUILD_VERSION \
     && python -m pip install ".[database,web,runner,worker]" \
-    && mkdir -p /backups /var/lib/cope/engine-artifacts \
+    && mkdir -p /backups /var/lib/cope/engine-artifacts /var/lib/cope/clone-transfer \
     && chown -R cope:cope /backups /var/lib/cope /app
 USER cope
 EXPOSE 8701 8702 8703

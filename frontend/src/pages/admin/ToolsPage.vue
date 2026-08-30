@@ -84,7 +84,7 @@ onMounted(load)
       <div v-else class="tool-grid">
         <RouterLink v-for="tool in data?.tools" :key="tool.name" class="tool-card panel" :to="tool.href">
           <div class="tool-card__top">
-            <span class="tool-card__icon"><AppIcon :name="tool.name === 'invalidate_rating_list_engine' ? 'trash' : tool.name === 'tournament_creator' ? 'trophy' : 'search'" :size="22" /></span>
+            <span class="tool-card__icon"><AppIcon :name="tool.name === 'invalidate_rating_list_engine' ? 'trash' : tool.name === 'tournament_creator' ? 'trophy' : tool.name === 'clone_environment' ? 'copy' : 'search'" :size="22" /></span>
             <span class="tool-card__status"><span />{{ statusLabel(tool.status) }}</span>
           </div>
           <div><h3>{{ tool.label }}</h3><p>{{ tool.description }}</p></div>

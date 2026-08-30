@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import urllib.parse
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,28 @@ from starlette.datastructures import UploadFile
 
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
+from cope.environment_clone import (
+    CLONE_PROTOCOL_VERSION,
+    RemoteCloneError,
+    authorize_environment_export,
+    cancel_clone_job,
+    clone_catalog_payload,
+    clone_job_payload,
+    create_clone_from_source,
+    create_environment_export,
+    engine_artifact_root,
+    environment_export_artifact,
+    environment_export_dataset_path,
+    environment_export_payload,
+    environment_instance_id,
+    environment_inventory,
+    list_clone_jobs,
+    normalize_source_url,
+    authenticated_source_opener,
+    remove_clone_transfer_tree,
+    remote_json,
+    resume_clone_job,
+)
 from cope.db import (
     CURRENT_EVENT_STATUSES,
     ChatSettingsRecord,
@@ -769,6 +792,11 @@ class GitHostPayload(BaseModel):
     def validate_host_url(cls, value: str) -> str:
         if not value.startswith(("https://", "http://")):
             raise ValueError("Git host URLs must use HTTP or HTTPS")
+        parsed = urllib.parse.urlsplit(value)
+        if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError("Git host URLs cannot contain embedded credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("Git host URLs cannot contain a query or fragment")
         return value
 
 
@@ -827,6 +855,21 @@ class WhoHasThisPayload(BaseModel):
 class InvalidateRatingListEnginePayload(BaseModel):
     engine_id: int = Field(gt=0)
     rating_list_id: int = Field(gt=0)
+
+
+class EnvironmentExportPayload(BaseModel):
+    datasets: list[str] = Field(min_length=1, max_length=100)
+
+
+class EnvironmentClonePayload(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    admin_token: str = Field(min_length=1, max_length=1000)
+    datasets: list[str] = Field(min_length=1, max_length=100)
+
+
+class EnvironmentClonePreflightPayload(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    admin_token: str = Field(min_length=1, max_length=1000)
 
 
 class WorkerSettingsPayload(BaseModel):
@@ -942,6 +985,147 @@ def register_api_routes(app: FastAPI) -> None:
         response.delete_cookie("cope_admin_session")
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/api/admin/environment-export/capabilities")
+    def environment_export_capabilities(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        response = _json(
+            {
+                **clone_catalog_payload(),
+                "instance_id": environment_instance_id(connection),
+                "app_version": app_version(),
+                "inventory": environment_inventory(connection),
+                "csrf_token": web_app._csrf_token(request, web_app._admin_token(request)),
+            }
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    @app.post("/api/admin/environment-exports")
+    def create_admin_environment_export(
+        payload: EnvironmentExportPayload,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            export_id, export_token, expires_at = create_environment_export(connection, payload.datasets)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        response = _json(
+            {
+                "export_id": export_id,
+                "export_token": export_token,
+                "expires_at": expires_at,
+                "status": "queued",
+                "message": "Environment export queued.",
+            },
+            status_code=201,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    def authorized_export(export_id: str, request: Request, connection):
+        export = authorize_environment_export(connection, export_id, _bearer_credential(request))
+        if export is None:
+            raise HTTPException(status_code=401, detail="A current environment export token is required.")
+        return export
+
+    @app.get("/api/environment-exports/{export_id}/status")
+    def environment_export_status(
+        export_id: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        authorized_export(export_id, request, connection)
+        payload = environment_export_payload(connection, export_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Environment export not found.")
+        payload.pop("manifest", None)
+        return _json(payload)
+
+    @app.get("/api/environment-exports/{export_id}/manifest")
+    def environment_export_manifest(
+        export_id: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        authorized_export(export_id, request, connection)
+        payload = environment_export_payload(connection, export_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Environment export not found.")
+        if payload["status"] != "ready":
+            raise HTTPException(status_code=409, detail="Environment export is not ready.")
+        return _json(payload["manifest"])
+
+    @app.get("/api/environment-exports/{export_id}/datasets/{dataset_name}")
+    def download_environment_export_dataset(
+        export_id: str,
+        dataset_name: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        export = authorized_export(export_id, request, connection)
+        if export["status"] != "ready":
+            raise HTTPException(status_code=409, detail="Environment export is not ready.")
+        row = connection.execute(
+            """
+            SELECT * FROM environment_export_datasets
+            WHERE export_id = ? AND dataset_name = ? AND status = 'ready'
+            """,
+            (export_id, dataset_name),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Environment export dataset not found.")
+        try:
+            path = environment_export_dataset_path(export_id, dataset_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="Environment export dataset not found.") from exc
+        if not path.is_file() or path.stat().st_size != int(row["byte_count"]):
+            raise HTTPException(status_code=503, detail="Environment export dataset is unavailable.")
+        response = FileResponse(path, media_type="application/gzip", filename=path.name)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Cope-Clone-SHA256"] = str(row["sha256"])
+        return response
+
+    @app.get("/api/environment-exports/{export_id}/artifacts/{artifact_sha256}")
+    def download_environment_export_artifact(
+        export_id: str,
+        artifact_sha256: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        authorized_export(export_id, request, connection)
+        artifact = environment_export_artifact(connection, export_id, artifact_sha256)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Environment export artifact not found.")
+        path = engine_artifact_root() / f"{artifact['storage_key']}.tar.gz"
+        if not path.is_file() or path.stat().st_size != int(artifact["artifact_size"]):
+            raise HTTPException(status_code=503, detail="Environment export artifact is unavailable.")
+        response = FileResponse(path, media_type="application/gzip", filename=f"{artifact_sha256}.tar.gz")
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Cope-Artifact-SHA256"] = artifact_sha256
+        return response
+
+    @app.delete("/api/environment-exports/{export_id}")
+    def cancel_environment_export(
+        export_id: str,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        authorized_export(export_id, request, connection)
+        connection.execute(
+            """
+            UPDATE environment_exports
+            SET cancel_requested = 1, status = 'cancelled', token_hash = ?,
+                error = 'Environment export cancelled.', finished_at = COALESCE(finished_at, ?)
+            WHERE export_id = ? AND status <> 'expired'
+            """,
+            ("0" * 64, datetime.now(UTC).isoformat(), export_id),
+        )
+        connection.commit()
+        remove_clone_transfer_tree("exports", export_id)
+        return _json({"message": "Environment export cancellation requested."})
 
     @app.put("/api/benchmarker/engine-artifacts/{build_hash}")
     async def upload_engine_artifact(
@@ -3754,6 +3938,13 @@ def register_api_routes(app: FastAPI) -> None:
                         "href": "/admin/tools/tournament-creator",
                         "status": "available",
                     },
+                    {
+                        "name": "clone_environment",
+                        "label": "Clone environment",
+                        "description": "Pull a dependency-complete, verified selection of data and engine artifacts from another Cope host.",
+                        "href": "/admin/tools/clone-environment",
+                        "status": "available",
+                    },
                 ],
                 "recent_jobs": [
                     _tool_job_api_payload(connection, job, include_items=False)
@@ -3764,6 +3955,132 @@ def register_api_routes(app: FastAPI) -> None:
                     for worker in workers
                 ),
             }
+        )
+
+    @app.get("/api/admin/tools/environment-clone")
+    def admin_environment_clone(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        return _json(
+            {
+                **clone_catalog_payload(),
+                "instance_id": environment_instance_id(connection),
+                "inventory": environment_inventory(connection),
+                "recent_jobs": list_clone_jobs(connection),
+            }
+        )
+
+    @app.post("/api/admin/tools/environment-clone/preflight")
+    async def admin_environment_clone_preflight(
+        payload: EnvironmentClonePreflightPayload,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        destination_instance = environment_instance_id(connection)
+
+        def inspect_source():
+            source_url = normalize_source_url(payload.source)
+            opener = authenticated_source_opener(source_url, payload.admin_token)
+            result = remote_json(opener, source_url, "/api/admin/environment-export/capabilities")
+            result.pop("csrf_token", None)
+            result["source_url"] = source_url
+            return result
+
+        try:
+            source = await asyncio.to_thread(inspect_source)
+        except (ValueError, RemoteCloneError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if source.get("instance_id") == destination_instance:
+            raise HTTPException(status_code=409, detail="The source and destination are the same Cope installation.")
+        source["compatible"] = (
+            int(source.get("protocol_version", 0)) == CLONE_PROTOCOL_VERSION
+            and int(source.get("schema_version", 0)) == database_schema_version(connection)
+        )
+        source["destination_inventory"] = environment_inventory(connection)
+        return _json(source)
+
+    @app.post("/api/admin/tools/environment-clone")
+    async def admin_create_environment_clone(payload: EnvironmentClonePayload):
+        def create_job():
+            connection = connect_database(app.state.db_path)
+            try:
+                return create_clone_from_source(
+                    connection,
+                    payload.source,
+                    payload.admin_token,
+                    payload.datasets,
+                )
+            finally:
+                connection.close()
+
+        try:
+            job = await asyncio.to_thread(create_job)
+        except (ValueError, RemoteCloneError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _json({"job": job, "message": "Environment clone queued."}, status_code=201)
+
+    @app.get("/api/admin/tools/environment-clone/jobs/{job_id}")
+    def admin_environment_clone_job(
+        job_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        job = clone_job_payload(connection, job_id, include_events=True)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Environment clone job not found.")
+        return _json({"job": job})
+
+    @app.post("/api/admin/tools/environment-clone/jobs/{job_id}/cancel")
+    def admin_cancel_environment_clone_job(
+        job_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if clone_job_payload(connection, job_id, include_events=False) is None:
+            raise HTTPException(status_code=404, detail="Environment clone job not found.")
+        if not cancel_clone_job(connection, job_id):
+            raise HTTPException(status_code=409, detail="This environment clone is no longer cancellable.")
+        return _json({"message": "Environment clone cancellation requested."})
+
+    @app.post("/api/admin/tools/environment-clone/jobs/{job_id}/resume")
+    def admin_resume_environment_clone_job(
+        job_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if clone_job_payload(connection, job_id, include_events=False) is None:
+            raise HTTPException(status_code=404, detail="Environment clone job not found.")
+        if not resume_clone_job(connection, job_id):
+            raise HTTPException(status_code=409, detail="This environment clone cannot be resumed.")
+        return _json({"message": "Environment clone queued to resume."})
+
+    @app.get("/api/admin/tools/environment-clone/jobs/{job_id}/events")
+    async def admin_environment_clone_events(job_id: int, request: Request):
+        def snapshot():
+            connection = connect_database(request.app.state.db_path)
+            try:
+                return clone_job_payload(connection, job_id, include_events=True)
+            finally:
+                connection.close()
+
+        if await asyncio.to_thread(snapshot) is None:
+            raise HTTPException(status_code=404, detail="Environment clone job not found.")
+
+        async def stream():
+            last_signature = ""
+            while True:
+                job = await asyncio.to_thread(snapshot)
+                if job is None:
+                    break
+                signature = f"{job['status']}|{job['updated_at']}|{len(job['events'])}"
+                if signature != last_signature:
+                    yield f"event: clone.snapshot\ndata: {json.dumps(job, separators=(',', ':'))}\n\n"
+                    last_signature = signature
+                if job["status"] in {"completed", "failed", "cancelled"}:
+                    break
+                await asyncio.sleep(1)
+            yield ": complete\n\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @app.get("/api/admin/tools/tournament-creator")

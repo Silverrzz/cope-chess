@@ -249,6 +249,12 @@ const router = createRouter({
           meta: { title: "Tournament creator" },
         },
         {
+          path: "tools/clone-environment",
+          name: "admin-tool-clone-environment",
+          component: () => import("@/pages/admin/CloneEnvironmentPage.vue"),
+          meta: { title: "Clone environment" },
+        },
+        {
           path: "updates",
           name: "admin-updates",
           component: () => import("@/pages/admin/DeploymentsPage.vue"),

@@ -1074,6 +1074,155 @@ CREATE TABLE IF NOT EXISTS dockerfile_pull_jobs (
   error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS environment_identity (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  instance_id TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS environment_exports (
+  export_id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'preparing', 'ready', 'failed', 'cancelled', 'expired')),
+  selection TEXT NOT NULL DEFAULT '{}',
+  manifest TEXT NOT NULL DEFAULT '{}',
+  total_datasets INTEGER NOT NULL DEFAULT 0 CHECK (total_datasets >= 0),
+  completed_datasets INTEGER NOT NULL DEFAULT 0 CHECK (completed_datasets >= 0),
+  total_rows BIGINT NOT NULL DEFAULT 0 CHECK (total_rows >= 0),
+  total_bytes BIGINT NOT NULL DEFAULT 0 CHECK (total_bytes >= 0),
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  expires_at TEXT NOT NULL,
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS environment_export_datasets (
+  export_id TEXT NOT NULL REFERENCES environment_exports(export_id) ON DELETE CASCADE,
+  dataset_name TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'exporting', 'ready', 'failed', 'cancelled')),
+  row_count BIGINT NOT NULL DEFAULT 0 CHECK (row_count >= 0),
+  byte_count BIGINT NOT NULL DEFAULT 0 CHECK (byte_count >= 0),
+  sha256 TEXT CHECK (sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$'),
+  file_name TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT,
+  PRIMARY KEY (export_id, dataset_name),
+  UNIQUE (export_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS environment_clone_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  job_key TEXT NOT NULL UNIQUE,
+  source_url TEXT NOT NULL,
+  source_instance_id TEXT NOT NULL,
+  source_export_id TEXT NOT NULL,
+  source_export_token_ciphertext TEXT NOT NULL,
+  source_expires_at TEXT NOT NULL,
+  selection TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN (
+      'queued', 'waiting_source', 'transferring', 'importing', 'verifying',
+      'cleaning_source', 'completed', 'failed', 'cancelled'
+    )),
+  phase TEXT NOT NULL DEFAULT 'queued',
+  total_datasets INTEGER NOT NULL DEFAULT 0 CHECK (total_datasets >= 0),
+  completed_datasets INTEGER NOT NULL DEFAULT 0 CHECK (completed_datasets >= 0),
+  total_rows BIGINT NOT NULL DEFAULT 0 CHECK (total_rows >= 0),
+  completed_rows BIGINT NOT NULL DEFAULT 0 CHECK (completed_rows >= 0),
+  total_bytes BIGINT NOT NULL DEFAULT 0 CHECK (total_bytes >= 0),
+  completed_bytes BIGINT NOT NULL DEFAULT 0 CHECK (completed_bytes >= 0),
+  artifacts_total INTEGER NOT NULL DEFAULT 0 CHECK (artifacts_total >= 0),
+  artifacts_completed INTEGER NOT NULL DEFAULT 0 CHECK (artifacts_completed >= 0),
+  artifacts_skipped INTEGER NOT NULL DEFAULT 0 CHECK (artifacts_skipped >= 0),
+  conflicts INTEGER NOT NULL DEFAULT 0 CHECK (conflicts >= 0),
+  warnings INTEGER NOT NULL DEFAULT 0 CHECK (warnings >= 0),
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT,
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1))
+);
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'environment_clone_jobs'
+      AND column_name = 'source_export_token'
+  ) THEN
+    ALTER TABLE environment_clone_jobs ADD COLUMN IF NOT EXISTS source_export_token_ciphertext TEXT;
+    ALTER TABLE environment_clone_jobs ADD COLUMN IF NOT EXISTS source_expires_at TEXT;
+    UPDATE environment_clone_jobs
+    SET source_export_token_ciphertext = '',
+        source_expires_at = '1970-01-01T00:00:00+00:00',
+        status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status ELSE 'failed' END,
+        phase = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN phase ELSE 'failed' END,
+        error = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN error ELSE 'Clone credential invalidated by security upgrade' END,
+        finished_at = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN finished_at ELSE CURRENT_TIMESTAMP::text END,
+        cancel_requested = 1;
+    ALTER TABLE environment_clone_jobs DROP COLUMN source_export_token;
+  END IF;
+END $$;
+ALTER TABLE environment_clone_jobs ADD COLUMN IF NOT EXISTS source_export_token_ciphertext TEXT;
+UPDATE environment_clone_jobs SET source_export_token_ciphertext = '' WHERE source_export_token_ciphertext IS NULL;
+ALTER TABLE environment_clone_jobs ALTER COLUMN source_export_token_ciphertext SET NOT NULL;
+ALTER TABLE environment_clone_jobs ADD COLUMN IF NOT EXISTS source_expires_at TEXT;
+UPDATE environment_clone_jobs SET source_expires_at = '1970-01-01T00:00:00+00:00' WHERE source_expires_at IS NULL;
+ALTER TABLE environment_clone_jobs ALTER COLUMN source_expires_at SET NOT NULL;
+ALTER TABLE environment_clone_jobs DROP CONSTRAINT IF EXISTS environment_clone_jobs_status_check;
+ALTER TABLE environment_clone_jobs ADD CONSTRAINT environment_clone_jobs_status_check
+  CHECK (status IN (
+    'queued', 'waiting_source', 'transferring', 'importing', 'verifying',
+    'cleaning_source', 'completed', 'failed', 'cancelled'
+  ));
+
+CREATE TABLE IF NOT EXISTS environment_clone_job_steps (
+  job_id BIGINT NOT NULL REFERENCES environment_clone_jobs(id) ON DELETE CASCADE,
+  dataset_name TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'waiting', 'transferring', 'validating', 'importing', 'completed', 'failed', 'skipped', 'cancelled')),
+  total_rows BIGINT NOT NULL DEFAULT 0 CHECK (total_rows >= 0),
+  completed_rows BIGINT NOT NULL DEFAULT 0 CHECK (completed_rows >= 0),
+  total_bytes BIGINT NOT NULL DEFAULT 0 CHECK (total_bytes >= 0),
+  completed_bytes BIGINT NOT NULL DEFAULT 0 CHECK (completed_bytes >= 0),
+  inserted_rows BIGINT NOT NULL DEFAULT 0 CHECK (inserted_rows >= 0),
+  skipped_rows BIGINT NOT NULL DEFAULT 0 CHECK (skipped_rows >= 0),
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT,
+  PRIMARY KEY (job_id, dataset_name),
+  UNIQUE (job_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS environment_clone_events (
+  id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL REFERENCES environment_clone_jobs(id) ON DELETE CASCADE,
+  level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warning', 'error', 'success')),
+  phase TEXT NOT NULL,
+  dataset_name TEXT,
+  message TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}',
+  occurred_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS environment_clone_id_mappings (
+  job_id BIGINT NOT NULL REFERENCES environment_clone_jobs(id) ON DELETE CASCADE,
+  dataset_name TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  destination_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('inserted', 'reused', 'skipped')),
+  PRIMARY KEY (job_id, dataset_name, source_id)
+);
+
 ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_kind_check;
 ALTER TABLE deployment_targets DROP CONSTRAINT IF EXISTS deployment_targets_target_id_fkey;
 ALTER TABLE deployment_targets ADD CONSTRAINT deployment_targets_target_kind_check
@@ -1132,7 +1281,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 48)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 49)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -1175,3 +1324,9 @@ CREATE INDEX IF NOT EXISTS idx_deployment_targets_benchmarker_pending ON deploym
 CREATE INDEX IF NOT EXISTS idx_tool_jobs_claim ON tool_jobs(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_tool_jobs_worker ON tool_jobs(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_tool_job_items_job ON tool_job_items(job_id, position);
+CREATE INDEX IF NOT EXISTS idx_environment_exports_status_created
+  ON environment_exports(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_environment_clone_jobs_status_created
+  ON environment_clone_jobs(status, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_environment_clone_events_job_id
+  ON environment_clone_events(job_id, id);

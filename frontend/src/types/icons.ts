@@ -23,6 +23,7 @@ export type IconName =
   | "gauge"
   | "home"
   | "info"
+  | "key"
   | "log-out"
   | "logo"
   | "menu"

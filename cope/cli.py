@@ -195,6 +195,23 @@ def main(argv: list[str] | None = None) -> int:
         help="run one scheduler and command-processing pass, then exit",
     )
 
+    clone_runner_parser = subparsers.add_parser(
+        "clone-runner",
+        help="process environment export and clone jobs",
+    )
+    clone_runner_parser.add_argument(
+        "--database-url",
+        dest="db_path",
+        default=_default_database_url(),
+        help="PostgreSQL connection URL",
+    )
+    clone_runner_parser.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=1.0,
+        help="seconds between environment clone queue scans",
+    )
+
     worker_server_parser = subparsers.add_parser(
         "worker-server",
         help="start the worker websocket server",
@@ -560,6 +577,16 @@ def main(argv: list[str] | None = None) -> int:
             LOG.info("no scheduled tournaments to prepare")
             return 0
 
+        return 0
+
+    if args.role == "clone-runner":
+        from .environment_clone import run_environment_clone_service
+
+        try:
+            run_environment_clone_service(args.db_path, args.poll_interval_s)
+        except KeyboardInterrupt:
+            LOG.info("environment clone runner stopped")
+            return 130
         return 0
 
     if args.role == "web":

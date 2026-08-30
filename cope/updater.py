@@ -42,6 +42,7 @@ from cope.version import app_version
 LOG = logging.getLogger("cope.updater")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}$")
+PLATFORM_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server", "clone-runner")
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +231,7 @@ def _run_deployment(
     dockerfiles_installed = False
     restart_attempted = False
     source_changed = False
+    deployed_services: tuple[str, ...] = ()
     try:
         if scope not in {"platform", "web"}:
             raise ValueError(f"unsupported deployment scope {scope!r}")
@@ -300,8 +302,9 @@ def _run_deployment(
         services = (
             ("web",)
             if web_only
-            else ("web", "scheduler", "worker-server", "benchmark-server")
+            else _platform_services(config, source_dir)
         )
+        deployed_services = services
         _compose(
             config,
             source_dir,
@@ -365,10 +368,10 @@ def _run_deployment(
             try:
                 _run(["docker", "tag", rollback_tag, "cope-chess:local"])
                 if restart_attempted:
-                    services = (
+                    rollback_services = (
                         ("web",)
                         if web_only
-                        else ("web", "scheduler", "worker-server", "benchmark-server")
+                        else _platform_services(config, source_dir)
                     )
                     _compose(
                         config,
@@ -377,7 +380,15 @@ def _run_deployment(
                         "-d",
                         "--no-deps",
                         "--force-recreate",
-                        *services,
+                        *rollback_services,
+                    )
+                    _remove_compose_service_containers(
+                        config,
+                        tuple(
+                            service
+                            for service in deployed_services
+                            if service not in rollback_services
+                        ),
                     )
                     if not web_only:
                         _reload_caddy(config, source_dir)
@@ -663,7 +674,7 @@ def _wait_for_services(
     *,
     expected: set[str] | None = None,
 ) -> None:
-    expected = expected or {"web", "scheduler", "worker-server", "benchmark-server"}
+    expected = expected or set(PLATFORM_SERVICES)
     deadline = time.monotonic() + max(config.service_wait_s, 1.0)
     while time.monotonic() < deadline:
         connection = connect_database(config.db_path)
@@ -824,6 +835,47 @@ def _compose(
         capture=True,
         environment=environment,
     )
+
+
+def _platform_services(config: UpdaterConfig, source_dir: Path) -> tuple[str, ...]:
+    available = set(_compose(config, source_dir, "config", "--services").splitlines())
+    services = tuple(service for service in PLATFORM_SERVICES if service in available)
+    required = {"web", "scheduler", "worker-server", "benchmark-server"}
+    if not required.issubset(services):
+        missing = ", ".join(sorted(required - set(services)))
+        raise RuntimeError(f"compose configuration is missing required services: {missing}")
+    return services
+
+
+def _remove_compose_service_containers(
+    config: UpdaterConfig,
+    services: tuple[str, ...],
+) -> None:
+    project_name = _compose_project_name(config.compose_project)
+    for service in services:
+        output = _run(
+            [
+                "docker",
+                "ps",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"label=com.docker.compose.project={project_name}",
+                "--filter",
+                f"label=com.docker.compose.service={service}",
+            ],
+            capture=True,
+        )
+        container_ids = tuple(output.splitlines())
+        if any(
+            re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None
+            for container_id in container_ids
+        ):
+            raise RuntimeError(
+                f"docker returned an invalid container identity for retired service {service}"
+            )
+        if container_ids:
+            _run(["docker", "rm", "--force", *container_ids])
 
 
 def _schedule_updater_restart(

@@ -20,6 +20,15 @@ x-cope-service: &cope-service
     COPE_BENCHMARK_PREPARATION_TIMEOUT_S: ${COPE_BENCHMARK_PREPARATION_TIMEOUT_S:-1800}
     COPE_ENGINE_ARTIFACT_DIR: /var/lib/cope/engine-artifacts
     COPE_ENGINE_ARTIFACT_MAX_BYTES: ${COPE_ENGINE_ARTIFACT_MAX_BYTES:-1073741824}
+    COPE_CLONE_TRANSFER_DIR: /var/lib/cope/clone-transfer
+    COPE_CLONE_ALLOW_PRIVATE_ORIGINS: ${COPE_CLONE_ALLOW_PRIVATE_ORIGINS:-0}
+    COPE_CLONE_EXPORT_TTL_HOURS: ${COPE_CLONE_EXPORT_TTL_HOURS:-72}
+    COPE_CLONE_REMOTE_JSON_MAX_BYTES: ${COPE_CLONE_REMOTE_JSON_MAX_BYTES:-16777216}
+    COPE_CLONE_TRANSFER_MAX_BYTES: ${COPE_CLONE_TRANSFER_MAX_BYTES:-10737418240}
+    COPE_CLONE_UNCOMPRESSED_MAX_BYTES: ${COPE_CLONE_UNCOMPRESSED_MAX_BYTES:-42949672960}
+    COPE_CLONE_ROW_MAX_BYTES: ${COPE_CLONE_ROW_MAX_BYTES:-16777216}
+    COPE_CLONE_SOURCE_WAIT_TIMEOUT_S: ${COPE_CLONE_SOURCE_WAIT_TIMEOUT_S:-3600}
+    COPE_CLONE_IMPORT_TTL_HOURS: ${COPE_CLONE_IMPORT_TTL_HOURS:-72}
   secrets:
     - cope_admin_token
     - cope_event_token
@@ -99,6 +108,7 @@ services:
     volumes:
       - engine-dockerfiles:/app/data/engines
       - engine-artifacts:/var/lib/cope/engine-artifacts
+      - clone-transfer:/var/lib/cope/clone-transfer
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8701/health/ready', timeout=3)"]
       interval: 15s
@@ -141,6 +151,24 @@ services:
         condition: service_completed_successfully
       web:
         condition: service_healthy
+
+  clone-runner:
+    <<: *cope-service
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: clone-runner
+      COPE_DATABASE_STATEMENT_TIMEOUT_MS: ${COPE_CLONE_STATEMENT_TIMEOUT_MS:-1800000}
+      COPE_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: ${COPE_CLONE_IDLE_TRANSACTION_TIMEOUT_MS:-1800000}
+    command: ["clone-runner", "--poll-interval-s", "1"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+    volumes:
+      - engine-dockerfiles:/app/data/engines
+      - engine-artifacts:/var/lib/cope/engine-artifacts
+      - clone-transfer:/var/lib/cope/clone-transfer
 
   updater:
     <<: *cope-service
@@ -238,3 +266,4 @@ volumes:
   caddy-config:
   engine-dockerfiles:
   engine-artifacts:
+  clone-transfer:
