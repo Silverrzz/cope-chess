@@ -47,7 +47,7 @@ function themeColor(key: string, fallback: string): string {
 <template>
   <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <div class="puzzle-field" aria-hidden="true"></div>
-    <div class="gauntlet-mark" aria-hidden="true"><span></span><i></i><b>G</b></div>
+    <div class="gauntlet-mark" aria-hidden="true"><span></span><i></i><AppIcon name="puzzle" size="clamp(7rem, 13vw, 12rem)" /></div>
     <div class="gauntlet-copy">
       <span class="gauntlet-kicker"><AppIcon name="trophy" :size="16" />{{ current ? isLive ? "Gauntlet live" : "Next challenge" : "Puzzle archive" }}</span>
       <h2>{{ event.title }}</h2>
@@ -59,9 +59,6 @@ function themeColor(key: string, fallback: string): string {
         <span>{{ current && isLive ? "Engines are solving now" : dateLabel }}</span>
         <strong>{{ current ? "Open event" : "Inspect the gauntlet" }} <AppIcon name="arrow-right" :size="18" /></strong>
       </div>
-    </div>
-    <div class="survivor-stack" aria-hidden="true">
-      <span v-for="index in 7" :key="index" :class="{ out: index > 4 }"><i>{{ String(index).padStart(2, "0") }}</i><b></b><small>{{ index > 4 ? "OUT" : "ACTIVE" }}</small></span>
     </div>
   </RouterLink>
 </template>
@@ -85,16 +82,9 @@ function themeColor(key: string, fallback: string): string {
 .gauntlet-mark { position: absolute; top: 50%; right: clamp(2rem, 9vw, 10rem); width: clamp(18rem, 31vw, 33rem); aspect-ratio: 1; border: 1px solid rgb(167 139 250 / 25%); transform: translateY(-50%) rotate(45deg); }
 .gauntlet-mark span, .gauntlet-mark i { position: absolute; inset: 12%; border: 1px solid rgb(34 211 238 / 15%); }
 .gauntlet-mark i { inset: 27%; border-color: rgb(167 139 250 / 27%); }
-.gauntlet-mark b { position: absolute; inset: 0; display: grid; place-items: center; color: #b8a3f6; font: 900 clamp(6rem, 13vw, 12rem)/1 ui-monospace, monospace; text-shadow: 0 0 3rem rgb(139 92 246 / 55%); transform: rotate(-45deg); }
-.survivor-stack { position: absolute; right: 2.5%; bottom: 7%; display: grid; width: min(27rem, 34vw); gap: .3rem; }
-.survivor-stack span { display: grid; grid-template-columns: 2rem minmax(0, 1fr) auto; align-items: center; gap: .5rem; color: #ada1c8; font: 700 .55rem/1 ui-monospace, monospace; }
-.survivor-stack span > b { height: 2px; background: linear-gradient(90deg, #a78bfa, #22d3ee); box-shadow: 0 0 .7rem rgb(167 139 250 / 35%); }
-.survivor-stack span > small { width: 3.2rem; color: #22d3ee; font-size: .48rem; }
-.survivor-stack span.out { opacity: .34; }
-.survivor-stack span.out > b { background: #5e5968; box-shadow: none; }
-.survivor-stack span.out > small { color: #7f7989; }
+.gauntlet-mark > svg { position: absolute; top: 50%; left: 50%; color: #b8a3f6; filter: drop-shadow(0 0 1.5rem rgb(139 92 246 / 55%)); stroke-width: 1.35; transform: translate(-50%, -50%) rotate(-45deg); }
 .gauntlet-archive:hover .gauntlet-mark { transform: translateY(-50%) rotate(47deg) scale(1.02); transition: transform 350ms ease; }
 .gauntlet-archive:hover .gauntlet-meta strong { text-decoration: underline; text-underline-offset: .25rem; }
 .gauntlet-archive:focus-visible { outline: 3px solid #a78bfa; outline-offset: -3px; }
-@media (max-width: 58rem) { .gauntlet-archive { min-height: 31rem; padding: 2rem 1.25rem; }.gauntlet-copy { width: 100%; }.gauntlet-copy h2 { max-width: 11ch; }.gauntlet-copy > p { max-width: 34rem; }.gauntlet-mark { top: 34%; right: -6rem; opacity: .55; }.survivor-stack { display: none; }.gauntlet-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
+@media (max-width: 58rem) { .gauntlet-archive { min-height: 31rem; padding: 2rem 1.25rem; }.gauntlet-copy { width: 100%; }.gauntlet-copy h2 { max-width: 11ch; }.gauntlet-copy > p { max-width: 34rem; }.gauntlet-mark { top: 34%; right: -6rem; opacity: .55; }.gauntlet-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
 </style>

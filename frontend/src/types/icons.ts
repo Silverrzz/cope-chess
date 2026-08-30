@@ -33,6 +33,7 @@ export type IconName =
   | "pause"
   | "play"
   | "plus"
+  | "puzzle"
   | "radio"
   | "refresh"
   | "search"
