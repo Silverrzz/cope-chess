@@ -184,6 +184,12 @@ export interface CurrentEventResponse {
   event: EventSummary | null;
 }
 
+export interface PublicEventListResponse {
+  server_time: string;
+  current: EventSummary | null;
+  events: EventSummary[];
+}
+
 export interface AdminEventListResponse {
   events: EventSummary[];
   statuses: EventStatus[];

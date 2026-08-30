@@ -90,7 +90,6 @@ let countdownAudioStarted = false;
 const soundPrimed = ref(false);
 let lastCheerRequestAt = 0;
 let cheerBatchTimer: number | undefined;
-let victoryRedirectTimer: number | undefined;
 const seenCheerIds = new Set<string>();
 const cheerTimers = new Set<number>();
 const queuedCheers: QueuedCheer[] = [];
@@ -102,7 +101,6 @@ let headingResizeObserver: ResizeObserver | null = null;
 
 const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
 const countdownAudioLengthMs = 60_000;
-const victoryRedirectDelayMs = 4_000;
 const cheerClientId = typeof globalThis.crypto?.randomUUID === "function"
   ? globalThis.crypto.randomUUID()
   : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -386,20 +384,6 @@ watch(() => gameData.value?.engine_data?.white ?? null, (analysis) => {
 watch(() => gameData.value?.engine_data?.black ?? null, (analysis) => {
   if (analysis) blackAnalysis.value = analysis;
 }, { immediate: true });
-watch(finaleComplete, (complete) => {
-  if (props.view !== "arena" || !complete) {
-    if (victoryRedirectTimer !== undefined) window.clearTimeout(victoryRedirectTimer);
-    victoryRedirectTimer = undefined;
-    return;
-  }
-  if (victoryRedirectTimer !== undefined) return;
-  victoryRedirectTimer = window.setTimeout(() => {
-    victoryRedirectTimer = undefined;
-    closeStream();
-    void router.replace({ name: "event", params: { slug: props.detail.event.slug } });
-  }, victoryRedirectDelayMs);
-}, { immediate: true });
-
 onMounted(() => {
   selectInitial();
   window.addEventListener("cope:event-cheer", handleCheerEvent as EventListener);
@@ -427,7 +411,6 @@ onBeforeUnmount(() => {
   closeStream();
   if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
   if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
-  if (victoryRedirectTimer !== undefined) window.clearTimeout(victoryRedirectTimer);
   document.removeEventListener("visibilitychange", handleCountdownResume);
   window.removeEventListener("focus", handleCountdownResume);
   window.removeEventListener("pageshow", handleCountdownResume);

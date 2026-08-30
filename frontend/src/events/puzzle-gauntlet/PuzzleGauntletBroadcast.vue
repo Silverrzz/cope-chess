@@ -773,7 +773,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 </script>
 
 <template>
-  <main class="gauntlet" :class="[`gauntlet--${isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`]">
+  <main class="gauntlet" :class="[`gauntlet--${view === 'arena' ? 'live' : isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`]">
     <div class="puzzle-pattern" aria-hidden="true"></div>
     <div v-if="confettiEnabled" class="confetti-layer" aria-hidden="true">
       <span v-for="burst in confettiBursts" :key="burst.id" class="confetti-burst" :class="`confetti-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%` }">
@@ -805,7 +805,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
       </Transition>
     </Teleport>
 
-    <section v-if="!isLive && !isComplete" class="countdown-stage">
+    <section v-if="view === 'event' && !isLive && !isComplete" class="countdown-stage">
       <div class="stage-spectators"><span>Current spectators</span><SpectatorCount :count="detail.spectator_count ?? 0" /></div>
       <div class="countdown-copy">
         <h1><span>Puzzle</span> Gauntlet</h1>
@@ -824,7 +824,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
       </section>
     </section>
 
-    <section v-else-if="isComplete" class="finish-stage">
+    <section v-else-if="view === 'event' && isComplete" class="finish-stage">
       <div class="stage-spectators"><span>Current spectators</span><SpectatorCount :count="detail.spectator_count ?? 0" /></div>
       <div class="finish-emblem"><AppIcon :name="winners.length ? 'trophy' : 'stop'" :size="42" /></div>
       <span class="kicker">{{ detail.event.status === "cancelled" ? "Run terminated" : "Gauntlet complete" }}</span>

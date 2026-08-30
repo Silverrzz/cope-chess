@@ -1297,6 +1297,26 @@ def register_api_routes(app: FastAPI) -> None:
             ),
         })
 
+    @app.get("/api/events")
+    def public_events(connection: sqlite3.Connection = Depends(web_app._database)):
+        events = list_events(connection, public_only=True)
+        current = next(
+            (item for item in events if item.status in CURRENT_EVENT_STATUSES),
+            None,
+        )
+        return _json({
+            "server_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "current": (
+                _event_summary_payload(connection, current, admin=False)
+                if current is not None
+                else None
+            ),
+            "events": [
+                _event_summary_payload(connection, event, admin=False)
+                for event in events
+            ],
+        })
+
     @app.get("/api/events/{slug}")
     def public_event(
         slug: str,
