@@ -19,6 +19,7 @@ export interface ApiErrorPayload {
 export interface SessionPayload {
   authenticated: boolean;
   admin_configured?: boolean;
+  repository_url?: string;
   secure_context?: boolean;
   csrf_token?: string | null;
   csrfToken?: string | null;

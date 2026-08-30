@@ -101,6 +101,7 @@ services:
     environment:
       <<: *cope-environment
       COPE_SERVICE_NAME: web
+      COPE_UPDATE_REPOSITORY_URL: ${COPE_UPDATE_REPOSITORY_URL:-}
     command: ["web", "--host", "0.0.0.0", "--port", "8701"]
     depends_on:
       migrate:

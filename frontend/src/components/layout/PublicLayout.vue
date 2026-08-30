@@ -7,12 +7,15 @@ import AppIcon from "@/components/ui/AppIcon.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
 import ThemeToggle from "@/components/ui/ThemeToggle.vue";
 import SettingsDrawer from "@/components/ui/SettingsDrawer.vue";
+import { useSessionStore } from "@/stores/session";
 import type { CurrentEventResponse } from "@/types/events";
 
 const route = useRoute();
+const session = useSessionStore();
 const menuOpen = ref(false);
 const currentEventPath = ref("");
 const compactGameLayout = computed(() => route.name === "tournament" || route.name === "event-arena");
+const repositoryUrl = computed(() => session.session?.repository_url ?? "");
 let eventRefreshTimer: number | undefined;
 
 const navItems = computed(() => [
@@ -71,6 +74,16 @@ watch(
           >
             {{ item.label }}
           </RouterLink>
+          <a
+            v-if="repositoryUrl"
+            class="public-nav__link"
+            :href="repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            @click="menuOpen = false"
+          >
+            GitHub
+          </a>
           <RouterLink class="public-nav__link public-nav__admin-mobile" to="/admin">Admin</RouterLink>
         </nav>
 

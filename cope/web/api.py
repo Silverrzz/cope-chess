@@ -355,6 +355,38 @@ def _bearer_credential(request: Request) -> str:
     return credential if scheme.lower() == "bearer" else ""
 
 
+def _public_update_repository_url() -> str:
+    raw = os.environ.get("COPE_UPDATE_REPOSITORY_URL", "").strip()
+    if not raw or raw.startswith(("/", ".")):
+        return ""
+    if "://" not in raw:
+        if ":" in raw:
+            authority, path = raw.split(":", 1)
+            host = authority.rsplit("@", 1)[-1]
+            raw = f"https://{host}/{path.lstrip('/')}"
+        else:
+            raw = f"https://{raw}"
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme not in {"git", "http", "https", "ssh"} or not parsed.hostname:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = parsed.hostname.lower()
+    netloc_host = f"[{host}]" if ":" in host else host
+    web_port = port if parsed.scheme in {"http", "https"} else None
+    netloc = (
+        netloc_host
+        if web_port in {None, 80, 443}
+        else f"{netloc_host}:{web_port}"
+    )
+    path = f"/{parsed.path.strip('/')}".removesuffix(".git")
+    if path == "/":
+        return ""
+    return urllib.parse.urlunsplit(("https", netloc, path, "", ""))
+
+
 def _artifact_client_is_authenticated(connection, credential: str) -> bool:
     if not credential:
         return False
@@ -628,6 +660,10 @@ class RatingListPayload(BaseModel):
 
 class TournamentStatusPayload(BaseModel):
     action: str = Field(min_length=1, max_length=20)
+
+
+class TournamentBulkStatusPayload(BaseModel):
+    action: Literal["pause", "resume"]
 
 
 class TournamentSchedulePayload(BaseModel):
@@ -933,6 +969,7 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "admin_configured": bool(token),
                 "authenticated": authenticated,
+                "repository_url": _public_update_repository_url(),
                 "secure_context": web_app._request_is_secure_or_local(request),
                 "csrf_token": (
                     web_app._csrf_token(request, token)
@@ -966,6 +1003,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "authenticated": True,
                 "csrf_token": web_app._csrf_for_nonce(token, nonce),
                 "message": "Signed in.",
+                "repository_url": _public_update_repository_url(),
             }
         )
         response.set_cookie(
@@ -2276,11 +2314,15 @@ def register_api_routes(app: FastAPI) -> None:
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
         event_tournament_ids = web_app._puzzle_gauntlet_tournament_ids(connection)
-        tournaments = tuple(
+        available_tournaments = tuple(
             tournament
             for tournament in list_tournaments(connection)
             if tournament.id not in event_tournament_ids
-            and (not status or tournament.status == status)
+        )
+        tournaments = tuple(
+            tournament
+            for tournament in available_tournaments
+            if not status or tournament.status == status
         )
         items = web_app._tournament_summaries(
             connection,
@@ -2292,6 +2334,14 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "tournaments": items,
                 "status_filter": status,
+                "running_count": sum(
+                    tournament.status == "running"
+                    for tournament in available_tournaments
+                ),
+                "paused_count": sum(
+                    tournament.status == "paused"
+                    for tournament in available_tournaments
+                ),
                 "statuses": [
                     "draft",
                     "scheduled",
@@ -2300,6 +2350,54 @@ def register_api_routes(app: FastAPI) -> None:
                     "finished",
                     "aborted",
                 ],
+            }
+        )
+
+    @app.post("/api/admin/tournaments/bulk-status")
+    def admin_bulk_tournament_status(
+        payload: TournamentBulkStatusPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        action = payload.action
+        source = "running" if action == "pause" else "paused"
+        target = "paused" if action == "pause" else "running"
+        event_tournament_ids = web_app._puzzle_gauntlet_tournament_ids(connection)
+        tournaments = tuple(
+            tournament
+            for tournament in list_tournaments(connection)
+            if tournament.id not in event_tournament_ids
+            and tournament.status == source
+        )
+        try:
+            for tournament in tournaments:
+                if action == "resume":
+                    resume_paused_tournament_games(connection, tournament.id)
+                set_tournament_status(connection, tournament.id, target)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if tournaments:
+            _publish_admin_change(web_app, request)
+        count = len(tournaments)
+        if count == 0:
+            message = f"No {source} tournaments to {action}."
+        elif action == "pause":
+            noun = "tournament" if count == 1 else "tournaments"
+            message = (
+                f"Pause requested for {count} {noun}. "
+                "Live games will freeze after their current move."
+            )
+        else:
+            noun = "tournament" if count == 1 else "tournaments"
+            message = f"Resumed {count} {noun} from their preserved games."
+        return _json(
+            {
+                "action": action,
+                "status": target,
+                "changed": count,
+                "message": message,
             }
         )
 

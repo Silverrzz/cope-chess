@@ -961,7 +961,14 @@ def _engine_source_dir(spec: EngineSpec) -> Path:
     if spec.distribution == "worker_local":
         if spec.worker_local_key is None:
             raise ValueError("worker-local engine has no local key")
-        return cache_root / "local" / spec.worker_local_key
+        candidates = tuple(
+            root / spec.worker_local_key
+            for root in _worker_local_roots()
+        )
+        for candidate in candidates:
+            if _worker_local_binary_ready(candidate / "engine"):
+                return candidate
+        return candidates[0]
     cache_key = spec.build_hash if spec.artifact is None else spec.artifact.sha256
     prefix = "build" if spec.artifact is None else "artifact"
     return cache_root / f"{prefix}-{cache_key}"
@@ -974,33 +981,41 @@ def _engine_cache_root() -> Path:
     return (_effective_home_dir() / ".cope-worker" / "engines").resolve()
 
 
-def discover_worker_local_engine_keys() -> tuple[str, ...]:
-    root = _engine_cache_root() / "local"
-    if not root.is_dir():
-        return ()
+def _worker_local_roots() -> tuple[Path, ...]:
+    configured = (_engine_cache_root() / "local").resolve()
+    home = (
+        _effective_home_dir() / ".cope-worker" / "engines" / "local"
+    ).resolve()
+    return tuple(dict.fromkeys((configured, home)))
+
+
+def _worker_local_binary_ready(binary: Path) -> bool:
     try:
-        directories = tuple(root.iterdir())
+        ready = binary.is_file() and binary.stat().st_size > 0
     except OSError:
-        LOG.exception("could not inspect worker-local engine directory %s", root)
-        return ()
-    keys: list[str] = []
-    for directory in directories:
+        return False
+    if not ready:
+        return False
+    return os.name != "posix" or os.access(binary, os.X_OK)
+
+
+def discover_worker_local_engine_keys() -> tuple[str, ...]:
+    keys: set[str] = set()
+    for root in _worker_local_roots():
         try:
-            directory_ready = directory.is_dir()
+            directories = tuple(root.iterdir()) if root.is_dir() else ()
         except OSError:
+            LOG.exception("could not inspect worker-local engine directory %s", root)
             continue
-        if not directory_ready or _WORKER_LOCAL_KEY.fullmatch(directory.name) is None:
-            continue
-        binary = directory / "engine"
-        try:
-            binary_ready = binary.is_file() and binary.stat().st_size > 0
-        except OSError:
-            continue
-        if not binary_ready:
-            continue
-        if os.name == "posix" and not os.access(binary, os.X_OK):
-            continue
-        keys.append(directory.name)
+        for directory in directories:
+            try:
+                directory_ready = directory.is_dir()
+            except OSError:
+                continue
+            if not directory_ready or _WORKER_LOCAL_KEY.fullmatch(directory.name) is None:
+                continue
+            if _worker_local_binary_ready(directory / "engine"):
+                keys.add(directory.name)
     return tuple(sorted(keys))
 
 

@@ -21,7 +21,19 @@ interface TournamentListItem {
   summary?: { finished: number; total: number }
   estimate?: TournamentEstimate
 }
-interface Response { tournaments: TournamentListItem[]; status_filter?: string | null; statuses: string[] }
+interface Response {
+  tournaments: TournamentListItem[]
+  status_filter?: string | null
+  running_count: number
+  paused_count: number
+  statuses: string[]
+}
+
+interface BulkStatusResponse {
+  changed: number
+  message: string
+  status: string
+}
 
 const tournamentStatusOrder: Record<string, number> = {
   running: 0,
@@ -42,6 +54,7 @@ const error = ref('')
 const query = ref('')
 const deleting = ref<number | null>(null)
 const copying = ref<number | null>(null)
+const bulkPending = ref<'pause' | 'resume' | null>(null)
 const status = computed(() => typeof route.query.status === 'string' ? route.query.status : '')
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
@@ -69,6 +82,30 @@ async function load(): Promise<void> {
 
 async function setStatus(next: string): Promise<void> {
   await router.push({ query: next ? { status: next } : {} })
+}
+
+async function bulkStatus(action: 'pause' | 'resume'): Promise<void> {
+  const count = action === 'pause' ? data.value?.running_count ?? 0 : data.value?.paused_count ?? 0
+  const accepted = await confirm({
+    title: `${action === 'pause' ? 'Pause' : 'Resume'} all ${action === 'pause' ? 'running' : 'paused'} tournaments?`,
+    message: action === 'pause'
+      ? `Pause ${count} running tournament${count === 1 ? '' : 's'}? Live games will freeze after their current move.`
+      : `Resume ${count} paused tournament${count === 1 ? '' : 's'} from their preserved games?`,
+    confirmLabel: `${action === 'pause' ? 'Pause' : 'Resume'} all`,
+  })
+  if (!accepted) return
+  bulkPending.value = action
+  error.value = ''
+  try {
+    const response = await api.post<BulkStatusResponse>('/api/admin/tournaments/bulk-status', { body: { action } })
+    toast.success(response.message)
+    await load()
+  } catch (cause) {
+    toast.error(cause)
+    error.value = errorText(cause)
+  } finally {
+    bulkPending.value = null
+  }
 }
 
 async function remove(item: TournamentListItem): Promise<void> {
@@ -130,7 +167,11 @@ onMounted(load)
 <template>
   <div class="admin-page page-stack">
     <AdminPageHeader title="Tournaments">
-      <template #actions><RouterLink class="button button--primary" to="/admin/tournaments/new">New tournament</RouterLink></template>
+      <template #actions>
+        <button class="button button--secondary" type="button" :disabled="loading || !!bulkPending || !data?.running_count" @click="bulkStatus('pause')"><AppIcon name="pause" :size="16" />{{ bulkPending === 'pause' ? 'Pausing…' : `Pause all${data?.running_count ? ` (${data.running_count})` : ''}` }}</button>
+        <button class="button button--secondary" type="button" :disabled="loading || !!bulkPending || !data?.paused_count" @click="bulkStatus('resume')"><AppIcon name="play" :size="16" />{{ bulkPending === 'resume' ? 'Resuming…' : `Resume all${data?.paused_count ? ` (${data.paused_count})` : ''}` }}</button>
+        <RouterLink class="button button--primary" to="/admin/tournaments/new">New tournament</RouterLink>
+      </template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
 
