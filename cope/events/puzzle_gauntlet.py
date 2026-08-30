@@ -46,7 +46,7 @@ from .registry import EventModule, register_event_module
 
 MODULE_KEY = "puzzle-gauntlet"
 MODULE_VERSION = 1
-PUZZLE_GAUNTLET_TRANSITION_MS = 5000
+PUZZLE_GAUNTLET_TRANSITION_MS = 2000
 _UCI_MOVE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$", re.IGNORECASE)
 _CHEER_CLIENT = re.compile(r"^[A-Za-z0-9-]{16,64}$")
 
