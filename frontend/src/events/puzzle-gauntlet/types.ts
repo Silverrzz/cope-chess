@@ -44,6 +44,14 @@ export interface GauntletRound {
   void: boolean;
   correct_ids: number[];
   eliminated_ids: number[];
+  submissions: GauntletSubmission[];
+}
+
+export interface GauntletSubmission {
+  entry_id: number;
+  move_uci: string;
+  outcome: "correct" | "incorrect" | "saved";
+  elapsed_ms: number | null;
 }
 
 export interface GauntletTransition {

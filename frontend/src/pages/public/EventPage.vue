@@ -170,16 +170,14 @@ function sessionTiming(session: EventSession): string {
             <div><span v-if="connected" class="event-connected">Live updates</span><StatusPill :status="data.event.status" /></div>
           </div>
           <div class="event-hero__body">
-            <span class="event-kicker">Unrated exhibition · {{ data.event.featured ? "COPE headline event" : "COPE special event" }}</span>
-            <p v-if="data.event.subtitle" class="event-subtitle">{{ data.event.subtitle }}</p>
+            <span class="event-kicker">{{ data.handler.label }}</span>
             <h1>{{ data.event.title }}</h1>
-            <p class="event-deck">{{ data.event.summary || "A one-off event created beyond the constraints of the rating circuit." }}</p>
           </div>
           <dl class="event-hero__facts">
             <div><dt>Starts</dt><dd>{{ dateLabel(data.event.scheduled_start_at) }}</dd></div>
             <div><dt>Cast</dt><dd>{{ data.counts.cast }}</dd></div>
             <div><dt>Programme</dt><dd>{{ data.counts.sessions }} sessions</dd></div>
-            <div><dt>Format</dt><dd>Special event</dd></div>
+            <div><dt>Format</dt><dd>{{ data.handler.label }}</dd></div>
           </dl>
         </div>
       </header>
@@ -197,7 +195,7 @@ function sessionTiming(session: EventSession): string {
         <div class="event-grid">
           <div class="event-main">
             <section v-if="programme.length || ungroupedSessions.length" class="event-section programme-section">
-              <header><span>Run of show</span><h2>Programme</h2></header>
+              <header><h2>Programme</h2></header>
               <div class="programme">
                 <article v-for="group in programme" :key="group.stage.id" class="programme-stage">
                   <div class="stage-marker"><span></span></div>
@@ -224,7 +222,7 @@ function sessionTiming(session: EventSession): string {
             </section>
 
             <section v-if="data.contests.length" class="event-section">
-              <header><span>The action</span><h2>Contests</h2></header>
+              <header><h2>Contests</h2></header>
               <div class="contest-list">
                 <article v-for="contest in data.contests" :key="contest.id">
                   <div class="contest-copy"><StatusPill :status="contest.status" /><h3>{{ contest.title }}</h3><p v-if="contest.summary">{{ contest.summary }}</p></div>
@@ -235,7 +233,7 @@ function sessionTiming(session: EventSession): string {
             </section>
 
             <section v-if="data.updates.length" class="event-section">
-              <header><span>Story feed</span><h2>Latest updates</h2></header>
+              <header><h2>Latest updates</h2></header>
               <div class="update-list">
                 <article v-for="update in data.updates" :key="update.id" :class="{ pinned: update.pinned }">
                   <div><span>{{ update.kind }}</span><time :datetime="update.occurred_at">{{ dateLabel(update.occurred_at) }}</time></div>
@@ -244,16 +242,15 @@ function sessionTiming(session: EventSession): string {
               </div>
             </section>
 
-            <section v-if="data.event.description || data.event.rules" class="event-section about-section">
-              <header><span>Event notes</span><h2>About this event</h2></header>
-              <div v-if="data.event.description"><h3>The concept</h3><p>{{ data.event.description }}</p></div>
+            <section v-if="data.event.rules" class="event-section about-section">
+              <header><h2>Rules</h2></header>
               <details v-if="data.event.rules"><summary>Rules and format <span>+</span></summary><p>{{ data.event.rules }}</p></details>
             </section>
           </div>
 
           <aside class="event-sidebar">
             <section v-if="topCast.length" class="sidebar-card cast-card">
-              <header><span>Meet the field</span><h2>Cast</h2></header>
+              <header><h2>Cast</h2></header>
               <div class="cast-list">
                 <article v-for="member in topCast" :key="member.id">
                   <span class="cast-avatar" :style="castStyle(member)">{{ (member.short_name || member.display_name).slice(0, 2).toUpperCase() }}</span>
@@ -263,7 +260,7 @@ function sessionTiming(session: EventSession): string {
             </section>
 
             <section v-if="data.awards.length" class="sidebar-card awards-card">
-              <header><span>Honours</span><h2>Awards</h2></header>
+              <header><h2>Awards</h2></header>
               <article v-for="award in data.awards" :key="award.id"><span aria-hidden="true">◇</span><div><strong>{{ award.title }}</strong><p>{{ award.recipient_label || award.description }}</p></div></article>
             </section>
 
@@ -289,10 +286,7 @@ function sessionTiming(session: EventSession): string {
 .event-connected::before { display: inline-block; width: .38rem; height: .38rem; margin-right: .35rem; border-radius: 50%; background: currentColor; content: ""; }
 .event-hero__body { max-width: 70rem; }
 .event-kicker { color: var(--event-accent); font-size: .68rem; font-weight: 820; letter-spacing: .14em; text-transform: uppercase; }
-.event-subtitle { margin: 1.2rem 0 .45rem; color: var(--color-text-muted, #607080); font-size: clamp(1rem, 2vw, 1.25rem); font-weight: 650; }
 .event-hero h1 { max-width: 14ch; margin: 1rem 0 0; font-size: clamp(3.2rem, 9vw, 8.2rem); letter-spacing: -.075em; line-height: .85; text-wrap: balance; }
-.event-subtitle + h1 { margin-top: 0; }
-.event-deck { max-width: 55ch; margin: 1.5rem 0 0; color: var(--color-text-muted, #607080); font-size: clamp(.95rem, 1.8vw, 1.18rem); line-height: 1.7; }
 .event-hero__facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: hidden; margin: 0; border: 1px solid var(--color-border, #d5dbe1); border-radius: .8rem; background: var(--color-border, #d5dbe1); }
 .event-hero__facts div { padding: .85rem 1rem; background: color-mix(in srgb, var(--color-surface, #fff) 88%, transparent); }
 .event-hero__facts dt { color: var(--color-text-muted, #607080); font-size: .6rem; font-weight: 780; letter-spacing: .09em; text-transform: uppercase; }

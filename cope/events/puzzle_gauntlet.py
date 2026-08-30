@@ -310,6 +310,43 @@ def _attempt_rows(
     }
 
 
+def _round_submissions(connection: sqlite3.Connection, event_id: int) -> dict[int, list[dict[str, Any]]]:
+    submissions: dict[int, list[dict[str, Any]]] = {}
+    rows = connection.execute(
+        """
+        SELECT attempt.puzzle_id, attempt.cast_member_id, attempt.outcome,
+               attempt.move_uci, attempt.elapsed_ms,
+               move.uci AS recorded_move_uci, move.time_ms AS recorded_elapsed_ms
+        FROM puzzle_gauntlet_attempts attempt
+        LEFT JOIN LATERAL (
+          SELECT uci, time_ms FROM moves
+          WHERE game_id = attempt.game_id AND is_book = 0
+          ORDER BY ply LIMIT 1
+        ) move ON TRUE
+        WHERE attempt.event_id = ?
+        ORDER BY attempt.puzzle_id, attempt.id
+        """,
+        (event_id,),
+    )
+    for row in rows:
+        move_uci = str(row["move_uci"] or row["recorded_move_uci"] or "").lower()
+        if not move_uci:
+            continue
+        submissions.setdefault(int(row["puzzle_id"]), []).append(
+            {
+                "entry_id": int(row["cast_member_id"]),
+                "move_uci": move_uci,
+                "outcome": row["outcome"],
+                "elapsed_ms": (
+                    row["elapsed_ms"]
+                    if row["elapsed_ms"] is not None
+                    else row["recorded_elapsed_ms"]
+                ),
+            }
+        )
+    return submissions
+
+
 def _time_for_position(config: Any, position: int) -> int:
     return max(
         int(config["minimum_time_ms"]),
@@ -389,6 +426,12 @@ def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool)
         (item for item in available_puzzles if item["id"] == next_puzzle_id),
         None,
     )
+    submissions_by_puzzle = _round_submissions(connection, event.id)
+    rounds = []
+    for stored_round in state.get("rounds", []):
+        round_payload = dict(stored_round)
+        round_payload["submissions"] = submissions_by_puzzle.get(int(round_payload["puzzle_id"]), [])
+        rounds.append(round_payload)
     tournament = None
     worker = None
     if config["tournament_id"] is not None:
@@ -431,7 +474,7 @@ def _payload(connection: sqlite3.Connection, event: EventRecord, *, admin: bool)
         "current_puzzle": current_puzzle,
         "next_puzzle": next_puzzle,
         "transition": transition,
-        "rounds": state.get("rounds", []),
+        "rounds": rounds,
         "winner_ids": state.get("winner_ids", []),
         "tournament": tournament,
         "worker": worker,
@@ -1237,9 +1280,9 @@ def _provision(connection: sqlite3.Connection) -> int:
         handler_key=MODULE_KEY,
         handler_version=MODULE_VERSION,
         title="Puzzle Gauntlet",
-        subtitle="Every engine. Every puzzle. One shared clock.",
-        summary="Every engine faces the same tactical positions as the clock tightens round after round.",
-        description="A live engine survival event built around shared tactical tests, visible calculation, and a steadily shrinking clock.",
+        subtitle="",
+        summary="",
+        description="",
         rules="Every active engine searches the same position independently. Engines that miss the accepted move are eliminated. If every engine misses, the round is void and everyone survives. A sole survivor wins immediately; if the puzzle list is exhausted, every remaining engine wins.",
         status="draft",
         featured=True,

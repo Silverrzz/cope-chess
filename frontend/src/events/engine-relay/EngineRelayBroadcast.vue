@@ -1101,7 +1101,7 @@ function handleUserActivation(): void {
 
       <div class="clash-hero__content">
         <header class="clash-heading">
-          <span class="clash-kicker"><AppIcon name="trophy" :size="15" /> {{ isFinale ? 'Sudden death championship' : 'Featured showcase event' }}</span>
+          <span class="clash-kicker"><AppIcon name="trophy" :size="15" /> {{ isFinale ? 'Engine Relay Finale' : 'Engine Relay' }}</span>
           <h1 id="clash-title">{{ detail.event.title }}</h1>
         </header>
 
@@ -1124,7 +1124,7 @@ function handleUserActivation(): void {
               <small><i></i>{{ team.thinking ? "Playing now" : team.current ? "On relay" : isLive ? "Ready" : "Relay team" }}</small>
             </div>
           </article>
-          <p v-if="!showcaseTeams.length" class="clash-orbit__empty">Teams will join the circuit when the lineup is locked.</p>
+          <p v-if="!showcaseTeams.length" class="clash-orbit__empty">No teams configured.</p>
         </div>
 
         <div v-if="isLive" class="clash-actions">

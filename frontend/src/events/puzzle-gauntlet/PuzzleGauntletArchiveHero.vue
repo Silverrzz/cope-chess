@@ -49,15 +49,14 @@ function themeColor(key: string, fallback: string): string {
     <div class="puzzle-field" aria-hidden="true"></div>
     <div class="gauntlet-mark" aria-hidden="true"><span></span><i></i><AppIcon name="puzzle" size="clamp(7rem, 13vw, 12rem)" /></div>
     <div class="gauntlet-copy">
-      <span class="gauntlet-kicker"><AppIcon name="trophy" :size="16" />{{ current ? isLive ? "Gauntlet live" : "Next challenge" : "Puzzle archive" }}</span>
+      <span class="gauntlet-kicker"><AppIcon name="trophy" :size="16" />{{ current ? isLive ? "Live" : "Upcoming" : "Completed" }}</span>
       <h2>{{ event.title }}</h2>
-      <p>{{ event.summary || event.subtitle }}</p>
       <div v-if="current && remainingMs > 0" class="gauntlet-countdown" aria-label="Time until event">
         <span v-for="part in countdown" :key="part.label"><strong>{{ String(part.value).padStart(2, "0") }}</strong><small>{{ part.label }}</small></span>
       </div>
       <div class="gauntlet-meta">
-        <span>{{ current && isLive ? "Engines are solving now" : dateLabel }}</span>
-        <strong>{{ current ? "Open event" : "Inspect the gauntlet" }} <AppIcon name="arrow-right" :size="18" /></strong>
+        <span>{{ current && isLive ? "Live now" : dateLabel }}</span>
+        <strong>{{ current ? "View event" : "View arena" }} <AppIcon name="arrow-right" :size="18" /></strong>
       </div>
     </div>
   </RouterLink>
@@ -71,7 +70,6 @@ function themeColor(key: string, fallback: string): string {
 .gauntlet-kicker { display: inline-flex; align-items: center; gap: .55rem; color: var(--archive-primary); font-size: .72rem; font-weight: 850; letter-spacing: .17em; text-transform: uppercase; }
 .gauntlet-copy h2 { max-width: 10ch; margin: .8rem 0 0; font-size: clamp(3.5rem, 8.5vw, 8.2rem); font-weight: 900; letter-spacing: -.075em; line-height: .84; text-transform: uppercase; text-wrap: balance; }
 .gauntlet-copy h2::first-line { color: #f8f7ff; }
-.gauntlet-copy > p { max-width: 48rem; margin: 1.4rem 0 0; color: #aaa5b9; font-size: clamp(.86rem, 1.35vw, 1.05rem); line-height: 1.65; }
 .gauntlet-countdown { display: flex; width: fit-content; margin-top: 1.8rem; overflow: hidden; border: 1px solid rgb(167 139 250 / 28%); border-radius: .7rem; background: rgb(14 10 27 / 72%); box-shadow: 0 1rem 3rem rgb(0 0 0 / 25%); }
 .gauntlet-countdown span { display: grid; min-width: clamp(4.1rem, 7vw, 6.2rem); padding: .7rem .9rem; border-left: 1px solid rgb(167 139 250 / 17%); }
 .gauntlet-countdown span:first-child { border-left: 0; }
@@ -86,5 +84,5 @@ function themeColor(key: string, fallback: string): string {
 .gauntlet-archive:hover .gauntlet-mark { transform: translateY(-50%) rotate(47deg) scale(1.02); transition: transform 350ms ease; }
 .gauntlet-archive:hover .gauntlet-meta strong { text-decoration: underline; text-underline-offset: .25rem; }
 .gauntlet-archive:focus-visible { outline: 3px solid #a78bfa; outline-offset: -3px; }
-@media (max-width: 58rem) { .gauntlet-archive { min-height: 31rem; padding: 2rem 1.25rem; }.gauntlet-copy { width: 100%; }.gauntlet-copy h2 { max-width: 11ch; }.gauntlet-copy > p { max-width: 34rem; }.gauntlet-mark { top: 34%; right: -6rem; opacity: .55; }.gauntlet-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
+@media (max-width: 58rem) { .gauntlet-archive { min-height: 31rem; padding: 2rem 1.25rem; }.gauntlet-copy { width: 100%; }.gauntlet-copy h2 { max-width: 11ch; }.gauntlet-mark { top: 34%; right: -6rem; opacity: .55; }.gauntlet-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
 </style>

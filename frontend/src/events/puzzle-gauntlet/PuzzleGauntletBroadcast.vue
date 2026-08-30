@@ -14,7 +14,7 @@ import AppIcon from "@/components/ui/AppIcon.vue";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventDetailResponse } from "@/types/events";
 
-import type { GauntletEngineInfo, GauntletEntry, GauntletPayload } from "./types";
+import type { GauntletEngineInfo, GauntletEntry, GauntletPayload, GauntletPuzzle, GauntletRound } from "./types";
 
 interface ConfettiPiece {
   id: number;
@@ -63,6 +63,7 @@ const { confettiEnabled, eventMusicEnabled, setEventMusicEnabled } = useViewerSe
 const router = useRouter();
 const payload = computed(() => props.detail.custom as GauntletPayload);
 const focusedId = ref<number | null>(null);
+const selectedRoundId = ref<number | null>(null);
 const now = ref(Date.now());
 const streamState = ref<"connecting" | "live" | "offline">("connecting");
 const infoByEngine = ref<Record<number, GauntletEngineInfo>>({});
@@ -109,41 +110,77 @@ const isLive = computed(() => {
 const activeEntries = computed(() => payload.value.entries.filter((entry) => entry.status === "active"));
 const winners = computed(() => payload.value.entries.filter((entry) => entry.winner));
 const showConfettiButtons = computed(() => (!isLive.value && !isComplete.value) || (isComplete.value && winners.value.length > 0));
-const focused = computed(() => payload.value.entries.find((entry) => entry.id === focusedId.value) ?? null);
+const selectedRound = computed(() => payload.value.rounds.find((round) => round.puzzle_id === selectedRoundId.value) ?? null);
+const viewingHistory = computed(() => selectedRound.value !== null);
+const viewedPuzzle = computed<GauntletPuzzle | null>(() => {
+  const round = selectedRound.value;
+  if (!round) return payload.value.current_puzzle;
+  return {
+    id: round.puzzle_id,
+    position: round.position,
+    title: round.title,
+    fen: round.fen,
+    solutions: round.solutions,
+    time_limit_ms: Math.max(
+      payload.value.settings.minimum_time_ms,
+      payload.value.settings.start_time_ms - payload.value.settings.decrement_ms * round.position,
+    ),
+    completed: true,
+  };
+});
+const focused = computed(() => viewingHistory.value ? null : payload.value.entries.find((entry) => entry.id === focusedId.value) ?? null);
 const focusedInfo = computed(() => focused.value ? infoByEngine.value[Number(focused.value.engine_id)] : undefined);
-const boardOrientation = computed<Color>(() => payload.value.current_puzzle?.fen.split(/\s+/)[1] === "b" ? "black" : "white");
-const puzzleNumber = computed(() => (payload.value.current_puzzle?.position ?? 0) + 1);
+const boardOrientation = computed<Color>(() => viewedPuzzle.value?.fen.split(/\s+/)[1] === "b" ? "black" : "white");
+const puzzleNumber = computed(() => (viewedPuzzle.value?.position ?? 0) + 1);
 const totalPuzzleCount = computed(() => payload.value.puzzle_count ?? payload.value.puzzles.length);
 const solvedPercent = computed(() => totalPuzzleCount.value ? Math.round(payload.value.rounds.length / totalPuzzleCount.value * 100) : 0);
+const viewedProgressPercent = computed(() => viewingHistory.value && totalPuzzleCount.value
+  ? Math.round(puzzleNumber.value / totalPuzzleCount.value * 100)
+  : solvedPercent.value);
 const puzzlesLeft = computed(() => Math.max(0, totalPuzzleCount.value - payload.value.rounds.length));
 
-const proposals = computed(() => payload.value.entries
-  .filter((entry) => entry.status === "active" || entry.attempt?.game_status === "finished")
-  .map((entry) => ({ entry, move: proposedMove(entry) }))
-  .filter((item): item is { entry: GauntletEntry; move: string } => !!item.move));
+const proposals = computed(() => {
+  if (selectedRound.value) {
+    return selectedRound.value.submissions
+      .map((submission) => ({
+        entry: payload.value.entries.find((entry) => entry.id === submission.entry_id),
+        move: normalizedMove(submission.move_uci),
+        outcome: submission.outcome,
+      }))
+      .filter((item): item is { entry: GauntletEntry; move: string; outcome: "correct" | "incorrect" | "saved" } => !!item.entry && !!item.move);
+  }
+  return payload.value.entries
+    .filter((entry) => entry.status === "active" || entry.attempt?.game_status === "finished")
+    .map((entry) => ({ entry, move: proposedMove(entry), outcome: entry.attempt?.outcome ?? "pending" }))
+    .filter((item): item is { entry: GauntletEntry; move: string; outcome: "pending" | "correct" | "incorrect" | "saved" } => !!item.move);
+});
 
 const moveGroups = computed(() => {
-  const groups = new Map<string, GauntletEntry[]>();
+  const groups = new Map<string, Array<{ entry: GauntletEntry; outcome: string }>>();
   for (const proposal of proposals.value) {
-    const entries = groups.get(proposal.move) ?? [];
-    entries.push(proposal.entry);
-    groups.set(proposal.move, entries);
+    const submissions = groups.get(proposal.move) ?? [];
+    submissions.push({ entry: proposal.entry, outcome: proposal.outcome });
+    groups.set(proposal.move, submissions);
   }
   const sorted = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
-  const solutions = new Set((payload.value.current_puzzle?.solutions ?? []).map((move) => move.toLowerCase()));
-  return sorted.map(([move, entries]) => {
-    const orderedEntries = [...entries].sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
+  const solutions = new Set((viewedPuzzle.value?.solutions ?? []).map((move) => move.toLowerCase()));
+  return sorted.map(([move, submissions]) => {
+    const orderedEntries = submissions.map((item) => item.entry).sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
     return {
       move,
       entries: orderedEntries,
       count: orderedEntries.length,
       solution: solutions.has(move.toLowerCase()),
+      successful: submissions.some((item) => ["correct", "saved"].includes(item.outcome)),
     };
   });
 });
 const rankedMoveGroups = computed(() => [...moveGroups.value].sort((left, right) => right.count - left.count || left.move.localeCompare(right.move)));
 const mostPopularMove = computed(() => rankedMoveGroups.value[0] ?? null);
-const focusOptions = computed(() => activeEntries.value.map((entry) => ({ id: String(entry.id), name: `${entry.name} ${entry.version}` })));
+const proposalFieldCount = computed(() => viewingHistory.value
+  ? selectedRound.value?.submissions.length ?? 0
+  : Math.max(activeEntries.value.length, payload.value.entries.filter((entry) => entry.attempt !== null).length));
+const focusOptions = computed(() => viewingHistory.value ? [] : activeEntries.value.map((entry) => ({ id: String(entry.id), name: `${entry.name} ${entry.version}` })));
 const followedEngineId = computed({
   get: () => focusedId.value === null ? "" : String(focusedId.value),
   set: (value: string) => { focusedId.value = value ? Number(value) : null; },
@@ -177,7 +214,7 @@ const boardArrows = computed<BoardArrow[]>(() => {
     return {
       move: group.move,
       color: group.move === focusedMove ? "white" : "black",
-      fillColor: muted || !group.entries.some((entry) => entry.status === "active") ? KNOCKOUT_GRAY : COPE_BLUE,
+      fillColor: muted || (viewingHistory.value ? !group.successful : !group.entries.some((entry) => entry.status === "active")) ? KNOCKOUT_GRAY : COPE_BLUE,
       ...(group.solution && !muted ? { outlineColor: "#22c55e" } : {}),
       label: String(group.count),
     };
@@ -212,6 +249,7 @@ const scheduleLabel = computed(() => {
 });
 
 const searchRemainingMs = computed(() => {
+  if (viewingHistory.value) return null;
   const puzzle = payload.value.current_puzzle;
   const startedAt = payload.value.entries
     .map((entry) => entry.attempt?.started_at ? Date.parse(entry.attempt.started_at) : Number.NaN)
@@ -222,12 +260,12 @@ const searchRemainingMs = computed(() => {
 });
 
 const searchPercent = computed(() => {
-  const limit = payload.value.current_puzzle?.time_limit_ms ?? 0;
+  const limit = viewedPuzzle.value?.time_limit_ms ?? 0;
   if (!limit || searchRemainingMs.value === null) return 100;
   return Math.max(0, Math.min(100, searchRemainingMs.value / limit * 100));
 });
 const searchUrgent = computed(() => searchRemainingMs.value !== null && searchRemainingMs.value < 5000);
-const isIntermission = computed(() => payload.value.phase === "intermission" && payload.value.transition !== null);
+const isIntermission = computed(() => !viewingHistory.value && payload.value.phase === "intermission" && payload.value.transition !== null);
 
 watch(
   () => payload.value.entries.map((entry) => `${entry.id}:${entry.status}`).join("|"),
@@ -453,7 +491,7 @@ function proposedMove(entry: GauntletEntry | null): string {
 }
 
 function timeLabel(value: number | null): string {
-  if (value === null) return formatSeconds(payload.value.current_puzzle?.time_limit_ms ?? payload.value.settings.start_time_ms);
+  if (value === null) return formatSeconds(viewedPuzzle.value?.time_limit_ms ?? payload.value.settings.start_time_ms);
   return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
 }
 
@@ -475,13 +513,26 @@ function completedPuzzles(entry: GauntletEntry): number {
   return eliminatedIndex < 0 ? payload.value.rounds.length : eliminatedIndex;
 }
 
+function selectRound(round: GauntletRound): void {
+  selectedRoundId.value = round.puzzle_id;
+  focusedId.value = null;
+  fenCopied.value = false;
+  scheduleArenaFit();
+}
+
+function showLatestPuzzle(): void {
+  selectedRoundId.value = null;
+  fenCopied.value = false;
+  scheduleArenaFit();
+}
+
 function appendChatMessage(message: ChatMessage): void {
   if (message.id !== undefined && props.detail.chat_messages.some((item) => String(item.id) === String(message.id))) return;
   props.detail.chat_messages.push(message);
 }
 
 async function copyFen(): Promise<void> {
-  const fen = payload.value.current_puzzle?.fen;
+  const fen = viewedPuzzle.value?.fen;
   if (!fen) return;
   try {
     if (navigator.clipboard?.writeText) {
@@ -828,11 +879,9 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
       <div class="stage-spectators"><span>Current spectators</span><SpectatorCount :count="detail.spectator_count ?? 0" /></div>
       <div class="finish-emblem"><AppIcon :name="winners.length ? 'trophy' : 'stop'" :size="42" /></div>
       <span class="kicker">{{ detail.event.status === "cancelled" ? "Run terminated" : "Gauntlet complete" }}</span>
-      <h1 v-if="winners.length === 1"><span>{{ winners[0]?.name }}</span> survives</h1>
-      <h1 v-else-if="winners.length">Shared <span>victory</span></h1>
-      <h1 v-else>No winner <span>declared</span></h1>
-      <p v-if="winners.length === 1">The last engine standing after {{ payload.rounds.length }} {{ payload.rounds.length === 1 ? "puzzle" : "puzzles" }}.</p>
-      <p v-else-if="!winners.length">The event ended before an engine could claim the gauntlet.</p>
+      <h1 v-if="winners.length === 1"><span>{{ winners[0]?.name }}</span> wins</h1>
+      <h1 v-else-if="winners.length">Joint <span>winners</span></h1>
+      <h1 v-else><span>No winner</span></h1>
       <div v-if="winners.length" class="winner-lineup">
         <article v-for="winner in winners" :key="winner.id"><i>{{ engineInitials(winner) }}</i><strong>{{ winner.name }}</strong><span>{{ winner.version }}</span></article>
       </div>
@@ -848,7 +897,8 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
             <StatusPill :status="payload.tournament?.status || detail.event.status" />
             <SpectatorCount :count="detail.spectator_count ?? 0" />
           </div>
-          <p v-if="isIntermission">Puzzle {{ puzzleNumber }} complete / {{ activeEntries.length }} {{ activeEntries.length === 1 ? "engine remains" : "engines remain" }}</p>
+          <p v-if="viewingHistory">Reviewing Puzzle {{ puzzleNumber }} / {{ proposalFieldCount }} final {{ proposalFieldCount === 1 ? "submission" : "submissions" }}</p>
+          <p v-else-if="isIntermission">Puzzle {{ puzzleNumber }} complete / {{ activeEntries.length }} {{ activeEntries.length === 1 ? "engine remains" : "engines remain" }}</p>
           <p v-else>Puzzle {{ puzzleNumber }} of {{ totalPuzzleCount }} / {{ activeEntries.length }} {{ activeEntries.length === 1 ? "engine remains" : "engines remain" }}</p>
         </div>
         <div class="tournament-heading__controls">
@@ -867,25 +917,25 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
         <div class="engine-column">
           <article class="viewer-card puzzle-card" :class="{ 'puzzle-card--urgent': searchUrgent }">
             <header>
-              <div><span>Current puzzle</span><strong>{{ payload.current_puzzle?.title || `Puzzle ${puzzleNumber}` }}</strong></div>
-              <span class="side-to-move">{{ boardOrientation === "white" ? "White" : "Black" }} to move</span>
+              <div><span>{{ viewingHistory ? "Archived puzzle" : "Current puzzle" }}</span><strong>{{ viewedPuzzle?.title || `Puzzle ${puzzleNumber}` }}</strong></div>
+              <div class="puzzle-card__actions"><span class="side-to-move">{{ boardOrientation === "white" ? "White" : "Black" }} to move</span><button v-if="viewingHistory" type="button" @click="showLatestPuzzle">Latest puzzle</button></div>
             </header>
             <div class="puzzle-clock">
-              <span>{{ searchRemainingMs === null ? "Waiting for engines" : "Time remaining" }}</span>
-              <time>{{ timeLabel(searchRemainingMs) }}</time>
+              <span>{{ viewingHistory ? "Final submissions" : searchRemainingMs === null ? "Waiting for engines" : "Time remaining" }}</span>
+              <time>{{ viewingHistory ? proposalFieldCount : timeLabel(searchRemainingMs) }}</time>
               <i><span :style="{ width: `${searchPercent}%` }"></span></i>
             </div>
             <dl class="puzzle-details">
               <div>
                 <dt>FEN</dt>
                 <dd class="fen-value">
-                  <code :title="payload.current_puzzle?.fen || undefined">{{ payload.current_puzzle?.fen || "Waiting for puzzle" }}</code>
-                  <button type="button" :disabled="!payload.current_puzzle?.fen" :title="fenCopied ? 'Copied' : 'Copy FEN'" :aria-label="fenCopied ? 'FEN copied' : 'Copy FEN'" @click="copyFen">
+                  <code :title="viewedPuzzle?.fen || undefined">{{ viewedPuzzle?.fen || "Waiting for puzzle" }}</code>
+                  <button type="button" :disabled="!viewedPuzzle?.fen" :title="fenCopied ? 'Copied' : 'Copy FEN'" :aria-label="fenCopied ? 'FEN copied' : 'Copy FEN'" @click="copyFen">
                     <AppIcon :name="fenCopied ? 'check' : 'copy'" :size="14" />
                   </button>
                 </dd>
               </div>
-              <div><dt>Correct solution</dt><dd class="solution-value">{{ payload.current_puzzle?.solutions?.join(" / ") || "Pending" }}</dd></div>
+              <div><dt>Correct solution</dt><dd class="solution-value">{{ viewedPuzzle?.solutions?.join(" / ") || "Pending" }}</dd></div>
             </dl>
           </article>
 
@@ -906,8 +956,8 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
               <div class="focus-pv"><span>Principal variation</span><p>{{ focusedInfo?.engine_data.pv || focused.attempt?.move_uci || "The calculation stream will appear when this engine begins searching." }}</p></div>
             </template>
             <template v-else>
-              <header class="overview-heading"><div><span>Field overview</span><strong>Engine consensus</strong></div></header>
-              <div class="overview-primary"><span>Most popular move</span><strong>{{ mostPopularMove?.move || "-" }}</strong><small>{{ mostPopularMove ? `${mostPopularMove.count} engine${mostPopularMove.count === 1 ? "" : "s"}` : "Waiting for candidate moves" }}</small></div>
+              <header class="overview-heading"><div><span>{{ viewingHistory ? "Puzzle results" : "Field overview" }}</span><strong>{{ viewingHistory ? "Final move breakdown" : "Engine consensus" }}</strong></div></header>
+              <div class="overview-primary"><span>{{ viewingHistory ? "Most submitted move" : "Most popular move" }}</span><strong>{{ mostPopularMove?.move || "-" }}</strong><small>{{ mostPopularMove ? `${mostPopularMove.count} engine${mostPopularMove.count === 1 ? "" : "s"}` : viewingHistory ? "No final moves were recorded" : "Waiting for candidate moves" }}</small></div>
               <div class="consensus-list">
                 <span>Move split</span>
                 <ol v-if="rankedMoveGroups.length">
@@ -915,20 +965,15 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
                     <details class="move-split-group">
                       <summary>
                         <strong>{{ group.move }}</strong>
-                        <i><span :style="{ width: `${group.count / Math.max(activeEntries.length, 1) * 100}%` }"></span></i>
+                        <i><span :style="{ width: `${group.count / Math.max(proposalFieldCount, 1) * 100}%` }"></span></i>
                         <small>{{ group.count }}</small>
                         <AppIcon name="chevron-down" :size="13" />
                       </summary>
-                      <ul class="move-split-engines">
-                        <li v-for="entry in group.entries" :key="entry.id">
-                          <span class="move-split-avatar">{{ engineInitials(entry) }}</span>
-                          <span><strong>{{ entry.name }}</strong><small>{{ entry.version }}</small></span>
-                        </li>
-                      </ul>
+                      <p class="move-split-engines"><span v-for="entry in group.entries" :key="entry.id"><strong>{{ entry.name }}</strong><small>{{ entry.version }}</small></span></p>
                     </details>
                   </li>
                 </ol>
-                <p v-else>No engine has committed to a line yet.</p>
+                <p v-else>{{ viewingHistory ? "No final submissions were recorded for this puzzle." : "No engine has committed to a line yet." }}</p>
               </div>
             </template>
           </article>
@@ -936,12 +981,12 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 
         <div ref="boardColumnElement" class="board-column">
           <div class="gauntlet-board">
-            <ChessBoard :fen="payload.current_puzzle?.fen ?? null" :orientation="boardOrientation" :controls="false" :arrows="boardArrows" label="Current Puzzle Gauntlet position" />
+            <ChessBoard :fen="viewedPuzzle?.fen ?? null" :orientation="boardOrientation" :controls="false" :arrows="boardArrows" :label="`${viewingHistory ? 'Archived' : 'Current'} Puzzle Gauntlet position`" />
           </div>
           <div class="puzzle-progression">
-            <div><span>Puzzle progression</span><strong>{{ payload.rounds.length }} completed</strong></div>
-            <div class="progress-track"><span :style="{ width: `${solvedPercent}%` }"></span></div>
-            <div class="progress-counts"><span>{{ puzzleNumber }} / {{ totalPuzzleCount }}</span><strong>{{ puzzlesLeft }} left</strong></div>
+            <div><span>Puzzle progression</span><strong>{{ viewingHistory ? "Reviewing archive" : `${payload.rounds.length} completed` }}</strong></div>
+            <div class="progress-track"><span :style="{ width: `${viewedProgressPercent}%` }"></span></div>
+            <div class="progress-counts"><span>{{ puzzleNumber }} / {{ totalPuzzleCount }}</span><strong>{{ viewingHistory ? "Archived round" : `${puzzlesLeft} left` }}</strong></div>
           </div>
         </div>
 
@@ -949,11 +994,13 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
           <section class="puzzle-log" aria-labelledby="puzzle-log-title">
             <header><h2 id="puzzle-log-title">Puzzle log</h2><span>{{ payload.rounds.length }}</span></header>
             <ol v-if="payload.rounds.length">
-              <li v-for="round in payload.rounds" :key="round.puzzle_id">
-                <div><span>{{ String(round.position + 1).padStart(2, "0") }}</span><strong>{{ round.title || `Puzzle ${round.position + 1}` }}</strong><small>{{ round.void ? "Field saved" : `${round.correct_ids.length} correct` }}</small></div>
-                <code>{{ round.fen }}</code>
-                <p><span>Solution</span><strong>{{ round.solutions.join(" / ") }}</strong></p>
-                <small v-if="round.eliminated_ids.length">{{ round.eliminated_ids.length }} {{ round.eliminated_ids.length === 1 ? "engine" : "engines" }} knocked out</small>
+              <li v-for="round in payload.rounds" :key="round.puzzle_id" :class="{ selected: selectedRound?.puzzle_id === round.puzzle_id }">
+                <button type="button" :aria-pressed="selectedRound?.puzzle_id === round.puzzle_id" @click="selectRound(round)">
+                  <span class="puzzle-log__heading"><span>{{ String(round.position + 1).padStart(2, "0") }}</span><strong>{{ round.title || `Puzzle ${round.position + 1}` }}</strong><small>{{ round.void ? "Field saved" : `${round.correct_ids.length} correct` }}</small></span>
+                  <code>{{ round.fen }}</code>
+                  <span class="puzzle-log__solution"><span>Solution</span><strong>{{ round.solutions.join(" / ") }}</strong></span>
+                  <small v-if="round.eliminated_ids.length">{{ round.eliminated_ids.length }} {{ round.eliminated_ids.length === 1 ? "engine" : "engines" }} knocked out</small>
+                </button>
               </li>
             </ol>
             <p v-else class="puzzle-log__empty">Completed puzzles will appear here.</p>
@@ -1094,6 +1141,9 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .viewer-card > header span, .puzzle-clock > span, .puzzle-details dt, .engine-call > span, .focus-pv > span, .overview-primary > span, .consensus-list > span { color: var(--color-text-muted, #607080); font-size: .59rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 .viewer-card > header strong { overflow: hidden; font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
 .side-to-move { padding: .28rem .48rem; border-radius: 999px; background: color-mix(in srgb, var(--color-accent, #2f78c4) 9%, transparent); color: var(--color-accent, #2f78c4) !important; white-space: nowrap; }
+.puzzle-card__actions { display: flex !important; align-items: center; gap: .4rem !important; }
+.puzzle-card__actions button { min-height: 1.75rem; border: 1px solid var(--color-border-strong, #bbc5d3); border-radius: 999px; background: var(--color-surface, #fff); padding: 0 .55rem; color: var(--color-text-muted, #607080); cursor: pointer; font: inherit; font-size: .58rem; font-weight: 720; }
+.puzzle-card__actions button:hover { border-color: var(--color-accent, #2f78c4); color: var(--color-accent, #2f78c4); }
 .puzzle-card { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr); grid-template-rows: auto auto; }
 .puzzle-card > header { grid-column: 1 / -1; }
 .puzzle-clock { display: grid; grid-column: 1; grid-template-columns: 1fr; align-content: center; align-items: end; gap: .4rem; padding: .7rem .8rem; border-inline-end: 1px solid var(--color-border, #d5dbe1); }
@@ -1140,13 +1190,11 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .move-split-group summary > small, .consensus-list > p { color: var(--color-text-muted, #607080); font-size: .62rem; }
 .move-split-group summary .app-icon { color: var(--color-text-muted, #607080); transition: transform 140ms ease; }
 .move-split-group[open] summary .app-icon { transform: rotate(180deg); }
-.move-split-engines { display: grid; gap: .25rem; margin: .45rem 0 .15rem; padding: .45rem 0 0 1rem; border-block-start: 1px solid var(--color-border, #d5dbe1); list-style: none; }
-.move-split-engines li { display: grid; grid-template-columns: 1.55rem minmax(0, 1fr); align-items: center; gap: .45rem; min-width: 0; padding: .22rem .3rem; }
-.move-split-engines li > span:last-child { display: grid; min-width: 0; }
-.move-split-engines li strong, .move-split-engines li small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.move-split-engines li strong { font-size: .62rem; }
-.move-split-engines li small { color: var(--color-text-muted, #607080); font-size: .53rem; }
-.move-split-avatar { display: grid; width: 1.55rem; aspect-ratio: 1; place-items: center; border-radius: .32rem; background: color-mix(in srgb, var(--color-accent, #2f78c4) 12%, var(--color-surface, #fff)); color: var(--color-accent, #2f78c4); font-size: .45rem; font-weight: 900; }
+.move-split-engines { display: flex; flex-wrap: wrap; gap: .2rem 0; margin: .45rem 0 .15rem; padding: .45rem 0 0 1rem; border-block-start: 1px solid var(--color-border, #d5dbe1); line-height: 1.45; }
+.move-split-engines > span { display: inline; color: var(--color-text, #17202a); font-size: .61rem; white-space: nowrap; }
+.move-split-engines > span:not(:last-child)::after { margin-right: .28rem; content: ","; }
+.move-split-engines strong { font-weight: 720; }
+.move-split-engines small { margin-left: .2rem; color: var(--color-text-muted, #607080); font-size: .52rem; }
 .gauntlet-board { --engine: var(--engine-alive); position: relative; width: 100%; aspect-ratio: 1; overflow: hidden; border-radius: var(--radius-md, .5rem); box-shadow: var(--shadow-sm, 0 2px 6px rgb(0 0 0 / 10%)); }
 .gauntlet-board :deep(.board-mount), .gauntlet-board :deep(.chess-viewer) { width: 100%; }
 .puzzle-progression { display: grid; height: 3.5rem; box-sizing: border-box; align-content: center; gap: .25rem; margin-block-start: .5rem; padding: .35rem .7rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-md, .5rem); background: var(--color-surface, #fff); }
@@ -1160,15 +1208,19 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .puzzle-log h2 { margin: 0; font-size: .72rem; }
 .puzzle-log > header > span { min-width: 1rem; padding: .05rem .25rem; border-radius: 999px; background: color-mix(in srgb, var(--color-border, #d5dbe1) 60%, transparent); font-size: .6rem; text-align: center; }
 .puzzle-log ol { min-height: 0; flex: 1; overflow-y: auto; margin: 0; padding: 0; list-style: none; scrollbar-gutter: stable; }
-.puzzle-log li { display: grid; gap: .45rem; padding: .75rem; border-block-end: 1px solid var(--color-border, #d5dbe1); }
-.puzzle-log li > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: .45rem; }
-.puzzle-log li > div > span { color: var(--color-accent, #2f78c4); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .66rem; font-weight: 800; }
-.puzzle-log li > div strong { overflow: hidden; font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
-.puzzle-log li > div small, .puzzle-log li > small { color: var(--color-text-muted, #607080); font-size: .59rem; }
+.puzzle-log li { border-block-end: 1px solid var(--color-border, #d5dbe1); }
+.puzzle-log li.selected { background: color-mix(in srgb, var(--color-accent, #2f78c4) 8%, var(--color-surface, #fff)); box-shadow: inset 3px 0 var(--color-accent, #2f78c4); }
+.puzzle-log li > button { display: grid; width: 100%; gap: .45rem; border: 0; background: transparent; padding: .75rem; color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.puzzle-log li > button:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 5%, transparent); }
+.puzzle-log li > button:focus-visible { outline: 2px solid var(--color-focus, #256dc3); outline-offset: -2px; }
+.puzzle-log__heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: .45rem; }
+.puzzle-log__heading > span { color: var(--color-accent, #2f78c4); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .66rem; font-weight: 800; }
+.puzzle-log__heading strong { overflow: hidden; font-size: .75rem; text-overflow: ellipsis; white-space: nowrap; }
+.puzzle-log__heading small, .puzzle-log li > button > small { color: var(--color-text-muted, #607080); font-size: .59rem; }
 .puzzle-log li code { overflow-wrap: anywhere; color: var(--color-text-muted, #607080); font-size: .56rem; line-height: 1.4; }
-.puzzle-log li p { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; margin: 0; font-size: .64rem; }
-.puzzle-log li p span { color: var(--color-text-muted, #607080); }
-.puzzle-log li p strong { color: var(--color-success, #16794b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.puzzle-log__solution { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; font-size: .64rem; }
+.puzzle-log__solution > span { color: var(--color-text-muted, #607080); }
+.puzzle-log__solution strong { color: var(--color-success, #16794b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .puzzle-log__empty { margin: auto; padding: 1.2rem; color: var(--color-text-muted, #607080); font-size: .72rem; line-height: 1.5; text-align: center; }
 .viewer-stage .tournament-data { display: grid; gap: var(--space-sm, .5rem); margin-block-start: 0; }
 .viewer-stage .data-tabs { display: flex; gap: .3rem; overflow-x: auto; }

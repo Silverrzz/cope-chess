@@ -51,15 +51,14 @@ function themeColor(key: string, fallback: string): string {
     <div class="relay-orbit" aria-hidden="true"><i></i><i></i><i></i><span>&#9818;</span></div>
     <span v-if="isFinale" class="finale-crown" aria-hidden="true">&#9812;</span>
     <div class="relay-copy">
-      <span class="relay-kicker"><AppIcon :name="isFinale ? 'trophy' : 'activity'" :size="16" />{{ current ? isLive ? "Live event" : "Next on COPE" : isFinale ? "Championship archive" : "OpenBench archive" }}</span>
+      <span class="relay-kicker"><AppIcon :name="isFinale ? 'trophy' : 'activity'" :size="16" />{{ current ? isLive ? "Live" : "Upcoming" : "Completed" }}</span>
       <h2>{{ event.title }}</h2>
-      <p>{{ event.summary || event.subtitle }}</p>
       <div v-if="current && remainingMs > 0" class="relay-countdown" aria-label="Time until event">
         <span v-for="part in countdown" :key="part.label"><strong>{{ String(part.value).padStart(2, "0") }}</strong><small>{{ part.label }}</small></span>
       </div>
       <div class="relay-meta">
-        <span>{{ current ? isLive ? "Broadcast in progress" : dateLabel : dateLabel }}</span>
-        <strong>{{ current ? "Open event" : "Enter archived arena" }} <AppIcon name="arrow-right" :size="18" /></strong>
+        <span>{{ current && isLive ? "Live now" : dateLabel }}</span>
+        <strong>{{ current ? "View event" : "View arena" }} <AppIcon name="arrow-right" :size="18" /></strong>
       </div>
     </div>
     <div class="relay-benches" aria-hidden="true">
@@ -77,7 +76,6 @@ function themeColor(key: string, fallback: string): string {
 .relay-copy { position: relative; z-index: 2; width: min(55rem, 72%); }
 .relay-kicker { display: inline-flex; align-items: center; gap: .55rem; color: var(--archive-accent); font-size: .72rem; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
 .relay-copy h2 { max-width: 11ch; margin: .8rem 0 0; font-size: clamp(3.5rem, 8.5vw, 8.2rem); font-weight: 860; letter-spacing: -.075em; line-height: .84; text-wrap: balance; }
-.relay-copy > p { max-width: 48rem; margin: 1.4rem 0 0; color: #a8b6ca; font-size: clamp(.86rem, 1.35vw, 1.05rem); line-height: 1.65; }
 .relay-countdown { display: flex; width: fit-content; margin-top: 1.8rem; overflow: hidden; border: 1px solid rgb(120 167 255 / 25%); border-radius: .7rem; background: rgb(6 12 22 / 64%); }
 .relay-countdown span { display: grid; min-width: clamp(4.1rem, 7vw, 6.2rem); padding: .7rem .9rem; border-left: 1px solid rgb(120 167 255 / 16%); }
 .relay-countdown span:first-child { border-left: 0; }
@@ -108,5 +106,5 @@ function themeColor(key: string, fallback: string): string {
 .relay-archive:hover .relay-orbit { transform: translateY(-50%) scale(1.025); transition: transform 350ms ease; }
 .relay-archive:hover .relay-meta strong { text-decoration: underline; text-underline-offset: .25rem; }
 .relay-archive:focus-visible { outline: 3px solid var(--relay-blue); outline-offset: -3px; }
-@media (max-width: 58rem) { .relay-archive { min-height: 31rem; padding: 2rem 1.25rem; }.relay-copy { width: 100%; }.relay-copy h2 { max-width: 12ch; }.relay-copy > p { max-width: 34rem; }.relay-orbit { top: 35%; right: -5rem; opacity: .55; }.relay-benches { display: none; }.relay-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
+@media (max-width: 58rem) { .relay-archive { min-height: 31rem; padding: 2rem 1.25rem; }.relay-copy { width: 100%; }.relay-copy h2 { max-width: 12ch; }.relay-orbit { top: 35%; right: -5rem; opacity: .55; }.relay-benches { display: none; }.relay-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
 </style>
