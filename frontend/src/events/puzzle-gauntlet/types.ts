@@ -109,6 +109,8 @@ export interface GauntletEngineInfo {
     seldepth?: string;
     nps?: string;
     nodes?: string;
+    time_ms?: number;
+    stream_at?: string;
     hashfull?: string;
     eval?: string;
     pv?: string;

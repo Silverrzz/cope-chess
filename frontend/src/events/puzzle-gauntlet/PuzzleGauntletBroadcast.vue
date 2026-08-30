@@ -392,11 +392,42 @@ function recordProposal(entry: GauntletEntry, move: string): void {
   proposalByEntry.value = { ...proposalByEntry.value, [entry.id]: move };
 }
 
+function engineProgress(info: GauntletEngineInfo | undefined): [number, number, number] | null {
+  if (!info) return null;
+  const elapsed = Number(info.engine_data.time_ms);
+  const nodes = Number(info.engine_data.nodes?.replaceAll(",", ""));
+  const depth = Number(info.engine_data.depth);
+  if (![elapsed, nodes, depth].some(Number.isFinite)) return null;
+  return [
+    Number.isFinite(elapsed) ? elapsed : -1,
+    Number.isFinite(nodes) ? nodes : -1,
+    Number.isFinite(depth) ? depth : -1,
+  ];
+}
+
+function olderEngineInfo(previous: GauntletEngineInfo | undefined, incoming: GauntletEngineInfo): boolean {
+  const previousStreamAt = previous?.engine_data.stream_at;
+  const incomingStreamAt = incoming.engine_data.stream_at;
+  if (previousStreamAt && incomingStreamAt && previousStreamAt !== incomingStreamAt) {
+    return incomingStreamAt < previousStreamAt;
+  }
+  const previousProgress = engineProgress(previous);
+  const incomingProgress = engineProgress(incoming);
+  if (!previousProgress || !incomingProgress) return false;
+  const [previousElapsed, previousNodes, previousDepth] = previousProgress;
+  const [incomingElapsed, incomingNodes, incomingDepth] = incomingProgress;
+  if (incomingElapsed !== previousElapsed) return incomingElapsed < previousElapsed;
+  if (incomingNodes !== previousNodes) return incomingNodes < previousNodes;
+  return incomingDepth < previousDepth;
+}
+
 function mergeEngineInfo(entry: GauntletEntry, incoming: GauntletEngineInfo): void {
   if (String(entry.attempt?.game_id) !== String(incoming.game_id)) return;
   const engineId = Number(entry.engine_id);
   if (engineId !== Number(incoming.engine_id)) return;
-  const previous = infoByEngine.value[engineId];
+  const current = infoByEngine.value[engineId];
+  const previous = String(current?.game_id) === String(incoming.game_id) ? current : undefined;
+  if (olderEngineInfo(previous, incoming)) return;
   const incomingData = Object.fromEntries(
     Object.entries(incoming.engine_data ?? {}).filter(([, value]) => (
       value !== undefined

@@ -1344,6 +1344,7 @@ def _live_engine_data(info: EngineSearchInfo | None) -> dict[str, Any]:
         "seldepth": str(info.seldepth) if info.seldepth is not None else "-",
         "nps": f"{nps:,}" if nps is not None else "-",
         "nodes": f"{info.nodes:,}" if info.nodes is not None else "-",
+        "time_ms": info.time_ms,
         "hashfull": str(info.hashfull) if info.hashfull is not None else "-",
         "eval": _live_eval_label(info),
         "eval_cp": info.eval_cp,

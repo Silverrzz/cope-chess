@@ -327,10 +327,17 @@ class StreamHub:
         with self._lock:
             seq = self._seq_by_topic.get(topic, 0) + 1
             self._seq_by_topic[topic] = seq
+            payload = dict(data or {})
+            engine_data = payload.get("engine_data")
+            if event_type == "engine.info" and isinstance(engine_data, dict):
+                payload["engine_data"] = {
+                    **engine_data,
+                    "stream_at": datetime.now(UTC).isoformat(),
+                }
             event = make_stream_event(
                 topic,
                 event_type,
-                data,
+                payload,
                 source=source,
                 seq=seq,
                 event_id=f"{topic}:{seq}",

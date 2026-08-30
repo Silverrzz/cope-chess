@@ -243,6 +243,8 @@ class UciEngineProcess:
                     process.stdin.write("quit\n")
                     process.stdin.flush()
                     process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
                 except Exception:
                     LOG.exception(
                         "engine graceful shutdown failed engine_id=%s engine=%s pid=%s",

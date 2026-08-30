@@ -2586,17 +2586,20 @@ class WorkerEngineTransport:
         if receiver_task is None:
             raise RuntimeError("worker reply receiver is not running")
         receive_task = asyncio.create_task(reply_queue.get())
-        done, _ = await asyncio.wait(
-            (receive_task, receiver_task),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if receive_task in done:
-            return receive_task.result()
-        receive_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await receive_task
-        receiver_task.result()
-        raise RuntimeError("worker reply receiver stopped")
+        try:
+            done, _ = await asyncio.wait(
+                (receive_task, receiver_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in done:
+                return receive_task.result()
+            receiver_task.result()
+            raise RuntimeError("worker reply receiver stopped")
+        finally:
+            if not receive_task.done():
+                receive_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receive_task
 
     async def _receive_replies(self) -> None:
         while True:

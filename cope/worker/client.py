@@ -1422,38 +1422,41 @@ async def _wait_for_engine_search(
 ) -> tuple[list[str], int] | None:
     while True:
         receive = asyncio.create_task(inbox.get())
-        done, _pending = await asyncio.wait(
-            {command_task, receive},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if receive not in done:
-            receive.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await receive
-            return command_task.result()
-
-        envelope = receive.result()
-        if envelope.type != "engine_stop":
-            raise ProtocolValidationError(
-                f"unexpected runner message during engine search: {envelope.type}"
-            )
-        stop = EngineStop.model_validate(envelope.data)
-        _validate_assignment_message(stop, assignment, "engine_stop")
-        if stop.engine_id != command.engine_id:
-            raise ProtocolValidationError("engine_stop engine mismatch")
-        await info_publisher.cancel()
-        clock_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await clock_task
-        await asyncio.to_thread(engine.stop_search)
         try:
-            await asyncio.wait_for(asyncio.shield(command_task), timeout=2)
-        except asyncio.TimeoutError:
-            await asyncio.to_thread(engine.close)
-        with contextlib.suppress(Exception):
-            await command_task
-        telemetry.discard(command.assignment_id, command.engine_id)
-        return None
+            done, _pending = await asyncio.wait(
+                {command_task, receive},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive not in done:
+                return command_task.result()
+
+            envelope = receive.result()
+            if envelope.type != "engine_stop":
+                raise ProtocolValidationError(
+                    f"unexpected runner message during engine search: {envelope.type}"
+                )
+            stop = EngineStop.model_validate(envelope.data)
+            _validate_assignment_message(stop, assignment, "engine_stop")
+            if stop.engine_id != command.engine_id:
+                raise ProtocolValidationError("engine_stop engine mismatch")
+            await info_publisher.cancel()
+            clock_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await clock_task
+            await asyncio.to_thread(engine.stop_search)
+            try:
+                await asyncio.wait_for(asyncio.shield(command_task), timeout=2)
+            except asyncio.TimeoutError:
+                await asyncio.to_thread(engine.close)
+            with contextlib.suppress(Exception):
+                await command_task
+            telemetry.discard(command.assignment_id, command.engine_id)
+            return None
+        finally:
+            if not receive.done():
+                receive.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receive
 
 
 async def _run_infinite_engine_search(
