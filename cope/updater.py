@@ -181,7 +181,14 @@ def _install_engine_dockerfiles(source_dir: Path, target_commit: str) -> int:
         files = tuple(path for path in source.rglob("*") if path.is_file())
         if not files:
             raise RuntimeError("the selected ref does not contain any engine Dockerfiles")
+        if (source / "cloned").exists():
+            raise RuntimeError("the repository uses the reserved cloned Dockerfile namespace")
+        cloned = target / "cloned"
+        if cloned.exists() and (not cloned.is_dir() or cloned.is_symlink()):
+            raise RuntimeError("the cloned Dockerfile namespace is invalid")
         for existing in target.iterdir():
+            if existing.name == "cloned":
+                continue
             if existing.is_dir():
                 shutil.rmtree(existing)
             else:
