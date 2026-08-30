@@ -297,6 +297,21 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("COPE_COMPOSE_PROJECT", ""),
     )
     updater_parser.add_argument(
+        "--compose-file",
+        dest="compose_files",
+        action="append",
+        type=Path,
+        default=[
+            Path(item)
+            for item in os.environ.get("COPE_UPDATE_COMPOSE_FILES", "").split(os.pathsep)
+            if item
+        ],
+    )
+    updater_parser.add_argument(
+        "--image-name",
+        default=os.environ.get("COPE_UPDATE_IMAGE_NAME", "cope-chess:local"),
+    )
+    updater_parser.add_argument(
         "--poll-interval-s",
         type=float,
         default=float(os.environ.get("COPE_UPDATE_POLL_INTERVAL_S", "2")),
@@ -534,6 +549,8 @@ def main(argv: list[str] | None = None) -> int:
                 worker_wait_s=args.worker_wait_s,
                 service_wait_s=args.service_wait_s,
                 allow_rollback=args.allow_rollback,
+                image_name=args.image_name,
+                compose_files=tuple(args.compose_files),
             )
         )
         return 0

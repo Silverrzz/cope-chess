@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -45,6 +45,14 @@ REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}$")
 PLATFORM_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server", "clone-runner")
 
 
+def _default_compose_files() -> tuple[Path, ...]:
+    return tuple(
+        Path(item)
+        for item in os.environ.get("COPE_UPDATE_COMPOSE_FILES", "").split(os.pathsep)
+        if item
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class UpdaterConfig:
     db_path: str | Path = DEFAULT_DATABASE_URL
@@ -56,6 +64,13 @@ class UpdaterConfig:
     worker_wait_s: float = 1800.0
     service_wait_s: float = 180.0
     allow_rollback: bool = False
+    image_name: str = field(
+        default_factory=lambda: os.environ.get(
+            "COPE_UPDATE_IMAGE_NAME",
+            "cope-chess:local",
+        )
+    )
+    compose_files: tuple[Path, ...] = field(default_factory=_default_compose_files)
 
 
 def run_updater(config: UpdaterConfig) -> None:
@@ -226,7 +241,7 @@ def _run_deployment(
 ) -> None:
     web_only = scope == "web"
     original_commit = ""
-    rollback_tag = f"cope-chess:rollback-{job_id}"
+    rollback_tag = _rollback_image_name(config.image_name, job_id)
     built = False
     dockerfiles_installed = False
     restart_attempted = False
@@ -267,13 +282,13 @@ def _run_deployment(
         _set_target_commit(config, job_id, target_commit, repository_identity)
         _set_job_status(config, job_id, "building")
         _set_server_target(config, job_id, "updating", current_commit=original_commit)
-        _run(["docker", "image", "inspect", "cope-chess:local"], check=True)
-        _run(["docker", "tag", "cope-chess:local", rollback_tag])
+        _run(["docker", "image", "inspect", config.image_name], check=True)
+        _run(["docker", "tag", config.image_name, rollback_tag])
         _run(["git", "-C", str(source_dir), "checkout", "--detach", target_commit])
         source_changed = target_commit != original_commit
         if web_only:
             _validate_web_schema_compatibility(config, source_dir)
-        _validate_compose_inputs(source_dir)
+        _validate_compose_inputs(config, source_dir)
         _compose(config, source_dir, "config", "--quiet")
         build_arguments = [
             "build",
@@ -366,7 +381,7 @@ def _run_deployment(
                 rollback_detail += f" Dockerfile rollback failed: {dockerfile_error}"
         if built or restart_attempted:
             try:
-                _run(["docker", "tag", rollback_tag, "cope-chess:local"])
+                _run(["docker", "tag", rollback_tag, config.image_name])
                 if restart_attempted:
                     rollback_services = (
                         ("web",)
@@ -820,6 +835,11 @@ def _compose(
         if shutil.which("docker-compose")
         else ["docker", "compose"]
     )
+    compose_files = [
+        argument
+        for compose_file in _compose_file_paths(config, source_dir)
+        for argument in ("--file", str(compose_file))
+    ]
     return _run(
         [
             *compose_command,
@@ -827,8 +847,7 @@ def _compose(
             project_name,
             "--project-directory",
             str(source_dir),
-            "--file",
-            str(source_dir / "compose.yaml"),
+            *compose_files,
             *arguments,
         ],
         check=check,
@@ -886,6 +905,9 @@ def _schedule_updater_restart(
     project_name = _compose_project_name(config.compose_project)
     host_source_dir = _host_source_dir(source_dir)
     helper_name = f"{project_name}-updater-handoff-{job_id}"
+    compose_files = os.pathsep.join(
+        str(path) for path in _compose_file_paths(config, source_dir)
+    )
     _run(
         [
             "docker",
@@ -908,14 +930,18 @@ def _schedule_updater_restart(
             f"COPE_HOST_SOURCE_DIR={host_source_dir}",
             "--env",
             f"COPE_COMPOSE_PROJECT={project_name}",
-            "cope-chess:local",
+            "--env",
+            f"COMPOSE_FILE={compose_files}",
+            config.image_name,
             "-c",
-            "sleep 2; docker compose --project-name \"$COPE_COMPOSE_PROJECT\" --project-directory /workspace --file /workspace/compose.yaml up -d --no-deps --force-recreate updater",
+            "sleep 2; docker compose --project-name \"$COPE_COMPOSE_PROJECT\" --project-directory /workspace up -d --no-deps --force-recreate updater",
         ]
     )
 
 
 def _reload_caddy(config: UpdaterConfig, source_dir: Path) -> None:
+    if "caddy" not in _compose(config, source_dir, "config", "--services").splitlines():
+        return
     _compose(
         config,
         source_dir,
@@ -984,10 +1010,35 @@ def _compose_project_name(configured: str = "") -> str:
     raise RuntimeError("could not determine the active Compose project")
 
 
-def _validate_compose_inputs(source_dir: Path) -> None:
-    compose_file = source_dir / "compose.yaml"
-    if not compose_file.is_file():
-        raise RuntimeError(f"deployment Compose file is missing: {compose_file}")
+def _compose_file_paths(config: UpdaterConfig, source_dir: Path) -> tuple[Path, ...]:
+    configured = config.compose_files or (Path("compose.yaml"),)
+    paths = tuple(
+        (path if path.is_absolute() else source_dir / path).resolve()
+        for path in configured
+    )
+    for path in paths:
+        try:
+            path.relative_to(source_dir)
+        except ValueError as error:
+            raise RuntimeError(
+                f"deployment Compose file is outside the source directory: {path}"
+            ) from error
+    return paths
+
+
+def _rollback_image_name(image_name: str, job_id: int) -> str:
+    unpinned = image_name.split("@", 1)[0]
+    last_component = unpinned.rsplit("/", 1)[-1]
+    repository = unpinned.rsplit(":", 1)[0] if ":" in last_component else unpinned
+    if not repository:
+        raise RuntimeError("deployment image name is empty")
+    return f"{repository}:rollback-{job_id}"
+
+
+def _validate_compose_inputs(config: UpdaterConfig, source_dir: Path) -> None:
+    for compose_file in _compose_file_paths(config, source_dir):
+        if not compose_file.is_file():
+            raise RuntimeError(f"deployment Compose file is missing: {compose_file}")
     missing = [
         str(path.relative_to(source_dir))
         for path in (
