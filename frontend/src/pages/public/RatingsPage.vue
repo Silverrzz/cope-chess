@@ -5,7 +5,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
+import RatingListPgnModal from '@/components/public/RatingListPgnModal.vue'
 import type { EngineRecord, Identifier } from '@/components/public/types'
+import AppIcon from '@/components/ui/AppIcon.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
 import { bestVersionRatings } from '@/utils/ratings'
 
 interface RatingListRecord {
@@ -26,6 +29,7 @@ interface RatingsResponse {
   rating_list: RatingListRecord | null
   rating_lists: RatingListRecord[]
   ratings: RatingRecord[]
+  filter_options: { opponent_ids_by_engine: Record<string, number[]> }
 }
 
 const route = useRoute()
@@ -34,6 +38,7 @@ const data = ref<RatingsResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const onlyBestVersions = ref(true)
+const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
 const routeRatingList = computed(() => {
@@ -45,11 +50,21 @@ const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   return onlyBestVersions.value ? bestVersionRatings(ratings) : ratings
 })
+const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
+const pgnEngineOptions = computed(() => (data.value?.ratings ?? []).map((row) => ({
+  id: engineId(row.engine),
+  name: row.engine.name,
+  version: row.engine.version || '',
+  games: row.games_played,
+})))
 
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
 watch(routeRatingList, (next, previous) => {
-  if (next !== previous) void load()
+  if (next !== previous) {
+    pgnModalOpen.value = false
+    void load()
+  }
 })
 
 async function load(): Promise<void> {
@@ -102,6 +117,7 @@ function selectRatingList(event: Event): void {
           <h1>Ratings</h1>
         </div>
         <div class="ratings-controls">
+          <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download PGNs</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
           <label v-if="data.rating_lists.length" class="category-picker">
             <span>Rating list</span>
@@ -120,7 +136,7 @@ function selectRatingList(event: Event): void {
         <dl>
           <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>
           <div><dt>Rated engines</dt><dd>{{ displayedRatings.length }}</dd></div>
-          <div><dt>Games represented</dt><dd>{{ Math.max(0, Math.round(data.ratings.reduce((sum, row) => sum + row.games_played, 0) / 2)) }}</dd></div>
+          <div><dt>Games represented</dt><dd>{{ representedGames }}</dd></div>
         </dl>
       </section>
 
@@ -169,6 +185,8 @@ function selectRatingList(event: Event): void {
           :title="data.rating_list ? 'No ratings yet' : 'No rating lists'"
         />
       </section>
+
+      <RatingListPgnModal v-if="data.rating_list" :open="pgnModalOpen" :rating-list="data.rating_list" :engines="pgnEngineOptions" :opponent-ids-by-engine="data.filter_options.opponent_ids_by_engine" @close="pgnModalOpen = false" />
     </template>
   </div>
 </template>

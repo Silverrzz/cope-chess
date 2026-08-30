@@ -52,13 +52,16 @@ const sides: Array<{ value: EngineGameSideFilter; label: string }> = [
   { value: 'black', label: 'Black' },
 ]
 
-const timeControlOptions = computed(() => [
-  { value: '', label: 'Any time control' },
-  ...props.options.time_controls.map((option) => ({ value: option.value, label: option.label })),
+const ratingListOptions = computed(() => [
+  { value: '', label: 'Any rating list' },
+  ...props.options.rating_lists.map((option) => ({ value: option.value, label: option.label })),
 ])
 
 const opponentOptions = computed(() => {
-  const allowed = new Set(props.options.opponent_ids.map(String))
+  const opponentIds = draft.value.ratingListId
+    ? props.options.opponent_ids_by_rating_list[draft.value.ratingListId] ?? []
+    : props.options.opponent_ids
+  const allowed = new Set(opponentIds.map(String))
   const grouped = new Map<number, {
     value: string
     label: string
@@ -91,7 +94,7 @@ const opponentOptions = computed(() => {
 
 const draftCount = computed(() => [
   draft.value.result,
-  draft.value.timeControl,
+  draft.value.ratingListId,
   draft.value.opponentId,
   draft.value.side,
 ].filter(Boolean).length)
@@ -109,10 +112,20 @@ watch(() => props.open, async (open, wasOpen) => {
   }
 })
 
+watch(() => draft.value.ratingListId, () => {
+  if (!draft.value.opponentId) return
+  const allowed = draft.value.ratingListId
+    ? props.options.opponent_ids_by_rating_list[draft.value.ratingListId] ?? []
+    : props.options.opponent_ids
+  if (!allowed.some((engineId) => String(engineId) === draft.value.opponentId)) {
+    draft.value = { ...draft.value, opponentId: '' }
+  }
+})
+
 onBeforeUnmount(restorePage)
 
 function emptyFilters(): EngineGameFilters {
-  return { result: '', timeControl: '', opponentId: '', side: '' }
+  return { result: '', ratingListId: '', opponentId: '', side: '' }
 }
 
 function resultCount(result: EngineGameResultFilter): number {
@@ -213,9 +226,9 @@ function submit(): void {
               </fieldset>
 
               <fieldset class="filter-section">
-                <legend>Time control</legend>
-                <p>Choose one of the controls used in this engine’s games.</p>
-                <OptionPicker v-model="draft.timeControl" :options="timeControlOptions" label="Time control" icon="clock" />
+                <legend>Rating list</legend>
+                <p>Only include games committed to a specific rating list.</p>
+                <OptionPicker v-model="draft.ratingListId" :options="ratingListOptions" label="Rating list" icon="trophy" />
               </fieldset>
 
               <fieldset class="filter-section">

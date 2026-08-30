@@ -188,7 +188,7 @@ def list_engine_games(
     *,
     limit: int = 50,
     result_filter: str | None = None,
-    time_control_filter: str | None = None,
+    rating_list_id: int | None = None,
     opponent_id: int | None = None,
     side_filter: str | None = None,
 ) -> tuple[GameRecord, ...]:
@@ -199,6 +199,12 @@ def list_engine_games(
         "(games.white_engine_id = ? OR games.black_engine_id = ?)",
     ]
     parameters: list[int | str] = [engine_id, engine_id]
+    if rating_list_id is not None:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM rating_list_history history "
+            "WHERE history.game_id = games.id AND history.rating_list_id = ?)"
+        )
+        parameters.append(rating_list_id)
     if result_filter == "win":
         conditions.append(
             "((games.result = '1-0' AND games.white_engine_id = ?) "
@@ -225,31 +231,18 @@ def list_engine_games(
     elif side_filter == "black":
         conditions.append("games.black_engine_id = ?")
         parameters.append(engine_id)
-    limit_sql = ""
-    if time_control_filter is None:
-        limit_sql = "LIMIT ?"
-        parameters.append(limit)
+    parameters.append(limit)
     rows = connection.execute(
         f"""
-        SELECT games.*, tournaments.config AS tournament_config
+        SELECT games.*
         FROM games
-        JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE {" AND ".join(conditions)}
         ORDER BY games.id DESC
-        {limit_sql}
+        LIMIT ?
         """,
         tuple(parameters),
     )
-    games: list[GameRecord] = []
-    for row in rows:
-        if time_control_filter is not None:
-            option = _time_control_option(row["tournament_config"])
-            if option is None or option["value"] != time_control_filter:
-                continue
-        games.append(_game_from_row(row))
-        if len(games) >= limit:
-            break
-    return tuple(games)
+    return tuple(_game_from_row(row) for row in rows)
 
 
 def engine_game_filter_options(
@@ -258,10 +251,8 @@ def engine_game_filter_options(
 ) -> dict[str, object]:
     rows = connection.execute(
         """
-        SELECT DISTINCT games.white_engine_id, games.black_engine_id,
-               tournaments.config AS tournament_config
+        SELECT DISTINCT games.white_engine_id, games.black_engine_id
         FROM games
-        JOIN tournaments ON tournaments.id = games.tournament_id
         WHERE games.record_eligible = 1
           AND games.status = 'finished' AND games.result IS NOT NULL
           AND (games.white_engine_id = ? OR games.black_engine_id = ?)
@@ -269,63 +260,43 @@ def engine_game_filter_options(
         (engine_id, engine_id),
     )
     opponent_ids: set[int] = set()
-    time_controls: dict[str, dict[str, str]] = {}
     for row in rows:
         opponent_ids.add(
             int(row["black_engine_id"])
             if int(row["white_engine_id"]) == engine_id
             else int(row["white_engine_id"])
         )
-        option = _time_control_option(row["tournament_config"])
-        if option is not None:
-            time_controls[option["value"]] = option
+    rating_lists = connection.execute(
+        """
+        SELECT DISTINCT rating_list.id, rating_list.name
+        FROM rating_list_history history
+        JOIN rating_lists rating_list ON rating_list.id = history.rating_list_id
+        WHERE history.engine_id = ?
+        ORDER BY rating_list.name, rating_list.id
+        """,
+        (engine_id,),
+    )
+    rating_list_opponents: dict[str, list[int]] = {}
+    for row in connection.execute(
+        """
+        SELECT DISTINCT rating_list_id, opponent_engine_id
+        FROM rating_list_history
+        WHERE engine_id = ?
+        ORDER BY rating_list_id, opponent_engine_id
+        """,
+        (engine_id,),
+    ):
+        rating_list_opponents.setdefault(str(row["rating_list_id"]), []).append(
+            int(row["opponent_engine_id"])
+        )
     return {
         "opponent_ids": sorted(opponent_ids),
-        "time_controls": sorted(time_controls.values(), key=lambda item: item["label"]),
+        "opponent_ids_by_rating_list": rating_list_opponents,
+        "rating_lists": [
+            {"value": str(row["id"]), "label": str(row["name"])}
+            for row in rating_lists
+        ],
     }
-
-
-def _time_control_option(config_value: str) -> dict[str, str] | None:
-    try:
-        control = json.loads(config_value).get("time_control", {})
-        category = str(control.get("category", ""))
-        if category == "increment":
-            initial = int(control["initial_ms"])
-            increment = int(control["increment_ms"])
-            return {
-                "value": f"increment:{initial}:{increment}",
-                "label": f"{_time_value_label(initial)} + {_time_value_label(increment)}",
-            }
-        if category == "movetime":
-            move_time = int(control["move_time_ms"])
-            return {
-                "value": f"movetime:{move_time}",
-                "label": f"{_time_value_label(move_time)} per move",
-            }
-        if category == "movestogo":
-            initial = int(control["initial_ms"])
-            moves = int(control["moves_to_go"])
-            return {
-                "value": f"movestogo:{initial}:{moves}",
-                "label": f"{_time_value_label(initial)} / {moves} moves",
-            }
-        if category == "movenodes":
-            nodes = int(control["nodes"])
-            return {
-                "value": f"movenodes:{nodes}",
-                "label": f"{nodes:,} nodes per move",
-            }
-    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    return None
-
-
-def _time_value_label(milliseconds: int) -> str:
-    if milliseconds >= 60_000 and milliseconds % 60_000 == 0:
-        return f"{milliseconds // 60_000} min"
-    if milliseconds >= 1_000:
-        return f"{milliseconds / 1_000:g} sec"
-    return f"{milliseconds} ms"
 
 
 def engine_result_summary(

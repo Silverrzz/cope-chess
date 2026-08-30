@@ -559,6 +559,30 @@ class TournamentNamePayload(BaseModel):
         return value
 
 
+class TournamentCreatorBatchPayload(BaseModel):
+    tournaments: list[TournamentPayload] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_shared_settings(self) -> TournamentCreatorBatchPayload:
+        shared = self.tournaments[0].config.model_dump(
+            mode="json",
+            exclude={"participants"},
+        )
+        if any(
+            item.config.model_dump(mode="json", exclude={"participants"}) != shared
+            for item in self.tournaments[1:]
+        ):
+            raise ValueError("batch tournaments must share the same settings")
+        return self
+
+
+class GauntletPreviewPayload(BaseModel):
+    rating_list_id: int = Field(gt=0)
+    hero_engine_id: int = Field(gt=0)
+    elo_estimate: float = Field(ge=-10000, le=10000)
+    gauntlet_size: int = Field(ge=2, le=500)
+
+
 class TournamentParticipantPayload(BaseModel):
     engine_id: int = Field(gt=0)
 
@@ -1264,11 +1288,28 @@ def register_api_routes(app: FastAPI) -> None:
             (item for item in rating_lists if item.id == selected_id),
             rating_lists[0] if rating_lists else None,
         )
+        opponent_ids_by_engine: dict[str, list[int]] = {}
+        if rating_list is not None:
+            for row in connection.execute(
+                """
+                SELECT DISTINCT engine_id, opponent_engine_id
+                FROM rating_list_history
+                WHERE rating_list_id = ?
+                ORDER BY engine_id, opponent_engine_id
+                """,
+                (rating_list.id,),
+            ):
+                opponent_ids_by_engine.setdefault(str(row["engine_id"]), []).append(
+                    int(row["opponent_engine_id"])
+                )
         return _json(
             {
                 "rating_list": rating_list,
                 "rating_lists": rating_lists,
                 "ratings": list_rating_rows(connection, rating_list.id) if rating_list else [],
+                "filter_options": {
+                    "opponent_ids_by_engine": opponent_ids_by_engine,
+                },
             }
         )
 
@@ -1345,7 +1386,7 @@ def register_api_routes(app: FastAPI) -> None:
     def public_engine(
         engine_id: int,
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
-        time_control: str | None = Query(default=None, max_length=100),
+        rating_list_id: int | None = Query(default=None, gt=0),
         opponent_id: int | None = Query(default=None, gt=0),
         side: Literal["white", "black"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
@@ -1363,7 +1404,7 @@ def register_api_routes(app: FastAPI) -> None:
             connection,
             engine_id,
             result_filter=result,
-            time_control_filter=time_control,
+            rating_list_id=rating_list_id,
             opponent_id=opponent_id,
             side_filter=side,
         )
@@ -1402,22 +1443,22 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         game_id: int | None = Query(default=None, gt=0),
         tournament_id: int | None = Query(default=None, gt=0),
+        rating_list_id: int | None = Query(default=None, gt=0),
         engine_id: int | None = Query(default=None, gt=0),
         opponent_id: int | None = Query(default=None, gt=0),
         side: Literal["white", "black"] | None = Query(default=None),
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
-        time_control: str | None = Query(default=None, max_length=100),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         try:
             filters = PgnExportFilters(
                 game_id=game_id,
                 tournament_id=tournament_id,
+                rating_list_id=rating_list_id,
                 engine_id=engine_id,
                 opponent_engine_id=opponent_id,
                 color=side,
                 result=result,
-                time_control=time_control,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1427,6 +1468,12 @@ def register_api_routes(app: FastAPI) -> None:
             tournament = get_tournament(connection, tournament_id)
             if tournament is None or tournament.status == "draft":
                 raise HTTPException(status_code=404, detail="Tournament not found.")
+
+        rating_list = None
+        if rating_list_id is not None:
+            rating_list = get_rating_list(connection, rating_list_id)
+            if rating_list is None:
+                raise HTTPException(status_code=404, detail="Rating list not found.")
 
         engine = None
         if engine_id is not None:
@@ -1457,6 +1504,8 @@ def register_api_routes(app: FastAPI) -> None:
             filename_parts = []
             if tournament is not None:
                 filename_parts.append(tournament.name)
+            if rating_list is not None:
+                filename_parts.append(rating_list.name)
             if engine is not None:
                 filename_parts.append(f"{engine.name}-{engine.version}")
             if result is not None:
@@ -1467,8 +1516,6 @@ def register_api_routes(app: FastAPI) -> None:
                 filename_parts.append(f"versus-{opponent_id}")
             if side is not None:
                 filename_parts.append(f"as-{side}")
-            if time_control is not None:
-                filename_parts.append("time-filtered")
             filename = safe_pgn_filename(
                 "-".join(filename_parts) if filename_parts else "cope-all-games",
                 "cope-games",
@@ -3700,6 +3747,13 @@ def register_api_routes(app: FastAPI) -> None:
                         "href": "/admin/tools/invalidate-engine-games",
                         "status": "available",
                     },
+                    {
+                        "name": "tournament_creator",
+                        "label": "Tournament creator",
+                        "description": "Create rating divisions or build a balanced Elo gauntlet as editable tournament drafts.",
+                        "href": "/admin/tools/tournament-creator",
+                        "status": "available",
+                    },
                 ],
                 "recent_jobs": [
                     _tool_job_api_payload(connection, job, include_items=False)
@@ -3710,6 +3764,214 @@ def register_api_routes(app: FastAPI) -> None:
                     for worker in workers
                 ),
             }
+        )
+
+    @app.get("/api/admin/tools/tournament-creator")
+    def admin_tournament_creator(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine_records = {engine.id: engine for engine in list_engine_records(connection)}
+        eligible_engine_ids = {
+            engine.id
+            for engine in engine_records.values()
+            if engine.active
+            and engine_build_is_benchmarked(
+                connection,
+                engine_version_id=engine.id,
+                build_hash=engine.build_hash,
+            )
+        }
+        rating_lists = []
+        for rating_list in list_rating_lists(connection):
+            engines = []
+            unavailable_engines = 0
+            for row in list_rating_rows(connection, rating_list.id):
+                engine_id = row.engine.engine_id
+                if engine_id not in eligible_engine_ids:
+                    unavailable_engines += 1
+                    continue
+                engines.append(
+                    {
+                        "id": engine_id,
+                        "name": row.engine.name,
+                        "version": row.engine.version,
+                        "elo": row.elo,
+                        "games_played": row.games_played,
+                    }
+                )
+            rating_lists.append(
+                {
+                    "id": rating_list.id,
+                    "name": rating_list.name,
+                    "engines": engines,
+                    "unavailable_engines": unavailable_engines,
+                }
+            )
+        form = _tournament_form_payload(web_app, request, connection)
+        form["engine_options"] = [
+            engine for engine in form["engine_options"]
+            if engine.id in eligible_engine_ids
+        ]
+        return _json(
+            {
+                "form": form,
+                "rating_lists": rating_lists,
+            }
+        )
+
+    @app.post("/api/admin/tools/tournament-creator/gauntlet-preview")
+    def admin_tournament_creator_gauntlet_preview(
+        payload: GauntletPreviewPayload,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        rating_list = get_rating_list(connection, payload.rating_list_id)
+        if rating_list is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        hero = get_engine_record(connection, payload.hero_engine_id)
+        if (
+            hero is None
+            or not hero.active
+            or not engine_build_is_benchmarked(
+                connection,
+                engine_version_id=hero.id,
+                build_hash=hero.build_hash,
+            )
+        ):
+            raise HTTPException(status_code=422, detail="Choose an available hero engine.")
+        engine_records = {engine.id: engine for engine in list_engine_records(connection)}
+        candidates = []
+        for row in list_rating_rows(connection, payload.rating_list_id):
+            engine_id = row.engine.engine_id
+            record = engine_records.get(engine_id)
+            if engine_id == payload.hero_engine_id or record is None or not record.active:
+                continue
+            if not engine_build_is_benchmarked(
+                connection,
+                engine_version_id=engine_id,
+                build_hash=record.build_hash,
+            ):
+                continue
+            candidates.append(row)
+        opponent_count = payload.gauntlet_size - 1
+        if len(candidates) < opponent_count:
+            raise HTTPException(
+                status_code=422,
+                detail=f"This list has only {len(candidates)} available opponent{'s' if len(candidates) != 1 else ''} for the selected hero.",
+            )
+        rank_denominator = max(1, len(candidates) - 1)
+        closeness_ranks = {
+            row.engine.engine_id: rank / rank_denominator
+            for rank, row in enumerate(
+                sorted(
+                    candidates,
+                    key=lambda item: (
+                        abs(item.elo - payload.elo_estimate),
+                        item.games_played,
+                        item.engine.engine_id,
+                    ),
+                )
+            )
+        }
+        coverage_ranks = {
+            row.engine.engine_id: rank / rank_denominator
+            for rank, row in enumerate(
+                sorted(
+                    candidates,
+                    key=lambda item: (
+                        item.games_played,
+                        abs(item.elo - payload.elo_estimate),
+                        item.engine.engine_id,
+                    ),
+                )
+            )
+        }
+
+        def selection_score(row) -> tuple[float, int, float, int]:
+            rating_distance = abs(row.elo - payload.elo_estimate)
+            return (
+                0.7 * closeness_ranks[row.engine.engine_id]
+                + 0.3 * coverage_ranks[row.engine.engine_id],
+                row.games_played,
+                rating_distance,
+                row.engine.engine_id,
+            )
+
+        selected = sorted(candidates, key=selection_score)[:opponent_count]
+        return _json(
+            {
+                "hero": {
+                    "id": hero.id,
+                    "name": hero.name,
+                    "version": hero.version,
+                },
+                "opponents": [
+                    {
+                        "id": row.engine.engine_id,
+                        "name": row.engine.name,
+                        "version": row.engine.version,
+                        "elo": row.elo,
+                        "games_played": row.games_played,
+                        "rating_distance": abs(row.elo - payload.elo_estimate),
+                        "selection_score": selection_score(row)[0],
+                    }
+                    for row in selected
+                ],
+            }
+        )
+
+    @app.post("/api/admin/tools/tournament-creator/batch")
+    def admin_tournament_creator_batch(
+        payload: TournamentCreatorBatchPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            tournaments = [
+                (item.name, _validated_tournament_config(connection, item.config))
+                for item in payload.tournaments
+            ]
+            created = [
+                {
+                    "id": create_tournament(connection, name, config, status="draft"),
+                    "name": name,
+                    "participants": len(config.participants),
+                }
+                for name, config in tournaments
+            ]
+            connection.commit()
+        except HTTPException:
+            connection.rollback()
+            raise
+        except ValidationError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail=[error["msg"] for error in exc.errors()],
+            ) from exc
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Tournament data changed while the drafts were being created. Reload the tool and try again.",
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            connection.rollback()
+            LOG.exception("tournament creator batch failed")
+            raise HTTPException(
+                status_code=503,
+                detail="The database could not save the tournament drafts. Try again.",
+            ) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "tournaments": created,
+                "message": f"Created {len(created)} tournament draft{'s' if len(created) != 1 else ''}.",
+            },
+            status_code=201,
         )
 
     @app.get("/api/admin/tools/invalidate-engine-games")

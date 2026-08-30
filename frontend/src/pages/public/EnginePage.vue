@@ -162,7 +162,7 @@ const mostPlayedOpponent = computed(() => {
 const pgnDownloadUrl = computed(() => {
   const parameters = new URLSearchParams({ engine_id: engineId.value })
   if (gameFilters.value.result) parameters.set('result', gameFilters.value.result)
-  if (gameFilters.value.timeControl) parameters.set('time_control', gameFilters.value.timeControl)
+  if (gameFilters.value.ratingListId) parameters.set('rating_list_id', gameFilters.value.ratingListId)
   if (gameFilters.value.opponentId) parameters.set('opponent_id', gameFilters.value.opponentId)
   if (gameFilters.value.side) parameters.set('side', gameFilters.value.side)
   return `/api/pgn?${parameters.toString()}`
@@ -175,9 +175,9 @@ const activeFilterChips = computed<Array<{ key: FilterKey; label: string }>>(() 
     const labels = { win: 'Wins', draw: 'Draws', loss: 'Losses' }
     chips.push({ key: 'result', label: `Result: ${labels[filters.result]}` })
   }
-  if (filters.timeControl) {
-    const label = data.value?.filter_options.time_controls.find((item) => item.value === filters.timeControl)?.label
-    chips.push({ key: 'timeControl', label: `Time: ${label || 'Selected control'}` })
+  if (filters.ratingListId) {
+    const label = data.value?.filter_options.rating_lists.find((item) => item.value === filters.ratingListId)?.label
+    chips.push({ key: 'ratingListId', label: `Rating list: ${label || 'Selected list'}` })
   }
   if (filters.opponentId) chips.push({ key: 'opponentId', label: `Opponent: ${data.value?.engines[filters.opponentId] || `Engine ${filters.opponentId}`}` })
   if (filters.side) chips.push({ key: 'side', label: `Playing as ${filters.side === 'white' ? 'White' : 'Black'}` })
@@ -206,7 +206,7 @@ watch(data, (response) => {
 onBeforeUnmount(() => controller?.abort())
 
 function emptyFilters(): EngineGameFilters {
-  return { result: '', timeControl: '', opponentId: '', side: '' }
+  return { result: '', ratingListId: '', opponentId: '', side: '' }
 }
 
 function resultForEngine(game: GameRecord): 'W' | 'D' | 'L' {
@@ -249,7 +249,7 @@ async function load(): Promise<void> {
     const response = await api.get<EngineResponse>(`/api/engines/${encodeURIComponent(engineId.value)}`, {
       query: {
         result: gameFilters.value.result || undefined,
-        time_control: gameFilters.value.timeControl || undefined,
+        rating_list_id: gameFilters.value.ratingListId || undefined,
         opponent_id: gameFilters.value.opponentId || undefined,
         side: gameFilters.value.side || undefined,
       },

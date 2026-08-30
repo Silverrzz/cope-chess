@@ -20,16 +20,17 @@ PgnColorFilter = Literal["white", "black"]
 class PgnExportFilters:
     game_id: int | None = None
     tournament_id: int | None = None
+    rating_list_id: int | None = None
     engine_id: int | None = None
     opponent_engine_id: int | None = None
     color: PgnColorFilter | None = None
     result: PgnResultFilter | None = None
-    time_control: str | None = None
 
     def __post_init__(self) -> None:
         identifiers = (
             self.game_id,
             self.tournament_id,
+            self.rating_list_id,
             self.engine_id,
             self.opponent_engine_id,
         )
@@ -39,8 +40,6 @@ class PgnExportFilters:
             value is not None for value in (self.opponent_engine_id, self.color, self.result)
         ):
             raise ValueError("opponent, color, and result filters require an engine")
-        if self.time_control is not None:
-            _parse_time_control_filter(self.time_control)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +292,12 @@ def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int |
     if filters.tournament_id is not None:
         conditions.append("game.tournament_id = ?")
         parameters.append(filters.tournament_id)
+    if filters.rating_list_id is not None:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM rating_list_history history "
+            "WHERE history.game_id = game.id AND history.rating_list_id = ?)"
+        )
+        parameters.append(filters.rating_list_id)
     if filters.engine_id is not None:
         conditions.append("(game.white_engine_id = ? OR game.black_engine_id = ?)")
         parameters.extend((filters.engine_id, filters.engine_id))
@@ -329,13 +334,6 @@ def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int |
             "OR (game.result = '1-0' AND game.black_engine_id = ?))"
         )
         parameters.extend((filters.engine_id, filters.engine_id))
-    if filters.time_control is not None:
-        conditions.append(
-            "(tournament.config::jsonb -> 'time_control') = CAST(? AS jsonb)"
-        )
-        parameters.append(
-            json.dumps(_parse_time_control_filter(filters.time_control), separators=(",", ":"))
-        )
     return conditions, parameters
 
 
@@ -387,40 +385,6 @@ def _time_control_header(time_control: Mapping[str, Any] | None) -> str | None:
     if category == "movestogo":
         return f"{time_control.get('moves_to_go')}/{_seconds(time_control.get('initial_ms'))}"
     return None
-
-
-def _parse_time_control_filter(value: str) -> dict[str, int | str]:
-    parts = value.split(":")
-    try:
-        if len(parts) == 3 and parts[0] == "increment":
-            initial_ms = int(parts[1])
-            increment_ms = int(parts[2])
-            if initial_ms > 0 and increment_ms >= 0:
-                return {
-                    "category": "increment",
-                    "initial_ms": initial_ms,
-                    "increment_ms": increment_ms,
-                }
-        elif len(parts) == 2 and parts[0] == "movetime":
-            move_time_ms = int(parts[1])
-            if move_time_ms > 0:
-                return {"category": "movetime", "move_time_ms": move_time_ms}
-        elif len(parts) == 3 and parts[0] == "movestogo":
-            initial_ms = int(parts[1])
-            moves_to_go = int(parts[2])
-            if initial_ms > 0 and moves_to_go > 0:
-                return {
-                    "category": "movestogo",
-                    "initial_ms": initial_ms,
-                    "moves_to_go": moves_to_go,
-                }
-        elif len(parts) == 2 and parts[0] == "movenodes":
-            nodes = int(parts[1])
-            if nodes > 0:
-                return {"category": "movenodes", "nodes": nodes}
-    except ValueError:
-        pass
-    raise ValueError("invalid time control filter")
 
 
 def _seconds(value: Any) -> str:

@@ -65,14 +65,15 @@ export type EngineGameSideFilter = '' | 'white' | 'black'
 
 export interface EngineGameFilters {
   result: EngineGameResultFilter
-  timeControl: string
+  ratingListId: string
   opponentId: string
   side: EngineGameSideFilter
 }
 
 export interface EngineGameFilterOptions {
   opponent_ids: number[]
-  time_controls: Array<{ value: string; label: string }>
+  opponent_ids_by_rating_list: Record<string, number[]>
+  rating_lists: Array<{ value: string; label: string }>
 }
 
 export interface MoveRecord {

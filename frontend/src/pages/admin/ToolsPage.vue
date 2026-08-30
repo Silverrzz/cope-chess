@@ -56,15 +56,15 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack tools-page">
-    <AdminPageHeader title="Tools" description="Operational utilities powered by your connected worker fleet." />
+    <AdminPageHeader title="Tools" description="Planning and operational utilities for tournaments, engines, and workers." />
     <InlineFeedback :message="error" />
 
     <section class="tools-hero panel">
       <div class="tools-hero__mark"><AppIcon name="wrench" :size="24" /></div>
       <div>
-        <span class="eyebrow">Worker-backed utilities</span>
-        <h2>One home for fleet-wide inspection and maintenance</h2>
-        <p>Tools use the same engine definitions, build cache, authentication, and live worker connections as tournament operations.</p>
+        <span class="eyebrow">Admin utilities</span>
+        <h2>One home for tournament planning and fleet-wide maintenance</h2>
+        <p>Tools use the same rating lists, engine definitions, build cache, authentication, and live worker connections as tournament operations.</p>
       </div>
       <div class="fleet-state" :class="{ 'fleet-state--offline': !data?.connected_workers }">
         <span class="fleet-state__pulse" />
@@ -79,12 +79,12 @@ onMounted(load)
         <span class="section-heading__count">{{ data?.tools.length ?? 0 }} available</span>
       </div>
       <div v-if="loading" class="tool-grid">
-        <div v-for="index in 2" :key="index" class="tool-card tool-card--loading panel" />
+        <div v-for="index in 4" :key="index" class="tool-card tool-card--loading panel" />
       </div>
       <div v-else class="tool-grid">
         <RouterLink v-for="tool in data?.tools" :key="tool.name" class="tool-card panel" :to="tool.href">
           <div class="tool-card__top">
-            <span class="tool-card__icon"><AppIcon :name="tool.name === 'invalidate_rating_list_engine' ? 'trash' : 'search'" :size="22" /></span>
+            <span class="tool-card__icon"><AppIcon :name="tool.name === 'invalidate_rating_list_engine' ? 'trash' : tool.name === 'tournament_creator' ? 'trophy' : 'search'" :size="22" /></span>
             <span class="tool-card__status"><span />{{ statusLabel(tool.status) }}</span>
           </div>
           <div><h3>{{ tool.label }}</h3><p>{{ tool.description }}</p></div>

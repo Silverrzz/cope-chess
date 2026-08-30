@@ -243,6 +243,12 @@ const router = createRouter({
           meta: { title: "Invalidate engine games" },
         },
         {
+          path: "tools/tournament-creator",
+          name: "admin-tool-tournament-creator",
+          component: () => import("@/pages/admin/TournamentCreatorPage.vue"),
+          meta: { title: "Tournament creator" },
+        },
+        {
           path: "updates",
           name: "admin-updates",
           component: () => import("@/pages/admin/DeploymentsPage.vue"),
