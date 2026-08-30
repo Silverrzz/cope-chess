@@ -1638,7 +1638,7 @@ def insert_clone_batch(connection, table: str, rows: list[dict[str, Any]]) -> in
     columns = tuple(rows[0])
     if any(tuple(row) != columns for row in rows):
         raise ValueError(f"Inconsistent columns in clone dataset {table}")
-    if not re.fullmatch(r"[a-z_]+", table) or any(re.fullmatch(r"[a-z_]+", column) is None for column in columns):
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", table) or any(re.fullmatch(r"[a-z_][a-z0-9_]*", column) is None for column in columns):
         raise ValueError("Invalid clone dataset identifiers")
     placeholders = ", ".join("?" for _ in columns)
     cursor = connection.executemany(
@@ -1756,8 +1756,19 @@ def materialize_clone_artifacts(job_id: int, artifacts: list[dict[str, Any]]) ->
                     raise CloneConflict(f"Destination artifact storage key conflicts with source artifact {digest}.")
                 staged.unlink()
                 continue
-            os.replace(staged, destination)
-            destination.chmod(0o600)
+            temporary = destination.parent / f".{destination.name}.clone-{job_id}.part"
+            try:
+                with staged.open("rb") as source, temporary.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if temporary.stat().st_size != size or sha256_file(temporary) != digest:
+                    raise RuntimeError(f"Copied artifact failed verification: {digest}")
+                os.replace(temporary, destination)
+                destination.chmod(0o600)
+                staged.unlink()
+            finally:
+                temporary.unlink(missing_ok=True)
             continue
         if not destination.is_file() or destination.stat().st_size != size or sha256_file(destination) != digest:
             raise RuntimeError(f"Staged artifact is unavailable: {digest}")

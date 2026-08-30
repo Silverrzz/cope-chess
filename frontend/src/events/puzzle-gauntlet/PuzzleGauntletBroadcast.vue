@@ -129,10 +129,11 @@ const moveGroups = computed(() => {
   const sorted = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
   const solutions = new Set((payload.value.current_puzzle?.solutions ?? []).map((move) => move.toLowerCase()));
   return sorted.map(([move, entries]) => {
+    const orderedEntries = [...entries].sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
     return {
       move,
-      entries,
-      count: entries.length,
+      entries: orderedEntries,
+      count: orderedEntries.length,
       solution: solutions.has(move.toLowerCase()),
     };
   });
@@ -846,7 +847,22 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
               <div class="consensus-list">
                 <span>Move split</span>
                 <ol v-if="rankedMoveGroups.length">
-                  <li v-for="group in rankedMoveGroups.slice(0, 6)" :key="group.move"><strong>{{ group.move }}</strong><i><span :style="{ width: `${group.count / Math.max(activeEntries.length, 1) * 100}%` }"></span></i><small>{{ group.count }}</small></li>
+                  <li v-for="group in rankedMoveGroups" :key="group.move">
+                    <details class="move-split-group">
+                      <summary>
+                        <strong>{{ group.move }}</strong>
+                        <i><span :style="{ width: `${group.count / Math.max(activeEntries.length, 1) * 100}%` }"></span></i>
+                        <small>{{ group.count }}</small>
+                        <AppIcon name="chevron-down" :size="13" />
+                      </summary>
+                      <ul class="move-split-engines">
+                        <li v-for="entry in group.entries" :key="entry.id">
+                          <span class="move-split-avatar">{{ engineInitials(entry) }}</span>
+                          <span><strong>{{ entry.name }}</strong><small>{{ entry.version }}</small></span>
+                        </li>
+                      </ul>
+                    </details>
+                  </li>
                 </ol>
                 <p v-else>No engine has committed to a line yet.</p>
               </div>
@@ -1051,11 +1067,22 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .overview-primary strong { color: var(--color-accent, #2f78c4); }
 .consensus-list { min-height: 0; flex: 1; overflow: auto; padding: .7rem .85rem; }
 .consensus-list ol { display: grid; gap: .5rem; margin: .55rem 0 0; padding: 0; list-style: none; }
-.consensus-list li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) 1.3rem; align-items: center; gap: .5rem; }
-.consensus-list li strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .7rem; }
-.consensus-list li i { height: .25rem; overflow: hidden; border-radius: 999px; background: var(--color-surface-sunken, #edf2f7); }
-.consensus-list li i span { display: block; height: 100%; background: var(--color-accent, #2f78c4); }
-.consensus-list li small, .consensus-list p { color: var(--color-text-muted, #607080); font-size: .62rem; }
+.consensus-list > ol > li { min-width: 0; }
+.move-split-group summary { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) 1.3rem auto; align-items: center; gap: .5rem; cursor: pointer; list-style: none; }
+.move-split-group summary::-webkit-details-marker { display: none; }
+.move-split-group summary > strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .7rem; }
+.move-split-group summary > i { height: .25rem; overflow: hidden; border-radius: 999px; background: var(--color-surface-sunken, #edf2f7); }
+.move-split-group summary > i span { display: block; height: 100%; background: var(--color-accent, #2f78c4); }
+.move-split-group summary > small, .consensus-list > p { color: var(--color-text-muted, #607080); font-size: .62rem; }
+.move-split-group summary .app-icon { color: var(--color-text-muted, #607080); transition: transform 140ms ease; }
+.move-split-group[open] summary .app-icon { transform: rotate(180deg); }
+.move-split-engines { display: grid; gap: .25rem; margin: .45rem 0 .15rem; padding: .45rem 0 0 1rem; border-block-start: 1px solid var(--color-border, #d5dbe1); list-style: none; }
+.move-split-engines li { display: grid; grid-template-columns: 1.55rem minmax(0, 1fr); align-items: center; gap: .45rem; min-width: 0; padding: .22rem .3rem; }
+.move-split-engines li > span:last-child { display: grid; min-width: 0; }
+.move-split-engines li strong, .move-split-engines li small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.move-split-engines li strong { font-size: .62rem; }
+.move-split-engines li small { color: var(--color-text-muted, #607080); font-size: .53rem; }
+.move-split-avatar { display: grid; width: 1.55rem; aspect-ratio: 1; place-items: center; border-radius: .32rem; background: color-mix(in srgb, var(--color-accent, #2f78c4) 12%, var(--color-surface, #fff)); color: var(--color-accent, #2f78c4); font-size: .45rem; font-weight: 900; }
 .gauntlet-board { --engine: var(--engine-alive); position: relative; width: 100%; aspect-ratio: 1; overflow: hidden; border-radius: var(--radius-md, .5rem); box-shadow: var(--shadow-sm, 0 2px 6px rgb(0 0 0 / 10%)); }
 .gauntlet-board :deep(.board-mount), .gauntlet-board :deep(.chess-viewer) { width: 100%; }
 .puzzle-progression { display: grid; height: 3.5rem; box-sizing: border-box; align-content: center; gap: .25rem; margin-block-start: .5rem; padding: .35rem .7rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-md, .5rem); background: var(--color-surface, #fff); }

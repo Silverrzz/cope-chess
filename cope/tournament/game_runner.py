@@ -66,7 +66,7 @@ class GameRunner:
         clock.start_clock()
         engine.start_search(
             board,
-            "go infinite" if self._search_until_timeout else self._build_go_command(clock),
+            self._build_go_command(clock),
         )
         if self._on_clock_sync is not None:
             self._on_clock_sync(side_to_move, True, _clock_remaining_ms(clock))
