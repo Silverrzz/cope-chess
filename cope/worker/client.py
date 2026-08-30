@@ -926,7 +926,6 @@ async def _serve_assignment(
             current=len(engines),
             total=len(engines),
         )
-        hardware_scores: dict[int, EngineHardwareScore] = {}
         benchmark_reference = assignment.benchmark_reference
         benchmark_engine_ids = (
             ()
@@ -941,48 +940,70 @@ async def _serve_assignment(
             current=0,
             total=max(1, len(benchmark_engine_ids)),
         )
-        for position, engine_id in enumerate(benchmark_engine_ids, start=1):
+        completed_benchmarks = 0
+        benchmark_slots = asyncio.Semaphore(ENGINE_BENCHMARK_CONCURRENCY)
+        benchmark_progress_lock = asyncio.Lock()
+
+        async def benchmark_engine(engine_id: int) -> EngineHardwareScore:
+            nonlocal completed_benchmarks
             engine = engines[engine_id]
             spec = assignment.engines[engine_id]
             if benchmark_reference is None:
                 raise ProtocolValidationError("managed engine has no benchmark reference")
             reference_nps = benchmark_reference.engine_nps[engine_id]
-            await progress.publish(
-                "benchmark",
-                "engine_benchmark",
-                "running",
-                f"Benchmarking {spec.name}",
-                engine=spec,
-                current=position - 1,
-                total=len(benchmark_engine_ids),
-            )
-            worker_nps, elapsed_ms = await benchmark_cache.benchmark(
-                engine,
-                spec,
-                benchmark_reference.timeout_s,
-            )
-            hardware_score = worker_nps / reference_nps
-            hardware_scores[engine_id] = EngineHardwareScore(
-                benchmark_nps=reference_nps,
-                worker_nps=worker_nps,
-                hardware_score=hardware_score,
-                elapsed_ms=elapsed_ms,
-            )
-            await progress.publish(
-                "benchmark",
-                "engine_benchmark",
-                "completed",
-                f"Benchmarked {spec.name} at {worker_nps} NPS",
-                engine=spec,
-                current=position,
-                total=len(benchmark_engine_ids),
-                metadata={
-                    "benchmark_nps": reference_nps,
-                    "worker_nps": worker_nps,
-                    "hardware_score": hardware_score,
-                    "elapsed_ms": elapsed_ms,
-                },
-            )
+            async with benchmark_slots:
+                async with benchmark_progress_lock:
+                    current = completed_benchmarks
+                await progress.publish(
+                    "benchmark",
+                    "engine_benchmark",
+                    "running",
+                    f"Benchmarking {spec.name}",
+                    engine=spec,
+                    current=current,
+                    total=len(benchmark_engine_ids),
+                )
+                worker_nps, elapsed_ms = await benchmark_cache.benchmark(
+                    engine,
+                    spec,
+                    benchmark_reference.timeout_s,
+                )
+                hardware_score = worker_nps / reference_nps
+                score = EngineHardwareScore(
+                    benchmark_nps=reference_nps,
+                    worker_nps=worker_nps,
+                    hardware_score=hardware_score,
+                    elapsed_ms=elapsed_ms,
+                )
+                async with benchmark_progress_lock:
+                    completed_benchmarks += 1
+                    current = completed_benchmarks
+                await progress.publish(
+                    "benchmark",
+                    "engine_benchmark",
+                    "completed",
+                    f"Benchmarked {spec.name} at {worker_nps} NPS",
+                    engine=spec,
+                    current=current,
+                    total=len(benchmark_engine_ids),
+                    metadata={
+                        "benchmark_nps": reference_nps,
+                        "worker_nps": worker_nps,
+                        "hardware_score": hardware_score,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+                return score
+
+        benchmark_results = await asyncio.gather(
+            *(benchmark_engine(engine_id) for engine_id in benchmark_engine_ids),
+            return_exceptions=True,
+        )
+        hardware_scores: dict[int, EngineHardwareScore] = {}
+        for engine_id, result in zip(benchmark_engine_ids, benchmark_results):
+            if isinstance(result, BaseException):
+                raise result
+            hardware_scores[engine_id] = result
         await progress.publish(
             "benchmark",
             "benchmark_all",

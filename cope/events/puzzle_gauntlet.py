@@ -1020,7 +1020,11 @@ def _register_api(app: FastAPI) -> None:
             raise HTTPException(status_code=422, detail="Select an available engine version.")
         if any(int(row["engine_version_id"]) == payload.engine_id for row in _entry_rows(connection, event_id)):
             raise HTTPException(status_code=409, detail="That engine is already in the gauntlet.")
-        position = len(_entry_rows(connection, event_id))
+        position_row = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM event_cast_members WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        position = int(position_row["position"])
         member_id = create_event_cast_member(
             connection,
             event_id,

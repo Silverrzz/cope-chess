@@ -50,6 +50,8 @@ interface GauntletStreamSnapshot {
 
 const COPE_BLUE = "#2d63bf";
 const KNOCKOUT_GRAY = "#7b8495";
+const UCI_MOVE_PATTERN = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+const TRANSIENT_ENGINE_VALUES = new Set(["", "-", "not recorded"]);
 
 const props = defineProps<{
   detail: EventDetailResponse;
@@ -64,6 +66,7 @@ const focusedId = ref<number | null>(null);
 const now = ref(Date.now());
 const streamState = ref<"connecting" | "live" | "offline">("connecting");
 const infoByEngine = ref<Record<number, GauntletEngineInfo>>({});
+const proposalByEntry = ref<Record<number, string>>({});
 const countdownFinished = ref(false);
 const countdownBeat = ref(-1);
 const soundState = ref<"armed" | "loading" | "playing" | "blocked" | "unavailable" | "finished">("loading");
@@ -237,6 +240,7 @@ watch(
   () => payload.value.current_puzzle?.id,
   () => {
     infoByEngine.value = {};
+    proposalByEntry.value = {};
     fenCopied.value = false;
     connectStream();
   },
@@ -340,27 +344,26 @@ function connectStream(): void {
   stream.onerror = () => { streamState.value = "offline"; };
   stream.addEventListener("tournament.snapshot", (raw) => {
     const data = streamData<GauntletStreamSnapshot>(raw);
-    const snapshot: Record<number, GauntletEngineInfo> = {};
     for (const info of data.engine_infos ?? []) {
       const entry = payload.value.entries.find((item) => String(item.attempt?.game_id) === String(info.game_id));
       if (!entry || Number(entry.engine_id) !== Number(info.engine_id)) continue;
-      snapshot[info.engine_id] = info;
+      mergeEngineInfo(entry, info);
     }
-    infoByEngine.value = snapshot;
   });
   stream.addEventListener("engine.info", (raw) => {
     const data = streamData<GauntletEngineInfo>(raw);
     const entry = payload.value.entries.find((item) => String(item.attempt?.game_id) === String(data.game_id));
     if (!data.engine_id || !entry || Number(entry.engine_id) !== Number(data.engine_id)) return;
-    infoByEngine.value = { ...infoByEngine.value, [data.engine_id]: data };
+    mergeEngineInfo(entry, data);
   });
   stream.addEventListener("game.move", (raw) => {
     const data = streamData<GauntletMoveEvent>(raw);
-    const move = data.move?.uci?.toLowerCase() ?? "";
-    if (data.game_id === undefined || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move)) return;
+    const move = normalizedMove(data.move?.uci);
+    if (data.game_id === undefined || !move) return;
     const entry = payload.value.entries.find((item) => String(item.attempt?.game_id) === String(data.game_id));
     if (!entry?.attempt) return;
     entry.attempt.move_uci = move;
+    recordProposal(entry, move);
     if (data.move?.time_ms !== undefined) entry.attempt.elapsed_ms = data.move.time_ms;
   });
   stream.addEventListener("spectators.changed", (raw) => {
@@ -378,14 +381,44 @@ function streamData<T>(raw: Event): T {
   }
 }
 
+function normalizedMove(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const move = value.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return UCI_MOVE_PATTERN.test(move) ? move : "";
+}
+
+function recordProposal(entry: GauntletEntry, move: string): void {
+  if (!move || proposalByEntry.value[entry.id] === move) return;
+  proposalByEntry.value = { ...proposalByEntry.value, [entry.id]: move };
+}
+
+function mergeEngineInfo(entry: GauntletEntry, incoming: GauntletEngineInfo): void {
+  if (String(entry.attempt?.game_id) !== String(incoming.game_id)) return;
+  const engineId = Number(entry.engine_id);
+  if (engineId !== Number(incoming.engine_id)) return;
+  const previous = infoByEngine.value[engineId];
+  const incomingData = Object.fromEntries(
+    Object.entries(incoming.engine_data ?? {}).filter(([, value]) => (
+      value !== undefined
+      && value !== null
+      && !(typeof value === "string" && TRANSIENT_ENGINE_VALUES.has(value.trim().toLowerCase()))
+    )),
+  ) as GauntletEngineInfo["engine_data"];
+  const merged: GauntletEngineInfo = {
+    ...(previous ?? incoming),
+    ...incoming,
+    raw: incoming.raw || previous?.raw || "",
+    root_fen: incoming.root_fen || previous?.root_fen || "",
+    engine_data: { ...(previous?.engine_data ?? {}), ...incomingData },
+  };
+  infoByEngine.value = { ...infoByEngine.value, [engineId]: merged };
+  recordProposal(entry, normalizedMove(merged.engine_data.pv));
+}
+
 function proposedMove(entry: GauntletEntry | null): string {
   if (!entry) return "";
-  const lockedMove = entry.attempt?.move_uci?.toLowerCase() ?? "";
-  if (/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(lockedMove)) return lockedMove;
-  const info = infoByEngine.value[Number(entry.engine_id)];
-  if (!info || String(info.game_id) !== String(entry.attempt?.game_id)) return "";
-  const liveMove = info?.engine_data.pv?.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-  return /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(liveMove) ? liveMove : "";
+  const lockedMove = normalizedMove(entry.attempt?.move_uci);
+  return lockedMove || proposalByEntry.value[entry.id] || "";
 }
 
 function timeLabel(value: number | null): string {
