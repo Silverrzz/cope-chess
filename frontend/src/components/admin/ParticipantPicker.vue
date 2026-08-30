@@ -8,6 +8,8 @@ interface Engine {
   author?: string
   version: string
   source_kind: 'release' | 'commit'
+  distribution?: 'managed' | 'worker_local'
+  worker_local_count?: number
 }
 
 interface EngineGroup {
@@ -163,7 +165,7 @@ watch(visibleGroups, (available) => {
             <input :type="single ? 'radio' : 'checkbox'" :checked="selected.has(version.id)" @change="toggle(version.id)">
             <span>
               <strong>{{ version.version }}</strong>
-              <small>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }}</small>
+              <small :class="{ 'participant-version__local-offline': version.distribution === 'worker_local' && !(version.worker_local_count ?? 0) }">{{ version.distribution === 'worker_local' ? `Worker-local · ${version.worker_local_count ?? 0} connected` : version.source_kind === 'release' ? 'Release' : 'Commit' }}</small>
             </span>
             <AppIcon v-if="selected.has(version.id)" name="check" :size="16" />
           </label>
@@ -221,6 +223,7 @@ watch(visibleGroups, (available) => {
 .participant-version strong, .participant-version small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .participant-version strong { font-size: .76rem; }
 .participant-version small { color: var(--color-text-muted, #64748b); font-size: .64rem; margin-top: .12rem; }
+.participant-version small.participant-version__local-offline { color: var(--color-warning, #92400e); }
 .participant-version > .app-icon { color: var(--color-accent, #315fcc); }
 .participant-versions--empty { align-content: center; color: var(--color-text-muted, #64748b); gap: .3rem; justify-items: center; padding: 2rem; text-align: center; }
 .participant-versions--empty strong { color: var(--color-text, #17202a); font-size: .8rem; margin-top: .25rem; }

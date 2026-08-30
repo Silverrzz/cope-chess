@@ -4092,12 +4092,7 @@ def register_api_routes(app: FastAPI) -> None:
         eligible_engine_ids = {
             engine.id
             for engine in engine_records.values()
-            if engine.active
-            and engine_build_is_benchmarked(
-                connection,
-                engine_version_id=engine.id,
-                build_hash=engine.build_hash,
-            )
+            if _engine_is_tournament_ready(connection, engine)
         }
         rating_lists = []
         for rating_list in list_rating_lists(connection):
@@ -4148,12 +4143,7 @@ def register_api_routes(app: FastAPI) -> None:
         hero = get_engine_record(connection, payload.hero_engine_id)
         if (
             hero is None
-            or not hero.active
-            or not engine_build_is_benchmarked(
-                connection,
-                engine_version_id=hero.id,
-                build_hash=hero.build_hash,
-            )
+            or not _engine_is_tournament_ready(connection, hero)
         ):
             raise HTTPException(status_code=422, detail="Choose an available hero engine.")
         engine_records = {engine.id: engine for engine in list_engine_records(connection)}
@@ -4161,13 +4151,9 @@ def register_api_routes(app: FastAPI) -> None:
         for row in list_rating_rows(connection, payload.rating_list_id):
             engine_id = row.engine.engine_id
             record = engine_records.get(engine_id)
-            if engine_id == payload.hero_engine_id or record is None or not record.active:
+            if engine_id == payload.hero_engine_id or record is None:
                 continue
-            if not engine_build_is_benchmarked(
-                connection,
-                engine_version_id=engine_id,
-                build_hash=record.build_hash,
-            ):
+            if not _engine_is_tournament_ready(connection, record):
                 continue
             candidates.append(row)
         opponent_count = payload.gauntlet_size - 1
@@ -4976,18 +4962,26 @@ def _validate_live_participant_engine(
     record = get_engine_record(connection, engine_id)
     if record is None:
         raise HTTPException(status_code=422, detail="Choose an existing engine version.")
-    if (
-        not record.active
-        or not record.engine_active
-        or (
-            record.distribution == "managed"
-            and not record.benchmark_current
-        )
-    ):
+    if not _engine_is_tournament_ready(connection, record):
         raise HTTPException(
             status_code=422,
             detail="Choose an active engine version that is ready to run.",
         )
+
+
+def _engine_is_tournament_ready(
+    connection: sqlite3.Connection,
+    record,
+) -> bool:
+    if not record.active or not record.engine_active or not record.version.strip():
+        return False
+    if record.distribution == "worker_local":
+        return True
+    return engine_build_is_benchmarked(
+        connection,
+        engine_version_id=record.id,
+        build_hash=record.build_hash,
+    )
 
 
 def _live_tournament_roster_payload(
@@ -5008,12 +5002,7 @@ def _live_tournament_roster_payload(
             engine
             for engine in list_engine_records(connection)
             if engine.id not in participant_ids
-            and engine.active
-            and engine.engine_active
-            and (
-                engine.distribution == "worker_local"
-                or engine.benchmark_current
-            )
+            and _engine_is_tournament_ready(connection, engine)
         ]
         if editable
         else []
@@ -5120,15 +5109,10 @@ def _validated_tournament_config(
         raise HTTPException(status_code=422, detail="One or more selected engines no longer exist.")
     unavailable = [
         engine_id for engine_id in submitted.participants
-        if not records[engine_id].active
-        or not engine_build_is_benchmarked(
-            connection,
-            engine_version_id=engine_id,
-            build_hash=records[engine_id].build_hash,
-        )
+        if not _engine_is_tournament_ready(connection, records[engine_id])
     ]
     if unavailable:
-        raise HTTPException(status_code=422, detail="Every participant must be active.")
+        raise HTTPException(status_code=422, detail="Every participant must be active and ready to run.")
 
     _validate_opening_suite_reference(connection, submitted.opening_suite_id)
     return submitted
@@ -5170,12 +5154,7 @@ def _tournament_form_payload(
         engine
         for engine in list_engine_records(connection)
         if (
-            engine.active
-            and engine_build_is_benchmarked(
-                connection,
-                engine_version_id=engine.id,
-                build_hash=engine.build_hash,
-            )
+            _engine_is_tournament_ready(connection, engine)
         ) or engine.id in participant_ids
     ]
     return {

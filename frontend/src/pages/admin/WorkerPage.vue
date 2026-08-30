@@ -466,7 +466,7 @@ onBeforeUnmount(() => source?.close())
             <div v-else class="system-empty">Hardware will appear after the first connection.</div>
           </section>
           <section class="panel system-card">
-            <header><span><AppIcon name="server" :size="17" /></span><div><h2>Worker-local engines</h2><p>Private binaries discovered on the latest connection.</p></div></header>
+            <header><span><AppIcon name="server" :size="17" /></span><div><h2>Worker-local engines</h2><p>Private binaries reported by this connection.</p></div></header>
             <dl v-if="data.local_engines.length" class="compact-facts"><div v-for="engine in data.local_engines" :key="engine.local_key"><dt><code>{{ engine.local_key }}</code></dt><dd>{{ engine.engine_name ? `${engine.engine_name} ${engine.engine_version}` : 'No registered version' }}</dd></div></dl>
             <div v-else class="system-empty">No executable binaries were discovered below the local engine directory.</div>
           </section>

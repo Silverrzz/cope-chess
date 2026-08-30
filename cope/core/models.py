@@ -47,6 +47,20 @@ class WorkerResourceTelemetry(StrictModel):
     disk_used_mb: float = Field(ge=0, allow_inf_nan=False)
     disk_free_mb: float = Field(ge=0, allow_inf_nan=False)
     disk_total_mb: float = Field(gt=0, allow_inf_nan=False)
+    worker_local_engine_keys: tuple[WorkerLocalEngineKey, ...] | None = Field(
+        default=None,
+        max_length=500,
+    )
+
+    @field_validator("worker_local_engine_keys")
+    @classmethod
+    def validate_worker_local_engine_keys(
+        cls,
+        value: tuple[str, ...] | None,
+    ) -> tuple[str, ...] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("worker-local engine keys must be unique")
+        return value
 
 
 class TimeControlCategory(StrEnum):

@@ -93,7 +93,7 @@ onMounted(load)
             <div class="version-card__heading"><div><h3>{{ version.version }}</h3><p>{{ version.repository_full_name }}</p></div><StatusBadge :status="version.active ? 'active' : 'inactive'" /></div>
             <dl>
               <div><dt>Source</dt><dd v-if="version.distribution === 'worker_local'">Worker-local private binary</dd><dd v-else>{{ version.source_kind === 'release' ? 'Release' : 'Commit' }} · <code>{{ version.source_ref }}</code></dd></div>
-              <div><dt>Worker artifact</dt><dd><span class="artifact-label" :class="{ 'artifact-label--ready': version.artifact || version.distribution === 'worker_local' }">{{ version.distribution === 'worker_local' ? `Worker-local · ${version.worker_local_count ?? 0} online` : version.artifact ? 'Ready' : 'Not published' }}</span><small v-if="version.artifact">{{ formatBytes(version.artifact.size) }} · {{ version.artifact.sha256.slice(0, 12) }}…</small></dd></div>
+              <div><dt>Worker artifact</dt><dd><span class="artifact-label" :class="{ 'artifact-label--ready': version.distribution === 'worker_local' ? (version.worker_local_count ?? 0) > 0 : version.artifact }">{{ version.distribution === 'worker_local' ? `Worker-local · ${version.worker_local_count ?? 0} connected` : version.artifact ? 'Ready' : 'Not published' }}</span><small v-if="version.artifact">{{ formatBytes(version.artifact.size) }} · {{ version.artifact.sha256.slice(0, 12) }}…</small></dd></div>
               <div><dt>Games</dt><dd>{{ formatNumber(gameCounts[String(version.id)]) }}</dd></div>
               <div><dt>Created</dt><dd>{{ formatDate(version.created_at) }}</dd></div>
             </dl>

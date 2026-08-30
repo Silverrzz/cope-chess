@@ -253,6 +253,7 @@ class _WorkerResourceSampler:
             disk_used_mb=round(float(disk.used) / mb, 3),
             disk_free_mb=round(float(disk.free) / mb, 3),
             disk_total_mb=round(float(disk.total) / mb, 3),
+            worker_local_engine_keys=discover_worker_local_engine_keys(),
         )
 
 

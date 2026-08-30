@@ -32,6 +32,7 @@ const settings = computed<TournamentSettings>({
 })
 
 const selectedOpening = computed(() => props.seed.opening_suites.find((suite) => suite.id === config.value.opening_suite_id))
+const hasLocalEngines = computed(() => props.seed.engine_options.some((engine) => engine.distribution === 'worker_local'))
 const selectedParticipantNames = computed(() => props.seed.engine_options
   .filter((engine) => config.value.participants.includes(engine.id))
   .map((engine) => `${engine.name} ${engine.version}`))
@@ -117,6 +118,7 @@ function submit(): void {
           <div><h2>Participants</h2></div>
         </div>
         <ParticipantPicker v-if="seed.engine_options.length" v-model="config.participants" :engines="seed.engine_options" />
+        <p v-if="hasLocalEngines" class="local-participant-guidance">Worker-local versions do not need a benchmark. Their games wait in the queue until a connected worker reports the matching binary.</p>
         <AdminEmptyState v-else title="No active engines">
           <RouterLink class="button button--primary button--small" to="/admin/engines/new">Register an engine</RouterLink>
         </AdminEmptyState>
@@ -230,6 +232,7 @@ function submit(): void {
 .tournament-options summary strong { font-size: .82rem; }
 .tournament-options summary span { color: var(--color-text-muted, #64748b); font-size: .72rem; }
 .tournament-options details > div { border-top: 1px solid var(--color-border, #d9e0ea); padding: .85rem; }
+.local-participant-guidance { background: color-mix(in srgb, var(--color-accent, #315fcc) 6%, transparent); border-left: 3px solid var(--color-accent, #315fcc); color: var(--color-text-muted, #64748b); font-size: .72rem; line-height: 1.45; margin: 0; padding: .55rem .7rem; }
 @media (max-width: 64rem) {
   .tournament-form { grid-template-columns: 1fr; }
   .tournament-summary { grid-row: 1; position: static; }

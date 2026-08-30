@@ -840,15 +840,25 @@ class WorkerHandshakeServer:
                     telemetry = WorkerResourceTelemetry.model_validate(envelope.data)
                 except ValidationError as error:
                     raise ProtocolValidationError(str(error)) from error
+                local_keys = telemetry.worker_local_engine_keys
+                capability = None if local_keys is None else (worker.id, local_keys)
+                discoveries_changed = (
+                    capability is not None
+                    and self._worker_capabilities.get(worker.id) != capability
+                )
                 recorded = await asyncio.to_thread(
                     self._record_worker_resource_telemetry,
                     worker,
                     telemetry,
+                    discoveries_changed,
                 )
                 if not recorded:
                     raise WorkerConnectionInactive(
                         "worker session is no longer current"
                     )
+                if discoveries_changed and capability is not None:
+                    self._worker_capabilities[worker.id] = capability
+                    await self._wake_workers()
                 continue
             if envelope.type == "worker_telemetry_batch":
                 messages = envelope.data.get("messages")
@@ -1882,6 +1892,7 @@ class WorkerHandshakeServer:
         self,
         worker: WorkerRecord,
         telemetry: WorkerResourceTelemetry,
+        replace_discoveries: bool,
     ) -> bool:
         if worker.session_id is None:
             return False
@@ -1893,6 +1904,16 @@ class WorkerHandshakeServer:
                 worker.session_id,
                 telemetry,
             )
+            if (
+                recorded
+                and replace_discoveries
+                and telemetry.worker_local_engine_keys is not None
+            ):
+                replace_worker_engine_discoveries(
+                    connection,
+                    worker.id,
+                    telemetry.worker_local_engine_keys,
+                )
             connection.commit()
             if recorded:
                 publish_workers_changed(
