@@ -47,7 +47,12 @@ function themeColor(key: string, fallback: string): string {
 <template>
   <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <div class="puzzle-field" aria-hidden="true"></div>
-    <div class="gauntlet-mark" aria-hidden="true"><span></span><i></i><AppIcon name="puzzle" size="clamp(7rem, 13vw, 12rem)" /></div>
+    <div class="gauntlet-mark" aria-hidden="true">
+      <span></span><i></i>
+      <svg class="gauntlet-puzzle" width="clamp(7rem, 13vw, 12rem)" height="clamp(7rem, 13vw, 12rem)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 4h-6v2.5a2.5 2.5 0 1 1-5 0V4H4v6h2.5a2.5 2.5 0 1 1 0 5H4v5h6v-2.5a2.5 2.5 0 1 1 5 0V20h4v-5h1.5a2.5 2.5 0 1 0 0-5H19V4Z" />
+      </svg>
+    </div>
     <div class="gauntlet-copy">
       <span class="gauntlet-kicker"><AppIcon name="trophy" :size="16" />{{ current ? isLive ? "Live" : "Upcoming" : "Completed" }}</span>
       <h2>{{ event.title }}</h2>
