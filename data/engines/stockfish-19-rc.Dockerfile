@@ -9,7 +9,7 @@ RUN make -C src -j"$(nproc)" profile-build \
         ARCH=x86-64-bmi2 \
         COMP=gcc \
         ENV_CXXFLAGS="-march=x86-64-v3 -mtune=generic" \
-        EXTRALDFLAGS="-static" \
+        ENV_LDFLAGS="-static" \
     && install -Dm755 src/stockfish /opt/cope/engine \
     && strip /opt/cope/engine
 
