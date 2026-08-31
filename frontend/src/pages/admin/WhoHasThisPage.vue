@@ -174,7 +174,7 @@ function stopPolling(): void {
 }
 
 async function cancelJob(): Promise<void> {
-  if (!activeJob.value || activeJob.value.status !== 'queued') return
+  if (!activeJob.value || !['queued', 'running'].includes(activeJob.value.status)) return
   try {
     const response = await api.post<{ message: string }>(`/api/admin/tools/jobs/${activeJob.value.id}/cancel`)
     toast.success(response.message)
@@ -265,7 +265,7 @@ onBeforeUnmount(stopPolling)
           <div v-if="active" class="progress-block">
             <div class="progress-copy"><span>{{ activeJob.completed_items }} of {{ activeJob.total_items }} engines inspected</span><strong>{{ progress }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progress}%` }" /></div>
-            <BaseButton v-if="activeJob.status === 'queued'" variant="ghost" size="small" @click="cancelJob">Cancel queued run</BaseButton>
+            <BaseButton variant="danger" size="small" @click="cancelJob"><template #icon><AppIcon name="x-circle" :size="14" /></template>Cancel job</BaseButton>
           </div>
           <div class="result-summary">
             <button type="button" :class="{ active: resultFilter === 'supported' }" @click="resultFilter = 'supported'"><span class="summary-icon summary-icon--yes"><AppIcon name="check" :size="17" /></span><span><strong>{{ resultCounts.supported }}</strong><small>Support it</small></span></button>

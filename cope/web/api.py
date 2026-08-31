@@ -4886,6 +4886,7 @@ def register_api_routes(app: FastAPI) -> None:
                 input_data={
                     "suite_id": suite_id,
                     "stage": "difficulty",
+                    "suite_stage": "miss_finetuning",
                     "puzzles": puzzle_input,
                     "multipv": 1,
                     **settings,
