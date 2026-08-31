@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -4097,7 +4098,7 @@ def register_api_routes(app: FastAPI) -> None:
                     {
                         "name": "puzzle_suite_manager",
                         "label": "Puzzle Suite Manager",
-                        "description": "Verify unique solutions, measure solve effort, and order puzzle suites by engine-rated difficulty.",
+                        "description": "Verify unique solutions, measure solve effort, finetune misses, and order puzzle suites by engine-rated difficulty.",
                         "href": "/admin/tools/puzzle-suite-manager",
                         "status": "available",
                     },
@@ -4802,6 +4803,116 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "job": _tool_job_api_payload(connection, job, include_items=True),
                 "message": f"Difficulty analysis queued across {len(payload.engine_ids)} engines.",
+            },
+            status_code=201,
+        )
+
+    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/miss-finetuning")
+    def admin_start_puzzle_suite_miss_finetuning(
+        suite_id: int,
+        payload: PuzzleSuiteDifficultyPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        suite = get_puzzle_suite(connection, suite_id)
+        if suite is None:
+            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
+        _ensure_puzzle_suite_idle(connection, suite_id)
+        rating_list = get_rating_list(connection, payload.rating_list_id)
+        if rating_list is None:
+            raise HTTPException(status_code=422, detail="Rating list not found.")
+        ratings = {row.engine.engine_id: row.elo for row in list_rating_rows(connection, rating_list.id)}
+        missing = [engine_id for engine_id in payload.engine_ids if engine_id not in ratings]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail="Every selected engine must have an Elo in the selected rating list.",
+            )
+        miss_selection = _puzzle_suite_missed_puzzle_ids(connection, suite_id)
+        if miss_selection is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Complete a difficulty rating run before miss finetuning.",
+            )
+        source_difficulty_run_id, missed_puzzle_ids = miss_selection
+        if not missed_puzzle_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="Every puzzle was solved in the latest completed difficulty run.",
+            )
+        puzzles = []
+        for puzzle in list_puzzle_suite_puzzles(connection, suite_id):
+            if puzzle.id not in missed_puzzle_ids:
+                continue
+            solution = puzzle.verified_solution
+            if not solution and len(puzzle.solutions) == 1:
+                solution = puzzle.solutions[0]
+            if solution:
+                puzzles.append((puzzle, solution))
+        if len(puzzles) != len(missed_puzzle_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="One or more missed puzzles no longer has exactly one target solution.",
+            )
+        thread_elo_bonus = 80.0 * math.log2(payload.threads)
+        base_engine_elos = {
+            str(engine_id): ratings[engine_id] for engine_id in payload.engine_ids
+        }
+        engine_elos = {
+            engine_id: round(float(elo) + thread_elo_bonus, 3)
+            for engine_id, elo in base_engine_elos.items()
+        }
+        settings = {
+            **payload.model_dump(mode="json"),
+            "engine_elos": engine_elos,
+            "base_engine_elos": base_engine_elos,
+            "thread_elo_bonus": round(thread_elo_bonus, 3),
+            "thread_elo_per_doubling": 80,
+            "rating_list_name": rating_list.name,
+            "source_difficulty_run_id": source_difficulty_run_id,
+        }
+        puzzle_input = [
+            {
+                "id": puzzle.id,
+                "fen": puzzle.fen,
+                "solutions": [solution],
+            }
+            for puzzle, solution in puzzles
+        ]
+        try:
+            job = create_tool_job(
+                connection,
+                tool_name="puzzle_suite_difficulty",
+                input_data={
+                    "suite_id": suite_id,
+                    "stage": "difficulty",
+                    "puzzles": puzzle_input,
+                    "multipv": 1,
+                    **settings,
+                },
+                engine_version_ids=payload.engine_ids,
+                required_threads=payload.threads,
+                required_hash_mb=payload.hash_mb,
+            )
+            prepare_puzzle_suite_run(
+                connection,
+                suite_id=suite_id,
+                job_id=job.id,
+                stage="miss_finetuning",
+                rating_list_id=rating_list.id,
+                settings=settings,
+            )
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "job": _tool_job_api_payload(connection, job, include_items=True),
+                "message": (
+                    f"Miss finetuning queued for {len(puzzles)} puzzles with "
+                    f"a {thread_elo_bonus:.1f} Elo thread adjustment."
+                ),
             },
             status_code=201,
         )
@@ -5810,6 +5921,25 @@ def _ensure_puzzle_suite_idle(connection, suite_id: int) -> None:
         raise HTTPException(status_code=409, detail="This suite already has an active stage.")
 
 
+def _puzzle_suite_missed_puzzle_ids(
+    connection,
+    suite_id: int,
+) -> tuple[int, set[int]] | None:
+    for run in list_puzzle_suite_runs(connection, suite_id, limit=200):
+        if run.stage != "difficulty":
+            continue
+        job = get_tool_job(connection, run.job_id)
+        if job is None or job.status != "completed":
+            continue
+        results = list_puzzle_suite_engine_results(connection, run.id)
+        searched = {result.puzzle_id for result in results}
+        solved = {
+            result.puzzle_id for result in results if result.status == "solved"
+        }
+        return run.id, searched - solved
+    return None
+
+
 def _puzzle_suite_summary_payload(connection, suite) -> dict[str, Any]:
     puzzles = list_puzzle_suite_puzzles(connection, suite.id)
     runs = list_puzzle_suite_runs(connection, suite.id, limit=1)
@@ -5836,7 +5966,11 @@ def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
     runs = list_puzzle_suite_runs(connection, suite.id)
     run_payloads = []
     latest_difficulty_results: tuple[Any, ...] = ()
+    latest_miss_results: tuple[Any, ...] = ()
     difficulty_results_selected = False
+    miss_results_selected = False
+    miss_selection = _puzzle_suite_missed_puzzle_ids(connection, suite.id)
+    source_difficulty_run_id = None if miss_selection is None else miss_selection[0]
     for run in runs:
         job = get_tool_job(connection, run.job_id)
         if job is None:
@@ -5851,11 +5985,33 @@ def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
                 "job": _tool_job_api_payload(connection, job, include_items=True),
             }
         )
-        if run.stage == "difficulty" and not difficulty_results_selected:
+        if (
+            run.stage == "difficulty"
+            and run.id == source_difficulty_run_id
+            and not difficulty_results_selected
+        ):
             latest_difficulty_results = list_puzzle_suite_engine_results(connection, run.id)
             difficulty_results_selected = True
+        if (
+            run.stage == "miss_finetuning"
+            and not miss_results_selected
+            and run.settings.get("source_difficulty_run_id") == source_difficulty_run_id
+        ):
+            latest_miss_results = list_puzzle_suite_engine_results(connection, run.id)
+            miss_results_selected = True
+    miss_result_puzzle_ids = {result.puzzle_id for result in latest_miss_results}
+    displayed_engine_results = (
+        tuple(
+            result
+            for result in latest_difficulty_results
+            if result.puzzle_id not in miss_result_puzzle_ids
+        )
+        + latest_miss_results
+    )
     return {
         **_puzzle_suite_summary_payload(connection, suite),
+        "difficulty_run_id": source_difficulty_run_id,
+        "miss_count": 0 if miss_selection is None else len(miss_selection[1]),
         "puzzles": [
             {
                 "id": puzzle.id,
@@ -5898,7 +6054,7 @@ def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
                 "time_ms": result.time_ms,
                 "error": result.error,
             }
-            for result in latest_difficulty_results
+            for result in displayed_engine_results
         ],
     }
 

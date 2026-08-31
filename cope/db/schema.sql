@@ -619,11 +619,17 @@ CREATE TABLE IF NOT EXISTS puzzle_suite_runs (
   id BIGSERIAL PRIMARY KEY,
   suite_id BIGINT NOT NULL REFERENCES puzzle_suites(id) ON DELETE CASCADE,
   job_id BIGINT NOT NULL UNIQUE REFERENCES tool_jobs(id) ON DELETE CASCADE,
-  stage TEXT NOT NULL CHECK (stage IN ('uniqueness', 'difficulty')),
+  stage TEXT NOT NULL CHECK (stage IN ('uniqueness', 'difficulty', 'miss_finetuning')),
   rating_list_id BIGINT,
   settings TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
+
+ALTER TABLE puzzle_suite_runs
+  DROP CONSTRAINT IF EXISTS puzzle_suite_runs_stage_check;
+ALTER TABLE puzzle_suite_runs
+  ADD CONSTRAINT puzzle_suite_runs_stage_check
+  CHECK (stage IN ('uniqueness', 'difficulty', 'miss_finetuning'));
 
 CREATE TABLE IF NOT EXISTS puzzle_suite_engine_results (
   id BIGSERIAL PRIMARY KEY,

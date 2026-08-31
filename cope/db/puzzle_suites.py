@@ -209,7 +209,7 @@ def prepare_puzzle_suite_run(
     rating_list_id: int | None,
     settings: dict[str, Any],
 ) -> PuzzleSuiteRunRecord:
-    if stage not in {"uniqueness", "difficulty"}:
+    if stage not in {"uniqueness", "difficulty", "miss_finetuning"}:
         raise ValueError("invalid puzzle suite stage")
     if get_puzzle_suite(connection, suite_id) is None:
         raise ValueError("puzzle suite not found")
@@ -239,7 +239,7 @@ def prepare_puzzle_suite_run(
             """,
             (now, suite_id),
         )
-    else:
+    elif stage == "difficulty":
         connection.execute(
             """
             UPDATE puzzle_suite_puzzles SET difficulty_elo = NULL, updated_at = ?
