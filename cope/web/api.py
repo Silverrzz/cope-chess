@@ -4874,10 +4874,13 @@ def register_api_routes(app: FastAPI) -> None:
         if job is None:
             raise HTTPException(status_code=404, detail="Tool job not found.")
         if not cancel_tool_job(connection, job_id):
-            raise HTTPException(status_code=409, detail="Only queued tool jobs can be cancelled.")
+            raise HTTPException(
+                status_code=409,
+                detail="Only queued or running tool jobs can be cancelled.",
+            )
         connection.commit()
         _publish_admin_change(web_app, request)
-        return _json({"message": "Tool job cancelled."})
+        return _json({"message": "Tool job cancelled. Its worker will be released shortly."})
 
     # Workers
 

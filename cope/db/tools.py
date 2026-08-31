@@ -342,8 +342,10 @@ def fail_tool_job(
 def cancel_tool_job(connection: sqlite3.Connection, job_id: int) -> bool:
     cursor = connection.execute(
         """
-        UPDATE tool_jobs SET status = 'cancelled', finished_at = ?
-        WHERE id = ? AND status = 'queued'
+        UPDATE tool_jobs
+        SET status = 'cancelled', finished_at = ?,
+            error = 'Cancelled by an administrator.'
+        WHERE id = ? AND status IN ('queued', 'running')
         """,
         (_utc_now(), job_id),
     )

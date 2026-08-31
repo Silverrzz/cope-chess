@@ -731,6 +731,31 @@ class WorkerHandshakeServer:
                 if work in done:
                     wake_generation = work.result()
                     try:
+                        inactive_tool_job_ids = await asyncio.to_thread(
+                            self._inactive_tool_job_ids,
+                            worker.id,
+                            tool_identities,
+                        )
+                    except Exception:
+                        inactive_tool_job_ids = ()
+                        LOG.exception(
+                            "active tool job reconciliation failed worker_id=%s",
+                            worker.id,
+                        )
+                    if inactive_tool_job_ids:
+                        LOG.info(
+                            "closing worker connection after tool job cancellation "
+                            "worker_id=%s job_ids=%s",
+                            worker.id,
+                            inactive_tool_job_ids,
+                        )
+                        with contextlib.suppress(ConnectionClosed):
+                            await websocket.close(
+                                code=4000,
+                                reason="tool job no longer active",
+                            )
+                        return
+                    try:
                         inactive_assignment_ids = await asyncio.to_thread(
                             self._inactive_assignment_ids,
                             assignment_identities,
@@ -1593,6 +1618,36 @@ class WorkerHandshakeServer:
             assignment_id
             for assignment_id, identity in assignment_identities.items()
             if active.get(assignment_id) != identity
+        )
+
+    def _inactive_tool_job_ids(
+        self,
+        worker_id: int,
+        tool_identities: dict[int, str],
+    ) -> tuple[int, ...]:
+        job_ids = tuple(tool_identities)
+        if not job_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in job_ids)
+        connection = connect_database(self._config.db_path)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT id, job_key
+                FROM tool_jobs
+                WHERE id IN ({placeholders})
+                  AND worker_id = ?
+                  AND status = 'running'
+                """,
+                (*job_ids, worker_id),
+            )
+            active = {int(row["id"]): str(row["job_key"]) for row in rows}
+        finally:
+            connection.close()
+        return tuple(
+            job_id
+            for job_id, job_key in tool_identities.items()
+            if active.get(job_id) != job_key
         )
 
     def _paused_assignment_ids(
