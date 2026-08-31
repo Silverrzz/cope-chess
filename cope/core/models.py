@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-WORKER_PROTOCOL_VERSION = 19
+WORKER_PROTOCOL_VERSION = 20
 BENCHMARK_PROTOCOL_VERSION = 16
 PROTOCOL_VERSION = WORKER_PROTOCOL_VERSION
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
@@ -723,6 +723,34 @@ class ToolJobEngineResult(ToolJobMessage):
     elapsed_ms: int = Field(ge=0)
 
 
+class ToolJobPuzzleResult(ToolJobMessage):
+    engine_id: int = Field(gt=0)
+    puzzle_id: int = Field(gt=0)
+    stage: Literal["uniqueness", "difficulty"]
+    status: Literal["unique", "ambiguous", "solved", "unsolved", "failed"]
+    best_move: str = Field(default="", max_length=10)
+    second_move: str = Field(default="", max_length=10)
+    best_sigmoid: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    second_sigmoid: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    sigmoid_gap: float | None = Field(default=None, ge=-1, le=1, allow_inf_nan=False)
+    solution_nodes: int | None = Field(default=None, gt=0)
+    final_nodes: int | None = Field(default=None, ge=0)
+    depth: int | None = Field(default=None, ge=0)
+    time_ms: int = Field(ge=0)
+    error: str = Field(default="", max_length=8000)
+
+    @model_validator(mode="after")
+    def validate_stage_status(self) -> ToolJobPuzzleResult:
+        allowed = (
+            {"unique", "ambiguous", "failed"}
+            if self.stage == "uniqueness"
+            else {"solved", "unsolved", "failed"}
+        )
+        if self.status not in allowed:
+            raise ValueError("puzzle result status does not match its stage")
+        return self
+
+
 class ToolJobComplete(ToolJobMessage):
     pass
 
@@ -825,7 +853,7 @@ class _EnvelopeBase(StrictModel):
 
 
 class Envelope(_EnvelopeBase):
-    v: Literal[19] = WORKER_PROTOCOL_VERSION
+    v: Literal[20] = WORKER_PROTOCOL_VERSION
 
 
 class BenchmarkEnvelope(_EnvelopeBase):

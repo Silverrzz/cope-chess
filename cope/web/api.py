@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import chess
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -61,6 +62,7 @@ from cope.db import (
     create_tournament,
     create_worker,
     create_tool_job,
+    create_puzzle_suite,
     connect_database,
     count_games,
     create_badge,
@@ -103,6 +105,7 @@ from cope.db import (
     get_worker,
     get_worker_by_session_id,
     get_tool_job,
+    get_puzzle_suite,
     invalidate_game_pair,
     invalidate_rating_list_engine_games,
     list_deployment_jobs,
@@ -145,6 +148,10 @@ from cope.db import (
     list_tournaments,
     list_tool_job_items,
     list_tool_jobs,
+    list_puzzle_suite_engine_results,
+    list_puzzle_suite_puzzles,
+    list_puzzle_suite_runs,
+    list_puzzle_suites,
     list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
     list_workers,
@@ -155,6 +162,7 @@ from cope.db import (
     replay_game,
     reset_event,
     record_manual_benchmark,
+    prepare_puzzle_suite_run,
     register_engine_artifact,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
@@ -164,6 +172,7 @@ from cope.db import (
     schedule_tournament,
     set_tournament_concurrency,
     set_tournament_status,
+    set_puzzle_suite_puzzle_included,
     suite_opening_count,
     update_chat_settings,
     update_badge,
@@ -886,6 +895,49 @@ class WhoHasThisPayload(BaseModel):
         if not cleaned or any(ord(character) < 32 for character in cleaned):
             raise ValueError("enter a valid UCI option name")
         return cleaned
+
+
+class PuzzleSuiteCreatePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    puzzles: str = Field(min_length=1, max_length=2_000_000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("enter a suite name")
+        return normalized
+
+
+class PuzzleSuiteUniquenessPayload(BaseModel):
+    engine_id: int = Field(gt=0)
+    movetime_ms: int = Field(default=30_000, ge=100, le=3_600_000)
+    multipv: int = Field(default=2, ge=2, le=20)
+    threads: int = Field(default=1, gt=0, le=1024)
+    hash_mb: int = Field(default=256, gt=0, le=1_048_576)
+    min_sigmoid_gap: float = Field(default=0.15, gt=0, le=1, allow_inf_nan=False)
+
+
+class PuzzleSuiteDifficultyPayload(BaseModel):
+    engine_ids: list[int] = Field(min_length=1, max_length=100)
+    rating_list_id: int = Field(gt=0)
+    movetime_ms: int = Field(default=30_000, ge=100, le=3_600_000)
+    threads: int = Field(default=1, gt=0, le=1024)
+    hash_mb: int = Field(default=256, gt=0, le=1_048_576)
+
+    @field_validator("engine_ids")
+    @classmethod
+    def validate_engine_ids(cls, value: list[int]) -> list[int]:
+        if any(engine_id <= 0 for engine_id in value):
+            raise ValueError("engine ids must be positive")
+        if len(set(value)) != len(value):
+            raise ValueError("engine ids must be unique")
+        return value
+
+
+class PuzzleSuitePuzzleIncludePayload(BaseModel):
+    included: bool
 
 
 class InvalidateRatingListEnginePayload(BaseModel):
@@ -4043,6 +4095,13 @@ def register_api_routes(app: FastAPI) -> None:
                         "status": "available",
                     },
                     {
+                        "name": "puzzle_suite_manager",
+                        "label": "Puzzle Suite Manager",
+                        "description": "Verify unique solutions, measure solve effort, and order puzzle suites by engine-rated difficulty.",
+                        "href": "/admin/tools/puzzle-suite-manager",
+                        "status": "available",
+                    },
+                    {
                         "name": "invalidate_rating_list_engine",
                         "label": "Invalidate engine games",
                         "description": "Uncommit one engine's games from every affected rating list, then invalidate them.",
@@ -4513,6 +4572,241 @@ def register_api_routes(app: FastAPI) -> None:
                 ],
             }
         )
+
+    @app.get("/api/admin/tools/puzzle-suite-manager")
+    def admin_puzzle_suite_manager(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        workers = list_workers(connection)
+        return _json(
+            {
+                "engines": [
+                    {
+                        "id": engine.id,
+                        "family_id": engine.engine_id,
+                        "name": engine.name,
+                        "author": engine.author,
+                        "version": engine.version,
+                        "distribution": engine.distribution,
+                        "artifact_ready": engine.artifact is not None,
+                        "active": engine.engine_active,
+                    }
+                    for engine in list_engine_records(connection)
+                ],
+                "rating_lists": [
+                    {
+                        "id": rating_list.id,
+                        "name": rating_list.name,
+                        "ratings": [
+                            {"engine_id": row.engine.engine_id, "elo": row.elo}
+                            for row in list_rating_rows(connection, rating_list.id)
+                        ],
+                    }
+                    for rating_list in list_rating_lists(connection)
+                ],
+                "suites": [
+                    _puzzle_suite_summary_payload(connection, suite)
+                    for suite in list_puzzle_suites(connection)
+                ],
+                "workers": [
+                    {
+                        "id": worker.id,
+                        "label": worker.label,
+                        "status": worker.status,
+                        "threads": None if worker.capacity is None else worker.capacity.threads,
+                        "hash_mb": None if worker.capacity is None else worker.capacity.hash_mb,
+                    }
+                    for worker in workers
+                    if worker.status in {"connected", "ready", "busy"}
+                ],
+            }
+        )
+
+    @app.post("/api/admin/tools/puzzle-suite-manager/suites")
+    def admin_create_puzzle_suite(
+        payload: PuzzleSuiteCreatePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            puzzles = _parse_puzzle_suite_block(payload.puzzles)
+            suite = create_puzzle_suite(connection, name=payload.name, puzzles=puzzles)
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "suite": _puzzle_suite_detail_payload(connection, suite),
+                "message": f"Imported {len(puzzles)} puzzles.",
+            },
+            status_code=201,
+        )
+
+    @app.get("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}")
+    def admin_puzzle_suite(
+        suite_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        suite = get_puzzle_suite(connection, suite_id)
+        if suite is None:
+            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
+        return _json({"suite": _puzzle_suite_detail_payload(connection, suite)})
+
+    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/uniqueness")
+    def admin_start_puzzle_suite_uniqueness(
+        suite_id: int,
+        payload: PuzzleSuiteUniquenessPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        suite = get_puzzle_suite(connection, suite_id)
+        if suite is None:
+            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
+        _ensure_puzzle_suite_idle(connection, suite_id)
+        puzzles = list_puzzle_suite_puzzles(connection, suite_id)
+        puzzle_input = [
+            {
+                "id": puzzle.id,
+                "fen": puzzle.fen,
+                "solutions": list(puzzle.solutions),
+            }
+            for puzzle in puzzles
+        ]
+        settings = payload.model_dump(mode="json")
+        try:
+            job = create_tool_job(
+                connection,
+                tool_name="puzzle_suite_uniqueness",
+                input_data={
+                    "suite_id": suite_id,
+                    "stage": "uniqueness",
+                    "puzzles": puzzle_input,
+                    **settings,
+                },
+                engine_version_ids=(payload.engine_id,),
+                required_threads=payload.threads,
+                required_hash_mb=payload.hash_mb,
+            )
+            prepare_puzzle_suite_run(
+                connection,
+                suite_id=suite_id,
+                job_id=job.id,
+                stage="uniqueness",
+                rating_list_id=None,
+                settings=settings,
+            )
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "job": _tool_job_api_payload(connection, job, include_items=True),
+                "message": f"Uniqueness analysis queued for {len(puzzles)} puzzles.",
+            },
+            status_code=201,
+        )
+
+    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/difficulty")
+    def admin_start_puzzle_suite_difficulty(
+        suite_id: int,
+        payload: PuzzleSuiteDifficultyPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        suite = get_puzzle_suite(connection, suite_id)
+        if suite is None:
+            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
+        _ensure_puzzle_suite_idle(connection, suite_id)
+        rating_list = get_rating_list(connection, payload.rating_list_id)
+        if rating_list is None:
+            raise HTTPException(status_code=422, detail="Rating list not found.")
+        ratings = {row.engine.engine_id: row.elo for row in list_rating_rows(connection, rating_list.id)}
+        missing = [engine_id for engine_id in payload.engine_ids if engine_id not in ratings]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail="Every selected engine must have an Elo in the selected rating list.",
+            )
+        puzzles = tuple(
+            puzzle
+            for puzzle in list_puzzle_suite_puzzles(connection, suite_id, included_only=True)
+            if puzzle.uniqueness_status == "unique" and puzzle.verified_solution
+        )
+        if not puzzles:
+            raise HTTPException(status_code=422, detail="Include at least one verified unique puzzle.")
+        engine_elos = {str(engine_id): ratings[engine_id] for engine_id in payload.engine_ids}
+        settings = {
+            **payload.model_dump(mode="json"),
+            "engine_elos": engine_elos,
+            "rating_list_name": rating_list.name,
+        }
+        puzzle_input = [
+            {
+                "id": puzzle.id,
+                "fen": puzzle.fen,
+                "solutions": [puzzle.verified_solution],
+            }
+            for puzzle in puzzles
+        ]
+        try:
+            job = create_tool_job(
+                connection,
+                tool_name="puzzle_suite_difficulty",
+                input_data={
+                    "suite_id": suite_id,
+                    "stage": "difficulty",
+                    "puzzles": puzzle_input,
+                    "multipv": 1,
+                    **settings,
+                },
+                engine_version_ids=payload.engine_ids,
+                required_threads=payload.threads,
+                required_hash_mb=payload.hash_mb,
+            )
+            prepare_puzzle_suite_run(
+                connection,
+                suite_id=suite_id,
+                job_id=job.id,
+                stage="difficulty",
+                rating_list_id=rating_list.id,
+                settings=settings,
+            )
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "job": _tool_job_api_payload(connection, job, include_items=True),
+                "message": f"Difficulty analysis queued across {len(payload.engine_ids)} engines.",
+            },
+            status_code=201,
+        )
+
+    @app.patch("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/puzzles/{puzzle_id}")
+    def admin_update_puzzle_suite_puzzle(
+        suite_id: int,
+        puzzle_id: int,
+        payload: PuzzleSuitePuzzleIncludePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_puzzle_suite(connection, suite_id) is None:
+            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
+        try:
+            set_puzzle_suite_puzzle_included(
+                connection,
+                suite_id=suite_id,
+                puzzle_id=puzzle_id,
+                included=payload.included,
+            )
+            connection.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Puzzle selection updated."})
 
     @app.post("/api/admin/tools/who-has-this")
     def admin_create_who_has_this(
@@ -5388,11 +5682,15 @@ def _deduplicate_openings(
 
 
 def _tool_job_api_payload(connection, job, *, include_items: bool) -> dict[str, Any]:
+    input_payload = dict(job.input)
+    puzzles = input_payload.pop("puzzles", None)
+    if isinstance(puzzles, list):
+        input_payload["puzzle_count"] = len(puzzles)
     payload: dict[str, Any] = {
         "id": job.id,
         "tool_name": job.tool_name,
         "status": job.status,
-        "input": job.input,
+        "input": input_payload,
         "worker": (
             None
             if job.worker_id is None
@@ -5400,6 +5698,11 @@ def _tool_job_api_payload(connection, job, *, include_items: bool) -> dict[str, 
         ),
         "total_items": job.total_items,
         "completed_items": job.completed_items,
+        "required_threads": job.required_threads,
+        "required_hash_mb": job.required_hash_mb,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "progress_detail": job.progress_detail,
         "attempt": job.attempt,
         "error": job.error,
         "created_at": job.created_at,
@@ -5423,6 +5726,157 @@ def _tool_job_api_payload(connection, job, *, include_items: bool) -> dict[str, 
             for item in list_tool_job_items(connection, job.id)
         ]
     return payload
+
+
+def _parse_puzzle_suite_block(value: str) -> list[dict[str, Any]]:
+    lines = tuple(
+        (number, line.strip())
+        for number, line in enumerate(value.splitlines(), start=1)
+        if line.strip()
+    )
+    if not lines:
+        raise ValueError("paste at least one puzzle")
+    if len(lines) > 5000:
+        raise ValueError("a puzzle suite can contain at most 5,000 puzzles")
+    puzzles: list[dict[str, Any]] = []
+    for number, line in lines:
+        if line.count("|") != 1:
+            raise ValueError(f"line {number} must use fen|solution")
+        fen, solution_text = (part.strip() for part in line.split("|", 1))
+        raw_solutions = [part.strip() for part in re.split(r"[,/]+", solution_text) if part.strip()]
+        if not fen:
+            raise ValueError(f"line {number} is missing a FEN")
+        if not raw_solutions:
+            raise ValueError(f"line {number} is missing a solution")
+        try:
+            board = chess.Board(fen)
+        except ValueError as exc:
+            raise ValueError(f"line {number} has an invalid FEN: {exc}") from exc
+        if board.is_game_over() or not any(board.legal_moves):
+            raise ValueError(f"line {number} must contain a position with a legal move")
+        solutions: list[str] = []
+        for raw in raw_solutions:
+            try:
+                if re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", raw, re.IGNORECASE):
+                    move = chess.Move.from_uci(raw.lower())
+                    if move not in board.legal_moves:
+                        raise ValueError
+                else:
+                    move = board.parse_san(raw)
+            except ValueError as exc:
+                raise ValueError(f"line {number}: {raw!r} is not a legal solution move") from exc
+            if move.uci() not in solutions:
+                solutions.append(move.uci())
+        puzzles.append({"fen": board.fen(), "solutions": solutions, "title": ""})
+    return puzzles
+
+
+def _ensure_puzzle_suite_idle(connection, suite_id: int) -> None:
+    row = connection.execute(
+        """
+        SELECT job.id
+        FROM puzzle_suite_runs run
+        JOIN tool_jobs job ON job.id = run.job_id
+        WHERE run.suite_id = ? AND job.status IN ('queued', 'running')
+        LIMIT 1
+        """,
+        (suite_id,),
+    ).fetchone()
+    if row is not None:
+        raise HTTPException(status_code=409, detail="This suite already has an active stage.")
+
+
+def _puzzle_suite_summary_payload(connection, suite) -> dict[str, Any]:
+    puzzles = list_puzzle_suite_puzzles(connection, suite.id)
+    runs = list_puzzle_suite_runs(connection, suite.id, limit=1)
+    active_job = None
+    if runs:
+        job = get_tool_job(connection, runs[0].job_id)
+        if job is not None and job.status in {"queued", "running"}:
+            active_job = _tool_job_api_payload(connection, job, include_items=False)
+    return {
+        "id": suite.id,
+        "name": suite.name,
+        "puzzle_count": len(puzzles),
+        "unique_count": sum(puzzle.uniqueness_status == "unique" for puzzle in puzzles),
+        "included_count": sum(puzzle.included for puzzle in puzzles),
+        "rated_count": sum(puzzle.difficulty_elo is not None for puzzle in puzzles),
+        "active_job": active_job,
+        "created_at": suite.created_at,
+        "updated_at": suite.updated_at,
+    }
+
+
+def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
+    puzzles = list_puzzle_suite_puzzles(connection, suite.id)
+    runs = list_puzzle_suite_runs(connection, suite.id)
+    run_payloads = []
+    latest_difficulty_results: tuple[Any, ...] = ()
+    difficulty_results_selected = False
+    for run in runs:
+        job = get_tool_job(connection, run.job_id)
+        if job is None:
+            continue
+        run_payloads.append(
+            {
+                "id": run.id,
+                "stage": run.stage,
+                "rating_list_id": run.rating_list_id,
+                "settings": run.settings,
+                "created_at": run.created_at,
+                "job": _tool_job_api_payload(connection, job, include_items=True),
+            }
+        )
+        if run.stage == "difficulty" and not difficulty_results_selected:
+            latest_difficulty_results = list_puzzle_suite_engine_results(connection, run.id)
+            difficulty_results_selected = True
+    return {
+        **_puzzle_suite_summary_payload(connection, suite),
+        "puzzles": [
+            {
+                "id": puzzle.id,
+                "position": puzzle.position,
+                "title": puzzle.title,
+                "fen": puzzle.fen,
+                "solutions": list(puzzle.solutions),
+                "included": puzzle.included,
+                "uniqueness_status": puzzle.uniqueness_status,
+                "verified_solution": puzzle.verified_solution,
+                "best_move": puzzle.best_move,
+                "second_move": puzzle.second_move,
+                "best_sigmoid": puzzle.best_sigmoid,
+                "second_sigmoid": puzzle.second_sigmoid,
+                "sigmoid_gap": puzzle.sigmoid_gap,
+                "uniqueness_depth": puzzle.uniqueness_depth,
+                "uniqueness_nodes": puzzle.uniqueness_nodes,
+                "uniqueness_time_ms": puzzle.uniqueness_time_ms,
+                "uniqueness_error": puzzle.uniqueness_error,
+                "difficulty_elo": puzzle.difficulty_elo,
+            }
+            for puzzle in puzzles
+        ],
+        "runs": run_payloads,
+        "engine_results": [
+            {
+                "id": result.id,
+                "run_id": result.run_id,
+                "puzzle_id": result.puzzle_id,
+                "engine_id": result.engine_version_id,
+                "engine_name": result.engine_name,
+                "engine_version": result.engine_version,
+                "engine_elo": result.engine_elo,
+                "estimate_elo": result.estimate_elo,
+                "status": result.status,
+                "best_move": result.best_move,
+                "solution_nodes": result.solution_nodes,
+                "final_nodes": result.final_nodes,
+                "depth": result.depth,
+                "time_ms": result.time_ms,
+                "error": result.error,
+            }
+            for result in latest_difficulty_results
+        ],
+    }
 
 
 def _publish_admin_change(web_app, request: Request) -> None:

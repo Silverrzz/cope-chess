@@ -543,8 +543,13 @@ CREATE TABLE IF NOT EXISTS tool_jobs (
     CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
   input TEXT NOT NULL DEFAULT '{}',
   worker_id BIGINT REFERENCES workers(id) ON DELETE SET NULL,
+  required_threads INTEGER NOT NULL DEFAULT 1 CHECK (required_threads > 0),
+  required_hash_mb INTEGER NOT NULL DEFAULT 1 CHECK (required_hash_mb > 0),
   total_items INTEGER NOT NULL CHECK (total_items > 0),
   completed_items INTEGER NOT NULL DEFAULT 0 CHECK (completed_items >= 0),
+  progress_current INTEGER NOT NULL DEFAULT 0 CHECK (progress_current >= 0),
+  progress_total INTEGER NOT NULL DEFAULT 0 CHECK (progress_total >= 0),
+  progress_detail TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -565,6 +570,77 @@ CREATE TABLE IF NOT EXISTS tool_job_items (
   finished_at TEXT,
   UNIQUE (job_id, engine_version_id),
   UNIQUE (job_id, position)
+);
+
+ALTER TABLE tool_jobs ADD COLUMN IF NOT EXISTS required_threads INTEGER NOT NULL DEFAULT 1
+  CHECK (required_threads > 0);
+ALTER TABLE tool_jobs ADD COLUMN IF NOT EXISTS required_hash_mb INTEGER NOT NULL DEFAULT 1
+  CHECK (required_hash_mb > 0);
+ALTER TABLE tool_jobs ADD COLUMN IF NOT EXISTS progress_current INTEGER NOT NULL DEFAULT 0
+  CHECK (progress_current >= 0);
+ALTER TABLE tool_jobs ADD COLUMN IF NOT EXISTS progress_total INTEGER NOT NULL DEFAULT 0
+  CHECK (progress_total >= 0);
+ALTER TABLE tool_jobs ADD COLUMN IF NOT EXISTS progress_detail TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS puzzle_suites (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS puzzle_suite_puzzles (
+  id BIGSERIAL PRIMARY KEY,
+  suite_id BIGINT NOT NULL REFERENCES puzzle_suites(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  title TEXT NOT NULL DEFAULT '',
+  fen TEXT NOT NULL,
+  solutions TEXT NOT NULL DEFAULT '[]',
+  included INTEGER NOT NULL DEFAULT 0 CHECK (included IN (0, 1)),
+  uniqueness_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (uniqueness_status IN ('pending', 'unique', 'ambiguous', 'failed')),
+  verified_solution TEXT NOT NULL DEFAULT '',
+  best_move TEXT NOT NULL DEFAULT '',
+  second_move TEXT NOT NULL DEFAULT '',
+  best_sigmoid REAL,
+  second_sigmoid REAL,
+  sigmoid_gap REAL,
+  uniqueness_depth INTEGER,
+  uniqueness_nodes BIGINT,
+  uniqueness_time_ms INTEGER,
+  uniqueness_error TEXT NOT NULL DEFAULT '',
+  difficulty_elo REAL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (suite_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS puzzle_suite_runs (
+  id BIGSERIAL PRIMARY KEY,
+  suite_id BIGINT NOT NULL REFERENCES puzzle_suites(id) ON DELETE CASCADE,
+  job_id BIGINT NOT NULL UNIQUE REFERENCES tool_jobs(id) ON DELETE CASCADE,
+  stage TEXT NOT NULL CHECK (stage IN ('uniqueness', 'difficulty')),
+  rating_list_id BIGINT,
+  settings TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS puzzle_suite_engine_results (
+  id BIGSERIAL PRIMARY KEY,
+  run_id BIGINT NOT NULL REFERENCES puzzle_suite_runs(id) ON DELETE CASCADE,
+  puzzle_id BIGINT NOT NULL REFERENCES puzzle_suite_puzzles(id) ON DELETE CASCADE,
+  engine_version_id BIGINT NOT NULL REFERENCES engine_versions(id),
+  engine_elo REAL NOT NULL,
+  estimate_elo REAL,
+  status TEXT NOT NULL CHECK (status IN ('solved', 'unsolved', 'failed')),
+  best_move TEXT NOT NULL DEFAULT '',
+  solution_nodes BIGINT,
+  final_nodes BIGINT,
+  depth INTEGER,
+  time_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE (run_id, puzzle_id, engine_version_id)
 );
 
 ALTER TABLE worker_failures DROP CONSTRAINT IF EXISTS worker_failures_stage_check;
@@ -1281,7 +1357,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 49)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 50)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -1324,6 +1400,10 @@ CREATE INDEX IF NOT EXISTS idx_deployment_targets_benchmarker_pending ON deploym
 CREATE INDEX IF NOT EXISTS idx_tool_jobs_claim ON tool_jobs(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_tool_jobs_worker ON tool_jobs(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_tool_job_items_job ON tool_job_items(job_id, position);
+CREATE INDEX IF NOT EXISTS idx_puzzle_suites_updated ON puzzle_suites(updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_puzzle_suite_puzzles_suite ON puzzle_suite_puzzles(suite_id, position);
+CREATE INDEX IF NOT EXISTS idx_puzzle_suite_runs_suite ON puzzle_suite_runs(suite_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_puzzle_suite_results_run ON puzzle_suite_engine_results(run_id, puzzle_id, engine_version_id);
 CREATE INDEX IF NOT EXISTS idx_environment_exports_status_created
   ON environment_exports(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_environment_clone_jobs_status_created

@@ -243,6 +243,12 @@ const router = createRouter({
           meta: { title: "Who Has This" },
         },
         {
+          path: "tools/puzzle-suite-manager",
+          name: "admin-tool-puzzle-suite-manager",
+          component: () => import("@/pages/admin/PuzzleSuiteManagerPage.vue"),
+          meta: { title: "Puzzle Suite Manager" },
+        },
+        {
           path: "tools/invalidate-engine-games",
           name: "admin-tool-invalidate-engine-games",
           component: () => import("@/pages/admin/InvalidateEngineGamesPage.vue"),

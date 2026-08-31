@@ -2430,6 +2430,16 @@ def _worker_activity_view(
 def _worker_tool_activity(job) -> dict[str, Any] | None:
     if job is None:
         return None
+    if job.tool_name in {"puzzle_suite_uniqueness", "puzzle_suite_difficulty"}:
+        stage = "Uniqueness filtering" if job.tool_name == "puzzle_suite_uniqueness" else "Difficulty rating"
+        return _activity_view(
+            "busy",
+            "Running tool",
+            job.progress_detail or f"Processed {job.progress_current} of {job.progress_total} searches",
+            f"Puzzle Suite Manager: {stage}",
+            href=f"/admin/tools/puzzle-suite-manager?suite={job.input.get('suite_id', '')}",
+            meta=f"Attempt {job.attempt}",
+        )
     option_name = str(job.input.get("option_name") or "UCI option")
     return _activity_view(
         "busy",

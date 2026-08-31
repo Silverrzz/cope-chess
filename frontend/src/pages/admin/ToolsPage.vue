@@ -18,7 +18,7 @@ interface JobSummary {
   id: number
   tool_name: string
   status: string
-  input: { option_name?: string }
+  input: { option_name?: string; suite_id?: number; stage?: string }
   completed_items: number
   total_items: number
   created_at: string
@@ -49,6 +49,19 @@ async function load(): Promise<void> {
 
 function statusLabel(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1)
+}
+
+function jobTarget(job: JobSummary): { path: string; query: Record<string, string | number> } {
+  if (job.tool_name.startsWith('puzzle_suite_')) {
+    return { path: '/admin/tools/puzzle-suite-manager', query: { suite: job.input.suite_id ?? '' } }
+  }
+  return { path: '/admin/tools/who-has-this', query: { job: job.id } }
+}
+
+function jobLabel(job: JobSummary): string {
+  if (job.tool_name === 'puzzle_suite_uniqueness') return 'Puzzle uniqueness filter'
+  if (job.tool_name === 'puzzle_suite_difficulty') return 'Puzzle difficulty rating'
+  return job.input.option_name || 'Who Has This'
 }
 
 onMounted(load)
@@ -84,7 +97,7 @@ onMounted(load)
       <div v-else class="tool-grid">
         <RouterLink v-for="tool in data?.tools" :key="tool.name" class="tool-card panel" :to="tool.href">
           <div class="tool-card__top">
-            <span class="tool-card__icon"><AppIcon :name="tool.name === 'invalidate_rating_list_engine' ? 'trash' : tool.name === 'tournament_creator' ? 'trophy' : tool.name === 'clone_environment' ? 'copy' : 'search'" :size="22" /></span>
+            <span class="tool-card__icon"><AppIcon :name="tool.name === 'puzzle_suite_manager' ? 'puzzle' : tool.name === 'invalidate_rating_list_engine' ? 'trash' : tool.name === 'tournament_creator' ? 'trophy' : tool.name === 'clone_environment' ? 'copy' : 'search'" :size="22" /></span>
             <span class="tool-card__status"><span />{{ statusLabel(tool.status) }}</span>
           </div>
           <div><h3>{{ tool.label }}</h3><p>{{ tool.description }}</p></div>
@@ -108,10 +121,10 @@ onMounted(load)
           v-for="job in data.recent_jobs"
           :key="job.id"
           class="recent-row"
-          :to="{ path: '/admin/tools/who-has-this', query: { job: job.id } }"
+          :to="jobTarget(job)"
         >
-          <span class="recent-row__icon"><AppIcon name="search" :size="16" /></span>
-          <span class="recent-row__main"><strong>{{ job.input.option_name || 'Who Has This' }}</strong><small>{{ formatDate(job.created_at) }}</small></span>
+          <span class="recent-row__icon"><AppIcon :name="job.tool_name.startsWith('puzzle_suite_') ? 'puzzle' : 'search'" :size="16" /></span>
+          <span class="recent-row__main"><strong>{{ jobLabel(job) }}</strong><small>{{ formatDate(job.created_at) }}</small></span>
           <span class="recent-row__progress">{{ job.completed_items }}/{{ job.total_items }}</span>
           <span class="job-status" :class="`job-status--${job.status}`">{{ statusLabel(job.status) }}</span>
           <AppIcon name="chevron-right" :size="16" />

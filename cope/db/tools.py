@@ -20,8 +20,13 @@ class ToolJobRecord:
     input: dict[str, Any]
     worker_id: int | None
     worker_label: str | None
+    required_threads: int
+    required_hash_mb: int
     total_items: int
     completed_items: int
+    progress_current: int
+    progress_total: int
+    progress_detail: str
     attempt: int
     error: str
     created_at: str
@@ -50,10 +55,14 @@ def create_tool_job(
     tool_name: str,
     input_data: dict[str, Any],
     engine_version_ids: Iterable[int],
+    required_threads: int = 1,
+    required_hash_mb: int = 1,
 ) -> ToolJobRecord:
     engine_ids = tuple(dict.fromkeys(int(value) for value in engine_version_ids))
     if not engine_ids:
         raise ValueError("select at least one engine")
+    if required_threads <= 0 or required_hash_mb <= 0:
+        raise ValueError("tool job resources must be positive")
     existing = {
         int(row["id"])
         for row in connection.execute(
@@ -65,14 +74,26 @@ def create_tool_job(
     if missing:
         raise ValueError("one or more selected engine versions no longer exist")
     now = _utc_now()
+    puzzles = input_data.get("puzzles")
+    progress_total = len(engine_ids) * len(puzzles) if isinstance(puzzles, list) else len(engine_ids)
     cursor = connection.execute(
         """
         INSERT INTO tool_jobs (
-          job_key, tool_name, status, input, total_items, completed_items,
+          job_key, tool_name, status, input, required_threads, required_hash_mb,
+          total_items, completed_items, progress_total,
           attempt, error, created_at
-        ) VALUES (?, ?, 'queued', ?, ?, 0, 0, '', ?)
+        ) VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, ?, 0, '', ?)
         """,
-        (secrets.token_urlsafe(24), tool_name, json.dumps(input_data), len(engine_ids), now),
+        (
+            secrets.token_urlsafe(24),
+            tool_name,
+            json.dumps(input_data),
+            required_threads,
+            required_hash_mb,
+            len(engine_ids),
+            progress_total,
+            now,
+        ),
     )
     job_id = cursor.lastrowid
     connection.executemany(
@@ -156,11 +177,15 @@ def claim_tool_job(
     connection: sqlite3.Connection,
     *,
     worker_id: int,
+    capacity_threads: int,
+    capacity_hash_mb: int,
 ) -> ToolJobRecord | None:
     row = connection.execute(
         """
         SELECT job.id FROM tool_jobs job
         WHERE job.status = 'queued'
+          AND job.required_threads <= ?
+          AND job.required_hash_mb <= ?
           AND NOT EXISTS (
             SELECT 1
             FROM tool_job_items item
@@ -178,7 +203,7 @@ def claim_tool_job(
         FOR UPDATE SKIP LOCKED
         LIMIT 1
         """,
-        (worker_id,),
+        (capacity_threads, capacity_hash_mb, worker_id),
     ).fetchone()
     if row is None:
         return None
@@ -222,6 +247,29 @@ def start_tool_job_item(
     )
     if cursor.rowcount != 1:
         raise ValueError("tool job item is not active")
+
+
+def record_tool_job_progress(
+    connection: sqlite3.Connection,
+    *,
+    job_id: int,
+    job_key: str,
+    worker_id: int,
+    current: int,
+    total: int,
+    detail: str,
+) -> None:
+    _validate_running_job(connection, job_id, job_key, worker_id)
+    if current < 0 or total <= 0 or current > total:
+        raise ValueError("invalid tool job progress")
+    connection.execute(
+        """
+        UPDATE tool_jobs
+        SET progress_current = ?, progress_total = ?, progress_detail = ?
+        WHERE id = ?
+        """,
+        (current, total, detail[-4000:], job_id),
+    )
 
 
 def finish_tool_job_item(
@@ -379,8 +427,13 @@ def _job_from_row(row) -> ToolJobRecord:
         input=json.loads(row["input"] or "{}"),
         worker_id=None if row["worker_id"] is None else int(row["worker_id"]),
         worker_label=row["worker_label"],
+        required_threads=int(row["required_threads"]),
+        required_hash_mb=int(row["required_hash_mb"]),
         total_items=int(row["total_items"]),
         completed_items=int(row["completed_items"]),
+        progress_current=int(row["progress_current"]),
+        progress_total=int(row["progress_total"]),
+        progress_detail=str(row["progress_detail"] or ""),
         attempt=int(row["attempt"]),
         error=str(row["error"] or ""),
         created_at=str(row["created_at"]),

@@ -37,6 +37,7 @@ from cope.core.models import (
     ToolJobEngineResult,
     ToolJobFailed,
     ToolJobProgress,
+    ToolJobPuzzleResult,
     WORKER_PROTOCOL_VERSION,
     WorkerResources,
     WorkerResourceTelemetry,
@@ -68,12 +69,15 @@ from cope.db import (
     acknowledge_game_assignment,
     get_game,
     get_engine,
+    get_tool_job,
     get_tournament,
     get_worker,
     get_worker_by_session_id,
     get_worker_by_token,
     list_workers,
     list_tool_job_items,
+    record_puzzle_suite_result,
+    record_tool_job_progress,
     pause_unstarted_game_assignment,
     record_worker_failure,
     record_worker_resource_sample,
@@ -239,6 +243,7 @@ async def run_worker_server(config: WorkerServerConfig) -> None:
             ping_timeout=ping_timeout_s,
             close_timeout=1,
             max_queue=256,
+            max_size=8 * 1024 * 1024,
         ):
             _register_worker_endpoint(config)
             LOG.info(
@@ -968,7 +973,16 @@ class WorkerHandshakeServer:
     def _claim_next_tool_job(self, worker: WorkerRecord) -> ToolJobAssignment | None:
         connection = connect_database(self._config.db_path)
         try:
-            job = claim_tool_job(connection, worker_id=worker.id)
+            capacity = worker.capacity
+            if capacity is None:
+                connection.commit()
+                return None
+            job = claim_tool_job(
+                connection,
+                worker_id=worker.id,
+                capacity_threads=capacity.threads,
+                capacity_hash_mb=capacity.hash_mb,
+            )
             if job is None:
                 connection.commit()
                 return None
@@ -997,11 +1011,16 @@ class WorkerHandshakeServer:
                 )
                 connection.commit()
                 return None
+            assignment_input = dict(job.input)
+            puzzles = assignment_input.get("puzzles")
+            if isinstance(puzzles, list):
+                assignment_input["progress_offset"] = (job.total_items - len(items)) * len(puzzles)
+                assignment_input["progress_total"] = job.total_items * len(puzzles)
             assignment = ToolJobAssignment(
                 job_id=job.id,
                 job_key=job.job_key,
                 tool_name=job.tool_name,
-                input=job.input,
+                input=assignment_input,
                 engines=engines,
             )
             connection.commit()
@@ -1023,18 +1042,37 @@ class WorkerHandshakeServer:
     ) -> None:
         await _send_message(websocket, "tool_job", job, lock=send_lock)
         engine_ids = {engine.engine_id for engine in job.engines}
+        puzzle_ids = {
+            puzzle.get("id")
+            for puzzle in job.input.get("puzzles", [])
+            if isinstance(puzzle, dict) and isinstance(puzzle.get("id"), int)
+        }
         while True:
             envelope = await inbox.get()
             if envelope.type == "tool_job_progress":
                 progress = ToolJobProgress.model_validate(envelope.data)
                 if not progress.matches_job(job) or progress.engine_id not in engine_ids:
                     raise ProtocolValidationError("tool job progress identity mismatch")
-                if progress.status == "running":
-                    await asyncio.to_thread(
-                        self._record_tool_job_item_started,
-                        worker.id,
-                        progress,
-                    )
+                await asyncio.to_thread(
+                    self._record_tool_job_progress,
+                    worker.id,
+                    progress,
+                )
+                continue
+            if envelope.type == "tool_job_puzzle_result":
+                result = ToolJobPuzzleResult.model_validate(envelope.data)
+                if (
+                    not result.matches_job(job)
+                    or result.engine_id not in engine_ids
+                    or result.puzzle_id not in puzzle_ids
+                    or result.stage != job.input.get("stage")
+                ):
+                    raise ProtocolValidationError("tool job puzzle result identity mismatch")
+                await asyncio.to_thread(
+                    self._record_tool_job_puzzle_result,
+                    worker.id,
+                    result,
+                )
                 continue
             if envelope.type == "tool_job_engine_result":
                 result = ToolJobEngineResult.model_validate(envelope.data)
@@ -1068,19 +1106,65 @@ class WorkerHandshakeServer:
                 return
             raise ProtocolValidationError(f"unexpected tool job message: {envelope.type}")
 
-    def _record_tool_job_item_started(
+    def _record_tool_job_progress(
         self,
         worker_id: int,
         progress: ToolJobProgress,
     ) -> None:
         connection = connect_database(self._config.db_path)
         try:
-            start_tool_job_item(
+            if progress.status == "running":
+                start_tool_job_item(
+                    connection,
+                    job_id=progress.job_id,
+                    job_key=progress.job_key,
+                    worker_id=worker_id,
+                    engine_version_id=progress.engine_id,
+                )
+            record_tool_job_progress(
                 connection,
                 job_id=progress.job_id,
                 job_key=progress.job_key,
                 worker_id=worker_id,
-                engine_version_id=progress.engine_id,
+                current=progress.current,
+                total=progress.total,
+                detail=progress.detail,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _record_tool_job_puzzle_result(
+        self,
+        worker_id: int,
+        result: ToolJobPuzzleResult,
+    ) -> None:
+        connection = connect_database(self._config.db_path)
+        try:
+            job = get_tool_job(connection, result.job_id)
+            if (
+                job is None
+                or job.job_key != result.job_key
+                or job.worker_id != worker_id
+                or job.status != "running"
+            ):
+                raise ValueError("tool job is no longer assigned to this worker")
+            record_puzzle_suite_result(
+                connection,
+                job_id=result.job_id,
+                puzzle_id=result.puzzle_id,
+                engine_version_id=result.engine_id,
+                status=result.status,
+                best_move=result.best_move,
+                second_move=result.second_move,
+                best_sigmoid=result.best_sigmoid,
+                second_sigmoid=result.second_sigmoid,
+                sigmoid_gap=result.sigmoid_gap,
+                solution_nodes=result.solution_nodes,
+                final_nodes=result.final_nodes,
+                depth=result.depth,
+                time_ms=result.time_ms,
+                error=result.error,
             )
             connection.commit()
         finally:

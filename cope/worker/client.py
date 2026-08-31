@@ -40,6 +40,7 @@ from cope.core.models import (
     ToolJobEngineResult,
     ToolJobFailed,
     ToolJobProgress,
+    ToolJobPuzzleResult,
     WorkerGameAssignment,
     WorkerResourceTelemetry,
     WorkerSessionHello,
@@ -364,6 +365,7 @@ async def _run_worker_connection(
         connection_config.server_url,
         ping_interval=10,
         ping_timeout=60,
+        max_size=8 * 1024 * 1024,
         close_timeout=5,
         max_queue=256,
     ) as websocket:
@@ -754,6 +756,15 @@ async def _serve_tool_job(
     server_url: str,
     credential: str,
 ) -> None:
+    if job.tool_name in {"puzzle_suite_uniqueness", "puzzle_suite_difficulty"}:
+        await _serve_puzzle_suite_job(
+            websocket,
+            job,
+            send_lock=send_lock,
+            server_url=server_url,
+            credential=credential,
+        )
+        return
     if job.tool_name != "who_has_this":
         await _send_message(
             websocket,
@@ -849,6 +860,372 @@ async def _serve_tool_job(
         ToolJobComplete(job_id=job.job_id, job_key=job.job_key),
         lock=send_lock,
     )
+
+
+async def _serve_puzzle_suite_job(
+    websocket,
+    job: ToolJobAssignment,
+    *,
+    send_lock: asyncio.Lock,
+    server_url: str,
+    credential: str,
+) -> None:
+    stage = str(job.input.get("stage") or "")
+    expected_stage = "uniqueness" if job.tool_name == "puzzle_suite_uniqueness" else "difficulty"
+    puzzles = job.input.get("puzzles")
+    if stage != expected_stage or not isinstance(puzzles, list) or not puzzles:
+        await _send_message(
+            websocket,
+            "tool_job_failed",
+            ToolJobFailed(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                error="the puzzle suite assignment is incomplete",
+            ),
+            lock=send_lock,
+        )
+        return
+    movetime_ms = _positive_job_integer(job.input, "movetime_ms")
+    threads = _positive_job_integer(job.input, "threads")
+    hash_mb = _positive_job_integer(job.input, "hash_mb")
+    multipv = _positive_job_integer(job.input, "multipv") if stage == "uniqueness" else 1
+    min_gap = float(job.input.get("min_sigmoid_gap", 0.15))
+    total = int(job.input.get("progress_total") or len(puzzles) * len(job.engines))
+    current = int(job.input.get("progress_offset") or 0)
+    for spec in job.engines:
+        engine = UciEngineProcess(
+            spec,
+            server_url=server_url,
+            credential=credential,
+            command_timeout_s=max(60, round(movetime_ms / 1000) + 30),
+            allow_build=True,
+        )
+        engine_error = ""
+        engine_status = "supported"
+        clear_hash = False
+        started_ns = time.monotonic_ns()
+        await _send_message(
+            websocket,
+            "tool_job_progress",
+            ToolJobProgress(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status="running",
+                detail=f"Preparing {spec.name} {spec.version}",
+                current=current,
+                total=total,
+            ),
+            lock=send_lock,
+        )
+        try:
+            await asyncio.to_thread(engine.prepare)
+            uci_lines = await asyncio.to_thread(engine.handle_command, "uci")
+            clear_hash = "clear_hash" in _uci_option_names(uci_lines)
+            missing = _configure_puzzle_engine(
+                engine,
+                spec_options=spec.uci_options,
+                uci_lines=uci_lines,
+                stage=stage,
+                threads=threads,
+                hash_mb=hash_mb,
+                multipv=multipv,
+            )
+            if missing:
+                engine_status = "unsupported"
+                engine_error = missing
+            else:
+                await asyncio.to_thread(engine.handle_command, "isready")
+        except Exception as error:
+            engine_status = "failed"
+            engine_error = (str(error).strip() or error.__class__.__name__)[-8000:]
+        for puzzle in puzzles:
+            puzzle_id = puzzle.get("id") if isinstance(puzzle, dict) else None
+            if not isinstance(puzzle_id, int) or puzzle_id <= 0:
+                await _send_message(
+                    websocket,
+                    "tool_job_failed",
+                    ToolJobFailed(
+                        job_id=job.job_id,
+                        job_key=job.job_key,
+                        error="the puzzle suite assignment contains an invalid puzzle id",
+                    ),
+                    lock=send_lock,
+                )
+                await asyncio.to_thread(engine.close)
+                return
+            detail = f"{spec.name} - puzzle {current + 1} of {total}"
+            await _send_message(
+                websocket,
+                "tool_job_progress",
+                ToolJobProgress(
+                    job_id=job.job_id,
+                    job_key=job.job_key,
+                    engine_id=spec.engine_id,
+                    status="running",
+                    detail=detail,
+                    current=current,
+                    total=total,
+                ),
+                lock=send_lock,
+            )
+            if engine_error:
+                result = ToolJobPuzzleResult(
+                    job_id=job.job_id,
+                    job_key=job.job_key,
+                    engine_id=spec.engine_id,
+                    puzzle_id=puzzle_id,
+                    stage=stage,
+                    status="failed",
+                    time_ms=0,
+                    error=engine_error,
+                )
+            else:
+                try:
+                    result = await asyncio.to_thread(
+                        _search_puzzle,
+                        engine,
+                        job,
+                        spec.engine_id,
+                        puzzle,
+                        stage=stage,
+                        movetime_ms=movetime_ms,
+                        min_gap=min_gap,
+                        clear_hash=clear_hash,
+                    )
+                except Exception as error:
+                    result = ToolJobPuzzleResult(
+                        job_id=job.job_id,
+                        job_key=job.job_key,
+                        engine_id=spec.engine_id,
+                        puzzle_id=puzzle_id,
+                        stage=stage,
+                        status="failed",
+                        time_ms=0,
+                        error=(str(error).strip() or error.__class__.__name__)[-8000:],
+                    )
+            await _send_message(websocket, "tool_job_puzzle_result", result, lock=send_lock)
+            current += 1
+        await asyncio.to_thread(engine.close)
+        await _send_message(
+            websocket,
+            "tool_job_engine_result",
+            ToolJobEngineResult(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status=engine_status,
+                error=engine_error,
+                elapsed_ms=max(0, round((time.monotonic_ns() - started_ns) / 1_000_000)),
+            ),
+            lock=send_lock,
+        )
+        await _send_message(
+            websocket,
+            "tool_job_progress",
+            ToolJobProgress(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=spec.engine_id,
+                status="completed",
+                detail=f"Finished {spec.name} {spec.version}",
+                current=current,
+                total=total,
+            ),
+            lock=send_lock,
+        )
+    await _send_message(
+        websocket,
+        "tool_job_complete",
+        ToolJobComplete(job_id=job.job_id, job_key=job.job_key),
+        lock=send_lock,
+    )
+
+
+def _positive_job_integer(input_data: dict[str, Any], name: str) -> int:
+    value = input_data.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ProtocolValidationError(f"the puzzle suite assignment has an invalid {name}")
+    return value
+
+
+def _configure_puzzle_engine(
+    engine: UciEngineProcess,
+    *,
+    spec_options: dict[str, Any],
+    uci_lines: list[str],
+    stage: str,
+    threads: int,
+    hash_mb: int,
+    multipv: int,
+) -> str:
+    available = _uci_option_names(uci_lines)
+    required = ["threads", "hash"]
+    if stage == "uniqueness":
+        required.extend(("multipv", "uci_showwdl"))
+    missing = [name for name in required if name not in available]
+    if missing:
+        return "engine is missing required UCI option" + ("s" if len(missing) > 1 else "") + ": " + ", ".join(missing)
+    for name, value in spec_options.items():
+        engine.handle_command(f"setoption name {name} value {value}")
+    engine.handle_command(f"setoption name Threads value {threads}")
+    engine.handle_command(f"setoption name Hash value {hash_mb}")
+    if stage == "uniqueness":
+        engine.handle_command(f"setoption name MultiPV value {multipv}")
+        engine.handle_command("setoption name UCI_ShowWDL value true")
+    return ""
+
+
+def _uci_option_names(lines: list[str]) -> set[str]:
+    names: set[str] = set()
+    for line in lines:
+        match = re.match(r"^option\s+name\s+(.+?)\s+type\s+\S+", line.strip(), re.IGNORECASE)
+        if match is not None:
+            names.add("_".join(match.group(1).casefold().split()))
+    return names
+
+
+def _search_puzzle(
+    engine: UciEngineProcess,
+    job: ToolJobAssignment,
+    engine_id: int,
+    puzzle: dict[str, Any],
+    *,
+    stage: str,
+    movetime_ms: int,
+    min_gap: float,
+    clear_hash: bool,
+) -> ToolJobPuzzleResult:
+    puzzle_id = int(puzzle["id"])
+    fen = str(puzzle.get("fen") or "")
+    solutions = tuple(str(move) for move in puzzle.get("solutions") or ())
+    if not fen or not solutions:
+        raise ValueError("puzzle has no FEN or solution")
+    if clear_hash:
+        engine.handle_command("setoption name Clear Hash")
+    engine.handle_command("ucinewgame")
+    engine.handle_command("isready")
+    engine.handle_command(f"position fen {fen}")
+    started_ns = time.monotonic_ns()
+    latest: dict[int, dict[str, Any]] = {}
+    solution_nodes: int | None = None
+
+    def collect(line: str) -> None:
+        nonlocal solution_nodes
+        info = _parse_puzzle_search_info(line)
+        if info is None:
+            return
+        latest[int(info["multipv"])] = info
+        if (
+            stage == "difficulty"
+            and int(info["multipv"]) == 1
+            and info["move"] in solutions
+            and isinstance(info["nodes"], int)
+            and int(info["nodes"]) > 0
+            and solution_nodes is None
+        ):
+            solution_nodes = int(info["nodes"])
+
+    lines = engine.handle_command(f"go movetime {movetime_ms}", line_callback=collect)
+    elapsed_ms = max(0, round((time.monotonic_ns() - started_ns) / 1_000_000))
+    bestmove = _bestmove_from_lines(lines)
+    primary = latest.get(1, {})
+    if stage == "uniqueness":
+        second = latest.get(2, {})
+        best_sigmoid = primary.get("sigmoid")
+        second_sigmoid = second.get("sigmoid")
+        if not isinstance(best_sigmoid, float) or not isinstance(second_sigmoid, float):
+            raise ValueError("engine did not report WDL for both leading MultiPV lines")
+        best_move = str(primary.get("move") or bestmove)
+        second_move = str(second.get("move") or "")
+        gap = best_sigmoid - second_sigmoid
+        unique = bool(best_move and second_move and best_move != second_move and gap >= min_gap)
+        return ToolJobPuzzleResult(
+            job_id=job.job_id,
+            job_key=job.job_key,
+            engine_id=engine_id,
+            puzzle_id=puzzle_id,
+            stage="uniqueness",
+            status="unique" if unique else "ambiguous",
+            best_move=best_move,
+            second_move=second_move,
+            best_sigmoid=best_sigmoid,
+            second_sigmoid=second_sigmoid,
+            sigmoid_gap=gap,
+            final_nodes=_optional_positive_int(primary.get("nodes")),
+            depth=_optional_nonnegative_int(primary.get("depth")),
+            time_ms=_optional_nonnegative_int(primary.get("time")) or elapsed_ms,
+        )
+    final_nodes = _optional_positive_int(primary.get("nodes"))
+    if final_nodes is None:
+        raise ValueError("engine did not report a positive node count")
+    if bestmove in solutions and solution_nodes is None:
+        solution_nodes = final_nodes
+    solved = bestmove in solutions and solution_nodes is not None
+    return ToolJobPuzzleResult(
+        job_id=job.job_id,
+        job_key=job.job_key,
+        engine_id=engine_id,
+        puzzle_id=puzzle_id,
+        stage="difficulty",
+        status="solved" if solved else "unsolved",
+        best_move=bestmove,
+        solution_nodes=solution_nodes if solved else None,
+        final_nodes=final_nodes,
+        depth=_optional_nonnegative_int(primary.get("depth")),
+        time_ms=_optional_nonnegative_int(primary.get("time")) or elapsed_ms,
+    )
+
+
+def _parse_puzzle_search_info(line: str) -> dict[str, Any] | None:
+    parts = line.split()
+    if not parts or parts[0] != "info" or "pv" not in parts:
+        return None
+    try:
+        pv_index = parts.index("pv")
+        move = parts[pv_index + 1]
+    except (ValueError, IndexError):
+        return None
+    result: dict[str, Any] = {
+        "move": move,
+        "multipv": _integer_after(parts, "multipv") or 1,
+        "nodes": _integer_after(parts, "nodes"),
+        "depth": _integer_after(parts, "depth"),
+        "time": _integer_after(parts, "time"),
+    }
+    if "wdl" in parts:
+        try:
+            index = parts.index("wdl")
+            win, draw, loss = (int(parts[index + offset]) for offset in (1, 2, 3))
+            total = win + draw + loss
+            if total > 0:
+                result["sigmoid"] = (win + 0.5 * draw) / total
+        except (ValueError, IndexError):
+            pass
+    return result
+
+
+def _integer_after(parts: list[str], token: str) -> int | None:
+    try:
+        return int(parts[parts.index(token) + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _bestmove_from_lines(lines: list[str]) -> str:
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "bestmove":
+            return parts[1] if parts[1] != "(none)" else ""
+    return ""
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 def _find_uci_option(lines: list[str], option_name: str) -> tuple[str, str]:
