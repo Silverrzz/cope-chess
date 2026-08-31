@@ -33,6 +33,7 @@ from cope.core.models import (
     EngineCommandResult,
     EngineHardwareScore,
     EngineInfo,
+    EngineSpec,
     EngineStop,
     HardwareInfo,
     ToolJobAssignment,
@@ -726,6 +727,7 @@ async def _route_assignment_messages(
                     send_lock=send_lock,
                     server_url=server_url,
                     credential=credential,
+                    capacity=capacity,
                 ),
                 name=f"worker-tool-job-{job.job_id}",
             )
@@ -755,6 +757,7 @@ async def _serve_tool_job(
     send_lock: asyncio.Lock,
     server_url: str,
     credential: str,
+    capacity: WorkerResources,
 ) -> None:
     if job.tool_name in {"puzzle_suite_uniqueness", "puzzle_suite_difficulty"}:
         await _serve_puzzle_suite_job(
@@ -763,6 +766,7 @@ async def _serve_tool_job(
             send_lock=send_lock,
             server_url=server_url,
             credential=credential,
+            capacity=capacity,
         )
         return
     if job.tool_name != "who_has_this":
@@ -869,6 +873,7 @@ async def _serve_puzzle_suite_job(
     send_lock: asyncio.Lock,
     server_url: str,
     credential: str,
+    capacity: WorkerResources,
 ) -> None:
     stage = str(job.input.get("stage") or "")
     expected_stage = "uniqueness" if job.tool_name == "puzzle_suite_uniqueness" else "difficulty"
@@ -892,6 +897,23 @@ async def _serve_puzzle_suite_job(
     min_gap = float(job.input.get("min_sigmoid_gap", 0.15))
     total = int(job.input.get("progress_total") or len(puzzles) * len(job.engines))
     current = int(job.input.get("progress_offset") or 0)
+    if stage == "difficulty":
+        await _serve_puzzle_suite_difficulty_job(
+            websocket,
+            job,
+            puzzles=puzzles,
+            movetime_ms=movetime_ms,
+            threads=threads,
+            hash_mb=hash_mb,
+            min_gap=min_gap,
+            total=total,
+            current=current,
+            send_lock=send_lock,
+            server_url=server_url,
+            credential=credential,
+            capacity=capacity,
+        )
+        return
     for spec in job.engines:
         engine = UciEngineProcess(
             spec,
@@ -1040,6 +1062,335 @@ async def _serve_puzzle_suite_job(
         ToolJobComplete(job_id=job.job_id, job_key=job.job_key),
         lock=send_lock,
     )
+
+
+async def _serve_puzzle_suite_difficulty_job(
+    websocket,
+    job: ToolJobAssignment,
+    *,
+    puzzles: list[Any],
+    movetime_ms: int,
+    threads: int,
+    hash_mb: int,
+    min_gap: float,
+    total: int,
+    current: int,
+    send_lock: asyncio.Lock,
+    server_url: str,
+    credential: str,
+    capacity: WorkerResources,
+) -> None:
+    if any(
+        not isinstance(puzzle, dict)
+        or not isinstance(puzzle.get("id"), int)
+        or puzzle["id"] <= 0
+        for puzzle in puzzles
+    ):
+        await _send_message(
+            websocket,
+            "tool_job_failed",
+            ToolJobFailed(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                error="the puzzle suite assignment contains an invalid puzzle id",
+            ),
+            lock=send_lock,
+        )
+        return
+    search_count = len(puzzles) * len(job.engines)
+    parallelism = min(
+        search_count,
+        max(1, capacity.threads // threads),
+        max(1, capacity.hash_mb // hash_mb),
+    )
+    engine_count = len(job.engines)
+    if parallelism < engine_count:
+        slot_counts = [1] * engine_count
+    else:
+        slots_per_engine, extra_slots = divmod(parallelism, engine_count)
+        slot_counts = [
+            min(len(puzzles), slots_per_engine + (1 if index < extra_slots else 0))
+            for index in range(engine_count)
+        ]
+    semaphore = asyncio.Semaphore(parallelism)
+    progress_lock = asyncio.Lock()
+    progress_current = [current]
+    await asyncio.gather(
+        *(
+            _serve_puzzle_difficulty_engine(
+                websocket,
+                job,
+                spec,
+                puzzles=puzzles,
+                slot_count=slot_counts[index],
+                parallelism=parallelism,
+                movetime_ms=movetime_ms,
+                threads=threads,
+                hash_mb=hash_mb,
+                min_gap=min_gap,
+                total=total,
+                progress_current=progress_current,
+                progress_lock=progress_lock,
+                semaphore=semaphore,
+                send_lock=send_lock,
+                server_url=server_url,
+                credential=credential,
+            )
+            for index, spec in enumerate(job.engines)
+        )
+    )
+    await _send_message(
+        websocket,
+        "tool_job_complete",
+        ToolJobComplete(job_id=job.job_id, job_key=job.job_key),
+        lock=send_lock,
+    )
+
+
+async def _serve_puzzle_difficulty_engine(
+    websocket,
+    job: ToolJobAssignment,
+    spec: EngineSpec,
+    *,
+    puzzles: list[Any],
+    slot_count: int,
+    parallelism: int,
+    movetime_ms: int,
+    threads: int,
+    hash_mb: int,
+    min_gap: float,
+    total: int,
+    progress_current: list[int],
+    progress_lock: asyncio.Lock,
+    semaphore: asyncio.Semaphore,
+    send_lock: asyncio.Lock,
+    server_url: str,
+    credential: str,
+) -> None:
+    started_ns = time.monotonic_ns()
+    await _send_puzzle_difficulty_progress(
+        websocket,
+        job,
+        engine_id=spec.engine_id,
+        status="running",
+        detail=(
+            f"Preparing {spec.name}: {slot_count} engine slots, "
+            f"{parallelism} worker-wide"
+        ),
+        total=total,
+        progress_current=progress_current,
+        progress_lock=progress_lock,
+        send_lock=send_lock,
+    )
+    shards = [puzzles[index::slot_count] for index in range(slot_count)]
+    slot_results = await asyncio.gather(
+        *(
+            _serve_puzzle_difficulty_slot(
+                websocket,
+                job,
+                spec,
+                puzzles=shard,
+                slot_number=index + 1,
+                slot_count=slot_count,
+                movetime_ms=movetime_ms,
+                threads=threads,
+                hash_mb=hash_mb,
+                min_gap=min_gap,
+                total=total,
+                progress_current=progress_current,
+                progress_lock=progress_lock,
+                semaphore=semaphore,
+                send_lock=send_lock,
+                server_url=server_url,
+                credential=credential,
+            )
+            for index, shard in enumerate(shards)
+        )
+    )
+    statuses = {status for status, _ in slot_results}
+    if "failed" in statuses:
+        engine_status = "failed"
+    elif "unsupported" in statuses:
+        engine_status = "unsupported"
+    else:
+        engine_status = "supported"
+    errors = list(dict.fromkeys(error for _, error in slot_results if error))
+    engine_error = "\n".join(errors)[-8000:]
+    await _send_message(
+        websocket,
+        "tool_job_engine_result",
+        ToolJobEngineResult(
+            job_id=job.job_id,
+            job_key=job.job_key,
+            engine_id=spec.engine_id,
+            status=engine_status,
+            error=engine_error,
+            elapsed_ms=max(0, round((time.monotonic_ns() - started_ns) / 1_000_000)),
+        ),
+        lock=send_lock,
+    )
+    await _send_puzzle_difficulty_progress(
+        websocket,
+        job,
+        engine_id=spec.engine_id,
+        status="completed",
+        detail=f"Finished {spec.name} {spec.version}",
+        total=total,
+        progress_current=progress_current,
+        progress_lock=progress_lock,
+        send_lock=send_lock,
+    )
+
+
+async def _serve_puzzle_difficulty_slot(
+    websocket,
+    job: ToolJobAssignment,
+    spec: EngineSpec,
+    *,
+    puzzles: list[Any],
+    slot_number: int,
+    slot_count: int,
+    movetime_ms: int,
+    threads: int,
+    hash_mb: int,
+    min_gap: float,
+    total: int,
+    progress_current: list[int],
+    progress_lock: asyncio.Lock,
+    semaphore: asyncio.Semaphore,
+    send_lock: asyncio.Lock,
+    server_url: str,
+    credential: str,
+) -> tuple[str, str]:
+    async with semaphore:
+        engine = UciEngineProcess(
+            spec,
+            server_url=server_url,
+            credential=credential,
+            command_timeout_s=max(60, round(movetime_ms / 1000) + 30),
+            allow_build=True,
+        )
+        engine_status = "supported"
+        engine_error = ""
+        clear_hash = False
+        try:
+            try:
+                await asyncio.to_thread(engine.prepare)
+                uci_lines = await asyncio.to_thread(engine.handle_command, "uci")
+                clear_hash = "clear_hash" in _uci_option_names(uci_lines)
+                missing = await asyncio.to_thread(
+                    _configure_puzzle_engine,
+                    engine,
+                    spec_options=spec.uci_options,
+                    uci_lines=uci_lines,
+                    stage="difficulty",
+                    threads=threads,
+                    hash_mb=hash_mb,
+                    multipv=1,
+                )
+                if missing:
+                    engine_status = "unsupported"
+                    engine_error = missing
+                else:
+                    await asyncio.to_thread(engine.handle_command, "isready")
+            except Exception as error:
+                engine_status = "failed"
+                engine_error = (str(error).strip() or error.__class__.__name__)[-8000:]
+            for puzzle in puzzles:
+                if engine_error:
+                    result = ToolJobPuzzleResult(
+                        job_id=job.job_id,
+                        job_key=job.job_key,
+                        engine_id=spec.engine_id,
+                        puzzle_id=int(puzzle["id"]),
+                        stage="difficulty",
+                        status="failed",
+                        time_ms=0,
+                        error=engine_error,
+                    )
+                else:
+                    try:
+                        result = await asyncio.to_thread(
+                            _search_puzzle,
+                            engine,
+                            job,
+                            spec.engine_id,
+                            puzzle,
+                            stage="difficulty",
+                            movetime_ms=movetime_ms,
+                            min_gap=min_gap,
+                            clear_hash=clear_hash,
+                        )
+                    except Exception as error:
+                        result = ToolJobPuzzleResult(
+                            job_id=job.job_id,
+                            job_key=job.job_key,
+                            engine_id=spec.engine_id,
+                            puzzle_id=int(puzzle["id"]),
+                            stage="difficulty",
+                            status="failed",
+                            time_ms=0,
+                            error=(
+                                str(error).strip() or error.__class__.__name__
+                            )[-8000:],
+                        )
+                await _send_message(
+                    websocket,
+                    "tool_job_puzzle_result",
+                    result,
+                    lock=send_lock,
+                )
+                await _send_puzzle_difficulty_progress(
+                    websocket,
+                    job,
+                    engine_id=spec.engine_id,
+                    status="running",
+                    detail=(
+                        f"{spec.name} slot {slot_number}/{slot_count} finished puzzle "
+                        f"{puzzle['id']}"
+                    ),
+                    total=total,
+                    progress_current=progress_current,
+                    progress_lock=progress_lock,
+                    send_lock=send_lock,
+                    advance=True,
+                )
+            return engine_status, engine_error
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(engine.close)
+
+
+async def _send_puzzle_difficulty_progress(
+    websocket,
+    job: ToolJobAssignment,
+    *,
+    engine_id: int,
+    status: str,
+    detail: str,
+    total: int,
+    progress_current: list[int],
+    progress_lock: asyncio.Lock,
+    send_lock: asyncio.Lock,
+    advance: bool = False,
+) -> None:
+    async with progress_lock:
+        if advance:
+            progress_current[0] += 1
+        await _send_message(
+            websocket,
+            "tool_job_progress",
+            ToolJobProgress(
+                job_id=job.job_id,
+                job_key=job.job_key,
+                engine_id=engine_id,
+                status=status,
+                detail=detail,
+                current=progress_current[0],
+                total=total,
+            ),
+            lock=send_lock,
+        )
 
 
 def _positive_job_integer(input_data: dict[str, Any], name: str) -> int:
