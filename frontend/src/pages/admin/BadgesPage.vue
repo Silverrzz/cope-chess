@@ -41,7 +41,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Badges" description="Create recognitions and award them to engine families.">
+    <AdminPageHeader title="Badges">
       <template #actions><RouterLink class="button button--primary" to="/admin/badges/new">New badge</RouterLink></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />

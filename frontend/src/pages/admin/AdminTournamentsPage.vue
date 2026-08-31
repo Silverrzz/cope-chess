@@ -55,7 +55,7 @@ const query = ref('')
 const deleting = ref<number | null>(null)
 const copying = ref<number | null>(null)
 const bulkPending = ref<'pause' | 'resume' | null>(null)
-const status = computed(() => typeof route.query.status === 'string' ? route.query.status : '')
+const status = computed(() => typeof route.query.status === 'string' ? route.query.status : 'active')
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
   const tournaments = [...(data.value?.tournaments ?? [])].sort((left, right) => {
@@ -75,13 +75,13 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    data.value = await api.get<Response>('/api/admin/tournaments', status.value ? { query: { status: status.value } } : {})
+    data.value = await api.get<Response>('/api/admin/tournaments', { query: { status: status.value } })
   } catch (cause) { error.value = errorText(cause) }
   finally { loading.value = false }
 }
 
 async function setStatus(next: string): Promise<void> {
-  await router.push({ query: next ? { status: next } : {} })
+  await router.push({ query: next === 'active' ? {} : { status: next } })
 }
 
 async function bulkStatus(action: 'pause' | 'resume'): Promise<void> {
@@ -155,7 +155,9 @@ function fallbackCopy(value: string): void {
 function scheduleText(item: TournamentListItem): string {
   if (item.record.status === 'scheduled') return `Starts ${formatDate(item.record.scheduled_start_at)}`
   if (item.record.status === 'running' && item.estimate?.estimated_finish_at) return `Est. ${formatDate(item.estimate.estimated_finish_at)}`
-  if (item.record.status === 'paused') return `${formatDuration(item.estimate?.estimated_remaining_seconds)} after resume`
+  if (item.record.status === 'running') return 'In progress'
+  if (item.record.status === 'paused' && item.estimate?.estimated_remaining_seconds != null) return `${formatDuration(item.estimate.estimated_remaining_seconds)} after resume`
+  if (item.record.status === 'paused') return 'Paused'
   if (['finished', 'aborted'].includes(item.record.status)) return formatDate(item.record.finished_at)
   return 'Not scheduled'
 }
@@ -180,7 +182,8 @@ onMounted(load)
         <label class="status-filter">
           <span>Status</span>
           <select class="input" :value="status" @change="setStatus(($event.target as HTMLSelectElement).value)">
-            <option value="">All tournaments</option>
+            <option value="active">Active tournaments</option>
+            <option value="all">All tournaments</option>
             <option v-for="option in data?.statuses ?? []" :key="option" :value="option">{{ humanize(option) }}</option>
           </select>
         </label>
@@ -191,7 +194,7 @@ onMounted(load)
         </label>
       </div>
 
-      <div v-if="loading" class="table-loading" role="status">Loading tournaments…</div>
+      <div v-if="loading && !data" class="table-loading" role="status">Loading tournaments…</div>
       <div v-else-if="filtered.length" class="table-scroll">
         <table class="data-table">
           <thead><tr><th>Tournament</th><th>Status</th><th>Format</th><th>Time control</th><th>Schedule / finish</th><th>Progress</th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -218,7 +221,8 @@ onMounted(load)
           </tbody>
         </table>
       </div>
-      <AdminEmptyState v-else :title="query ? 'No matching tournaments' : 'No tournaments yet'">
+      <AdminEmptyState v-else :title="query ? 'No matching tournaments' : status === 'active' ? 'No active tournaments' : 'No tournaments'">
+        <button v-if="!query && status === 'active'" class="button button--secondary button--small" type="button" @click="setStatus('all')">Show all tournaments</button>
         <RouterLink v-if="!query" class="button button--primary button--small" to="/admin/tournaments/new">New tournament</RouterLink>
       </AdminEmptyState>
     </section>

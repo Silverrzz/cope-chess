@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import EngineVersionPicker from './EngineVersionPicker.vue'
 import type { Engine, OpeningSuite, TimeControlCategory, TournamentFormat, TournamentSettings } from './types'
 
 const props = withDefaults(defineProps<{
@@ -147,10 +148,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
         <template v-else-if="model.format === 'gauntlet' && allowGauntlet">
           <label class="field">
             <span class="field__label">Hero engine</span>
-            <select class="input" :value="numberOption('hero_engine_id')" @change="patchFormatOption('hero_engine_id', Number(($event.target as HTMLSelectElement).value))">
-              <option value="0" disabled>Select a participant</option>
-              <option v-for="engine in participantEngines" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option>
-            </select>
+            <EngineVersionPicker :model-value="numberOption('hero_engine_id')" :engines="participantEngines" placeholder="Select a participant" @update:model-value="patchFormatOption('hero_engine_id', Number($event))" />
           </label>
           <label class="field">
             <span class="field__label">Cycles</span>

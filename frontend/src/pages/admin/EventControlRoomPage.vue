@@ -109,11 +109,11 @@ async function reset(): Promise<void> {
       <section v-else class="panel module-gate">
         <div class="module-gate__signal" :class="{ 'module-gate__signal--warning': !data.handler.current }"><span></span></div>
         <div class="module-gate__copy">
-          <span>Control room adapter</span>
-          <h2>{{ data.handler.available ? "The event module needs attention" : "This event’s control room is not installed" }}</h2>
-          <p v-if="!data.handler.available">The universal event record is healthy, but its bespoke admin interface belongs to the <code>{{ data.handler.key }}</code> code module. Register that module to activate operational controls.</p>
+          <span>Event module</span>
+          <h2>{{ data.handler.available ? "Module version mismatch" : "Admin controls are not installed" }}</h2>
+          <p v-if="!data.handler.available">Install the <code>{{ data.handler.key }}</code> module to manage this event.</p>
           <p v-else-if="!data.handler.current">This event requires module version {{ data.handler.required_version }}, while version {{ data.handler.installed_version }} is installed. Align the versions before operating it.</p>
-          <p v-else>The backend module is ready, but this build does not provide its admin component.</p>
+          <p v-else>This build does not include the module's admin component.</p>
         </div>
         <dl>
           <div><dt>Handler</dt><dd><code>{{ data.handler.key }}</code></dd></div>

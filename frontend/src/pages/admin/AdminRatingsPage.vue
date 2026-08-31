@@ -47,7 +47,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Rating lists" description="Create independent named Elo lists and inspect their committed tournaments.">
+    <AdminPageHeader title="Rating lists">
       <template #actions><button class="button button--primary" type="button" @click="showCreate = true">New rating list</button></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />

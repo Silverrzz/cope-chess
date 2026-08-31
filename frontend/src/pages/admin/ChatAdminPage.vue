@@ -87,7 +87,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Public chat" description="Moderate the shared chat defaults and messages across tournaments and events.">
+    <AdminPageHeader title="Public chat">
       <template #actions><StatusBadge :status="settings.enabled ? 'active' : 'paused'" :label="settings.enabled ? 'Chat enabled' : 'Chat disabled'" /></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />

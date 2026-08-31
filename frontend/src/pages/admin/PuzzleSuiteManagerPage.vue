@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import EngineVersionPicker from '@/components/admin/EngineVersionPicker.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText, formatDate, formatNumber } from '@/components/admin/format'
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -360,7 +361,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="admin-page page-stack puzzle-manager">
-    <AdminPageHeader title="Puzzle Suite Manager" description="Filter for a single verified solution, then rate the survivors by engine solve effort.">
+    <AdminPageHeader title="Puzzle Suite Manager">
       <template #actions><BaseButton variant="ghost" to="/admin/tools"><template #icon><AppIcon name="arrow-left" :size="16" /></template>All tools</BaseButton></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
@@ -418,7 +419,7 @@ onBeforeUnmount(() => {
             <section class="panel stage-card" :class="{ complete: latestUniqueness?.job.status === 'completed' }">
               <div class="stage-head"><span class="stage-number">1</span><div><span class="eyebrow">Filter</span><h2>Verify one solution</h2><p>Compare MultiPV #1 and #2 using WDL expected score in sigmoid probability space.</p></div><AppIcon v-if="latestUniqueness && latestUniqueness.job.status === 'completed'" name="check-circle" :size="20" /></div>
               <div class="stage-form">
-                <label class="wide">Analysis engine<select v-model.number="uniqueness.engine_id" :disabled="!!activeRun"><option v-for="engine in context?.engines" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option></select></label>
+                <label class="wide">Analysis engine<EngineVersionPicker v-model="uniqueness.engine_id" :engines="context?.engines ?? []" :disabled="!!activeRun" /></label>
                 <label>Time<input v-model.number="uniqueness.seconds" type="number" min="0.1" max="3600" step="0.1" /><span>seconds</span></label>
                 <label>MultiPV<input v-model.number="uniqueness.multipv" type="number" min="2" max="20" /></label>
                 <label>Threads<input v-model.number="uniqueness.threads" type="number" min="1" max="1024" /></label>

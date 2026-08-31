@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import EngineVersionPicker from '@/components/admin/EngineVersionPicker.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -87,7 +88,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack invalidation-page">
-    <AdminPageHeader title="Invalidate engine games" description="Surgically remove one engine version's games from committed rating data.">
+    <AdminPageHeader title="Invalidate engine games">
       <template #actions><BaseButton variant="ghost" to="/admin/tools"><template #icon><AppIcon name="arrow-left" :size="16" /></template>All tools</BaseButton></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
@@ -100,10 +101,7 @@ onMounted(load)
       <div class="fields">
         <label class="field">
           <span>Engine version</span>
-          <select v-model.number="engineId" class="input" required :disabled="loading || invalidating" @change="selectEngine">
-            <option disabled value="">Choose an engine</option>
-            <option v-for="engine in context?.engines" :key="engine.id" :value="engine.id">{{ engine.name }} - {{ engine.version }}</option>
-          </select>
+          <EngineVersionPicker v-model="engineId" :engines="context?.engines ?? []" placeholder="Choose an engine" :disabled="loading || invalidating" @change="selectEngine" />
           <small>Only versions currently present in committed rating history are shown.</small>
         </label>
         <label class="field">

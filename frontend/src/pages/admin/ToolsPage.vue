@@ -93,27 +93,13 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack tools-page">
-    <AdminPageHeader title="Tools" description="Planning and operational utilities for tournaments, engines, and workers." />
+    <AdminPageHeader title="Tools" />
     <InlineFeedback :message="error" />
-
-    <section class="tools-hero panel">
-      <div class="tools-hero__mark"><AppIcon name="wrench" :size="24" /></div>
-      <div>
-        <span class="eyebrow">Admin utilities</span>
-        <h2>One home for tournament planning and fleet-wide maintenance</h2>
-        <p>Tools use the same rating lists, engine definitions, build cache, authentication, and live worker connections as tournament operations.</p>
-      </div>
-      <div class="fleet-state" :class="{ 'fleet-state--offline': !data?.connected_workers }">
-        <span class="fleet-state__pulse" />
-        <strong>{{ data?.connected_workers ?? 0 }}</strong>
-        <span>worker{{ data?.connected_workers === 1 ? '' : 's' }} online</span>
-      </div>
-    </section>
 
     <section aria-labelledby="available-tools-title">
       <div class="section-heading">
-        <div><span class="eyebrow">Catalog</span><h2 id="available-tools-title">Available tools</h2></div>
-        <span class="section-heading__count">{{ data?.tools.length ?? 0 }} available</span>
+        <div><h2 id="available-tools-title">Available tools</h2></div>
+        <span class="section-heading__count">{{ data?.tools.length ?? 0 }} tools · {{ data?.connected_workers ?? 0 }} workers online</span>
       </div>
       <div v-if="loading" class="tool-grid">
         <div v-for="index in 4" :key="index" class="tool-card tool-card--loading panel" />
@@ -127,14 +113,6 @@ onMounted(load)
           <div><h3>{{ tool.label }}</h3><p>{{ tool.description }}</p></div>
           <span class="tool-card__action">Open tool <AppIcon name="arrow-right" :size="16" /></span>
         </RouterLink>
-        <article class="tool-card tool-card--soon panel">
-          <div class="tool-card__top">
-            <span class="tool-card__icon"><AppIcon name="plus" :size="22" /></span>
-            <span class="tool-card__status tool-card__status--muted">Extensible</span>
-          </div>
-          <div><h3>More tools</h3><p>The shared queue, progress, results, and worker execution model is ready for additional utilities.</p></div>
-          <span class="tool-card__action tool-card__action--muted">Tool framework ready</span>
-        </article>
       </div>
     </section>
 

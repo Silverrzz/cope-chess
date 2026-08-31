@@ -125,7 +125,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader :title="id ? form.name || 'Badge' : 'New badge'" description="Badge details are shown publicly on every assigned engine.">
+    <AdminPageHeader :title="id ? form.name || 'Badge' : 'New badge'">
       <template #actions>
         <RouterLink class="button button--ghost" to="/admin/badges">Back to badges</RouterLink>
         <button v-if="id" class="button button--danger" type="button" :disabled="saving || deleting" @click="remove">{{ deleting ? 'Deleting…' : 'Delete badge' }}</button>

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import EngineVersionPicker from '@/components/admin/EngineVersionPicker.vue'
 import EngineOptionsEditor from '@/components/admin/EngineOptionsEditor.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import TournamentSettingsEditor from '@/components/admin/TournamentSettingsEditor.vue'
@@ -295,7 +296,7 @@ onMounted(load)
 
 <template>
   <div class="admin-page page-stack creator-page">
-    <AdminPageHeader title="Tournament creator" description="Build rating divisions or a targeted gauntlet, then keep every tournament safely in draft.">
+    <AdminPageHeader title="Tournament creator">
       <template #actions><BaseButton variant="ghost" to="/admin/tools"><template #icon><AppIcon name="arrow-left" :size="16" /></template>All tools</BaseButton></template>
     </AdminPageHeader>
 
@@ -374,7 +375,7 @@ onMounted(load)
           <div class="panel-title"><span class="step">1</span><div><h2>Build the field</h2><p>Every available engine on the list is ranked by relative Elo proximity and game coverage, with no fixed rating band.</p></div></div>
           <div class="gauntlet-grid">
             <label class="field"><span>Rating list</span><select v-model.number="gauntletListId" class="input"><option disabled value="">Select a list</option><option v-for="list in context.rating_lists" :key="list.id" :value="list.id">{{ list.name }} · {{ list.engines.length }} available</option></select></label>
-            <label class="field"><span>Hero engine</span><select v-model.number="heroEngineId" class="input"><option disabled value="">Select a hero</option><option v-for="engine in context.form.engine_options" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }}</option></select></label>
+            <label class="field"><span>Hero engine</span><EngineVersionPicker v-model="heroEngineId" :engines="context.form.engine_options" placeholder="Select a hero" /></label>
             <label class="field"><span>Estimated hero Elo</span><input v-model.number="eloEstimate" class="input" type="number" min="-10000" max="10000" step="1"></label>
             <label class="field"><span>Gauntlet size</span><input v-model.number="gauntletSize" class="input" type="number" min="2" :max="Math.min(500, (selectedGauntletList?.engines.length ?? 0) + (selectedGauntletList?.engines.some((engine) => engine.id === heroEngineId) ? 0 : 1))" step="1"><small>Includes the hero; {{ Math.max(0, gauntletSize - 1) }} opponents will be selected.</small></label>
             <label class="field"><span>Round total</span><input v-model.number="roundTotal" class="input" type="number" min="1" step="1"><small>Each round gives the hero a colour-balanced pair against every opponent.</small></label>

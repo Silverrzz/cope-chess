@@ -18,9 +18,6 @@ type UpdateMethodId = "web" | "platform" | "dockerfiles";
 interface UpdateMethod {
   id: UpdateMethodId;
   label: string;
-  description: string;
-  scope: string;
-  impact: string;
 }
 
 interface DeploymentTarget {
@@ -73,23 +70,14 @@ const fallbackMethods: UpdateMethod[] = [
   {
     id: "web",
     label: "Web application",
-    description: "Deploy same-schema website and API changes without touching game services.",
-    scope: "Web only",
-    impact: "Games continue",
   },
   {
     id: "platform",
     label: "Full platform",
-    description: "Update services, workers, benchmarkers, and the database.",
-    scope: "Entire fleet",
-    impact: "Waits for active work",
   },
   {
     id: "dockerfiles",
     label: "Engine definitions",
-    description: "Refresh engine Dockerfiles without restarting services.",
-    scope: "Engine catalog",
-    impact: "No restart",
   },
 ];
 
@@ -251,32 +239,28 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="admin-page deployments-page">
-    <AdminPageHeader
-      title="Release center"
-      description="Choose the smallest update scope for the change you want to ship."
-    />
+    <AdminPageHeader title="Updates" />
 
     <section v-if="reconnecting" class="connection-notice connection-notice--reconnecting" role="status" aria-live="polite">
       <span class="connection-spinner" aria-hidden="true" />
-      <span><strong>Web service is switching releases</strong><small>The coordinator is still tracking the update. Reconnecting automatically…</small></span>
+      <span><strong>Reconnecting</strong><small>The web service is restarting.</small></span>
     </section>
     <section v-else-if="connectionRestored" class="connection-notice connection-notice--restored" role="status">
       <AppIcon name="check-circle" :size="18" />
-      <span><strong>Connection restored</strong><small>Live release tracking has resumed.</small></span>
+      <span><strong>Connected</strong><small>Update status is current.</small></span>
     </section>
 
     <InlineFeedback :message="error" />
     <InlineFeedback :message="message" tone="info" />
 
-    <section v-if="loading" class="panel loading-panel" role="status">Loading release state…</section>
+    <section v-if="loading" class="panel loading-panel" role="status">Loading updates…</section>
     <template v-else-if="data">
       <section class="release-overview">
         <article class="release-primary panel">
           <span class="release-icon"><AppIcon name="tag" :size="20" /></span>
           <div>
-            <span class="eyebrow">Running release</span>
+            <span class="eyebrow">Current release</span>
             <strong>{{ shortVersion(data.current_version) }}</strong>
-            <small>The version currently serving the control panel and public site.</small>
           </div>
           <StatusBadge status="active" label="Live" />
         </article>
@@ -293,18 +277,14 @@ onBeforeUnmount(() => {
             <div><dt>Release</dt><dd><code>{{ shortVersion(data.updater?.app_version ?? null) }}</code></dd></div>
             <div><dt>Last heartbeat</dt><dd>{{ data.updater ? formatDate(data.updater.last_seen) : "Not reported" }}</dd></div>
           </dl>
-          <p v-if="updaterDifferentRelease" class="coordinator-note">
-            <AppIcon name="info" :size="15" /> The coordinator can remain on the previous release after a web-only update.
-          </p>
+          <p v-if="updaterDifferentRelease" class="coordinator-note">Updater release: <code>{{ shortVersion(data.updater?.app_version ?? null) }}</code></p>
         </article>
       </section>
 
       <section class="panel update-composer">
         <header class="section-heading">
           <div>
-            <span class="eyebrow">New update</span>
-            <h2>What do you want to change?</h2>
-            <p>Each method has its own rollout scope and operational impact.</p>
+            <h2>Start an update</h2>
           </div>
           <span v-if="activeOperation" class="busy-lock"><AppIcon name="clock" :size="15" /> Another update is active</span>
         </header>
@@ -323,11 +303,6 @@ onBeforeUnmount(() => {
             <span class="method-card__icon"><AppIcon :name="methodIcons[method.id]" :size="21" /></span>
             <span class="method-card__copy">
               <strong>{{ method.label }}</strong>
-              <small>{{ method.description }}</small>
-            </span>
-            <span class="method-card__facts">
-              <span>{{ method.scope }}</span>
-              <span :class="{ safe: method.id !== 'platform' }">{{ method.impact }}</span>
             </span>
             <span class="method-card__check"><AppIcon name="check" :size="14" /></span>
           </button>
@@ -342,15 +317,6 @@ onBeforeUnmount(() => {
             spellcheck="false"
             :disabled="updateBusy"
           />
-          <div class="selected-impact">
-            <span :class="['impact-mark', { 'impact-mark--safe': selectedMethodId !== 'platform' }]">
-              <AppIcon :name="selectedMethodId === 'platform' ? 'clock' : 'check-circle'" :size="17" />
-            </span>
-            <span>
-              <small>Selected scope</small>
-              <strong>{{ selectedMethod?.scope }} · {{ selectedMethod?.impact }}</strong>
-            </span>
-          </div>
           <BaseButton
             type="submit"
             variant="primary"
@@ -435,7 +401,7 @@ onBeforeUnmount(() => {
             </div>
           </article>
         </div>
-        <AdminEmptyState v-else title="No updates yet" description="Choose an update method to create the first release activity." />
+        <AdminEmptyState v-else title="No updates yet" />
       </section>
     </template>
   </div>
@@ -454,8 +420,7 @@ onBeforeUnmount(() => {
 .connection-spinner { animation: connection-spin .8s linear infinite; border: 2px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; border-top-color: currentColor; height: 1rem; width: 1rem; }
 @keyframes connection-spin { to { transform: rotate(360deg); } }
 .release-overview { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1.15fr) minmax(20rem, .85fr); }
-.release-primary { align-items: center; display: grid; gap: 1rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 8.5rem; overflow: hidden; padding: 1.25rem; position: relative; }
-.release-primary::after { background: radial-gradient(circle, color-mix(in srgb, var(--color-accent) 16%, transparent), transparent 68%); content: ""; height: 13rem; pointer-events: none; position: absolute; right: -4rem; top: -5rem; width: 13rem; }
+.release-primary { align-items: center; display: grid; gap: 1rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 6.25rem; overflow: hidden; padding: 1rem; position: relative; }
 .release-primary > * { position: relative; z-index: 1; }
 .release-primary > div { display: grid; gap: .22rem; }
 .release-primary strong { font-family: var(--font-mono); font-size: clamp(1.15rem, 2vw, 1.55rem); }
@@ -471,33 +436,24 @@ onBeforeUnmount(() => {
 .coordinator-card dt { color: var(--color-text-muted); font-size: .62rem; text-transform: uppercase; }
 .coordinator-card dd { font-size: .7rem; margin: 0; }
 .coordinator-note { align-items: center; color: var(--color-text-muted); display: flex; font-size: .68rem; gap: .4rem; margin: 0; }
-.update-composer { display: grid; gap: 1.25rem; padding: 1.25rem; }
+.update-composer { display: grid; gap: 1rem; padding: 1rem; }
 .section-heading { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
 .section-heading > div { display: grid; gap: .25rem; }
 .section-heading h2 { font-size: 1rem; margin: 0; }
 .section-heading p { color: var(--color-text-muted); font-size: .74rem; margin: 0; }
 .busy-lock { align-items: center; background: var(--color-warning-soft); border-radius: 999px; color: var(--color-warning); display: flex; font-size: .68rem; font-weight: 700; gap: .35rem; padding: .4rem .6rem; }
 .method-grid { display: grid; gap: .75rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.method-card { background: var(--color-surface-sunken); border: 1px solid transparent; border-radius: var(--radius-lg); color: var(--color-text); cursor: pointer; display: grid; gap: .75rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 10.5rem; padding: 1rem; position: relative; text-align: left; transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast); }
+.method-card { align-items: center; background: var(--color-surface-sunken); border: 1px solid transparent; border-radius: var(--radius-md); color: var(--color-text); cursor: pointer; display: grid; gap: .7rem; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 4.25rem; padding: .75rem; position: relative; text-align: left; transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast); }
 .method-card:hover { border-color: var(--color-border-strong); transform: translateY(-1px); }
 .method-card--selected { background: color-mix(in srgb, var(--color-accent-soft) 58%, var(--color-surface)); border-color: var(--color-accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 15%, transparent); }
-.method-card__icon { align-items: center; background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: .7rem; color: var(--color-text-secondary); display: flex; height: 2.5rem; justify-content: center; width: 2.5rem; }
+.method-card__icon { align-items: center; background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: .55rem; color: var(--color-text-secondary); display: flex; height: 2.25rem; justify-content: center; width: 2.25rem; }
 .method-card--selected .method-card__icon { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
-.method-card__copy { display: grid; gap: .3rem; }
+.method-card__copy { display: grid; }
 .method-card__copy strong { font-size: .82rem; }
 .method-card__copy small { color: var(--color-text-muted); font-size: .69rem; line-height: 1.45; }
-.method-card__facts { align-self: end; display: flex; gap: .4rem; grid-column: 1 / -1; }
-.method-card__facts span { background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-text-muted); font-size: .61rem; font-weight: 700; padding: .3rem .45rem; }
-.method-card__facts .safe { color: var(--color-success); }
-.method-card__check { align-items: center; background: var(--color-accent); border-radius: 50%; color: var(--color-on-accent); display: flex; height: 1.4rem; justify-content: center; opacity: 0; position: absolute; right: .7rem; top: .7rem; transform: scale(.75); transition: opacity var(--transition-fast), transform var(--transition-fast); width: 1.4rem; }
+.method-card__check { align-items: center; background: var(--color-accent); border-radius: 50%; color: var(--color-on-accent); display: flex; height: 1.4rem; justify-content: center; opacity: 0; transform: scale(.75); transition: opacity var(--transition-fast), transform var(--transition-fast); width: 1.4rem; }
 .method-card--selected .method-card__check { opacity: 1; transform: scale(1); }
-.update-config { align-items: end; border-top: 1px solid var(--color-border); display: grid; gap: 1rem; grid-template-columns: minmax(14rem, 1fr) minmax(15rem, auto) auto; padding-top: 1.1rem; }
-.selected-impact { align-items: center; display: flex; gap: .6rem; min-height: var(--control-height); }
-.selected-impact > span:last-child { display: grid; gap: .12rem; }
-.selected-impact small { color: var(--color-text-muted); font-size: .61rem; text-transform: uppercase; }
-.selected-impact strong { font-size: .7rem; }
-.impact-mark { align-items: center; background: var(--color-warning-soft); border-radius: 50%; color: var(--color-warning); display: flex; height: 2rem; justify-content: center; width: 2rem; }
-.impact-mark--safe { background: var(--color-success-soft); color: var(--color-success); }
+.update-config { align-items: end; border-top: 1px solid var(--color-border); display: grid; gap: 1rem; grid-template-columns: minmax(14rem, 1fr) auto; padding-top: 1.1rem; }
 .active-rollout { align-items: center; border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); display: grid; gap: 1rem; grid-template-columns: auto minmax(0, 1fr) auto auto; padding: 1rem 1.1rem; }
 .active-rollout__pulse { align-items: center; background: var(--color-accent-soft); border-radius: 50%; display: flex; height: 2.6rem; justify-content: center; width: 2.6rem; }
 .active-rollout__pulse span { animation: status-pulse 1.5s ease-in-out infinite; background: var(--color-accent); border-radius: 50%; height: .65rem; width: .65rem; }
@@ -533,7 +489,6 @@ onBeforeUnmount(() => {
   .method-grid { grid-template-columns: 1fr; }
   .method-card { min-height: auto; }
   .update-config { align-items: stretch; grid-template-columns: 1fr; }
-  .selected-impact { order: 3; }
 }
 @media (max-width: 680px) {
   .release-primary { grid-template-columns: auto minmax(0, 1fr); }

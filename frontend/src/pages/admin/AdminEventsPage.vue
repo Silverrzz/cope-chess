@@ -80,7 +80,7 @@ async function provision(moduleKey: string): Promise<void> {
 
 <template>
   <div class="admin-page events-admin page-stack">
-    <AdminPageHeader title="Events" description="The launchpad for bespoke exhibitions. Event creation and format-specific controls are supplied by code modules." />
+    <AdminPageHeader title="Events" />
     <InlineFeedback :message="error" />
 
     <div v-if="loading" class="panel loading-panel" role="status">Loading events…</div>
@@ -91,7 +91,7 @@ async function provision(moduleKey: string): Promise<void> {
 
       <section class="panel event-launchpad">
         <div class="launchpad-heading">
-          <div><span>Control rooms</span><h2>Event launchpad</h2><p>{{ filtered.length }} of {{ data.events.length }} events</p></div>
+          <div><h2>Existing events</h2><p>{{ filtered.length }} of {{ data.events.length }}</p></div>
           <div class="launchpad-filters">
             <label><span class="sr-only">Search events</span><input v-model="query" class="input" type="search" placeholder="Search events or modules"></label>
             <label><span class="sr-only">Filter by status</span><select v-model="status" class="input"><option value="">All statuses</option><option v-for="item in data.statuses" :key="item" :value="item">{{ humanize(item) }}</option></select></label>
@@ -107,12 +107,12 @@ async function provision(moduleKey: string): Promise<void> {
             <footer><span class="module-state" :class="{ 'module-state--ready': item.handler.current, 'module-state--warning': !item.handler.current }"><i></i>{{ item.handler.current ? item.handler.label : item.handler.available ? "Module version mismatch" : "Module unavailable" }}</span><span aria-hidden="true">→</span></footer>
           </RouterLink>
         </div>
-        <AdminEmptyState v-else-if="data.events.length" title="No matching events" description="Adjust the search or status filter." />
-        <AdminEmptyState v-else title="No events have been created" description="Create an event from one of the installed formats below, then configure it in its control room." />
+        <AdminEmptyState v-else-if="data.events.length" title="No matching events" />
+        <AdminEmptyState v-else title="No events" />
       </section>
 
       <section class="module-registry panel">
-        <div><span>Event formats</span><h2>Create a bespoke event</h2><p>Installed formats can be launched here and configured in their dedicated control rooms.</p></div>
+        <div><h2>Create an event</h2></div>
         <div v-if="data.registered_modules.length" class="module-list">
           <div v-for="module in data.registered_modules" :key="module.key">
             <span><strong>{{ module.label }}</strong><code>{{ module.key }}</code></span>
@@ -123,7 +123,7 @@ async function provision(moduleKey: string): Promise<void> {
             </div>
           </div>
         </div>
-        <p v-else class="module-empty">The universal event system is ready. No bespoke event modules are registered in this build.</p>
+        <p v-else class="module-empty">No event formats are installed.</p>
       </section>
     </template>
   </div>

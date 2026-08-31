@@ -100,7 +100,7 @@ from cope.network import (
 )
 from cope.web.forms import form_value
 from cope.version import app_version
-from cope.tournament.estimates import TournamentEstimator, completed_tournament_estimate
+from cope.tournament.estimates import TournamentEstimate, TournamentEstimator, completed_tournament_estimate
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -3684,28 +3684,15 @@ def _tournament_summaries(
     engines: dict[int, str],
     *,
     estimator: TournamentEstimator | None = None,
+    include_completed_estimates: bool = True,
+    include_active_estimates: bool = True,
 ) -> list[dict[str, Any]]:
     if not tournaments:
         return []
     tournament_ids = tuple(tournament.id for tournament in tournaments)
     placeholders = ", ".join("?" for _ in tournament_ids)
-    rows = connection.execute(
-        f"""
-        SELECT tournament_id,
-               COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE status = 'pending') AS pending,
-               COUNT(*) FILTER (WHERE status = 'assigned') AS assigned,
-               COUNT(*) FILTER (WHERE status = 'live') AS live,
-               COUNT(*) FILTER (WHERE status = 'finished') AS finished,
-               COUNT(*) FILTER (WHERE status = 'abandoned') AS abandoned,
-               COUNT(DISTINCT (
-                 LEAST(white_engine_id, black_engine_id),
-                 GREATEST(white_engine_id, black_engine_id),
-                 opening_id,
-                 match_id,
-                 (game_number - 1) / 2,
-                 tiebreak_kind
-               )) AS pairs,
+    duration_columns = (
+        """
                COUNT(*) FILTER (
                  WHERE status = 'finished'
                    AND started_at IS NOT NULL
@@ -3728,6 +3715,28 @@ def _tournament_summaries(
                    AND finished_at::timestamptz
                      <= started_at::timestamptz + INTERVAL '7 days'
                ) AS median_game_seconds
+        """
+        if include_completed_estimates
+        else "0 AS duration_sample, NULL::double precision AS median_game_seconds"
+    )
+    rows = connection.execute(
+        f"""
+        SELECT tournament_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+               COUNT(*) FILTER (WHERE status = 'assigned') AS assigned,
+               COUNT(*) FILTER (WHERE status = 'live') AS live,
+               COUNT(*) FILTER (WHERE status = 'finished') AS finished,
+               COUNT(*) FILTER (WHERE status = 'abandoned') AS abandoned,
+               COUNT(DISTINCT (
+                 LEAST(white_engine_id, black_engine_id),
+                 GREATEST(white_engine_id, black_engine_id),
+                 opening_id,
+                 match_id,
+                 (game_number - 1) / 2,
+                 tiebreak_kind
+               )) AS pairs,
+               {duration_columns}
         FROM games
         WHERE tournament_id IN ({placeholders}) AND record_eligible = 1
         GROUP BY tournament_id
@@ -3757,7 +3766,7 @@ def _tournament_summaries(
     active_ids = tuple(
         tournament.id
         for tournament in tournaments
-        if tournament.status not in {"finished", "aborted"}
+        if include_active_estimates and tournament.status not in {"finished", "aborted"}
     )
     games_by_tournament: dict[int, list[GameRecord]] = {
         tournament_id: [] for tournament_id in active_ids
@@ -3788,6 +3797,24 @@ def _tournament_summaries(
                     values["median_game_seconds"] if values is not None else None
                 ),
                 sample_size=(values["duration_sample"] if values is not None else 0),
+            )
+        elif not include_active_estimates:
+            tournament_estimate = TournamentEstimate(
+                estimated_finish_at=None,
+                estimated_remaining_seconds=None,
+                median_game_seconds=None,
+                sample_size=0,
+                remaining_games=max(
+                    0,
+                    game_summary["total"]
+                    - game_summary["finished"]
+                    - game_summary["abandoned"],
+                ),
+                projected_total_games=game_summary["total"],
+                concurrency=max(1, tournament.config.concurrency),
+                confidence="unavailable",
+                basis="unavailable",
+                state="paused" if tournament.status == "paused" else "unavailable",
             )
         else:
             tournament_estimate = shared_estimator.estimate(tournament, tournament_games)

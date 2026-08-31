@@ -411,7 +411,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="admin-page page-stack clone-page">
-    <AdminPageHeader title="Clone environment" description="Pull a verified, dependency-complete selection from another live Cope installation.">
+    <AdminPageHeader title="Clone environment">
       <template #actions>
         <BaseButton variant="ghost" to="/admin/tools"><template #icon><AppIcon name="arrow-left" :size="16" /></template>All tools</BaseButton>
         <BaseButton v-if="job" variant="secondary" @click="newClone"><template #icon><AppIcon name="plus" :size="16" /></template>New clone</BaseButton>
@@ -469,7 +469,7 @@ onBeforeUnmount(() => {
           <div><small>Destination</small><strong>{{ Object.values(preflight?.destination_inventory ?? {}).reduce((sum, value) => sum + Number(value), 0).toLocaleString() }}</strong><span>Current portable records</span></div>
         </div>
         <div class="safety-strip"><AppIcon name="info" :size="18" /><span><strong>Safe live-state policy</strong>Running competitions are neutralized, workers and benchmarkers arrive offline, pending commands are terminalized, and known stored credentials are stripped.</span></div>
-        <div class="start-row"><span v-if="!preflight">Test the source connection to unlock selection and review.</span><span v-else-if="!preflight.compatible">Upgrade both hosts to the same Cope schema and clone protocol.</span><span v-else>Ready to create a consistent source snapshot and begin the resumable transfer.</span><BaseButton variant="primary" size="large" :loading="starting" :disabled="!preflight?.compatible || !expandedSelection.size || !adminToken" @click="start"><template #icon><AppIcon name="download" :size="18" /></template>Start environment clone</BaseButton></div>
+        <div class="start-row"><span v-if="!preflight">Test the source connection first.</span><span v-else-if="!preflight.compatible">Upgrade both hosts to the same Cope schema and clone protocol.</span><span v-else>{{ expandedSelection.size }} options selected.</span><BaseButton variant="primary" size="large" :loading="starting" :disabled="!preflight?.compatible || !expandedSelection.size || !adminToken" @click="start"><template #icon><AppIcon name="download" :size="18" /></template>Start environment clone</BaseButton></div>
       </section>
 
       <section v-if="context?.recent_jobs.length" class="recent-panel panel">
@@ -489,7 +489,7 @@ onBeforeUnmount(() => {
           <div class="progress-track" role="progressbar" :aria-valuenow="progress" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${progress}%` }" /></div>
           <div class="progress-foot"><span>{{ job.completed_datasets }}/{{ job.total_datasets }} datasets · {{ job.completed_rows.toLocaleString() }}/{{ job.total_rows.toLocaleString() }} rows</span><span>{{ formatBytes(job.completed_bytes) }}/{{ formatBytes(job.total_bytes) }}</span></div>
         </div>
-        <div class="run-actions"><span class="stream-state" :class="`stream-state--${streamState}`"><i />{{ streamState === "live" ? "Live updates" : streamState }}</span><BaseButton v-if="cancellable" variant="danger" :loading="actioning" @click="cancel"><template #icon><AppIcon name="stop" :size="16" /></template>Cancel safely</BaseButton><BaseButton v-else-if="job.status === 'failed' || job.status === 'cancelled'" variant="primary" :loading="actioning" @click="resume"><template #icon><AppIcon name="refresh" :size="16" /></template>Resume clone</BaseButton></div>
+        <div class="run-actions"><span class="stream-state" :class="`stream-state--${streamState}`"><i />{{ streamState === "live" ? "Live updates" : streamState }}</span><BaseButton v-if="cancellable" variant="danger" :loading="actioning" @click="cancel"><template #icon><AppIcon name="stop" :size="16" /></template>Cancel</BaseButton><BaseButton v-else-if="job.status === 'failed' || job.status === 'cancelled'" variant="primary" :loading="actioning" @click="resume"><template #icon><AppIcon name="refresh" :size="16" /></template>Resume clone</BaseButton></div>
       </section>
 
       <section class="telemetry-grid">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
@@ -66,6 +66,7 @@ const filtered = computed(() => {
 
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
+watch(statusFilter, () => void load())
 
 async function load(): Promise<void> {
   controller?.abort()
@@ -73,7 +74,10 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    data.value = await api.get<TournamentsResponse>('/api/tournaments', { signal: controller.signal })
+    data.value = await api.get<TournamentsResponse>('/api/tournaments', {
+      query: { status: statusFilter.value },
+      signal: controller.signal,
+    })
   } catch (error) {
     if ((error as { name?: string })?.name !== 'AbortError') {
       loadError.value = errorMessage(error, 'Tournaments could not be loaded.')
@@ -97,14 +101,17 @@ function updateQuery(values: Record<string, string | undefined>): void {
 }
 
 function clearFilters(): void {
-  updateQuery({ q: undefined, status: undefined })
+  updateQuery({
+    q: undefined,
+    status: !search.value && statusFilter.value === 'active' ? 'all' : undefined,
+  })
 }
 </script>
 
 <template>
   <div class="page-container tournaments-page">
-    <ContentState v-if="loading" kind="loading" title="Loading tournaments" />
-    <ContentState v-else-if="loadError" kind="error" :message="loadError" action-label="Try again" @action="load" />
+    <ContentState v-if="loading && !data" kind="loading" title="Loading tournaments" />
+    <ContentState v-else-if="loadError && !data" kind="error" :message="loadError" action-label="Try again" @action="load" />
 
     <template v-else-if="data">
       <section class="tournament-hero">
@@ -112,18 +119,18 @@ function clearFilters(): void {
           <h1>Tournaments</h1>
         </div>
         <dl aria-label="Tournament overview">
-          <div><dt>Tournaments</dt><dd>{{ publicTournaments.length }}</dd></div>
+          <div><dt>Tournaments</dt><dd>{{ data.tournament_stats.total }}</dd></div>
           <div><dt>Active</dt><dd>{{ data.tournament_stats.active }}</dd></div>
           <div><dt>Live games</dt><dd>{{ data.tournament_stats.live_games }}</dd></div>
           <div><dt>Games complete</dt><dd>{{ data.tournament_stats.completion_percent }}%</dd></div>
         </dl>
       </section>
 
-      <section v-if="publicTournaments.length" class="tournament-content" aria-labelledby="tournament-list-title">
+      <section v-if="data.tournament_stats.total" class="tournament-content" aria-labelledby="tournament-list-title">
         <div class="list-heading">
           <div>
-            <h2 id="tournament-list-title">All tournaments</h2>
-            <p>{{ filtered.length }} of {{ publicTournaments.length }} shown</p>
+            <h2 id="tournament-list-title">{{ statusFilter === 'all' ? 'All tournaments' : `${statusFilter.charAt(0).toUpperCase()}${statusFilter.slice(1)} tournaments` }}</h2>
+            <p>{{ filtered.length }} shown</p>
           </div>
           <form class="filters" role="search" @submit.prevent>
             <label>
@@ -156,7 +163,7 @@ function clearFilters(): void {
           kind="empty"
           compact
           title="No matching tournaments"
-          action-label="Clear filters"
+          :action-label="search ? 'Clear search' : statusFilter === 'active' ? 'Show all tournaments' : 'Reset filters'"
           @action="clearFilters"
         />
       </section>

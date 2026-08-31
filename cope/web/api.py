@@ -1007,6 +1007,18 @@ class ChatSettingsPayload(BaseModel):
     allow_anonymous_names: bool
 
 
+def _tournament_status_matches(current: str, requested: str) -> bool:
+    if requested in {"", "all"}:
+        return True
+    if requested == "active":
+        return current in {"scheduled", "running", "paused"}
+    if requested == "live":
+        return current == "running"
+    if requested == "ended":
+        return current in {"finished", "aborted"}
+    return current == requested
+
+
 def register_api_routes(app: FastAPI) -> None:
     from cope.web import app as web_app
 
@@ -1305,30 +1317,45 @@ def register_api_routes(app: FastAPI) -> None:
     @app.get("/api/tournaments")
     def public_tournaments(
         request: Request,
+        status: str = "",
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engines = web_app._engine_names(connection)
         estimator = TournamentEstimator(connection)
         event_tournament_ids = web_app._event_linked_tournament_ids(connection)
-        tournaments = tuple(
+        available_tournaments = tuple(
             tournament
             for tournament in list_tournaments(connection)
-            if tournament.status != "draft" and tournament.id not in event_tournament_ids
+            if tournament.status != "draft"
+            and tournament.id not in event_tournament_ids
+        )
+        tournaments = tuple(
+            tournament
+            for tournament in available_tournaments
+            if _tournament_status_matches(tournament.status, status)
         )
         items = web_app._tournament_summaries(
             connection,
             tournaments,
             engines,
             estimator=estimator,
+            include_completed_estimates=False,
+            include_active_estimates=False,
         )
         for item in items:
             item["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
                 item["record"].id
             )
+        stats = web_app._tournament_index_stats(items)
+        stats["total"] = len(available_tournaments)
+        stats["active"] = sum(
+            tournament.status in {"scheduled", "running", "paused"}
+            for tournament in available_tournaments
+        )
         return _json(
             {
                 "tournaments": items,
-                "tournament_stats": web_app._tournament_index_stats(items),
+                "tournament_stats": stats,
             }
         )
 
@@ -2395,13 +2422,15 @@ def register_api_routes(app: FastAPI) -> None:
         tournaments = tuple(
             tournament
             for tournament in available_tournaments
-            if not status or tournament.status == status
+            if _tournament_status_matches(tournament.status, status)
         )
         items = web_app._tournament_summaries(
             connection,
             tournaments,
             engines,
             estimator=estimator,
+            include_completed_estimates=False,
+            include_active_estimates=False,
         )
         return _json(
             {

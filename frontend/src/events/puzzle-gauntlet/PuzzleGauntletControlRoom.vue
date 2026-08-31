@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from "vue";
 
 import { api } from "@/api/client";
+import EngineVersionPicker from "@/components/admin/EngineVersionPicker.vue";
 import ChessBoard from "@/components/chess/ChessBoard.vue";
 import { errorText, formatDate } from "@/components/admin/format";
 import StatusBadge from "@/components/admin/StatusBadge.vue";
@@ -295,7 +296,7 @@ function toLocalDateTime(value: string | null): string {
       <section class="field-layout">
         <div class="panel field-card">
           <header><div><span>Contender roster</span><h2>Add engines one at a time</h2><p>Each engine receives an independent search on every active puzzle.</p></div><strong>{{ payload.entries.length }}</strong></header>
-          <form class="engine-adder" @submit.prevent="addEngine"><label><span>Available engine version</span><select v-model.number="selectedEngine" class="input" :disabled="locked"><option :value="0">Choose an engine…</option><option v-for="engine in availableEngines" :key="engine.id" :value="engine.id">{{ engine.name }} {{ engine.version }} · {{ engine.author }}</option></select></label><button class="button button--primary" type="submit" :disabled="locked || !selectedEngine || pending === 'add-engine'"><AppIcon name="plus" :size="15" />Enter engine</button></form>
+          <form class="engine-adder" @submit.prevent="addEngine"><label><span>Available engine version</span><EngineVersionPicker v-model="selectedEngine" :engines="availableEngines" placeholder="Choose an engine" :disabled="locked" /></label><button class="button button--primary" type="submit" :disabled="locked || !selectedEngine || pending === 'add-engine'"><AppIcon name="plus" :size="15" />Enter engine</button></form>
           <div class="roster-list"><article v-for="(entry, index) in payload.entries" :key="entry.id" :class="{ 'roster-entry--knocked-out': entry.status !== 'active' }"><span class="roster-seed">{{ String(index + 1).padStart(2, "0") }}</span><i>{{ entry.name.slice(0, 2).toUpperCase() }}</i><div><strong>{{ entry.name }}</strong><small>{{ entry.version }} · {{ entry.author }}</small></div><span class="roster-status" :class="entry.status">{{ entry.winner ? "winner" : entry.status }}</span><button type="button" :disabled="locked" title="Remove engine" @click="removeEngine(entry.id)"><AppIcon name="close" :size="14" /></button></article><p v-if="!payload.entries.length">No engines entered yet.</p></div>
         </div>
 

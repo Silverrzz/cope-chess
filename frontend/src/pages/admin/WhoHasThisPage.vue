@@ -205,7 +205,7 @@ onBeforeUnmount(stopPolling)
 
 <template>
   <div class="admin-page page-stack who-page">
-    <AdminPageHeader title="Who Has This" description="Check which engine versions expose a UCI option using a real worker handshake.">
+    <AdminPageHeader title="Who Has This">
       <template #actions><BaseButton variant="ghost" to="/admin/tools"><template #icon><AppIcon name="arrow-left" :size="16" /></template>All tools</BaseButton></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
