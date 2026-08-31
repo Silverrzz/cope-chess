@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { api } from '@/api/client'
+import { api, setCsrfToken } from '@/api/client'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
@@ -19,10 +19,15 @@ interface GitHost {
   enabled: boolean
 }
 
+type AccessTokenRole = 'admin' | 'manager'
+
 const toast = useToast()
 const { confirm } = useConfirm()
 const loading = ref(true)
 const hostPending = ref<number | 'new' | null>(null)
+const tokenPending = ref<`${AccessTokenRole}-${'copy' | 'rotate'}` | null>(null)
+const tokenCopied = ref<AccessTokenRole | null>(null)
+const canManageTokens = ref(false)
 const error = ref('')
 const hosts = ref<GitHost[]>([])
 const showNewHost = ref(false)
@@ -40,7 +45,8 @@ const newHost = reactive<GitHost>({
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const response = await api.get<{ git_hosts: GitHost[] }>('/api/admin/settings')
+    const response = await api.get<{ can_manage_tokens: boolean; git_hosts: GitHost[] }>('/api/admin/settings')
+    canManageTokens.value = response.can_manage_tokens
     hosts.value = response.git_hosts.map((host) => ({ ...host, access_token: '', clear_access_token: false }))
   } catch (cause) {
     error.value = errorText(cause)
@@ -116,6 +122,50 @@ async function removeHost(host: GitHost): Promise<void> {
   }
 }
 
+async function copyAccessToken(role: AccessTokenRole): Promise<void> {
+  tokenPending.value = `${role}-copy`
+  error.value = ''
+  try {
+    const response = await api.get<{ token: string }>(`/api/admin/settings/access-tokens/${role}`)
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is not available.')
+    await navigator.clipboard.writeText(response.token)
+    tokenCopied.value = role
+    toast.success(`${role === 'admin' ? 'Admin' : 'Manager'} token copied.`)
+    window.setTimeout(() => { if (tokenCopied.value === role) tokenCopied.value = null }, 2000)
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    tokenPending.value = null
+  }
+}
+
+async function rotateAccessToken(role: AccessTokenRole): Promise<void> {
+  const label = role === 'admin' ? 'admin' : 'manager'
+  const accepted = await confirm({
+    title: `Rotate ${label} token?`,
+    message: role === 'admin'
+      ? 'The current admin token and other admin sessions will stop working immediately. This browser will stay signed in.'
+      : 'The current manager token and all manager sessions will stop working immediately.',
+    confirmLabel: 'Rotate token',
+    tone: 'danger',
+  })
+  if (!accepted) return
+  tokenPending.value = `${role}-rotate`
+  error.value = ''
+  try {
+    const response = await api.post<{ csrf_token: string; message: string }>(`/api/admin/settings/access-tokens/${role}`)
+    setCsrfToken(response.csrf_token)
+    tokenCopied.value = null
+    toast.success(response.message)
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    tokenPending.value = null
+  }
+}
+
 function applyProviderDefaults(host: GitHost): void {
   if (host.provider === 'github') {
     host.base_url = 'https://github.com'
@@ -135,6 +185,19 @@ onMounted(load)
     <InlineFeedback :message="error" />
     <div v-if="loading" class="panel loading-card">Loading settings…</div>
     <template v-else>
+      <section v-if="canManageTokens" class="token-section">
+        <div class="section-heading"><div><h2>Access tokens</h2></div></div>
+        <div class="token-grid">
+          <article class="panel settings-card">
+            <div class="card-heading"><div><h3>Admin token</h3><p>Full access, including these token controls.</p></div><span class="auth-status configured">Hidden</span></div>
+            <div class="token-actions"><button class="button button--secondary" type="button" :disabled="tokenPending !== null" @click="copyAccessToken('admin')">{{ tokenPending === 'admin-copy' ? 'Copying…' : tokenCopied === 'admin' ? 'Copied' : 'Copy token' }}</button><button class="button button--danger" type="button" :disabled="tokenPending !== null" @click="rotateAccessToken('admin')">{{ tokenPending === 'admin-rotate' ? 'Rotating…' : 'Rotate token' }}</button></div>
+          </article>
+          <article class="panel settings-card">
+            <div class="card-heading"><div><h3>Manager token</h3><p>Full admin access except viewing or rotating access tokens.</p></div><span class="auth-status configured">Hidden</span></div>
+            <div class="token-actions"><button class="button button--secondary" type="button" :disabled="tokenPending !== null" @click="copyAccessToken('manager')">{{ tokenPending === 'manager-copy' ? 'Copying…' : tokenCopied === 'manager' ? 'Copied' : 'Copy token' }}</button><button class="button button--danger" type="button" :disabled="tokenPending !== null" @click="rotateAccessToken('manager')">{{ tokenPending === 'manager-rotate' ? 'Rotating…' : 'Rotate token' }}</button></div>
+          </article>
+        </div>
+      </section>
       <section class="host-section">
         <div class="section-heading"><div><h2>Git hosts</h2><p>Add an API token to authenticate repository searches and avoid public rate limits.</p></div><button class="button button--primary button--small" type="button" @click="showNewHost = !showNewHost">{{ showNewHost ? 'Cancel' : 'Add Git host' }}</button></div>
         <form v-if="showNewHost" class="panel settings-card" @submit.prevent="addHost">
@@ -168,5 +231,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.loading-card,.settings-card{padding:1rem}.settings-card{display:grid;gap:1rem}.card-heading,.section-heading{align-items:start;display:flex;gap:1rem;justify-content:space-between}.card-heading{border-bottom:1px solid var(--color-border);padding-bottom:.8rem}.card-heading h2,.section-heading h2,.card-heading h3{font-size:.95rem;margin:0}.card-heading p,.section-heading p{color:var(--color-text-muted);font-size:.7rem;margin:.2rem 0 0}.card-heading>span,.auth-status{background:var(--color-surface-subtle);border-radius:999px;color:var(--color-warning);font-size:.65rem;padding:.3rem .55rem;white-space:nowrap}.card-heading>span.configured,.auth-status.configured{color:var(--color-success)}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem}.field>span{font-size:.76rem;font-weight:650}.field small{color:var(--color-text-muted);font-size:.67rem;line-height:1.4}.token-field{align-content:start}.switch-row{align-items:center;cursor:pointer;display:flex;gap:.5rem}.switch-row strong{font-size:.73rem}.host-heading-actions{align-items:center;display:flex;gap:.7rem}.form-actions{display:flex;justify-content:flex-end}.form-actions.split{justify-content:space-between}.host-section,.host-grid-list{display:grid;gap:.8rem}.host-grid-list{grid-template-columns:repeat(auto-fill,minmax(min(100%,28rem),1fr))}.host-grid{grid-template-columns:repeat(2,minmax(0,1fr))}@media(max-width:42rem){.card-heading,.section-heading{align-items:stretch;flex-direction:column}.host-heading-actions{justify-content:space-between}.form-grid,.host-grid{grid-template-columns:1fr}}
+.loading-card,.settings-card{padding:1rem}.settings-card{display:grid;gap:1rem}.card-heading,.section-heading{align-items:start;display:flex;gap:1rem;justify-content:space-between}.card-heading{border-bottom:1px solid var(--color-border);padding-bottom:.8rem}.card-heading h2,.section-heading h2,.card-heading h3{font-size:.95rem;margin:0}.card-heading p,.section-heading p{color:var(--color-text-muted);font-size:.7rem;margin:.2rem 0 0}.card-heading>span,.auth-status{background:var(--color-surface-subtle);border-radius:999px;color:var(--color-warning);font-size:.65rem;padding:.3rem .55rem;white-space:nowrap}.card-heading>span.configured,.auth-status.configured{color:var(--color-success)}.token-section,.token-grid{display:grid;gap:.8rem}.token-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.token-actions{display:flex;gap:.5rem;justify-content:flex-end}.form-grid{display:grid;gap:.85rem;grid-template-columns:repeat(2,minmax(0,1fr))}.field{display:grid;gap:.38rem}.field>span{font-size:.76rem;font-weight:650}.field small{color:var(--color-text-muted);font-size:.67rem;line-height:1.4}.token-field{align-content:start}.switch-row{align-items:center;cursor:pointer;display:flex;gap:.5rem}.switch-row strong{font-size:.73rem}.host-heading-actions{align-items:center;display:flex;gap:.7rem}.form-actions{display:flex;justify-content:flex-end}.form-actions.split{justify-content:space-between}.host-section,.host-grid-list{display:grid;gap:.8rem}.host-grid-list{grid-template-columns:repeat(auto-fill,minmax(min(100%,28rem),1fr))}.host-grid{grid-template-columns:repeat(2,minmax(0,1fr))}@media(max-width:42rem){.card-heading,.section-heading{align-items:stretch;flex-direction:column}.host-heading-actions{justify-content:space-between}.token-grid{grid-template-columns:1fr}.token-actions{align-items:stretch;flex-direction:column}.form-grid,.host-grid{grid-template-columns:1fr}}
 </style>

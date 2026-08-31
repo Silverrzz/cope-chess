@@ -561,6 +561,8 @@ def create_app(
     app.state.benchmarker_server_url = benchmarker_server_url
     app.state.event_token = event_token or default_web_event_token()
     app.state.admin_token = admin_token or default_admin_token()
+    app.state.manager_token = None
+    app.state.access_tokens_loaded = False
     app.state.stream_hub = StreamHub()
     app.state.request_limits = {}
     app.state.last_service_heartbeat = 0.0
@@ -653,10 +655,11 @@ def create_app(
         admin_api = path.startswith("/api/admin")
         admin_page = path.startswith("/admin") and path != "/admin/login"
         protected = admin_api or admin_page or private_event_page
-        token = _admin_token(request) if protected else None
+        admin_token = _admin_token(request) if protected else None
+        manager_token = _manager_token(request) if protected else None
 
         if protected:
-            if not token:
+            if not admin_token and not manager_token:
                 return _security_error(
                     request,
                     f"Admin access requires {ADMIN_TOKEN_ENV}.",
@@ -668,7 +671,8 @@ def create_app(
                     "Admin access requires HTTPS.",
                     status_code=403,
                 )
-            if not _admin_session_valid(request, token):
+            role = _admin_session_role(request)
+            if role is None:
                 if admin_api:
                     return JSONResponse(
                         {"detail": "Admin session required."},
@@ -683,6 +687,12 @@ def create_app(
                         status_code=303,
                     )
                 return HTMLResponse("Admin session required.", status_code=403)
+            if role == "manager" and path.startswith("/api/admin/settings/access-tokens"):
+                return JSONResponse(
+                    {"detail": "The admin token is required to manage access tokens."},
+                    status_code=403,
+                )
+            token = admin_token if role == "admin" else manager_token
             if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
                 if admin_api:
                     supplied = request.headers.get("x-csrf-token", "")
@@ -1179,11 +1189,9 @@ def _event_is_public(event: EventRecord) -> bool:
 
 
 def _admin_request_authenticated(request: Request) -> bool:
-    token = _admin_token(request)
     return bool(
-        token
-        and _request_is_secure_or_local(request)
-        and _admin_session_valid(request, token)
+        _request_is_secure_or_local(request)
+        and _admin_session_role(request) is not None
     )
 
 
@@ -1696,7 +1704,43 @@ def _admin_tournament_path_id(path: str) -> int | None:
 
 
 def _admin_token(request: Request) -> str | None:
+    _load_access_tokens(request)
     return getattr(request.app.state, "admin_token", None) or None
+
+
+def _manager_token(request: Request) -> str | None:
+    _load_access_tokens(request)
+    return getattr(request.app.state, "manager_token", None) or None
+
+
+def _load_access_tokens(request: Request) -> None:
+    if getattr(request.app.state, "access_tokens_loaded", False):
+        return
+    connection = connect_database(request.app.state.db_path)
+    try:
+        rows = connection.execute(
+            "SELECT role, token FROM admin_access_tokens"
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    finally:
+        connection.close()
+    for row in rows:
+        if row["role"] == "admin" and row["token"]:
+            request.app.state.admin_token = str(row["token"])
+        elif row["role"] == "manager" and row["token"]:
+            request.app.state.manager_token = str(row["token"])
+    request.app.state.access_tokens_loaded = True
+
+
+def _admin_session_role(request: Request) -> str | None:
+    admin_token = _admin_token(request)
+    if admin_token and _admin_session_valid(request, admin_token):
+        return "admin"
+    manager_token = _manager_token(request)
+    if manager_token and _admin_session_valid(request, manager_token):
+        return "manager"
+    return None
 
 
 def _admin_session_valid(request: Request, token: str) -> bool:

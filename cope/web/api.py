@@ -1028,17 +1028,20 @@ def register_api_routes(app: FastAPI) -> None:
 
     @app.get("/api/session")
     def session(request: Request):
-        token = web_app._admin_token(request)
-        authenticated = bool(token and web_app._admin_session_valid(request, token))
+        admin_token = web_app._admin_token(request)
+        manager_token = web_app._manager_token(request)
+        role = web_app._admin_session_role(request)
+        token = admin_token if role == "admin" else manager_token if role == "manager" else None
         response = _json(
             {
-                "admin_configured": bool(token),
-                "authenticated": authenticated,
+                "admin_configured": bool(admin_token or manager_token),
+                "authenticated": role is not None,
                 "repository_url": _public_update_repository_url(),
                 "secure_context": web_app._request_is_secure_or_local(request),
+                "user": {"role": role} if role else None,
                 "csrf_token": (
                     web_app._csrf_token(request, token)
-                    if token and authenticated
+                    if token and role
                     else ""
                 ),
             }
@@ -1048,8 +1051,9 @@ def register_api_routes(app: FastAPI) -> None:
 
     @app.post("/api/session")
     async def create_session(request: Request):
-        token = web_app._admin_token(request)
-        if not token:
+        admin_token = web_app._admin_token(request)
+        manager_token = web_app._manager_token(request)
+        if not admin_token and not manager_token:
             raise HTTPException(
                 status_code=503,
                 detail="Admin access is not configured.",
@@ -1059,7 +1063,13 @@ def register_api_routes(app: FastAPI) -> None:
 
         form = await read_form(request)
         supplied = form_value(form, "token")
-        if not hmac.compare_digest(supplied, token):
+        if admin_token and hmac.compare_digest(supplied, admin_token):
+            token = admin_token
+            role = "admin"
+        elif manager_token and hmac.compare_digest(supplied, manager_token):
+            token = manager_token
+            role = "manager"
+        else:
             raise HTTPException(status_code=401, detail="Invalid admin token.")
 
         nonce = secrets.token_urlsafe(32)
@@ -1069,6 +1079,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "csrf_token": web_app._csrf_for_nonce(token, nonce),
                 "message": "Signed in.",
                 "repository_url": _public_update_repository_url(),
+                "user": {"role": role},
             }
         )
         response.set_cookie(
@@ -3073,10 +3084,14 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({"message": "Tournament deleted."})
 
     @app.get("/api/admin/settings")
-    def admin_settings(connection: sqlite3.Connection = Depends(web_app._database)):
+    def admin_settings(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
         hosts = list_git_hosts(connection)
         return _json(
             {
+                "can_manage_tokens": web_app._admin_session_role(request) == "admin",
                 "git_hosts": [
                     {
                         "id": host.id,
@@ -3092,6 +3107,58 @@ def register_api_routes(app: FastAPI) -> None:
                 ],
             }
         )
+
+    @app.get("/api/admin/settings/access-tokens/{role}")
+    def access_token(role: Literal["admin", "manager"], request: Request):
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="The admin token is required.")
+        token = web_app._admin_token(request) if role == "admin" else web_app._manager_token(request)
+        if not token:
+            raise HTTPException(status_code=503, detail=f"The {role} token is not configured.")
+        response = _json({"token": token})
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    @app.post("/api/admin/settings/access-tokens/{role}")
+    def rotate_access_token(
+        role: Literal["admin", "manager"],
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="The admin token is required.")
+        token = secrets.token_urlsafe(48)
+        connection.execute(
+            """
+            INSERT INTO admin_access_tokens (role, token, rotated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (role) DO UPDATE SET
+              token = EXCLUDED.token,
+              rotated_at = EXCLUDED.rotated_at
+            """,
+            (role, token, datetime.now(UTC).isoformat()),
+        )
+        connection.commit()
+        setattr(request.app.state, f"{role}_token", token)
+        request.app.state.access_tokens_loaded = True
+        if role == "admin":
+            nonce = secrets.token_urlsafe(32)
+            csrf_token = web_app._csrf_for_nonce(token, nonce)
+        else:
+            nonce = None
+            csrf_token = web_app._csrf_token(request, web_app._admin_token(request))
+        response = _json({"csrf_token": csrf_token, "message": f"{role.title()} token rotated."})
+        if nonce is not None:
+            response.set_cookie(
+                "cope_admin_session",
+                web_app._signed_value(token, nonce),
+                httponly=True,
+                secure=web_app._request_is_secure(request),
+                samesite="lax",
+                max_age=web_app.ADMIN_SESSION_MAX_AGE_SECONDS,
+            )
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
 
     @app.get("/api/admin/benchmarks/manager")
     def admin_benchmark_manager(
