@@ -4870,6 +4870,7 @@ def register_api_routes(app: FastAPI) -> None:
             "thread_elo_per_doubling": 80,
             "rating_list_name": rating_list.name,
             "source_difficulty_run_id": source_difficulty_run_id,
+            "suite_stage": "miss_finetuning",
         }
         puzzle_input = [
             {
@@ -4899,7 +4900,7 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 suite_id=suite_id,
                 job_id=job.id,
-                stage="miss_finetuning",
+                stage="difficulty",
                 rating_list_id=rating_list.id,
                 settings=settings,
             )
@@ -5927,7 +5928,10 @@ def _puzzle_suite_missed_puzzle_ids(
     suite_id: int,
 ) -> tuple[int, set[int]] | None:
     for run in list_puzzle_suite_runs(connection, suite_id, limit=200):
-        if run.stage != "difficulty":
+        if (
+            run.stage != "difficulty"
+            or run.settings.get("suite_stage") == "miss_finetuning"
+        ):
             continue
         job = get_tool_job(connection, run.job_id)
         if job is None or job.status != "completed":
@@ -5979,7 +5983,7 @@ def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
         run_payloads.append(
             {
                 "id": run.id,
-                "stage": run.stage,
+                "stage": run.settings.get("suite_stage", run.stage),
                 "rating_list_id": run.rating_list_id,
                 "settings": run.settings,
                 "created_at": run.created_at,
@@ -5994,7 +5998,8 @@ def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
             latest_difficulty_results = list_puzzle_suite_engine_results(connection, run.id)
             difficulty_results_selected = True
         if (
-            run.stage == "miss_finetuning"
+            run.stage == "difficulty"
+            and run.settings.get("suite_stage") == "miss_finetuning"
             and not miss_results_selected
             and run.settings.get("source_difficulty_run_id") == source_difficulty_run_id
         ):
