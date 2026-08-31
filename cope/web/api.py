@@ -4729,13 +4729,34 @@ def register_api_routes(app: FastAPI) -> None:
                 status_code=422,
                 detail="Every selected engine must have an Elo in the selected rating list.",
             )
-        puzzles = tuple(
-            puzzle
-            for puzzle in list_puzzle_suite_puzzles(connection, suite_id, included_only=True)
-            if puzzle.uniqueness_status == "unique" and puzzle.verified_solution
+        suite_puzzles = list_puzzle_suite_puzzles(connection, suite_id)
+        unfiltered = bool(suite_puzzles) and all(
+            puzzle.uniqueness_status == "pending" for puzzle in suite_puzzles
         )
+        if unfiltered:
+            puzzles = tuple(
+                (puzzle, puzzle.solutions[0])
+                for puzzle in suite_puzzles
+                if len(puzzle.solutions) == 1
+            )
+            if len(puzzles) != len(suite_puzzles):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Every unfiltered puzzle must have exactly one supplied solution before rating.",
+                )
+        else:
+            puzzles = tuple(
+                (puzzle, puzzle.verified_solution)
+                for puzzle in suite_puzzles
+                if puzzle.included
+                and puzzle.uniqueness_status == "unique"
+                and puzzle.verified_solution
+            )
         if not puzzles:
-            raise HTTPException(status_code=422, detail="Include at least one verified unique puzzle.")
+            raise HTTPException(
+                status_code=422,
+                detail="Add an unfiltered suite with one supplied solution per puzzle, or include at least one verified unique puzzle.",
+            )
         engine_elos = {str(engine_id): ratings[engine_id] for engine_id in payload.engine_ids}
         settings = {
             **payload.model_dump(mode="json"),
@@ -4746,9 +4767,9 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "id": puzzle.id,
                 "fen": puzzle.fen,
-                "solutions": [puzzle.verified_solution],
+                "solutions": [solution],
             }
-            for puzzle in puzzles
+            for puzzle, solution in puzzles
         ]
         try:
             job = create_tool_job(

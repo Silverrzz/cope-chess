@@ -49,6 +49,12 @@ const selectedRatingList = computed(() => context.value?.rating_lists.find((item
 const ratingMap = computed(() => new Map(selectedRatingList.value?.ratings.map((rating) => [rating.engine_id, rating.elo]) ?? []))
 const ratedEngines = computed(() => (context.value?.engines ?? []).filter((engine) => ratingMap.value.has(engine.id)))
 const activeJob = computed(() => activeRun.value?.job ?? null)
+const unfilteredSuite = computed(() => Boolean(suite.value?.puzzles.length) && suite.value!.puzzles.every((puzzle) => puzzle.uniqueness_status === 'pending'))
+const ratingCandidateCount = computed(() => {
+  if (!suite.value) return 0
+  if (unfilteredSuite.value) return suite.value.puzzles.filter((puzzle) => puzzle.solutions.length === 1).length
+  return suite.value.puzzles.filter((puzzle) => puzzle.included && puzzle.uniqueness_status === 'unique' && puzzle.verified_solution).length
+})
 const progressPercent = computed(() => {
   const job = activeJob.value
   if (!job?.progress_total) return job?.status === 'completed' ? 100 : 0
@@ -242,10 +248,13 @@ function statusText(value: string): string {
 }
 
 async function copyOutput(ordered: boolean): Promise<void> {
-  const values = (suite.value?.puzzles ?? []).filter((puzzle) => puzzle.included && puzzle.verified_solution)
+  const values = (suite.value?.puzzles ?? []).filter((puzzle) => (
+    puzzle.included && puzzle.verified_solution
+    || unfilteredSuite.value && puzzle.solutions.length === 1
+  ))
   if (ordered) values.sort((left, right) => (left.difficulty_elo ?? Number.MAX_VALUE) - (right.difficulty_elo ?? Number.MAX_VALUE) || left.position - right.position)
   else values.sort((left, right) => left.position - right.position)
-  await navigator.clipboard.writeText(values.map((puzzle) => `${puzzle.fen}|${puzzle.verified_solution}`).join('\n'))
+  await navigator.clipboard.writeText(values.map((puzzle) => `${puzzle.fen}|${puzzle.verified_solution || puzzle.solutions[0]}`).join('\n'))
   toast.success(`Copied ${values.length} puzzles.`)
 }
 
@@ -342,8 +351,8 @@ onBeforeUnmount(() => {
               <div class="stage-footer"><span><i :class="{ ready: eligibleWorkers(uniqueness.threads, uniqueness.hash_mb) }" />{{ eligibleWorkers(uniqueness.threads, uniqueness.hash_mb) }} resource-eligible worker{{ eligibleWorkers(uniqueness.threads, uniqueness.hash_mb) === 1 ? '' : 's' }}</span><BaseButton variant="primary" :loading="pending === 'uniqueness'" :disabled="!!activeRun || !uniqueness.engine_id" @click="startUniqueness"><template #icon><AppIcon name="play" :size="15" /></template>{{ latestUniqueness ? 'Run filter again' : 'Run uniqueness filter' }}</BaseButton></div>
             </section>
 
-            <section class="panel stage-card" :class="{ locked: !suite.included_count, complete: latestDifficulty?.job.status === 'completed' }">
-              <div class="stage-head"><span class="stage-number">2</span><div><span class="eyebrow">Rate</span><h2>Measure difficulty</h2><p>Track when each engine first finds the verified move and combine nodes with list Elo.</p></div><AppIcon v-if="latestDifficulty && latestDifficulty.job.status === 'completed'" name="check-circle" :size="20" /></div>
+            <section class="panel stage-card" :class="{ locked: !ratingCandidateCount, complete: latestDifficulty?.job.status === 'completed' }">
+              <div class="stage-head"><span class="stage-number">2</span><div><span class="eyebrow">Rate</span><h2>Measure difficulty</h2><p>Track when each engine first finds the target move and combine nodes with list Elo.</p></div><AppIcon v-if="latestDifficulty && latestDifficulty.job.status === 'completed'" name="check-circle" :size="20" /></div>
               <div class="stage-form">
                 <label class="wide">Rating list<select v-model.number="difficulty.rating_list_id" :disabled="!!activeRun"><option v-for="item in context?.rating_lists" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
                 <label>Time<input v-model.number="difficulty.seconds" type="number" min="0.1" max="3600" step="0.1" /><span>seconds</span></label>
@@ -355,12 +364,12 @@ onBeforeUnmount(() => {
                 <div v-if="ratedEngines.length" class="picker-list"><label v-for="engine in ratedEngines" :key="engine.id" :class="{ selected: difficulty.engine_ids.includes(engine.id) }"><input type="checkbox" :checked="difficulty.engine_ids.includes(engine.id)" :disabled="!!activeRun" @change="toggleDifficultyEngine(engine.id)" /><span><strong>{{ engine.name }}</strong><small>{{ engine.version }}</small></span><b>{{ Math.round(ratingMap.get(engine.id) ?? 0) }}</b></label></div>
                 <div v-else class="picker-empty">This rating list has no rated engines.</div>
               </div>
-              <div class="stage-footer"><span><i :class="{ ready: eligibleWorkers(difficulty.threads, difficulty.hash_mb) }" />{{ eligibleWorkers(difficulty.threads, difficulty.hash_mb) }} resource-eligible worker{{ eligibleWorkers(difficulty.threads, difficulty.hash_mb) === 1 ? '' : 's' }}</span><BaseButton variant="primary" :loading="pending === 'difficulty'" :disabled="!!activeRun || !suite.included_count || !difficulty.engine_ids.length || !difficulty.rating_list_id" @click="startDifficulty"><template #icon><AppIcon name="gauge" :size="15" /></template>{{ latestDifficulty ? 'Rate again' : 'Rate difficulty' }}</BaseButton></div>
+              <div class="stage-footer"><span><i :class="{ ready: eligibleWorkers(difficulty.threads, difficulty.hash_mb) }" />{{ ratingCandidateCount }} rating candidates · {{ eligibleWorkers(difficulty.threads, difficulty.hash_mb) }} resource-eligible worker{{ eligibleWorkers(difficulty.threads, difficulty.hash_mb) === 1 ? '' : 's' }}</span><BaseButton variant="primary" :loading="pending === 'difficulty'" :disabled="!!activeRun || !ratingCandidateCount || !difficulty.engine_ids.length || !difficulty.rating_list_id" @click="startDifficulty"><template #icon><AppIcon name="gauge" :size="15" /></template>{{ latestDifficulty ? 'Rate again' : 'Rate difficulty' }}</BaseButton></div>
             </section>
           </div>
 
           <section class="panel output-card">
-            <div class="output-head"><div><span class="eyebrow">Stage output</span><h2>Curated puzzle set</h2><p>Unique puzzles can be removed before stage 2. Rated output is ordered from easiest to hardest.</p></div><div><BaseButton size="small" variant="ghost" :disabled="!suite.included_count" @click="copyOutput(false)"><template #icon><AppIcon name="copy" :size="14" /></template>Copy filtered</BaseButton><BaseButton size="small" variant="secondary" :disabled="!suite.rated_count" @click="copyOutput(true)"><template #icon><AppIcon name="gauge" :size="14" /></template>Copy ordered</BaseButton></div></div>
+            <div class="output-head"><div><span class="eyebrow">Stage output</span><h2>Curated puzzle set</h2><p>Unfiltered suites use their supplied solution directly. Filtered suites use only curated inclusions. Rated output is ordered from easiest to hardest.</p></div><div><BaseButton size="small" variant="ghost" :disabled="!ratingCandidateCount" @click="copyOutput(false)"><template #icon><AppIcon name="copy" :size="14" /></template>Copy filtered</BaseButton><BaseButton size="small" variant="secondary" :disabled="!suite.rated_count" @click="copyOutput(true)"><template #icon><AppIcon name="gauge" :size="14" /></template>Copy ordered</BaseButton></div></div>
             <div class="output-toolbar"><div class="filter-tabs"><button v-for="item in ([['all','All'],['included','Included'],['unique','Unique'],['rejected','Rejected']] as const)" :key="item[0]" type="button" :class="{ active: puzzleFilter === item[0] }" @click="puzzleFilter = item[0]">{{ item[1] }}</button></div><label class="search-box"><AppIcon name="search" :size="14" /><input v-model="puzzleSearch" placeholder="Search FEN or move" /></label><span>{{ formatNumber(displayedPuzzles.length) }} shown</span></div>
             <div class="puzzle-table-wrap">
               <table>
