@@ -37,6 +37,9 @@ interface UpcomingRow {
 }
 
 interface HomeResponse {
+  connected_workers: number
+  connected_cores: number
+  live_games: number
   running_tournaments: RunningTournamentCard[]
   upcoming_rows: UpcomingRow[]
   recent_games: GameRecord[]
@@ -84,6 +87,7 @@ function progress(item: TournamentSummary): number {
       <section class="home-heading">
         <div>
           <h1>COPE Chess</h1>
+          <p>{{ data.connected_workers }} workers connected, totalling {{ data.connected_cores }} cores and {{ data.live_games }} currently live games</p>
         </div>
       </section>
 
@@ -218,6 +222,12 @@ function progress(item: TournamentSummary): number {
   font-size: clamp(2rem, 5vw, 4rem);
   letter-spacing: -0.045em;
   line-height: 0.98;
+}
+
+.home-heading p {
+  margin-block-start: 0.65rem;
+  color: var(--color-text-muted, #607080);
+  font-size: clamp(0.8rem, 1.5vw, 0.95rem);
 }
 
 .section-heading,
