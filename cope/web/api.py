@@ -1390,6 +1390,7 @@ def register_api_routes(app: FastAPI) -> None:
             )
         return _json(
             {
+                **web_app._home_stats(connection),
                 "running_tournaments": running_tournaments,
                 "upcoming_rows": web_app._upcoming_rows(connection, engines, limit=16),
                 "recent_games": list_games_by_status(connection, "finished", limit=16),
