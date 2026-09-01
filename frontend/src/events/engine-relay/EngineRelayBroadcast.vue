@@ -56,7 +56,7 @@ interface QueuedCheer {
 }
 
 const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: "event" | "arena" }>(), { clockOffsetMs: 0, view: "event" });
-const { confettiEnabled } = useViewerSettings();
+const { confettiEnabled, eventMusicEnabled, setEventMusicEnabled } = useViewerSettings();
 const route = useRoute();
 const router = useRouter();
 
@@ -396,7 +396,7 @@ onMounted(() => {
     return;
   }
   restoreCountdownCompletion();
-  prepareCountdownAudio();
+  if (eventMusicEnabled.value) prepareCountdownAudio();
   syncCountdown();
   countdownTimer = window.setInterval(syncCountdown, 100);
   document.addEventListener("visibilitychange", handleCountdownResume);
@@ -443,6 +443,16 @@ watch(() => queryValue(route.query.game_id), (requestedGameId) => {
 });
 watch(targetTime, (value, previous) => {
   if (value !== previous) resetCountdownForTarget();
+});
+watch(eventMusicEnabled, (enabled) => {
+  if (!enabled) {
+    releaseCountdownAudio();
+    soundRequested.value = false;
+    soundPrimed.value = false;
+    soundState.value = "loading";
+    return;
+  }
+  if (props.view === "event" && countdownVisible.value) void enableCountdownSound();
 });
 watch(headingElement, (next, previous) => {
   if (previous) headingResizeObserver?.unobserve(previous);
@@ -900,7 +910,7 @@ function resetCountdownForTarget(): void {
 }
 
 function prepareCountdownAudio(force = false): void {
-  if (countdownFinished.value || typeof Audio === "undefined") return;
+  if (!eventMusicEnabled.value || countdownFinished.value || typeof Audio === "undefined") return;
   if (countdownAudio && !force) return;
   if (countdownAudio) releaseCountdownAudio();
   const audio = new Audio();
@@ -950,6 +960,7 @@ function seekCountdownAudio(audio: HTMLAudioElement, expected: number): void {
 }
 
 async function playCountdownAudio(expected: number, force = false): Promise<void> {
+  if (!eventMusicEnabled.value) return;
   prepareCountdownAudio(soundState.value === "unavailable");
   const audio = countdownAudio;
   if (!audio || audioPlayPending || countdownAudioStarted || countdownFinished.value) return;
@@ -1025,7 +1036,11 @@ function finishCountdown(): void {
 }
 
 async function enableCountdownSound(dismiss = false): Promise<void> {
-  if (dismiss) soundRequested.value = true;
+  if (dismiss) {
+    soundRequested.value = true;
+    setEventMusicEnabled(true);
+  }
+  if (!eventMusicEnabled.value) return;
   if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
   prepareCountdownAudio(soundState.value === "unavailable");
   const expected = expectedCountdownAudioTime();
