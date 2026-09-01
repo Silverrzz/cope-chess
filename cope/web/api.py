@@ -613,6 +613,40 @@ def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
     return {"rating_lists": _admin_rating_list_summaries(connection)}
 
 
+def _engine_queues_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    acknowledged = [
+        {
+            "id": int(row["id"]),
+            "name": str(row["name"]),
+            "version": str(row["version"]),
+        }
+        for row in connection.execute(
+            "SELECT id, name, version FROM engine_acknowledged_queue ORDER BY position, id"
+        )
+    ]
+    waiting_for_test = [
+        {
+            "id": int(row["id"]),
+            "engine_version_id": int(row["engine_version_id"]),
+            "rating_list_id": int(row["rating_list_id"]),
+            "engine_name": str(row["engine_name"]),
+            "engine_version": str(row["engine_version"]),
+            "rating_list_name": str(row["rating_list_name"]),
+        }
+        for row in connection.execute(
+            """SELECT queue.id, queue.engine_version_id, queue.rating_list_id,
+                      engine.name AS engine_name, version.version AS engine_version,
+                      rating_list.name AS rating_list_name
+               FROM engine_waiting_test_queue queue
+               JOIN engine_versions version ON version.id = queue.engine_version_id
+               JOIN engines engine ON engine.id = version.engine_id
+               JOIN rating_lists rating_list ON rating_list.id = queue.rating_list_id
+               ORDER BY queue.position, queue.id"""
+        )
+    ]
+    return {"acknowledged": acknowledged, "waiting_for_test": waiting_for_test}
+
+
 class TournamentPayload(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     config: TournamentConfig
@@ -718,6 +752,39 @@ class EnginePayload(BaseModel):
     @classmethod
     def strip_engine_author(cls, value: str) -> str:
         return value.strip()
+
+
+class AcknowledgedEngineQueueItemPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name", "version")
+    @classmethod
+    def strip_value(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("queue values cannot be blank")
+        return value
+
+
+class WaitingEngineQueueItemPayload(BaseModel):
+    engine_version_id: int = Field(gt=0)
+    rating_list_id: int = Field(gt=0)
+
+
+class EngineQueuesPayload(BaseModel):
+    acknowledged: list[AcknowledgedEngineQueueItemPayload] = Field(max_length=1000)
+    waiting_for_test: list[WaitingEngineQueueItemPayload] = Field(max_length=1000)
+
+    @model_validator(mode="after")
+    def unique_waiting_plans(self) -> EngineQueuesPayload:
+        plans = {
+            (item.engine_version_id, item.rating_list_id)
+            for item in self.waiting_for_test
+        }
+        if len(plans) != len(self.waiting_for_test):
+            raise ValueError("waiting test plans must be unique")
+        return self
 
 
 class BadgePayload(BaseModel):
@@ -1396,6 +1463,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "recent_games": list_games_by_status(connection, "finished", limit=16),
                 "engines": engines,
                 "tournament_names": web_app._tournament_names(connection),
+                "engine_queues": _engine_queues_payload(connection),
             }
         )
 
@@ -3709,6 +3777,67 @@ def register_api_routes(app: FastAPI) -> None:
                 },
             }
         )
+
+    @app.get("/api/admin/engines/queue")
+    def admin_engine_queue(
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        versions = list_engine_records(connection)
+        return _json(
+            {
+                **_engine_queues_payload(connection),
+                "engine_versions": [
+                    {
+                        "id": version.id,
+                        "engine_id": version.engine_id,
+                        "name": version.name,
+                        "version": version.version,
+                        "author": version.author,
+                        "active": version.active and version.engine_active,
+                    }
+                    for version in versions
+                ],
+                "rating_lists": [
+                    {"id": rating_list.id, "name": rating_list.name}
+                    for rating_list in list_rating_lists(connection)
+                ],
+            }
+        )
+
+    @app.put("/api/admin/engines/queue")
+    def admin_update_engine_queue(
+        payload: EngineQueuesPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        version_ids = {version.id for version in list_engine_records(connection)}
+        rating_list_ids = {rating_list.id for rating_list in list_rating_lists(connection)}
+        if any(item.engine_version_id not in version_ids for item in payload.waiting_for_test):
+            raise HTTPException(status_code=422, detail="Choose a valid engine version.")
+        if any(item.rating_list_id not in rating_list_ids for item in payload.waiting_for_test):
+            raise HTTPException(status_code=422, detail="Choose a valid rating list.")
+        connection.execute("DELETE FROM engine_waiting_test_queue")
+        connection.execute("DELETE FROM engine_acknowledged_queue")
+        if payload.acknowledged:
+            connection.executemany(
+                "INSERT INTO engine_acknowledged_queue (name, version, position) VALUES (?, ?, ?)",
+                (
+                    (item.name, item.version, position)
+                    for position, item in enumerate(payload.acknowledged)
+                ),
+            )
+        if payload.waiting_for_test:
+            connection.executemany(
+                """INSERT INTO engine_waiting_test_queue
+                     (engine_version_id, rating_list_id, position) VALUES (?, ?, ?)""",
+                (
+                    (item.engine_version_id, item.rating_list_id, position)
+                    for position, item in enumerate(payload.waiting_for_test)
+                ),
+            )
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({**_engine_queues_payload(connection), "message": "Engine queues updated."})
 
     @app.get("/api/admin/engines/{engine_id}")
     def admin_engine(

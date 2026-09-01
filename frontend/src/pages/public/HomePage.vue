@@ -36,6 +36,24 @@ interface UpcomingRow {
   scheduled_start_at?: string | null
 }
 
+interface AcknowledgedQueueItem {
+  id: number
+  name: string
+  version: string
+}
+
+interface WaitingQueueItem {
+  id: number
+  engine_name: string
+  engine_version: string
+  rating_list_name: string
+}
+
+interface EngineQueues {
+  acknowledged: AcknowledgedQueueItem[]
+  waiting_for_test: WaitingQueueItem[]
+}
+
 interface HomeResponse {
   connected_workers: number
   connected_cores: number
@@ -45,6 +63,7 @@ interface HomeResponse {
   recent_games: GameRecord[]
   engines: Record<string, string>
   tournament_names: Record<string, string>
+  engine_queues: EngineQueues
 }
 
 const data = ref<HomeResponse | null>(null)
@@ -147,6 +166,41 @@ function progress(item: TournamentSummary): number {
           </article>
         </div>
         <ContentState v-else kind="empty" compact title="No running tournaments" />
+      </section>
+
+      <section class="engine-queues" aria-labelledby="engine-queues-title">
+        <div class="section-heading queue-section-heading">
+          <div>
+            <h2 id="engine-queues-title">Engine queues</h2>
+            <p>Engines planned for addition and testing across COPE.</p>
+          </div>
+        </div>
+
+        <div class="queue-public-grid">
+          <article class="panel public-queue">
+            <header><div><span>Acknowledged</span><h3>Recognised engines</h3></div><strong>{{ data.engine_queues.acknowledged.length }}</strong></header>
+            <p>All engines must be fully original in their data and codebase, and human-written. This queue contains engines recognised by COPE that are planned to be added. Its order may be subject to change.</p>
+            <ol v-if="data.engine_queues.acknowledged.length">
+              <li v-for="(item, index) in data.engine_queues.acknowledged" :key="item.id">
+                <b>{{ String(index + 1).padStart(2, '0') }}</b>
+                <span><strong>{{ item.name }}</strong><small>{{ item.version }}</small></span>
+              </li>
+            </ol>
+            <div v-else class="public-queue__empty">No engines are currently queued for acknowledgement.</div>
+          </article>
+
+          <article class="panel public-queue public-queue--waiting">
+            <header><div><span>Waiting for test</span><h3>Planned test runs</h3></div><strong>{{ data.engine_queues.waiting_for_test.length }}</strong></header>
+            <p>Test order can vary. Every engine will eventually be tested in all lists it qualifies for, but lower-priority lists may take time. Authors who release new versions at excessive speeds may wait longer for each version to be tested. To fast-track engine testing, contact <strong>@silverrzz</strong> on Discord to learn how to donate your hardware.</p>
+            <ol v-if="data.engine_queues.waiting_for_test.length">
+              <li v-for="(item, index) in data.engine_queues.waiting_for_test" :key="item.id">
+                <b>{{ String(index + 1).padStart(2, '0') }}</b>
+                <span><strong>{{ item.engine_name }} {{ item.engine_version }}</strong><small>{{ item.rating_list_name }}</small></span>
+              </li>
+            </ol>
+            <div v-else class="public-queue__empty">No engine tests are currently waiting.</div>
+          </article>
+        </div>
       </section>
 
       <section class="home-tables">
@@ -406,6 +460,125 @@ function progress(item: TournamentSummary): number {
   align-items: start;
 }
 
+.engine-queues {
+  display: grid;
+  gap: var(--space-md, 1rem);
+}
+
+.queue-section-heading {
+  align-items: center;
+}
+
+.queue-public-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md, 1rem);
+}
+
+.public-queue {
+  overflow: hidden;
+  padding: 0;
+}
+
+.public-queue > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue > header span {
+  color: var(--color-accent, #2f78c4);
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.public-queue > header h3 {
+  margin: .16rem 0 0;
+  font-size: 1rem;
+}
+
+.public-queue > header > strong {
+  display: grid;
+  min-width: 1.85rem;
+  height: 1.85rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: .72rem;
+}
+
+.public-queue > p {
+  min-height: 6.2rem;
+  margin: 0;
+  padding: .9rem 1rem;
+  color: var(--color-text-muted, #607080);
+  font-size: .72rem;
+  line-height: 1.55;
+}
+
+.public-queue > p strong {
+  color: var(--color-text);
+}
+
+.public-queue ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-block-start: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: center;
+  gap: .65rem;
+  padding: .68rem 1rem;
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue li:last-child {
+  border-block-end: 0;
+}
+
+.public-queue li > b {
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  font-size: .65rem;
+}
+
+.public-queue li > span {
+  display: grid;
+  min-width: 0;
+  gap: .12rem;
+}
+
+.public-queue li strong {
+  overflow: hidden;
+  font-size: .78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.public-queue li small {
+  color: var(--color-text-muted, #607080);
+  font-size: .66rem;
+}
+
+.public-queue__empty {
+  padding: 1.4rem 1rem;
+  border-block-start: 1px solid var(--color-border, #d5dbe1);
+  color: var(--color-text-muted, #607080);
+  font-size: .75rem;
+  text-align: center;
+}
+
 .data-panel {
   overflow: hidden;
   padding: 0;
@@ -472,6 +645,8 @@ function progress(item: TournamentSummary): number {
 
 @media (max-width: 68rem) {
   .home-tables { grid-template-columns: 1fr; }
+  .queue-public-grid { grid-template-columns: 1fr; }
+  .public-queue > p { min-height: 0; }
 }
 
 @media (max-width: 42rem) {

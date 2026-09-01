@@ -66,7 +66,10 @@ onMounted(load)
 <template>
   <div class="admin-page page-stack">
     <AdminPageHeader title="Engines">
-      <template #actions><RouterLink class="button button--primary" to="/admin/engines/new">New engine</RouterLink></template>
+      <template #actions>
+        <RouterLink class="button button--secondary" to="/admin/engines/queue">Engine queue</RouterLink>
+        <RouterLink class="button button--primary" to="/admin/engines/new">New engine</RouterLink>
+      </template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
     <section class="panel engine-index">
