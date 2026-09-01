@@ -40,13 +40,21 @@ def install_client_release(
     root = _update_root(client_name)
     repository = root / "repository"
     root.mkdir(parents=True, exist_ok=True, mode=0o755)
+    clone_url = _repository_clone_url(repository_url, client_name)
     if not (repository / ".git").exists():
-        clone_url = _repository_clone_url(repository_url, client_name)
         _run(["git", "clone", "--origin", "origin", clone_url, str(repository)])
     configured_url = _git_output(repository, "remote", "get-url", "origin")
     if _normalise_repository_url(configured_url) != _normalise_repository_url(repository_url):
-        raise RuntimeError(
-            f"{client_name} update repository does not match the server deployment source"
+        _run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "remote",
+                "set-url",
+                "origin",
+                clone_url,
+            ]
         )
     _run(["git", "-C", str(repository), "fetch", "--prune", "origin"])
     resolved = _git_output(repository, "rev-parse", "--verify", f"{target_commit}^{{commit}}")
@@ -146,11 +154,9 @@ def _update_root(client_name: str) -> Path:
 
 def _repository_clone_url(repository_url: str, client_name: str) -> str:
     configured = os.environ.get("COPE_UPDATE_REPOSITORY_URL", "").strip()
-    if configured:
-        if _normalise_repository_url(configured) != _normalise_repository_url(repository_url):
-            raise RuntimeError(
-                f"configured {client_name} repository does not match the deployment source"
-            )
+    if configured and _normalise_repository_url(configured) == _normalise_repository_url(
+        repository_url
+    ):
         return configured
     if "://" in repository_url or repository_url.startswith(("/", ".")):
         return repository_url

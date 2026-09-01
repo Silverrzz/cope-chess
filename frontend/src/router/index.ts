@@ -11,6 +11,7 @@ const router = createRouter({
     {
       path: "/",
       component: PublicLayout,
+      meta: { requiresPlatformAccess: true },
       children: [
         {
           path: "",
@@ -325,6 +326,13 @@ router.beforeEach(async (to) => {
   if (!session.initialized) await session.bootstrap();
 
   if (to.meta.requiresAdmin && !session.authenticated) {
+    return {
+      name: "admin-login",
+      query: { redirect: to.fullPath },
+    };
+  }
+
+  if (to.meta.requiresPlatformAccess && session.session?.privatise_platform && !session.authenticated) {
     return {
       name: "admin-login",
       query: { redirect: to.fullPath },

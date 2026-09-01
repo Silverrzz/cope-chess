@@ -52,6 +52,7 @@ from cope.db import (
     get_game,
     get_opening_position,
     get_opening_suite,
+    get_platform_settings,
     get_tournament,
     get_worker,
     get_worker_activity,
@@ -566,6 +567,7 @@ def create_app(
     app.state.stream_hub = StreamHub()
     app.state.request_limits = {}
     app.state.last_service_heartbeat = 0.0
+    app.state.platform_privacy_cache = None
     app.state.worker_snapshot_task = None
     app.state.tournament_snapshot_tasks = {}
     app.add_middleware(GZipMiddleware, minimum_size=1_000)
@@ -653,8 +655,12 @@ def create_app(
             and await asyncio.to_thread(_private_event_page, app, path)
         )
         admin_api = path.startswith("/api/admin")
-        admin_page = path.startswith("/admin") and path != "/admin/login"
-        protected = admin_api or admin_page or private_event_page
+        admin_page = path.startswith("/admin") and path.rstrip("/") != "/admin/login"
+        private_platform_request = (
+            _is_platform_access_request(request)
+            and await asyncio.to_thread(_platform_is_private, app)
+        )
+        protected = admin_api or admin_page or private_event_page or private_platform_request
         admin_token = _admin_token(request) if protected else None
         manager_token = _manager_token(request) if protected else None
 
@@ -673,7 +679,7 @@ def create_app(
                 )
             role = _admin_session_role(request)
             if role is None:
-                if admin_api:
+                if admin_api or path.startswith("/api/"):
                     return JSONResponse(
                         {"detail": "Admin session required."},
                         status_code=401,
@@ -694,7 +700,7 @@ def create_app(
                 )
             token = admin_token if role == "admin" else manager_token
             if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-                if admin_api:
+                if path.startswith("/api/"):
                     supplied = request.headers.get("x-csrf-token", "")
                 else:
                     await request.body()
@@ -1141,6 +1147,49 @@ def _is_spa_request(request: Request) -> bool:
     if re.fullmatch(r"/admin/workers/\d+/token", path) is not None:
         return False
     return True
+
+
+def _is_platform_access_request(request: Request) -> bool:
+    path = request.url.path.rstrip("/") or "/"
+    if path == "/admin/login" or path.startswith("/admin/"):
+        return False
+    if _is_spa_request(request):
+        return True
+    public_api_roots = (
+        "/api/home",
+        "/api/tournaments",
+        "/api/events",
+        "/api/ratings",
+        "/api/engines",
+        "/api/pgn",
+    )
+    if any(path == root or path.startswith(f"{root}/") for root in public_api_roots):
+        return True
+    if path == "/tournament-spectators/events":
+        return True
+    if path.startswith("/events/") and path.endswith("/stream"):
+        return True
+    return re.fullmatch(r"/tournaments/\d+/events", path) is not None
+
+
+def _platform_is_private(app: FastAPI) -> bool:
+    now = time.monotonic()
+    cached = getattr(app.state, "platform_privacy_cache", None)
+    if cached is not None and now - cached[0] < 1.0:
+        return bool(cached[1])
+    connection = connect_database(app.state.db_path)
+    try:
+        private = get_platform_settings(connection).privatise_platform
+    except sqlite3.Error:
+        return bool(cached[1]) if cached is not None else False
+    finally:
+        connection.close()
+    app.state.platform_privacy_cache = (now, private)
+    return private
+
+
+def _set_platform_privacy_cache(app: FastAPI, private: bool) -> None:
+    app.state.platform_privacy_cache = (time.monotonic(), private)
 
 
 def _touch_web_heartbeat(app: FastAPI) -> None:

@@ -1092,6 +1092,20 @@ INSERT INTO chat_settings (key, value) VALUES
   ('retention_days', '30')
 ON CONFLICT (key) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS cope_build_settings (
+  key TEXT PRIMARY KEY CHECK (key IN ('repository_url', 'update_ref')),
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS platform_settings (
+  key TEXT PRIMARY KEY CHECK (key IN ('privatise_platform')),
+  value TEXT NOT NULL
+);
+
+INSERT INTO platform_settings (key, value) VALUES
+  ('privatise_platform', 'false')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS runner_commands (
   id BIGSERIAL PRIMARY KEY,
   command TEXT NOT NULL,
@@ -1363,7 +1377,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 51)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 53)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

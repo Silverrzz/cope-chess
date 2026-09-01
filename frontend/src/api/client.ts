@@ -140,7 +140,7 @@ async function request<T>(method: string, path: string, options: RequestOptions 
   const payload = await parseResponse(response);
   if (!response.ok) {
     const errorPayload = typeof payload === "object" && payload !== null ? (payload as ApiErrorPayload) : null;
-    if (response.status === 401 && path.startsWith("/api/admin")) {
+    if (response.status === 401 && path !== "/api/session") {
       window.dispatchEvent(new CustomEvent("cope:session-expired"));
     }
     throw new ApiError(response.status, errorMessage(response.status, errorPayload), errorPayload);

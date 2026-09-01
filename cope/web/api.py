@@ -50,6 +50,8 @@ from cope.environment_clone import (
 from cope.db import (
     CURRENT_EVENT_STATUSES,
     ChatSettingsRecord,
+    CopeBuildSettingsRecord,
+    PlatformSettingsRecord,
     EventRecord,
     append_suite_openings,
     cancel_tool_job,
@@ -91,6 +93,8 @@ from cope.db import (
     get_badge,
     get_deployment_job,
     get_chat_settings,
+    get_cope_build_settings,
+    get_platform_settings,
     get_engine_record,
     get_event,
     get_event_by_slug,
@@ -176,6 +180,8 @@ from cope.db import (
     set_puzzle_suite_puzzle_included,
     suite_opening_count,
     update_chat_settings,
+    update_cope_build_settings,
+    update_platform_settings,
     update_badge,
     update_engine,
     update_engine_version,
@@ -365,8 +371,16 @@ def _bearer_credential(request: Request) -> str:
     return credential if scheme.lower() == "bearer" else ""
 
 
-def _public_update_repository_url() -> str:
-    raw = os.environ.get("COPE_UPDATE_REPOSITORY_URL", "").strip()
+def _cope_build_settings(connection: sqlite3.Connection) -> CopeBuildSettingsRecord:
+    return get_cope_build_settings(
+        connection,
+        default_repository_url=os.environ.get("COPE_UPDATE_REPOSITORY_URL", ""),
+        default_update_ref=os.environ.get("COPE_UPDATE_REF", "main"),
+    )
+
+
+def _public_update_repository_url(raw: str) -> str:
+    raw = raw.strip()
     if not raw or raw.startswith(("/", ".")):
         return ""
     if "://" not in raw:
@@ -1001,6 +1015,51 @@ class UpdatePayload(BaseModel):
         return cleaned
 
 
+class CopeBuildSettingsPayload(BaseModel):
+    repository_url: str = Field(min_length=1, max_length=1000)
+    update_ref: str = Field(min_length=1, max_length=200)
+
+    @field_validator("repository_url")
+    @classmethod
+    def validate_repository_url(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(character.isspace() for character in cleaned):
+            raise ValueError("Git repository URL cannot be blank or contain whitespace")
+        if cleaned.startswith("-"):
+            raise ValueError("Git repository URL cannot begin with a dash")
+        if any(ord(character) < 32 for character in cleaned):
+            raise ValueError("Git repository URL contains unsupported characters")
+        if "://" in cleaned:
+            parsed = urllib.parse.urlsplit(cleaned)
+            if parsed.scheme not in {"git", "http", "https", "ssh"} or not parsed.hostname:
+                raise ValueError("Git repository URL must use Git, HTTP, HTTPS, or SSH")
+            try:
+                parsed.port
+            except ValueError as exc:
+                raise ValueError("Git repository URL contains an invalid port") from exc
+            if parsed.scheme in {"git", "http", "https"} and (
+                parsed.username is not None or parsed.password is not None
+            ):
+                raise ValueError("Git repository URL cannot contain embedded credentials")
+            if parsed.query or parsed.fragment:
+                raise ValueError("Git repository URL cannot contain a query or fragment")
+            if not parsed.path.strip("/"):
+                raise ValueError("Git repository URL must include a repository path")
+        return cleaned
+
+    @field_validator("update_ref")
+    @classmethod
+    def validate_update_ref(cls, value: str) -> str:
+        cleaned = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}", cleaned) is None:
+            raise ValueError("Git branch or ref contains unsupported characters")
+        return cleaned
+
+
+class PlatformSettingsPayload(BaseModel):
+    privatise_platform: bool
+
+
 class ChatSettingsPayload(BaseModel):
     enabled: bool
     max_message_length: int = Field(ge=1, le=2_000)
@@ -1027,16 +1086,22 @@ def register_api_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------
 
     @app.get("/api/session")
-    def session(request: Request):
+    def session(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
         admin_token = web_app._admin_token(request)
         manager_token = web_app._manager_token(request)
+        build_settings = _cope_build_settings(connection)
+        platform_settings = get_platform_settings(connection)
         role = web_app._admin_session_role(request)
         token = admin_token if role == "admin" else manager_token if role == "manager" else None
         response = _json(
             {
                 "admin_configured": bool(admin_token or manager_token),
                 "authenticated": role is not None,
-                "repository_url": _public_update_repository_url(),
+                "repository_url": _public_update_repository_url(build_settings.repository_url),
+                "privatise_platform": platform_settings.privatise_platform,
                 "secure_context": web_app._request_is_secure_or_local(request),
                 "user": {"role": role} if role else None,
                 "csrf_token": (
@@ -1050,7 +1115,10 @@ def register_api_routes(app: FastAPI) -> None:
         return response
 
     @app.post("/api/session")
-    async def create_session(request: Request):
+    async def create_session(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
         admin_token = web_app._admin_token(request)
         manager_token = web_app._manager_token(request)
         if not admin_token and not manager_token:
@@ -1078,7 +1146,12 @@ def register_api_routes(app: FastAPI) -> None:
                 "authenticated": True,
                 "csrf_token": web_app._csrf_for_nonce(token, nonce),
                 "message": "Signed in.",
-                "repository_url": _public_update_repository_url(),
+                "repository_url": _public_update_repository_url(
+                    _cope_build_settings(connection).repository_url
+                ),
+                "privatise_platform": get_platform_settings(
+                    connection
+                ).privatise_platform,
                 "user": {"role": role},
             }
         )
@@ -2252,6 +2325,7 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_deployments(
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        build_settings = _cope_build_settings(connection)
         heartbeats = {
             item["service"]: item
             for item in list_service_heartbeats(connection)
@@ -2264,7 +2338,7 @@ def register_api_routes(app: FastAPI) -> None:
         return _json(
             {
                 "current_version": app_version(),
-                "default_ref": os.environ.get("COPE_UPDATE_REF", "main"),
+                "default_ref": build_settings.update_ref,
                 "updater": heartbeats.get("updater"),
                 "methods": [
                     {
@@ -2308,7 +2382,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        requested_ref = payload.ref or _cope_build_settings(connection).update_ref
         try:
             job_id = create_deployment_job(
                 connection,
@@ -2338,7 +2412,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        requested_ref = payload.ref or _cope_build_settings(connection).update_ref
         try:
             if payload.method == "dockerfiles":
                 job_id = create_dockerfile_pull_job(
@@ -2374,7 +2448,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        requested_ref = payload.ref or os.environ.get("COPE_UPDATE_REF", "main")
+        requested_ref = payload.ref or _cope_build_settings(connection).update_ref
         try:
             job_id = create_dockerfile_pull_job(
                 connection,
@@ -3089,9 +3163,13 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         hosts = list_git_hosts(connection)
+        build_settings = _cope_build_settings(connection)
+        platform_settings = get_platform_settings(connection)
         return _json(
             {
                 "can_manage_tokens": web_app._admin_session_role(request) == "admin",
+                "cope_build": jsonable_encoder(build_settings),
+                "platform": jsonable_encoder(platform_settings),
                 "git_hosts": [
                     {
                         "id": host.id,
@@ -3105,6 +3183,69 @@ def register_api_routes(app: FastAPI) -> None:
                     }
                     for host in hosts
                 ],
+            }
+        )
+
+    @app.put("/api/admin/settings/cope-build")
+    def admin_update_cope_build_settings(
+        payload: CopeBuildSettingsPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        active_deployment = connection.execute(
+            """
+            SELECT id FROM deployment_jobs
+            WHERE status NOT IN ('succeeded', 'failed')
+            LIMIT 1
+            """
+        ).fetchone()
+        active_dockerfile_pull = connection.execute(
+            """
+            SELECT id FROM dockerfile_pull_jobs
+            WHERE status NOT IN ('succeeded', 'failed')
+            LIMIT 1
+            """
+        ).fetchone()
+        if active_deployment is not None or active_dockerfile_pull is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for the active update to finish before changing build settings.",
+            )
+        settings = CopeBuildSettingsRecord(
+            repository_url=payload.repository_url,
+            update_ref=payload.update_ref,
+        )
+        update_cope_build_settings(connection, settings)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "cope_build": jsonable_encoder(settings),
+                "message": "Cope build settings updated.",
+            }
+        )
+
+    @app.put("/api/admin/settings/platform")
+    def admin_update_platform_settings(
+        payload: PlatformSettingsPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        settings = PlatformSettingsRecord(
+            privatise_platform=payload.privatise_platform,
+        )
+        update_platform_settings(connection, settings)
+        connection.commit()
+        web_app._set_platform_privacy_cache(request.app, settings.privatise_platform)
+        _publish_admin_change(web_app, request)
+        return _json(
+            {
+                "platform": jsonable_encoder(settings),
+                "message": (
+                    "Platform access is now private."
+                    if settings.privatise_platform
+                    else "Public platform access restored."
+                ),
             }
         )
 

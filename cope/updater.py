@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from cope.db import (
+    CopeBuildSettingsRecord,
     DEFAULT_DATABASE_URL,
     activate_benchmarker_deployment_targets,
     claim_dockerfile_pull_job,
@@ -25,6 +26,7 @@ from cope.db import (
     fail_interrupted_deployment_jobs,
     fail_interrupted_dockerfile_pull_jobs,
     get_benchmarker,
+    get_cope_build_settings,
     get_worker,
     list_deployment_targets,
     list_service_heartbeats,
@@ -121,14 +123,19 @@ def _run_dockerfile_pull(
 ) -> None:
     target_commit = ""
     try:
-        repository_url = config.repository_url or _git_output(
+        build_settings = _configured_build_settings(config)
+        repository_url = build_settings.repository_url or _git_output(
             source_dir,
             "remote",
             "get-url",
             "origin",
         )
+        _configure_source_repository(source_dir, repository_url)
         _validate_source_repository(source_dir, repository_url)
-        target_commit = _resolve_target_commit(source_dir, requested_ref or config.default_ref)
+        target_commit = _resolve_target_commit(
+            source_dir,
+            requested_ref or build_settings.update_ref,
+        )
         _update_dockerfile_pull_job(config, job_id, "syncing", target_commit=target_commit)
         files_updated = _install_engine_dockerfiles(source_dir, target_commit)
         connection = connect_database(config.db_path)
@@ -257,19 +264,21 @@ def _run_deployment(
     try:
         if scope not in {"platform", "web"}:
             raise ValueError(f"unsupported deployment scope {scope!r}")
-        repository_url = config.repository_url or _git_output(
+        build_settings = _configured_build_settings(config)
+        repository_url = build_settings.repository_url or _git_output(
             source_dir,
             "remote",
             "get-url",
             "origin",
         )
+        _configure_source_repository(source_dir, repository_url)
         _validate_source_repository(source_dir, repository_url)
         _compose_project_name(config.compose_project)
         repository_identity = _normalise_repository_url(repository_url)
         original_commit = _git_output(source_dir, "rev-parse", "HEAD")
         target_commit = _resolve_target_commit(
             source_dir,
-            requested_ref or config.default_ref,
+            requested_ref or build_settings.update_ref,
         )
         if target_commit != original_commit and not config.allow_rollback:
             result = subprocess.run(
@@ -428,12 +437,55 @@ def _run_deployment(
         _set_job_status(config, job_id, "failed", error=detail + rollback_detail)
 
 
+def _configured_build_settings(config: UpdaterConfig) -> CopeBuildSettingsRecord:
+    connection = connect_database(config.db_path)
+    try:
+        return get_cope_build_settings(
+            connection,
+            default_repository_url=config.repository_url,
+            default_update_ref=config.default_ref,
+        )
+    finally:
+        connection.close()
+
+
+def _configure_source_repository(source_dir: Path, repository_url: str) -> None:
+    if not (source_dir / ".git").exists():
+        raise RuntimeError(f"deployment source is not a Git checkout: {source_dir}")
+    dirty = _run(
+        [
+            "git",
+            "-C",
+            str(source_dir),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        capture=True,
+    )
+    if dirty:
+        raise RuntimeError("deployment source has tracked local changes")
+    configured = _git_output(source_dir, "remote", "get-url", "origin")
+    if _normalise_repository_url(configured) != _normalise_repository_url(repository_url):
+        _run(
+            [
+                "git",
+                "-C",
+                str(source_dir),
+                "remote",
+                "set-url",
+                "origin",
+                repository_url,
+            ]
+        )
+
+
 def _validate_source_repository(source_dir: Path, repository_url: str) -> None:
     if not (source_dir / ".git").exists():
         raise RuntimeError(f"deployment source is not a Git checkout: {source_dir}")
     configured = _git_output(source_dir, "remote", "get-url", "origin")
     if _normalise_repository_url(configured) != _normalise_repository_url(repository_url):
-        raise RuntimeError("deployment source origin does not match COPE_UPDATE_REPOSITORY_URL")
+        raise RuntimeError("deployment source origin does not match the configured repository")
     dirty = _run(
         [
             "git",

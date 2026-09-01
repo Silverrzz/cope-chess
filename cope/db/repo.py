@@ -331,6 +331,17 @@ class ChatSettingsRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CopeBuildSettingsRecord:
+    repository_url: str
+    update_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformSettingsRecord:
+    privatise_platform: bool
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerToken:
     worker_id: int
     token: str
@@ -4076,6 +4087,66 @@ def update_chat_settings(
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """,
         values.items(),
+    )
+
+
+def get_cope_build_settings(
+    connection: sqlite3.Connection,
+    *,
+    default_repository_url: str = "",
+    default_update_ref: str = "main",
+) -> CopeBuildSettingsRecord:
+    values = {
+        row["key"]: row["value"]
+        for row in connection.execute("SELECT key, value FROM cope_build_settings")
+    }
+    return CopeBuildSettingsRecord(
+        repository_url=values.get("repository_url", default_repository_url).strip(),
+        update_ref=values.get("update_ref", default_update_ref).strip() or "main",
+    )
+
+
+def update_cope_build_settings(
+    connection: sqlite3.Connection,
+    settings: CopeBuildSettingsRecord,
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO cope_build_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (
+            ("repository_url", settings.repository_url),
+            ("update_ref", settings.update_ref),
+        ),
+    )
+
+
+def get_platform_settings(connection: sqlite3.Connection) -> PlatformSettingsRecord:
+    values = {
+        row["key"]: row["value"]
+        for row in connection.execute("SELECT key, value FROM platform_settings")
+    }
+    return PlatformSettingsRecord(
+        privatise_platform=_bool_setting(
+            values.get("privatise_platform"),
+            default=False,
+        )
+    )
+
+
+def update_platform_settings(
+    connection: sqlite3.Connection,
+    settings: PlatformSettingsRecord,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO platform_settings (key, value)
+        VALUES ('privatise_platform', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (str(settings.privatise_platform).lower(),),
     )
 
 

@@ -15,10 +15,14 @@ let handlingExpiredSession = false;
 async function handleExpiredSession(): Promise<void> {
   if (handlingExpiredSession) return;
   const current = router.currentRoute.value;
-  if (!current.path.startsWith("/admin") || current.name === "admin-login") return;
+  if (current.name === "admin-login") return;
   handlingExpiredSession = true;
+  const hadSession = session.authenticated;
   session.clear();
-  toast.warning("Your admin session expired. Sign in again.", { duration: 0 });
+  toast.warning(
+    hadSession ? "Your admin session expired. Sign in again." : "Admin sign-in is required to continue.",
+    { duration: 0 },
+  );
   try {
     await router.replace({ name: "admin-login", query: { redirect: current.fullPath } });
   } finally {
