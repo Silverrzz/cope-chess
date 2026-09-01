@@ -160,6 +160,12 @@ const router = createRouter({
           meta: { title: "Register engine" },
         },
         {
+          path: "engines/queue",
+          name: "admin-engine-queue",
+          component: () => import("@/pages/admin/EngineQueuePage.vue"),
+          meta: { title: "Engine queue" },
+        },
+        {
           path: "engines/:id",
           name: "admin-engine",
           component: () => import("@/pages/admin/EngineFormPage.vue"),

@@ -4,7 +4,6 @@ import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import AppIcon from "@/components/ui/AppIcon.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
-import ThemeToggle from "@/components/ui/ThemeToggle.vue";
 import SettingsDrawer from "@/components/ui/SettingsDrawer.vue";
 import { useSessionStore } from "@/stores/session";
 
@@ -15,10 +14,10 @@ const compactGameLayout = computed(() => route.name === "tournament" || route.na
 const repositoryUrl = computed(() => session.session?.repository_url ?? "");
 
 const navItems = [
-  { label: "Events", to: "/events" },
-  { label: "Tournaments", to: "/tournaments" },
   { label: "Ratings", to: "/ratings" },
+  { label: "Tournaments", to: "/tournaments" },
   { label: "Engines", to: "/engines" },
+  { label: "Events", to: "/events" },
 ];
 
 function navActive(path: string): boolean {
@@ -53,21 +52,24 @@ watch(
           >
             {{ item.label }}
           </RouterLink>
-          <a
-            v-if="repositoryUrl"
-            class="public-nav__link"
-            :href="repositoryUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            @click="menuOpen = false"
-          >
-            GitHub
-          </a>
           <RouterLink class="public-nav__link public-nav__admin-mobile" to="/admin">Admin</RouterLink>
         </nav>
 
         <div class="public-header__actions">
-          <ThemeToggle />
+          <BaseButton
+            v-if="repositoryUrl"
+            variant="ghost"
+            size="small"
+            icon-only
+            :href="repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="GitHub"
+            aria-label="Open COPE Chess on GitHub"
+          >
+            <template #icon><AppIcon name="github" :size="18" /></template>
+            GitHub
+          </BaseButton>
           <SettingsDrawer />
           <BaseButton class="public-header__admin" variant="ghost" size="small" to="/admin">
             Admin
