@@ -2952,6 +2952,30 @@ def _home_tournament_cards(
     return cards
 
 
+def _home_stats(connection: sqlite3.Connection) -> dict[str, int]:
+    connected_workers = tuple(
+        worker
+        for worker in list_workers(connection)
+        if _worker_effective_status(worker) in CONNECTED_WORKER_STATUSES
+    )
+    live_games = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM games
+        WHERE record_eligible = 1 AND status = 'live'
+        """
+    ).fetchone()
+    return {
+        "connected_workers": len(connected_workers),
+        "connected_cores": sum(
+            worker.capacity.threads
+            for worker in connected_workers
+            if worker.capacity is not None
+        ),
+        "live_games": int(live_games["count"]),
+    }
+
+
 def _upcoming_rows(
     connection: sqlite3.Connection,
     engines: dict[int, str],

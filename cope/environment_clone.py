@@ -98,6 +98,8 @@ DATASETS = (
     CloneDataset("worker_resource_samples", "Worker resource samples", "CPU, memory, disk, and engine resource history.", "Workers", "worker_resource_samples", ("workers",), serial=True),
     CloneDataset("game_hardware_scores", "Game hardware scores", "Per-game normalized hardware results.", "Games", "game_hardware_scores", ("games", "game_assignments", "workers", "engine_versions", "benchmark_hardware")),
     CloneDataset("rating_lists", "Rating list definitions", "Lists, anchors, and baseline Elo settings.", "Ratings", "rating_lists", ("engine_versions",), serial=True),
+    CloneDataset("engine_acknowledged_queue", "Acknowledged engine queue", "Recognised engines planned for addition.", "Engines", "engine_acknowledged_queue", (), serial=True),
+    CloneDataset("engine_waiting_test_queue", "Waiting test queue", "Engine versions and rating lists queued for testing.", "Engines", "engine_waiting_test_queue", ("engine_versions", "rating_lists"), serial=True),
     CloneDataset("rating_list_ratings", "Current ratings", "Current Elo, game counts, and error margins.", "Ratings", "rating_list_ratings", ("rating_lists", "engine_versions")),
     CloneDataset("engine_elo_history", "Elo history", "Historical rating samples for charts and analysis.", "Ratings", "engine_elo_history", ("rating_lists", "engine_versions"), serial=True),
     CloneDataset("rating_list_history", "Per-game rating history", "Every applied rating change and its game references.", "Ratings", "rating_list_history", ("rating_lists", "engine_versions", "tournaments", "games"), serial=True),

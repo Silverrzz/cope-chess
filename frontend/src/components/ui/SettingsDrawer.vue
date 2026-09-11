@@ -2,22 +2,28 @@
 import { nextTick, ref, watch, onBeforeUnmount } from "vue";
 
 import { useBoardTheme, type BoardTheme } from "@/composables/useBoardTheme";
+import { useTheme } from "@/composables/useTheme";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import AppIcon from "./AppIcon.vue";
 import BaseButton from "./BaseButton.vue";
 
 const { theme, boardPresets, previewBoardTheme, revertBoardTheme, setBoardTheme } = useBoardTheme();
-const { confettiEnabled, setConfettiEnabled } = useViewerSettings();
+const { resolvedTheme, setTheme } = useTheme();
+const { confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled } = useViewerSettings();
 
 const open = ref(false);
 const panel = ref<HTMLElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
 const draftConfettiEnabled = ref(confettiEnabled.value);
+const draftEventMusicEnabled = ref(eventMusicEnabled.value);
+const draftDarkMode = ref(resolvedTheme.value === "dark");
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
   draft.value = { ...theme.value };
   draftConfettiEnabled.value = confettiEnabled.value;
+  draftEventMusicEnabled.value = eventMusicEnabled.value;
+  draftDarkMode.value = resolvedTheme.value === "dark";
   await nextTick();
   panel.value?.focus();
 });
@@ -29,6 +35,8 @@ watch(draft, (next) => {
 function save(): void {
   setBoardTheme(draft.value);
   setConfettiEnabled(draftConfettiEnabled.value);
+  setEventMusicEnabled(draftEventMusicEnabled.value);
+  setTheme(draftDarkMode.value ? "dark" : "light");
   open.value = false;
 }
 
@@ -57,6 +65,8 @@ function update(key: "light" | "dark", event: Event): void {
 function reset(): void {
   draft.value = { ...boardPresets.brown! };
   draftConfettiEnabled.value = true;
+  draftEventMusicEnabled.value = false;
+  draftDarkMode.value = true;
 }
 
 </script>
@@ -95,6 +105,12 @@ function reset(): void {
       </header>
 
       <div class="settings-drawer__body">
+        <h3>Appearance</h3>
+        <label class="setting-toggle">
+          <input v-model="draftDarkMode" type="checkbox" />
+          <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
+        </label>
+
         <h3>Board colours</h3>
         <div class="preset-grid">
           <button
@@ -129,6 +145,12 @@ function reset(): void {
         <label class="setting-toggle">
           <input v-model="draftConfettiEnabled" type="checkbox" />
           <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
+        </label>
+
+        <h3>Event audio</h3>
+        <label class="setting-toggle">
+          <input v-model="draftEventMusicEnabled" type="checkbox" />
+          <span><strong>Countdown music</strong><small>Play event music during the final minute of a countdown.</small></span>
         </label>
       </div>
 

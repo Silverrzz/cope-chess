@@ -861,6 +861,21 @@ CREATE TABLE IF NOT EXISTS rating_lists (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS engine_acknowledged_queue (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL CHECK (btrim(name) <> ''),
+  version TEXT NOT NULL CHECK (btrim(version) <> ''),
+  position INTEGER NOT NULL CHECK (position >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS engine_waiting_test_queue (
+  id BIGSERIAL PRIMARY KEY,
+  engine_version_id BIGINT NOT NULL REFERENCES engine_versions(id) ON DELETE CASCADE,
+  rating_list_id BIGINT NOT NULL REFERENCES rating_lists(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  UNIQUE (engine_version_id, rating_list_id)
+);
+
 ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_engine_id BIGINT REFERENCES engine_versions(id) ON DELETE SET NULL;
 ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_elo REAL NOT NULL DEFAULT 1500;
 
@@ -1377,7 +1392,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 53)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 54)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
