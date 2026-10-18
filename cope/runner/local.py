@@ -77,6 +77,7 @@ from cope.db import (
 
 from .scheduler import TournamentPreparation, advance_tournament, prepare_scheduled_tournaments
 from .commands import process_pending_runner_commands
+from cope.db.repo import compact_game_assignment_progress
 from .events import (
     publish_clock_sync,
     publish_engine_info,
@@ -128,6 +129,7 @@ def run_tournament_service(config: RunnerServiceConfig) -> None:
     wake = threading.Event()
     set_runner_wake_handler(lambda _event: wake.set())
     start_event_publisher()
+    next_progress_compaction = 0.0
 
     while True:
         wake.clear()
@@ -141,6 +143,16 @@ def run_tournament_service(config: RunnerServiceConfig) -> None:
             )
             report = run_tournament_matches(connection)
             print_runner_report(report)
+            if time.monotonic() >= next_progress_compaction:
+                next_progress_compaction = time.monotonic() + 3600.0
+                assignments, deleted = compact_game_assignment_progress(connection)
+                connection.commit()
+                if assignments:
+                    LOG.info(
+                        "compacted assignment progress assignments=%s removed=%s",
+                        assignments,
+                        deleted,
+                    )
         except Exception:
             LOG.exception("cycle failed")
         finally:
