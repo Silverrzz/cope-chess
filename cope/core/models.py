@@ -873,6 +873,10 @@ class _EnvelopeBase(StrictModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class BootstrapEnvelope(_EnvelopeBase):
+    v: int = Field(gt=0, strict=True)
+
+
 class Envelope(_EnvelopeBase):
     v: Literal[21] = WORKER_PROTOCOL_VERSION
 
