@@ -28,8 +28,10 @@ from cope.core.protocol import (
     ProtocolValidationError,
     decode_benchmark_envelope,
     decode_benchmark_message,
+    decode_bootstrap_message,
     encode_message,
     make_benchmark_message,
+    make_bootstrap_message,
 )
 from cope.db import (
     DEFAULT_DATABASE_URL,
@@ -172,23 +174,28 @@ class BenchmarkServer:
             if path is not None and path != DEFAULT_BENCHMARKER_PATH:
                 await websocket.close(code=4004, reason="unknown websocket path")
                 return
-            hello = decode_benchmark_message(
+            protocol_version, hello = decode_bootstrap_message(
                 await websocket.recv(),
                 "benchmark_hello",
                 BenchmarkerTokenHello | BenchmarkerSessionHello,
             )
             self._validate_hello(hello)
             authenticated = self._authenticate(hello)
+            update = self._benchmarker_update_command(
+                authenticated.id,
+                hello.app_version,
+                hello.supports_updates,
+            )
+            if protocol_version != BENCHMARK_PROTOCOL_VERSION and update is None:
+                raise ProtocolValidationError(
+                    "benchmarker protocol is incompatible and no deployment update is available"
+                )
             session_id = secrets.token_urlsafe(32)
             benchmarker = self._record_connection(
                 authenticated,
                 session_id,
                 hello,
-            )
-            update = self._benchmarker_update_command(
-                benchmarker.id,
-                hello.app_version,
-                hello.supports_updates,
+                protocol_version=protocol_version,
             )
             old = self._connections.get(benchmarker.id)
             self._connections[benchmarker.id] = (session_id, websocket)
@@ -209,9 +216,10 @@ class BenchmarkServer:
             )
             await websocket.send(
                 encode_message(
-                    make_benchmark_message(
+                    make_bootstrap_message(
                         "benchmark_welcome",
                         welcome.model_dump(mode="json", exclude_none=True),
+                        protocol_version=protocol_version,
                     )
                 )
             )
@@ -222,7 +230,12 @@ class BenchmarkServer:
                 benchmarker.hardware_key,
             )
             if update is not None:
-                await self._serve_benchmarker_update(websocket, benchmarker, update)
+                await self._serve_benchmarker_update(
+                    websocket,
+                    benchmarker,
+                    update,
+                    protocol_version=protocol_version,
+                )
                 return
             while True:
                 pending_update = self._benchmarker_update_command(
@@ -373,6 +386,8 @@ class BenchmarkServer:
         record: BenchmarkerRecord,
         session_id: str,
         hello: BenchmarkerTokenHello | BenchmarkerSessionHello,
+        *,
+        protocol_version: int = BENCHMARK_PROTOCOL_VERSION,
     ) -> BenchmarkerRecord:
         connection = connect_database(self._config.db_path)
         try:
@@ -388,7 +403,7 @@ class BenchmarkServer:
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
-                protocol_version=BENCHMARK_PROTOCOL_VERSION,
+                protocol_version=protocol_version,
                 machine_id=hello.machine_id,
                 hardware_key=hello.hardware_key,
                 hw=hello.hw,
@@ -478,12 +493,15 @@ class BenchmarkServer:
         websocket: WebSocketServerProtocol,
         benchmarker: BenchmarkerRecord,
         command: BenchmarkerUpdateCommand,
+        *,
+        protocol_version: int = BENCHMARK_PROTOCOL_VERSION,
     ) -> None:
         while True:
-            status = decode_benchmark_message(
+            _, status = decode_bootstrap_message(
                 await websocket.recv(),
                 "benchmarker_update_status",
                 BenchmarkerUpdateStatus,
+                protocol_version=protocol_version,
             )
             if status.job_id != command.job_id or status.target_commit != command.target_commit:
                 raise ProtocolValidationError(

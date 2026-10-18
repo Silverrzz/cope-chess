@@ -50,9 +50,11 @@ from cope.core.models import (
 from cope.core.protocol import (
     ProtocolError,
     ProtocolValidationError,
+    decode_bootstrap_message,
     decode_envelope,
     decode_message,
     encode_message,
+    make_bootstrap_message,
     make_message,
 )
 from cope.db import (
@@ -494,7 +496,7 @@ class WorkerHandshakeServer:
                 return
 
             raw_message = await websocket.recv()
-            hello = decode_message(
+            protocol_version, hello = decode_bootstrap_message(
                 raw_message,
                 "hello",
                 WorkerTokenHello
@@ -504,6 +506,15 @@ class WorkerHandshakeServer:
                 self._authenticate_worker,
                 hello,
             )
+            update = await asyncio.to_thread(
+                self._worker_update_command,
+                authenticated_worker.id,
+                hello.app_version,
+            )
+            if protocol_version != WORKER_PROTOCOL_VERSION and update is None:
+                raise ProtocolValidationError(
+                    "worker protocol is incompatible and no deployment update is available"
+                )
             session_id = _new_session_id()
             label = _worker_label(authenticated_worker, hello)
             worker = await asyncio.to_thread(
@@ -512,11 +523,7 @@ class WorkerHandshakeServer:
                 label,
                 session_id,
                 hello,
-            )
-            update = await asyncio.to_thread(
-                self._worker_update_command,
-                worker.id,
-                hello.app_version,
+                protocol_version=protocol_version,
             )
 
             capacity = worker.capacity
@@ -529,7 +536,12 @@ class WorkerHandshakeServer:
                 capacity=capacity,
                 update=update,
             )
-            await _send_message(websocket, "welcome", welcome)
+            await _send_message(
+                websocket,
+                "welcome",
+                welcome,
+                protocol_version=protocol_version,
+            )
             previous = self._connections.get(worker.id)
             self._connections[worker.id] = (worker.session_id or "", websocket)
             if previous is not None and previous[1] is not websocket:
@@ -541,7 +553,12 @@ class WorkerHandshakeServer:
             LOG.info("worker accepted worker_id=%s label=%s", worker.id, label)
             publish_workers_changed("worker.connected", {"worker_id": worker.id})
             if update is not None:
-                await self._serve_worker_update(websocket, worker, update)
+                await self._serve_worker_update(
+                    websocket,
+                    worker,
+                    update,
+                    protocol_version=protocol_version,
+                )
                 return
             await self._wake_workers()
             await self._serve_worker(websocket, worker)
@@ -1849,12 +1866,15 @@ class WorkerHandshakeServer:
         websocket: WebSocketServerProtocol,
         worker: WorkerRecord,
         command: WorkerUpdateCommand,
+        *,
+        protocol_version: int = WORKER_PROTOCOL_VERSION,
     ) -> None:
         while True:
-            status = await _receive_message(
-                websocket,
+            _, status = decode_bootstrap_message(
+                await websocket.recv(),
                 "worker_update_status",
                 WorkerUpdateStatus,
+                protocol_version=protocol_version,
             )
             if status.job_id != command.job_id or status.target_commit != command.target_commit:
                 raise ProtocolValidationError("worker update status does not match the deployment")
@@ -1920,6 +1940,8 @@ class WorkerHandshakeServer:
         label: str,
         session_id: str,
         hello: WorkerTokenHello | WorkerSessionHello,
+        *,
+        protocol_version: int = WORKER_PROTOCOL_VERSION,
     ) -> WorkerRecord:
         connection = connect_database(self._config.db_path)
         try:
@@ -1957,7 +1979,7 @@ class WorkerHandshakeServer:
                 label=label,
                 session_id=session_id,
                 app_commit=hello.app_version,
-                protocol_version=WORKER_PROTOCOL_VERSION,
+                protocol_version=protocol_version,
                 machine_id=hello.machine_id,
                 hw=hello.hw,
             )
@@ -2816,8 +2838,18 @@ async def _send_message(
     data,
     *,
     lock: asyncio.Lock | None = None,
+    protocol_version: int | None = None,
 ) -> None:
-    payload = encode_message(make_message(message_type, data))
+    message = (
+        make_message(message_type, data)
+        if protocol_version is None
+        else make_bootstrap_message(
+            message_type,
+            data,
+            protocol_version=protocol_version,
+        )
+    )
+    payload = encode_message(message)
     if lock is None:
         await websocket.send(payload)
         return
