@@ -90,13 +90,13 @@ def _provision(connection: sqlite3.Connection) -> int:
         slug=MODULE_KEY,
         handler_key=MODULE_KEY,
         title="Duck vs Fish",
-        subtitle="One pond. Two engines. Twenty games.",
-        summary="Wakwak meets Stockfish in a 64-thread classical Duck Chess head-to-head.",
-        description="A meeting of duck and fish on home water. Wakwak and Fairy-Stockfish face twenty games of Duck Chess, with Lichess UHO openings and time to dive deep.",
-        rules="20 unrated Duck Chess games in 10 colour-swapped opening pairs from Lichess UHO (Duck). Each engine receives 64 threads and 4096 MiB hash, with 20 minutes plus 12 seconds per move, matching COPE's 8CPU Top-Class Classical clock. One game runs at a time. A win scores 1 point and a draw scores ½; the highest total wins and a tied match remains tied. Duck Chess ends by king capture; check and checkmate do not apply. Evaluation-based draw and resignation adjudication are disabled.",
+        subtitle="",
+        summary="Wakwak vs Fairy-Stockfish. Duck Chess, 20 games, 64 threads per engine, 20m + 12s.",
+        description="",
+        rules="20 unrated Duck Chess games in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
         status="announced",
         featured=True,
-        theme={"primary": "#edc653", "accent": "#b8d8a5", "background": "#163f3d", "surface": "#285c54", "text": "#f4ecd3"},
+        theme={"primary": "#edc653", "accent": "#b8d8a5", "background": "#080f13", "surface": "#142b24", "text": "#eff3e9"},
         config={"module": MODULE_KEY, "match": match.model_dump(mode="json"), "opening_book": suite.name},
     )
     for position, (engine, label, color) in enumerate(zip(participants, ("Wakwak", "Stockfish"), ("#edc653", "#a9d8d4"), strict=True)):
