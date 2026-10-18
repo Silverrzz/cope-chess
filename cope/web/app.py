@@ -2895,7 +2895,10 @@ def _engine_names(connection: sqlite3.Connection) -> dict[int, str]:
 
 
 def _engine_display_name(name: str, version: str | None) -> str:
-    return " ".join(part for part in (name.strip(), (version or "").strip()) if part)
+    label = (version or "").strip()
+    if label.lower() in {"unversioned", "development"}:
+        label = ""
+    return " ".join(part for part in (name.strip(), label) if part)
 
 
 def _tournament_names(connection: sqlite3.Connection) -> dict[int, str]:

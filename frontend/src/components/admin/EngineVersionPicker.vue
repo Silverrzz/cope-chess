@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed } from 'vue'
 
 import OptionPicker from '@/components/ui/OptionPicker.vue'
@@ -49,7 +50,7 @@ const options = computed(() => {
         .sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true, sensitivity: 'base' }))
         .map((engine) => ({
           value: engine.id,
-          label: engine.version,
+          label: engineVersionLabel(engine.version) || engine.name,
           ...(engine.author && engine.author !== group.author ? { description: engine.author } : {}),
           disabled: engine.active === false,
         })),

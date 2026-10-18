@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -91,7 +92,7 @@ const uciOptions = computed(() => Object.entries(data.value?.engine.uci_options 
 const activeFilterCount = computed(() => Object.values(gameFilters.value).filter(Boolean).length)
 const versionOptions = computed(() => (data.value?.versions ?? []).map((version, index) => ({
   value: String(version.id),
-  label: version.version || `Version ${version.id}`,
+  label: engineVersionLabel(version.version) || version.name,
   description: `${version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'commit' ? 'Commit' : 'Release'}${index === 0 ? ' · latest' : ''}`,
 })))
 const ratingListOptions = computed(() => (data.value?.ratings ?? []).map((rating) => ({
@@ -279,7 +280,7 @@ async function load(): Promise<void> {
           <div class="engine-title-row"><h1>{{ data.family?.name || data.engine.name }}</h1><StatusPill :status="data.family?.active && data.engine.active ? 'ready' : 'unavailable'" /></div>
           <p v-if="data.family?.author || data.engine.author">By {{ data.family?.author || data.engine.author }}</p>
         </div>
-        <label class="version-picker">
+        <label v-if="data.versions.length > 1 || engineVersionLabel(data.engine.version)" class="version-picker">
           <span>Engine version</span>
           <OptionPicker :model-value="engineId" :options="versionOptions" label="Engine version" icon="tag" @update:model-value="selectVersion" />
         </label>
@@ -300,7 +301,7 @@ async function load(): Promise<void> {
         </article>
         <article class="overview-card">
           <span class="overview-card__icon"><AppIcon name="engine" :size="18" /></span>
-          <div><span>Family versions</span><strong>{{ data.versions.length }}</strong><small>Latest is {{ data.versions[0]?.version }}</small></div>
+          <div><span>Family versions</span><strong>{{ data.versions.length }}</strong><small v-if="engineVersionLabel(data.versions[0]?.version)">Latest is {{ engineVersionLabel(data.versions[0]?.version) }}</small></div>
         </article>
       </section>
 
@@ -358,7 +359,7 @@ async function load(): Promise<void> {
         <summary><span><AppIcon name="info" :size="17" /><strong>Version details</strong><small>{{ data.engine.distribution === 'worker_local' ? 'Worker-local availability' : 'Source and build' }}, and {{ uciOptions.length }} custom UCI option{{ uciOptions.length === 1 ? '' : 's' }}</small></span><AppIcon name="chevron-down" :size="17" /></summary>
         <div class="technical-content">
           <dl>
-            <div><dt>Version</dt><dd>{{ data.engine.version || '—' }}</dd></div>
+            <div v-if="engineVersionLabel(data.engine.version)"><dt>Version</dt><dd>{{ engineVersionLabel(data.engine.version) }}</dd></div>
             <div><dt>Source</dt><dd v-if="data.engine.distribution === 'worker_local'">Worker-local private binary</dd><dd v-else>{{ data.engine.source_kind || '—' }} · <code>{{ data.engine.source_ref || '—' }}</code></dd></div>
             <div v-if="data.engine.distribution !== 'worker_local'"><dt>Repository</dt><dd><a v-if="data.engine.repository_url" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>—</span></dd></div>
             <div><dt>Added</dt><dd>{{ formatDate(data.engine.created_at) }}</dd></div>

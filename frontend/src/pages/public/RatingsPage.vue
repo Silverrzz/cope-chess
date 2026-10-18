@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -162,7 +163,7 @@ function selectRatingList(event: Event): void {
             <tbody>
               <tr v-for="(row, index) in displayedRatings" :key="engineId(row.engine)">
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
-                <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small>{{ row.engine.version }}</small></RouterLink></td>
+                <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small></RouterLink></td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
                 <td class="error-column" data-label="95% error">
                   <span v-if="row.error_margin !== null && row.error_margin !== undefined" class="error-estimate" :title="`Approximate 95% interval: ${ratingLabel((row.elo ?? 0) - row.error_margin)} to ${ratingLabel((row.elo ?? 0) + row.error_margin)}`">

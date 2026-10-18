@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { api } from '@/api/client'
@@ -184,7 +185,7 @@ function progress(item: TournamentSummary): number {
             <ol v-if="data.engine_queues.acknowledged.length">
               <li v-for="(item, index) in data.engine_queues.acknowledged" :key="item.id">
                 <b>{{ String(index + 1).padStart(2, '0') }}</b>
-                <span><strong>{{ item.name }}</strong><small>{{ item.version }}</small></span>
+                <span><strong>{{ item.name }}</strong><small v-if="engineVersionLabel(item.version)">{{ engineVersionLabel(item.version) }}</small></span>
               </li>
             </ol>
             <div v-else class="public-queue__empty">No engines are currently queued for acknowledgement.</div>
@@ -196,7 +197,7 @@ function progress(item: TournamentSummary): number {
             <ol v-if="data.engine_queues.waiting_for_test.length">
               <li v-for="(item, index) in data.engine_queues.waiting_for_test" :key="item.id">
                 <b>{{ String(index + 1).padStart(2, '0') }}</b>
-                <span><strong>{{ item.engine_name }} {{ item.engine_version }}</strong><small>{{ item.rating_list_name }}</small></span>
+                <span><strong>{{ item.engine_name }} {{ engineVersionLabel(item.engine_version) }}</strong><small>{{ item.rating_list_name }}</small></span>
               </li>
             </ol>
             <div v-else class="public-queue__empty">No engine tests are currently waiting.</div>

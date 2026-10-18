@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -72,7 +73,7 @@ const opponentOptions = computed(() => {
     if (!allowed.has(String(engine.id)) || String(engine.id) === String(props.engineId)) continue
     const child = {
       value: String(engine.id),
-      label: engine.version,
+      label: engineVersionLabel(engine.version) || engine.name,
       description: `${engine.source_kind === 'commit' ? 'Commit' : 'Release'}${engine.active === false ? ' · unavailable' : ''}`,
     }
     const existing = grouped.get(engine.engine_id)

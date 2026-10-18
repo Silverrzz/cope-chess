@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -101,7 +102,7 @@ function groupedEngineOptions(engines: EngineOption[], allLabel: string) {
   for (const engine of engines) {
     const child = {
       value: String(engine.id),
-      label: engine.version || `Version ${engine.id}`,
+      label: engineVersionLabel(engine.version) || engine.name,
       description: `${engine.games.toLocaleString()} rated game${engine.games === 1 ? '' : 's'}`,
     }
     const existing = grouped.get(engine.name)
@@ -182,7 +183,7 @@ function restorePage(): void {
 
             <fieldset class="filter-section filter-section--wide" :disabled="!selectedEngine">
               <legend>Result</legend>
-              <p>{{ selectedEngine ? `Outcome from ${selectedEngine.name} ${selectedEngine.version}’s perspective.` : 'Choose an engine to filter by its result.' }}</p>
+              <p>{{ selectedEngine ? `Outcome from ${[selectedEngine.name, engineVersionLabel(selectedEngine.version)].filter(Boolean).join(' ')}’s perspective.` : 'Choose an engine to filter by its result.' }}</p>
               <div class="outcome-grid">
                 <button v-for="outcome in outcomes" :key="outcome.value" type="button" class="outcome-option" :class="{ 'outcome-option--selected': draft.result === outcome.value }" :aria-pressed="draft.result === outcome.value" @click="draft.result = outcome.value">
                   <span class="outcome-option__mark" :data-result="outcome.value || 'all'">{{ outcome.mark }}</span>

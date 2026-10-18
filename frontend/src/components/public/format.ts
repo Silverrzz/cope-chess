@@ -1,6 +1,11 @@
 import { localDateFormatter, timestampDate } from '@/utils/time'
 import type { GameRecord, Identifier, MoveRecord, TimeControl } from './types'
 
+export function engineVersionLabel(version: string | null | undefined): string {
+  const label = version?.trim() || ''
+  return ['unversioned', 'development'].includes(label.toLowerCase()) ? '' : label
+}
+
 export function recordValue<T>(record: Record<string, T> | undefined, id: Identifier): T | undefined {
   return record?.[String(id)]
 }
