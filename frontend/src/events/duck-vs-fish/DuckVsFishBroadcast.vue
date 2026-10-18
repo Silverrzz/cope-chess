@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { api } from "@/api/client";
-import duck from "@/assets/duck.svg";
+import wakwak from "@/assets/wakwak.svg";
 import MoveList from "@/components/chess/MoveList.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
 import StatusPill from "@/components/public/StatusPill.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import FishMark from "./FishMark.vue";
+import EngineCheers from "./EngineCheers.vue";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import type { ChatMessage, GameRecord, TournamentDetailResponse } from "@/components/public/types";
@@ -104,18 +105,20 @@ async function loadViewer(gameId?: string): Promise<void> {
         <div class="duck-orbit duck-orbit--2">
           <div class="duck-orbit__rings" aria-hidden="true"><span></span><span></span><span></span></div><span class="duck-vs" aria-hidden="true">VS</span>
           <article v-for="(member, index) in roster" :key="member.id" class="duck-node" :class="`duck-node--${index + 1}`">
-            <div class="duck-node__beacon"><span><img v-if="index === 0" :src="duck" alt="" /><FishMark v-else /></span></div>
+            <div class="duck-node__beacon"><span><img v-if="index === 0" :src="wakwak" alt="" /><FishMark v-else /></span></div>
             <div class="duck-node__card"><strong>{{ member.display_name }}</strong><span>{{ member.profile }}</span><b v-if="played.length || live" class="duck-score">{{ score(member.engine_version_id) }}</b><small v-else>64 threads</small></div>
           </article>
         </div>
         <p class="duck-format">20 games <i>·</i> 20m + 12s <i>·</i> Lichess UHO</p>
         <RouterLink :to="{ name: 'event-arena', params: { slug: detail.event.slug } }" class="duck-primary-action"><AppIcon name="trophy" :size="18" /> View arena <AppIcon name="arrow-right" :size="18" /></RouterLink>
+        <EngineCheers class="duck-hero-cheers" :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>
       <aside class="duck-status-card duck-status-card--systems"><span class="duck-status-card__icon"><AppIcon name="activity" :size="25" /></span><div><small>Status</small><strong>{{ status }}</strong></div><i :class="{ active: live }"></i></aside>
       <aside class="duck-status-card duck-status-card--audience"><span class="duck-status-card__icon"><AppIcon name="user" :size="25" /></span><div><small>Current spectators</small><strong>{{ (detail.spectator_count ?? 0).toLocaleString() }}</strong></div></aside>
     </section>
     <main v-else class="duck-arena">
       <header class="tournament-heading"><div><div class="title-line"><h1>{{ detail.event.title }}</h1><StatusPill :status="detail.event.status" /></div><p>Duck Chess · {{ played.length }} / 20 games · 20m + 12s · 64 threads</p></div><RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink></header>
+      <EngineCheers class="duck-arena-cheers" :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       <p v-if="error" role="alert" class="duck-error">{{ error }}</p>
       <div v-if="gameReady && viewer?.viewer_game" class="arena">
         <div class="engine-column"><EnginePanel v-for="side in (['black', 'white'] as const)" :key="side" :side="side" variant="duck" :name="name(side === 'white' ? viewer.viewer_game.white_engine_id : viewer.viewer_game.black_engine_id)" :clock="viewer.clocks?.[side] ?? '—'" :analysis="viewer.engine_data?.[side] ?? null" :position-fen="currentFen" /></div>
@@ -133,6 +136,9 @@ async function loadViewer(gameId?: string): Promise<void> {
 </template>
 
 <style scoped>
+.duck-hero-cheers { --color-surface: #102019; --color-text: #e1e8d8; --color-text-muted: #8a9e90; margin-top: 1.15rem; }
+.duck-arena-cheers { justify-content: start; }
+
 .duck-hero {
   border-color: #a8c8f5;
   background:

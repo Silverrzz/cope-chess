@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import sqlite3
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cope.core.models import (
     AdjudicationConfig,
@@ -21,6 +23,7 @@ from cope.db import (
     create_event_cast_member,
     create_tournament,
     get_event,
+    get_event_by_slug,
     get_tournament,
     list_engine_records,
     list_games,
@@ -125,8 +128,48 @@ class VisibilityPayload(BaseModel):
     published: bool
 
 
+class CheerPayload(BaseModel):
+    member_id: int = Field(gt=0)
+
+
 def _register_api(app: FastAPI) -> None:
     from cope.web import app as web_app
+
+    @app.post("/api/events/{slug}/duck-vs-fish/cheers")
+    def cheer(
+        slug: str,
+        payload: CheerPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        hub = request.app.state.stream_hub
+        host = request.client.host if request.client is not None else "unknown"
+        supplied_client = request.headers.get("x-cope-cheer-client", "")
+        client = supplied_client if re.fullmatch(r"[A-Za-z0-9-]{16,64}", supplied_client) else host
+        if not hub.allow_ephemeral(f"cheer-host:{slug}:{host}", rate=12.0, burst=24):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
+        if not hub.allow_ephemeral(f"cheer-client:{slug}:{host}:{client}", rate=4.0, burst=8):
+            raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
+        event = get_event_by_slug(connection, slug)
+        if event is None or event.handler_key != MODULE_KEY or event.handler_version != 1:
+            raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
+        if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
+            raise HTTPException(status_code=401, detail="Admin session required.")
+        member = connection.execute(
+            "SELECT id, position FROM event_cast_members WHERE event_id = ? AND id = ? AND kind = 'engine' AND parent_id IS NULL",
+            (event.id, payload.member_id),
+        ).fetchone()
+        if member is None:
+            raise HTTPException(status_code=404, detail="Event engine not found.")
+        if not hub.allow_ephemeral(f"cheer-event:{event.id}", rate=20.0, burst=30):
+            raise HTTPException(status_code=429, detail="The crowd is cheering too quickly.")
+        cheer_id = secrets.token_hex(8)
+        hub.publish(
+            f"event.{event.id}", "event.cheer",
+            {"id": cheer_id, "event_id": event.id, "member_id": member["id"], "side": "left" if member["position"] == 0 else "right"},
+            source="web", ephemeral=True,
+        )
+        return JSONResponse({"accepted": True, "cheer_id": cheer_id}, status_code=202)
 
     @app.put("/api/admin/events/{event_id}/duck-vs-fish/visibility")
     def visibility(

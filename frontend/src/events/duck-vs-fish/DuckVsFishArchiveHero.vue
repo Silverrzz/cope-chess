@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import duck from "@/assets/duck.svg";
+import wakwak from "@/assets/wakwak.svg";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
 import FishMark from "./FishMark.vue";
@@ -25,7 +25,7 @@ const timing = computed(() => {
 <template>
   <RouterLink class="duck-archive" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <PondScene />
-    <div class="duck-orbit" aria-hidden="true"><i></i><i></i><i></i><img :src="duck" alt="" /><FishMark /><span>VS</span></div>
+    <div class="duck-orbit" aria-hidden="true"><i></i><i></i><i></i><img :src="wakwak" alt="" /><FishMark /><span>VS</span></div>
     <div class="duck-copy">
       <span class="duck-kicker"><AppIcon name="trophy" :size="16" />{{ current ? live ? 'Live' : 'Upcoming' : event.status === 'cancelled' ? 'Cancelled' : 'Completed' }}</span>
       <h2>{{ event.title }}</h2>
