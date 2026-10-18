@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { api } from "@/api/client";
+import AppIcon from "@/components/ui/AppIcon.vue";
 import wakwak from "@/assets/wakwak.svg";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventCastMember } from "@/types/events";
@@ -20,7 +21,7 @@ interface CheerBurst {
   pieces: Array<{ x: number; y: number; rotation: number; duration: number; delay: number; size: number }>;
 }
 
-const props = defineProps<{ eventId: number; slug: string; members: EventCastMember[] }>();
+const props = defineProps<{ eventId: number; slug: string; members: EventCastMember[]; compact?: boolean }>();
 const { confettiEnabled } = useViewerSettings();
 const bursts = ref<CheerBurst[]>([]);
 const message = ref("");
@@ -84,8 +85,8 @@ function launch(cheer: CheerEvent): void {
 </script>
 
 <template>
-  <div class="engine-cheers">
-    <button v-for="(member, index) in members" :key="member.id" type="button" :data-cheer-engine="member.id" :aria-label="`Cheer for ${member.display_name}`" :style="{ '--engine-color': /^#[0-9a-f]{6}$/i.test(member.accent_color) ? member.accent_color : '#a9d8d4' }" @click="cheer(member)"><span class="cheer-icon"><img v-if="index === 0" :src="wakwak" alt="" /><FishMark v-else /></span><span><small>Cheer for</small><strong>{{ member.display_name }}</strong></span></button>
+  <div class="engine-cheers" :class="{ 'engine-cheers--compact': compact }">
+    <button v-for="(member, index) in members" :key="member.id" type="button" :data-cheer-engine="member.id" :aria-label="`Cheer for ${member.display_name}`" :style="{ '--engine-color': /^#[0-9a-f]{6}$/i.test(member.accent_color) ? member.accent_color : '#a9d8d4' }" @click="cheer(member)"><template v-if="compact"><AppIcon name="trophy" :size="14" /> Cheer {{ member.short_name || member.display_name }}</template><template v-else><span class="cheer-icon"><img v-if="index === 0" :src="wakwak" alt="" /><FishMark v-else /></span><span><small>Cheer for</small><strong>{{ member.display_name }}</strong></span></template></button>
     <span class="sr-only" role="status">{{ message }}</span>
     <Teleport to="body"><div v-if="confettiEnabled" class="cheer-layer" aria-hidden="true"><span v-for="burst in bursts" :key="burst.id" class="cheer-burst" :style="{ left: `${burst.x}%`, top: `${burst.y}%`, '--cheer-color': burst.color }"><i v-for="(piece, index) in burst.pieces" :key="index" :style="{ '--cheer-end-x': `${piece.x}rem`, '--cheer-end-y': `${piece.y}rem`, '--cheer-rotation': `${piece.rotation}deg`, '--cheer-duration': `${piece.duration}ms`, '--cheer-delay': `${piece.delay}ms`, '--cheer-size': `${piece.size}rem` }"></i></span></div></Teleport>
   </div>
@@ -100,4 +101,6 @@ function launch(cheer: CheerEvent): void {
 @keyframes cheer-pop { 0% { opacity: 0; transform: rotate(0) scale(.5); } 13% { opacity: .95; } 100% { opacity: 0; transform: translate(var(--cheer-end-x), var(--cheer-end-y)) rotate(var(--cheer-rotation)) scale(1); } }
 @media (max-width: 38rem) { .engine-cheers { gap: .4rem; }.engine-cheers button { min-width: 0; padding-right: .6rem; }.engine-cheers strong { font-size: .68rem; } }
 @media (prefers-reduced-motion: reduce) { .cheer-layer { display: none; }.engine-cheers button { transition: none; } }
+.engine-cheers--compact { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+.engine-cheers--compact button { display: inline-flex; min-width: 0; min-height: 2.65rem; align-items: center; justify-content: center; gap: .3rem; padding: 0 1rem; border: 1px solid color-mix(in srgb, var(--engine-color) 55%, white); border-radius: 999px; background: color-mix(in srgb, var(--engine-color) 13%, white); color: color-mix(in srgb, var(--engine-color) 82%, #071426); font-size: .67rem; font-weight: 800; box-shadow: 0 .2rem .55rem color-mix(in srgb, var(--engine-color) 14%, transparent); }
 </style>
