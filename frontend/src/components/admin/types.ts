@@ -1,3 +1,4 @@
+import type { Variant } from '@/components/chess/chess'
 export type Id = number
 
 export interface EngineArtifact {
@@ -67,6 +68,8 @@ export interface Badge {
 }
 
 export interface OpeningSuite {
+  variant?: string
+  rules_revision?: string
   id: Id
   name: string
   description?: string
@@ -89,6 +92,8 @@ export type TimeControl =
   | { category: 'movenodes'; nodes: number }
 
 export interface TournamentSettings {
+  variant?: Variant
+  rules_revision?: string
   format: TournamentFormat
   format_options: FormatOptions
   time_control: TimeControl

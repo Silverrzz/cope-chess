@@ -5,6 +5,7 @@ import { api } from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import VariantPicker from '@/components/admin/VariantPicker.vue'
 import OpeningImportEditor from '@/components/admin/OpeningImportEditor.vue'
 import { errorText } from '@/components/admin/format'
 import type { OpeningSuite } from '@/components/admin/types'
@@ -17,7 +18,7 @@ const id = computed(() => Number(route.params.id) || null)
 const loading = ref(true)
 const pending = ref(false)
 const error = ref('')
-const form = reactive({ name: '', description: '', positions: '', mode: 'replace' as 'replace' | 'append', source: 'files' as 'files' | 'manual', files: [] as File[] })
+const form = reactive({ variant: 'standard', name: '', description: '', positions: '', mode: 'replace' as 'replace' | 'append', source: 'files' as 'files' | 'manual', files: [] as File[] })
 const originalPositions = ref('')
 const positionCount = ref(0)
 const positionsTruncated = ref(false)
@@ -25,7 +26,7 @@ const positionsTruncated = ref(false)
 async function load(): Promise<void> {
   try {
     const response = await api.get<Response>(id.value ? `/api/admin/openings/${id.value}` : '/api/admin/openings/form')
-    if (response.suite) { form.name = response.suite.name; form.description = response.suite.description ?? ''; form.source = 'manual' }
+    if (response.suite) { form.variant = response.suite.variant || 'standard'; form.name = response.suite.name; form.description = response.suite.description ?? ''; form.source = 'manual' }
     positionCount.value = response.position_count ?? 0
     positionsTruncated.value = Boolean(response.positions_truncated)
     if (positionsTruncated.value) { form.mode = 'append'; form.source = 'files' }
@@ -50,6 +51,7 @@ async function save(): Promise<void> {
   if (id.value && form.mode === 'replace' && !hasPositions) { error.value = 'Add at least one position for the replacement set.'; return }
   pending.value = true
   const body = new FormData()
+  body.set('variant', form.variant)
   body.set('name', form.name.trim())
   body.set('description', form.description.trim())
   body.set('positions', form.source === 'manual' ? form.positions : '')
@@ -77,6 +79,7 @@ onMounted(load)
     <form v-else class="opening-form" novalidate @submit.prevent="save">
       <section class="panel form-card">
         <div class="form-card__heading"><h2>Suite details</h2></div>
+        <label class="field"><span>Variant</span><VariantPicker v-model="form.variant" /></label>
         <div class="form-grid"><label class="field"><span>Name</span><input v-model="form.name" class="input" required maxlength="100"></label><label class="field"><span>Description <small>optional</small></span><input v-model="form.description" class="input" maxlength="240"></label></div>
       </section>
       <section class="panel form-card">

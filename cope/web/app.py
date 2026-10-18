@@ -79,6 +79,7 @@ from cope.db import (
     touch_service_heartbeat,
 )
 from cope.core.san import pv_to_san
+from cope.variants import Position, create_board, get_variant
 from cope.core.models import ENGINE_PROCESS_MEMORY_OVERHEAD_MB, HardwareInfo, TournamentFormat
 from cope.core.stream import (
     StreamEnvelope,
@@ -3065,7 +3066,7 @@ def _game_payload(
     return payload
 
 
-def _move_payload(move: MoveRecord, root_fen: str | None) -> dict[str, Any]:
+def _move_payload(move: MoveRecord, root_fen: str | None, variant: str = "dfrc") -> dict[str, Any]:
     score_bound = move.score_bound or _uci_score_bound(move.info_line)
     seldepth = move.seldepth if move.seldepth is not None else _uci_info_int(move.info_line, "seldepth")
     hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
@@ -3083,7 +3084,7 @@ def _move_payload(move: MoveRecord, root_fen: str | None) -> dict[str, Any]:
         "nps": move.nps,
         "hashfull": hashfull,
         "pv": move.pv,
-        "pv_san": pv_to_san(move.pv, root_fen),
+        "pv_san": pv_to_san(move.pv, root_fen, variant=variant),
         "info_line": move.info_line,
         "time_ms": move.time_ms,
         "clock_after_ms": move.clock_after_ms,
@@ -3143,7 +3144,7 @@ def _tournament_live_payload(
         viewer_game = _tournament_viewer_game(active_games)
     viewer_moves = list_moves(connection, viewer_game.id) if viewer_game and not cross_table else ()
     opening = _opening_view(connection, viewer_game.opening_id) if viewer_game and not cross_table else None
-    engine_data = _engine_data(viewer_game, viewer_moves, opening)
+    engine_data = _engine_data(viewer_game, viewer_moves, opening, variant=tournament.config.variant)
     clocks = _clock_data(viewer_moves)
     clock_state = _persisted_clock_state(viewer_game, viewer_moves)
     game_live = None if cross_table else _live_for_game(live, viewer_game.id if viewer_game else None)
@@ -3160,7 +3161,7 @@ def _tournament_live_payload(
         },
         "game": _game_payload(viewer_game, engines, live=True) if viewer_game else None,
         "opening": opening or {"name": "Start position", "fen": "startpos"},
-        "moves": _move_payloads(viewer_moves, opening),
+        "moves": _move_payloads(viewer_moves, opening, variant=tournament.config.variant),
         "engine_data": engine_data,
         "clocks": clocks,
         "clock_state": clock_state,
@@ -3192,7 +3193,9 @@ def _cross_table_games_payload(
             (tournament_id,),
         )
     }
-    boards: dict[int, chess.Board] = {}
+    tournament = get_tournament(connection, tournament_id)
+    variant = tournament.config.variant if tournament else "standard"
+    boards: dict[int, Position] = {}
     clocks_by_game: dict[int, dict[str, int | None]] = {}
     evaluations_by_game: dict[int, dict[str, dict[str, Any] | None]] = {}
     last_moves: dict[int, str | None] = {}
@@ -3200,9 +3203,9 @@ def _cross_table_games_payload(
     for game in games:
         start_fen = opening_fens.get(game.opening_id, "startpos")
         try:
-            boards[game.id] = chess.Board(chess960=True) if start_fen == "startpos" else chess.Board(start_fen, chess960=True)
+            boards[game.id] = create_board(start_fen, variant=variant)
         except ValueError:
-            boards[game.id] = chess.Board()
+            boards[game.id] = create_board(variant=variant)
         clocks_by_game[game.id] = {"white": None, "black": None}
         evaluations_by_game[game.id] = {"white": None, "black": None}
         last_moves[game.id] = None
@@ -3277,6 +3280,7 @@ def _cross_table_games_payload(
         payloads.append({
             **_game_payload(game, engines, live=True),
             "fen": board.fen(),
+            "variant": variant,
             "last_move": last_moves[game.id],
             "ply": plies[game.id],
             "evaluations": evaluations,
@@ -3350,6 +3354,7 @@ def _merge_engine_data(
                         "pv_san",
                         "info",
                         "root_fen",
+                        "variant",
                         "engine_id",
                         "eval_cp",
                         "eval_mate",
@@ -3394,12 +3399,11 @@ def _clock_label(value: Any) -> str:
 def _move_root_fens(
     moves: tuple[MoveRecord, ...],
     opening: dict[str, Any] | None,
+    variant: str = "dfrc",
 ) -> list[str | None]:
     start_fen = (opening or {}).get("fen") or "startpos"
     try:
-        board: chess.Board | None = (
-            chess.Board(chess960=True) if start_fen == "startpos" else chess.Board(start_fen, chess960=True)
-        )
+        board = create_board(start_fen, variant=variant)
     except ValueError:
         board = None
 
@@ -3418,14 +3422,16 @@ def _move_root_fens(
 def _move_payloads(
     moves: tuple[MoveRecord, ...],
     opening: dict[str, Any] | None,
+    variant: str = "dfrc",
 ) -> list[dict[str, Any]]:
-    root_fens = _move_root_fens(moves, opening)
-    return [_move_payload(move, root_fens[index]) for index, move in enumerate(moves)]
+    root_fens = _move_root_fens(moves, opening, variant)
+    return [_move_payload(move, root_fens[index], variant) for index, move in enumerate(moves)]
 
 def _engine_data(
     game: GameRecord | None,
     moves: tuple[MoveRecord, ...],
-    opening: dict[str, Any] | None = None,      # new
+    opening: dict[str, Any] | None = None,
+    variant: str = "dfrc",
 ) -> dict[str, dict[str, str]]:
     if game is None:
         return {
@@ -3433,13 +3439,13 @@ def _engine_data(
             "black": _engine_data_for_move(None),
         }
 
-    root_fens = _move_root_fens(moves, opening)
+    root_fens = _move_root_fens(moves, opening, variant)
 
     def for_side(side: str) -> dict[str, str]:
         index = _latest_move_index_for_side(moves, side)
         if index < 0:
             return _engine_data_for_move(None)
-        return _engine_data_for_move(moves[index], root_fens[index])
+        return _engine_data_for_move(moves[index], root_fens[index], variant)
 
     return {"white": for_side("white"), "black": for_side("black")}
 
@@ -3451,7 +3457,7 @@ def _latest_move_index_for_side(moves: tuple[MoveRecord, ...], side: str) -> int
             return index
     return -1
 
-def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) -> dict[str, Any]:
+def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None, variant: str = "dfrc") -> dict[str, Any]:
     if move is None:
         return {
             "depth": "-",
@@ -3472,6 +3478,7 @@ def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) 
     hashfull = move.hashfull if move.hashfull is not None else _uci_info_int(move.info_line, "hashfull")
 
     return {
+        "variant": variant,
         "engine_id": move.engine_version_id,
         "depth": str(move.depth) if move.depth is not None else "-",
         "seldepth": str(seldepth) if seldepth is not None else "-",
@@ -3481,7 +3488,7 @@ def _engine_data_for_move(move: MoveRecord | None, root_fen: str | None = None) 
         "eval": _eval_label(move),
         "info": move.info_line or move.pv or "not recorded",
         "pv": move.pv or "not recorded",
-        "pv_san": pv_to_san(move.pv, root_fen) if move.pv else "not recorded",
+        "pv_san": pv_to_san(move.pv, root_fen, variant=variant) if move.pv else "not recorded",
     }
 
 
@@ -4057,6 +4064,8 @@ def _settings_view(
     engines = _engine_names(connection)
 
     rows: list[tuple[str, str]] = [
+        ("Variant", get_variant(config.variant).name),
+        ("Rules", config.rules_revision),
         ("Format", config.format.value.replace("_", " ").title()),
         ("Time control", _time_control_label(config.time_control)),
     ]

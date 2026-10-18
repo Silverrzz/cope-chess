@@ -6,12 +6,15 @@ import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import type { Key } from 'chessground/types'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 
 import {
   buildPositions,
   materialSummary,
   positionFen,
+  isTurn,
+  type Variant,
   type BoardArrow,
   type Color,
 } from './chess'
@@ -27,6 +30,7 @@ const arrowBrushes: DrawBrushes = {
 
 const props = withDefaults(defineProps<{
   fen?: string | null
+  variant?: Variant | undefined
   moves?: string[]
   sanMoves?: string[]
   modelValue?: number
@@ -60,9 +64,17 @@ const board = ref<HTMLElement | null>(null)
 let ground: ChessgroundApi | null = null
 const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
-const positions = computed(() => buildPositions(props.fen, props.moves))
+const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const currentFen = computed(() => positionFen(position.value))
+const duckStyle = computed(() => {
+  const square = position.value.duckSquare
+  if (square === null) return {}
+  const file = square % 8
+  const rank = Math.floor(square / 8)
+  const flipped = props.orientation === 'black'
+  return { left: `${(flipped ? 7 - file : file) * 12.5}%`, top: `${(flipped ? 7 - rank : rank) * 12.5}%` }
+})
 const material = computed(() => materialSummary(position.value))
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
@@ -74,7 +86,9 @@ const status = computed(() => {
 
 const positionDescription = computed(() => {
   const side = position.value.turn === 'w' ? 'White' : 'Black'
-  return `${status.value}. ${side} to move. ${material.value.label}.`
+  const duck = position.value.duckSquare
+  const duckLabel = duck === null ? '' : ` Neutral duck on ${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}.`
+  return `${status.value}. ${side} to move. ${material.value.label}.${duckLabel}`
 })
 
 watch(() => props.modelValue, (next) => {
@@ -134,6 +148,23 @@ function selectPly(ply: number): void {
   emit('update:modelValue', next)
 }
 
+function predictionShapes(arrow: BoardArrow, brush: string): DrawShape[] {
+  const shapes: DrawShape[] = [{
+    orig: arrow.move.slice(0, 2).toLowerCase() as Key,
+    dest: arrow.move.slice(2, 4).toLowerCase() as Key,
+    brush,
+  }]
+  if (arrow.move.includes(',')) {
+    const square = position.value.duckSquare
+    const orig = square === null
+      ? arrow.move.slice(2, 4).toLowerCase() as Key
+      : `${'abcdefgh'[square % 8]}${8 - Math.floor(square / 8)}` as Key
+    const dest = arrow.move.slice(-2).toLowerCase() as Key
+    if (orig !== dest) shapes.push({ orig, dest, brush })
+  }
+  return shapes
+}
+
 function renderBoard(): void {
   if (!ground) return
   const move = lastMove.value
@@ -141,15 +172,11 @@ function renderBoard(): void {
     ? [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
     : []
   const arrows = props.arrows
-    .filter((arrow) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(arrow.move.toLowerCase()))
+    .filter((arrow) => isTurn(arrow.move))
     .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
   const styledArrows = arrows.filter((arrow) => arrow.fillColor)
   const outlinedArrows = styledArrows.filter((arrow) => arrow.outlineColor)
-  const outlinedShapes = outlinedArrows.map<DrawShape>((arrow, index) => ({
-    orig: arrow.move.slice(0, 2).toLowerCase() as Key,
-    dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-    brush: `engineOutline${index}`,
-  }))
+  const outlinedShapes = outlinedArrows.flatMap((arrow, index) => predictionShapes(arrow, `engineOutline${index}`))
   const fillBrushes = Object.fromEntries(styledArrows.map((arrow, index) => [
     `engineTeam${index}`,
     {
@@ -170,17 +197,17 @@ function renderBoard(): void {
   ]))
   const autoShapes = [
     ...outlinedShapes,
-    ...arrows.map<DrawShape>((arrow) => ({
-      orig: arrow.move.slice(0, 2).toLowerCase() as Key,
-      dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-      brush: arrow.fillColor
+    ...arrows.flatMap((arrow) => {
+      const brush = arrow.fillColor
         ? `engineTeam${styledArrows.indexOf(arrow)}`
-        : arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
-      ...(arrow.label ? { label: { text: arrow.label } } : {}),
-    })),
+        : arrow.color === 'white' ? 'engineWhite' : 'engineBlack'
+      const shapes = predictionShapes(arrow, brush)
+      if (arrow.label) shapes[0]!.label = { text: arrow.label }
+      return shapes
+    }),
   ]
   const config: ChessgroundConfig = {
-    fen: currentFen.value,
+    fen: currentFen.value.replaceAll('*', '1'),
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
@@ -223,7 +250,10 @@ defineExpose({ selectPly, focusBoard })
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
-    <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
+    <div class="board-frame">
+      <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
+      <img v-if="position.duckSquare !== null" class="duck-piece" :style="duckStyle" :src="duckIcon" alt="Neutral duck" :draggable="false">
+    </div>
 
     <div v-if="controls" class="board-controls">
       <div class="board-controls__buttons" role="group" aria-label="Replay controls">
@@ -249,6 +279,8 @@ defineExpose({ selectPly, focusBoard })
 </template>
 
 <style scoped>
+.board-frame { position: relative; container-type: inline-size; }
+.duck-piece { position: absolute; width: 12.5%; height: 12.5%; object-fit: contain; pointer-events: none; z-index: 4; filter: drop-shadow(0 1px 2px #0008); }
 .chess-viewer {
   width: 100%;
   min-width: 0;

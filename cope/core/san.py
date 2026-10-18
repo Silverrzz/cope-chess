@@ -1,11 +1,12 @@
 import chess
+from cope.variants import create_board
 
 # Convert a PV string to SAN notation, given an optional root FEN position.
-def pv_to_san(pv: str | None, root_fen: str | None = None, *, numbered: bool = True) -> str | None:
+def pv_to_san(pv: str | None, root_fen: str | None = None, *, numbered: bool = True, variant: str = "dfrc") -> str | None:
     if not pv or root_fen is None:
         return pv
     try:
-        board = chess.Board(root_fen, chess960=True) if root_fen and root_fen != "startpos" else chess.Board(chess960=True)
+        board = create_board(root_fen, variant=variant)
     except ValueError:
         return pv
 

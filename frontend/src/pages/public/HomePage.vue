@@ -122,6 +122,7 @@ function progress(item: TournamentSummary): number {
           <article v-for="item in data.running_tournaments" :key="item.tournament.record.id" class="live-card" :class="{ 'live-card--without-preview': !item.preview }">
             <div v-if="item.preview" class="live-card__board" aria-hidden="true">
               <ChessBoard
+                :variant="item.tournament.record.config?.variant"
                 :fen="item.preview.opening?.fen || 'startpos'"
                 :moves="item.preview.moves.map((move) => move.uci)"
                 :controls="false"

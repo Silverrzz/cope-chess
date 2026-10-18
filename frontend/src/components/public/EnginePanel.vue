@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
+import { isTurn, type Variant } from '@/components/chess/chess'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
@@ -9,6 +10,7 @@ import { formatNodes, formatNps, formatNumber } from './format'
 
 const props = withDefaults(defineProps<{
   side: 'white' | 'black'
+  variant?: Variant | undefined
   name?: string
   engineId?: Identifier | null
   clock?: string
@@ -43,7 +45,7 @@ const depth = computed(() => `${props.analysis?.depth ?? '-'}/${props.analysis?.
 const pvMoves = computed(() => (props.analysis?.pv || '')
   .split(/\s+/)
   .map((move) => move.toLowerCase())
-  .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move)))
+  .filter(isTurn))
 const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen || 'startpos')
 </script>
 
@@ -95,6 +97,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
         <div class="pv-preview">
           <span>PV position</span>
           <ChessBoard
+            :variant="variant"
             :fen="pvRootFen"
             :moves="pvMoves"
             :orientation="side"

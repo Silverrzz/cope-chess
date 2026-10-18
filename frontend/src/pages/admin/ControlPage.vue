@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { api } from "@/api/client"
+import VariantPicker from "@/components/admin/VariantPicker.vue"
 import AdminPageHeader from "@/components/admin/AdminPageHeader.vue"
 import { errorText } from "@/components/admin/format"
 
-interface Choice { id: number; name: string }
+interface Choice { id: number; name: string; variant?: string }
 interface Submission { id: number; name: string; version: string; submitted_at: string | null }
 interface TestingPlan { id: number; engine_name: string; engine_version: string; preset_key: string; status: string; reason: string; tournament_id: number | null; tournament_status: string | null }
 interface Preset { key: string; name: string; revision: number; category: string; variant: string }
@@ -30,6 +31,7 @@ interface DraftEngine {
   source_ref: string
   recipe: { path: string; content: string }
   dfrc: string
+  variant_capabilities: Record<string, string>
   capability_evidence: string
   top20: string
   strength_evidence: string
@@ -52,6 +54,7 @@ const tokenLabel = ref("")
 const newToken = ref("")
 const origin = window.location.origin
 const preset = ref({ key: "", name: "", rating_list_id: 0, category: "bullet", variant: "standard", seconds: 60, increment: 1, threads: 1, hash: 64, opponents: 9, cycles: 1, concurrency: 8, opening_suite_id: 0 })
+watch(() => preset.value.variant, () => { preset.value.rating_list_id = 0; preset.value.opening_suite_id = 0 })
 const owner = computed(() => context.value?.scopes.includes("*") ?? false)
 let timer: number | undefined
 let refreshing = false
@@ -73,7 +76,7 @@ async function refresh(): Promise<void> {
     if (!drafts.value.length) drafts.value = nextContext.queue.acknowledged.map((item) => ({
       queue_id: item.id, selected: false, git_host_id: nextContext.git_hosts[0]?.id ?? 0,
       repository_full_name: "", source_ref: "", recipe: { path: `${item.name}-${item.version}`.toLowerCase().replace(/[^a-z0-9._-]/g, "-") + ".Dockerfile", content: "" },
-      dfrc: "unknown", capability_evidence: "", top20: "unknown", strength_evidence: "",
+      dfrc: "unknown", variant_capabilities: { duck: "unknown", duck960: "unknown" }, capability_evidence: "", top20: "unknown", strength_evidence: "",
     }))
     if (selected.value) selected.value = await api.get<Operation>(`/api/admin/control/operations/${selected.value.id}`)
   } catch (cause) { if (active) error.value = errorText(cause) }
@@ -222,6 +225,7 @@ onBeforeUnmount(() => { active = false; window.clearInterval(timer) })
           <label>Source commit<input v-model="draft.source_ref" placeholder="Full 40-character commit"></label>
           <label>Dockerfile name<input v-model="draft.recipe.path"></label>
           <label>DFRC support<select v-model="draft.dfrc"><option value="unknown">Unknown</option><option value="supported">Supported</option><option value="unsupported">Unsupported</option></select></label>
+          <label v-for="variant in ['duck', 'duck960']" :key="variant">{{ variant === 'duck' ? 'Duck' : 'Duck960' }} support<select v-model="draft.variant_capabilities[variant]"><option value="unknown">Unknown</option><option value="supported">Supported</option><option value="unsupported">Unsupported</option></select></label>
           <label>Capability evidence<input v-model="draft.capability_evidence" placeholder="Source or verified assessment"></label>
           <label>Expected top 20<select v-model="draft.top20"><option value="unknown">Await rating evidence</option><option value="yes">Yes</option><option value="no">No</option></select></label>
           <label>Strength evidence<input v-model="draft.strength_evidence"></label>
@@ -237,10 +241,10 @@ onBeforeUnmount(() => { active = false; window.clearInterval(timer) })
         <p>Saving an existing key creates a new immutable revision.</p>
         <div class="control-grid">
           <label>Key<input v-model="preset.key" required pattern="[a-z][a-z0-9_-]*"></label><label>Name<input v-model="preset.name" required></label>
-          <label>Rating list<select v-model="preset.rating_list_id" required><option :value="0" disabled>Choose list</option><option v-for="list in context?.rating_lists" :key="list.id" :value="list.id">{{ list.name }}</option></select></label>
+          <label>Rating list<select v-model="preset.rating_list_id" required><option :value="0" disabled>Choose list</option><option v-for="list in context?.rating_lists.filter(item => !item.variant || item.variant === preset.variant)" :key="list.id" :value="list.id">{{ list.name }}</option></select></label>
           <label>Category<select v-model="preset.category"><option value="bullet">Bullet</option><option value="rapid">Rapid</option><option value="classical">Classical · 8 threads</option></select></label>
-          <label>Variant<select v-model="preset.variant"><option value="standard">Standard</option><option value="dfrc">DFRC</option></select></label>
-          <label>Opening suite<select v-model="preset.opening_suite_id"><option :value="0">Standard starting position</option><option v-for="suite in context?.opening_suites" :key="suite.id" :value="suite.id">{{ suite.name }}</option></select></label>
+          <label>Variant<VariantPicker v-model="preset.variant" /></label>
+          <label>Opening suite<select v-model="preset.opening_suite_id"><option :value="0">Standard starting position</option><option v-for="suite in context?.opening_suites.filter(item => !item.variant || item.variant === preset.variant || item.variant === 'legacy' && !preset.variant.startsWith('duck'))" :key="suite.id" :value="suite.id">{{ suite.name }}</option></select></label>
           <label>Initial seconds<input v-model.number="preset.seconds" type="number" min="1" required></label><label>Increment seconds<input v-model.number="preset.increment" type="number" min="0" step="0.1" required></label>
           <label>Engine threads<input v-model.number="preset.threads" type="number" min="1" :disabled="preset.category === 'classical'"></label><label>Hash per engine, MB<input v-model.number="preset.hash" type="number" min="1" required></label>
           <label>Opponents<input v-model.number="preset.opponents" type="number" min="1" max="499" required></label><label>Cycles<input v-model.number="preset.cycles" type="number" min="1" required></label><label>Concurrent games<input v-model.number="preset.concurrency" type="number" min="1" required></label>

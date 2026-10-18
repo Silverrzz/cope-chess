@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
+import VariantPicker from '@/components/admin/VariantPicker.vue'
 import EngineVersionPicker from '@/components/admin/EngineVersionPicker.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
@@ -14,22 +15,29 @@ import { bestVersionRatings } from '@/utils/ratings'
 interface RatingRow { engine: { engine_id: number; name: string; version: string }; elo: number; games_played: number; error_margin?: number | null; updated_at?: string }
 interface Commit { tournament_id: number; tournament_name: string; tournament_status: string; applied_at: string | null; requested_at: string; games: number; hardware_games: number }
 interface EngineVersion { id: number; name: string; version: string }
-interface Response { rating_list: { id: number; name: string; anchor_engine_id: number | null; anchor_elo: number; created_at: string }; ratings: RatingRow[]; tournaments: Commit[]; engine_versions: EngineVersion[] }
+interface Response { rating_list: { variant: string; rules_revision: string; id: number; name: string; anchor_engine_id: number | null; anchor_elo: number; created_at: string }; ratings: RatingRow[]; tournaments: Commit[]; engine_versions: EngineVersion[] }
 
 const route = useRoute(); const router = useRouter(); const toast = useToast(); const { confirm } = useConfirm()
 const id = computed(() => Number(route.params.id)); const data = ref<Response | null>(null); const loading = ref(true); const error = ref(''); const pending = ref('')
 const anchorEngineId = ref<number | ''>(''); const anchorElo = ref(1500)
+const listVariant = ref('standard')
 const onlyBestVersions = ref(false)
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   return onlyBestVersions.value ? bestVersionRatings(ratings) : ratings
 })
 
-async function load() { loading.value = true; error.value = ''; try { data.value = await api.get<Response>(`/api/admin/rating-lists/${id.value}`); anchorEngineId.value = data.value.rating_list.anchor_engine_id ?? ''; anchorElo.value = data.value.rating_list.anchor_elo } catch (cause) { error.value = errorText(cause) } finally { loading.value = false } }
+async function load() { loading.value = true; error.value = ''; try { data.value = await api.get<Response>(`/api/admin/rating-lists/${id.value}`); listVariant.value = data.value.rating_list.variant; anchorEngineId.value = data.value.rating_list.anchor_engine_id ?? ''; anchorElo.value = data.value.rating_list.anchor_elo } catch (cause) { error.value = errorText(cause) } finally { loading.value = false } }
 async function uncommit(item: Commit) {
   if (!await confirm({ title: 'Uncommit tournament?', message: `Remove ${item.tournament_name} from this list? The tournament and games are retained. Calculate the ratings when you are ready to apply the change.`, confirmLabel: 'Uncommit', tone: 'danger' })) return
   pending.value = `uncommit-${item.tournament_id}`
   try { const response = await api.delete<{message:string}>(`/api/admin/rating-lists/${id.value}/tournaments/${item.tournament_id}`); toast.success(response.message); await load() } catch (cause) { error.value = errorText(cause); toast.error(cause) } finally { pending.value = '' }
+}
+async function saveVariant() {
+  pending.value = 'variant'; error.value = ''
+  try { const response = await api.put<{message:string}>(`/api/admin/rating-lists/${id.value}/variant`, { body: { variant: listVariant.value } }); toast.success(response.message); await load() }
+  catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
 }
 async function calculate() {
   if (anchorEngineId.value === '') { error.value = 'Select an engine version to use as the Elo anchor.'; return }
@@ -48,6 +56,7 @@ onMounted(load)
   <template v-else-if="data">
     <AdminPageHeader :title="data.rating_list.name"><template #actions><RouterLink class="button button--ghost" to="/admin/ratings">All lists</RouterLink><RouterLink class="button button--secondary" :to="`/ratings?rating_list_id=${id}`">Public list</RouterLink><button class="button button--danger" :disabled="!!pending" @click="remove">Delete</button></template></AdminPageHeader>
     <InlineFeedback :message="error" />
+    <form class="panel anchor-panel" @submit.prevent="saveVariant"><label class="field"><span>Variant</span><VariantPicker v-model="listVariant" /></label><span>{{ data.rating_list.rules_revision }}</span><button class="button button--secondary" :disabled="!!pending || listVariant === data.rating_list.variant">Save variant</button></form>
     <form class="panel anchor-panel" @submit.prevent="calculate">
       <div class="anchor-heading"><h2>Elo anchor</h2><p>Choose the engine version that defines the rating scale. Its calculated rating will be fixed to the Elo entered here.</p></div>
       <label class="field"><span>Engine version</span><EngineVersionPicker v-model="anchorEngineId" :engines="data.engine_versions" placeholder="Select an engine version" /></label>

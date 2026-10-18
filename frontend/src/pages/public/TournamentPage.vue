@@ -210,7 +210,7 @@ const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
 const blackClock = computed(() => clockForSide('black'))
 const suggestedMoves = computed<BoardArrow[]>(() => {
-  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci))
+  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci), data.value?.tournament.config?.variant)
   const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length))
   const viewedFen = positionFen(positions[viewedPly]!)
   const sideToMove = parseFen(viewedFen).turn === 'w' ? 'white' : 'black'
@@ -580,7 +580,7 @@ function applyCrossTableMove(payload: GameMoveEvent): void {
     scheduleSnapshotRefresh()
     return
   }
-  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci)
+  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci, data.value.tournament.config?.variant)
   const activeSide = nextPosition.turn === 'w' ? 'white' : 'black'
   const moverSide = payload.ply % 2 === 1 ? 'white' : 'black'
   Object.assign(game, {
@@ -896,6 +896,7 @@ function analysisForSide(side: 'white' | 'black'): EngineAnalysis {
     root_fen: positionFen(buildPositions(
       opening.value.fen,
       moves.value.slice(0, moveIndex).map((item) => item.uci),
+      data.value?.tournament.config?.variant,
     ).at(-1)!),
   }
   if (move.depth !== undefined) analysis.depth = move.depth
@@ -938,7 +939,7 @@ function pvMoves(value: string | null | undefined): string[] {
   return parts
     .slice(pvIndex >= 0 ? pvIndex + 1 : 0)
     .map(normalizedUci)
-    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move))
+    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?(?:,[a-h][1-8][a-h][1-8])?$/.test(move))
 }
 
 function movePv(move: MoveRecord): string[] {
@@ -1190,6 +1191,7 @@ function forgetManualFollowPauseGame(): void {
       <section v-else-if="viewerGame" ref="arenaElement" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
+            :variant="data.tournament.config?.variant"
             side="black"
             :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
             :engine-id="viewerGame.black_engine_id"
@@ -1200,6 +1202,7 @@ function forgetManualFollowPauseGame(): void {
             :loading="isPreparing"
           />
           <EnginePanel
+            :variant="data.tournament.config?.variant"
             side="white"
             :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
             :engine-id="viewerGame.white_engine_id"
@@ -1219,6 +1222,7 @@ function forgetManualFollowPauseGame(): void {
 
         <div ref="boardColumnElement" class="board-column">
           <ChessViewer
+            :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
             :moves="isPreparing ? [] : moves"
             :model-value="isPreparing ? 0 : selectedPly"

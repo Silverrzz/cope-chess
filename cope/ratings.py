@@ -12,6 +12,7 @@ from cope.db.repo import (
     list_games_for_tournaments,
     list_tournaments_by_ids,
     utc_now,
+    validate_rating_list_variant,
 )
 
 
@@ -99,6 +100,10 @@ def apply_tournament_rating_commit(
         raise RatingCommitError("tournament is not finished or aborted")
     if not tournament.config.rated:
         raise RatingCommitError("tournament is not rated")
+    try:
+        validate_rating_list_variant(connection, rating_list_id, tournament.config)
+    except ValueError as exc:
+        raise RatingCommitError(str(exc)) from exc
     if connection.execute(
         "SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?",
         (tournament_id,),
@@ -199,6 +204,10 @@ def recalculate_ratings(
         tournament = tournaments.get(tournament_id)
         if tournament is None:
             raise RatingCommitError(f"committed tournament {tournament_id} no longer exists")
+        try:
+            validate_rating_list_variant(connection, rating_list_id, tournament.config)
+        except ValueError as exc:
+            raise RatingCommitError(str(exc)) from exc
         games = _committable_games(tournament, tuple(games_by_tournament[tournament_id]))
         _validate_games(tournament, games)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at

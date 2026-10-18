@@ -58,6 +58,8 @@ function formatSeconds(milliseconds: number): string {
 
 export function defaultSettings(): TournamentSettings {
   return {
+    variant: 'standard',
+    rules_revision: 'chess1',
     format: 'round_robin',
     format_options: { cycles: 1 },
     time_control: { category: 'increment', initial_ms: 60_000, increment_ms: 1_000 },

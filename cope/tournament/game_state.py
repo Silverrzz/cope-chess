@@ -1,4 +1,5 @@
 import chess
+from cope.variants import DuckBoard, Position, Turn
 from enum import Enum
 
 
@@ -14,11 +15,13 @@ class GameTermination(Enum):
     ILLEGAL_MOVE = "illegal move"
     ENGINE_ERROR = "engine error"
     VARIANT_END = "variant end"
+    KING_CAPTURE = "king capture"
+    NO_LEGAL_MOVE = "no legal move"
     UNKNOWN = "unknown"
 
 
 class GameState():
-    def __init__(self, board: chess.Board):
+    def __init__(self, board: Position):
         self._board = board
         self._result = "*"
         self._winner = None
@@ -29,10 +32,10 @@ class GameState():
         self._reset_position_counts()
         self.update_from_board()
 
-    def get_board(self) -> chess.Board:
+    def get_board(self) -> Position:
         return self._board
 
-    def set_board(self, board: chess.Board):
+    def set_board(self, board: Position):
         self._board = board
         self._reset_position_counts()
 
@@ -61,10 +64,14 @@ class GameState():
         self._result = outcome.result()
         self._winner = outcome.winner
         self._termination = self._get_board_termination(outcome.termination)
+        if isinstance(self._board, DuckBoard) and outcome.termination in (chess.Termination.VARIANT_WIN, chess.Termination.VARIANT_LOSS):
+            self._termination = GameTermination.KING_CAPTURE if self._board._missing_king() else GameTermination.NO_LEGAL_MOVE
         self._details = self._termination.value
 
     def _current_outcome(self) -> chess.Outcome | None:
         board = self._board
+        if isinstance(board, DuckBoard):
+            return board.outcome()
         if board.is_variant_loss():
             return chess.Outcome(chess.Termination.VARIANT_LOSS, not board.turn)
         if board.is_variant_win():
@@ -108,7 +115,7 @@ class GameState():
         self._recorded_stack_size = stack_size
 
     @staticmethod
-    def _position_key(board: chess.Board) -> tuple[str, ...]:
+    def _position_key(board: Position) -> tuple[str, ...]:
         return tuple(board.fen(en_passant="legal").split()[:4])
 
     def record_timeout(self, loser: chess.Color):
@@ -121,7 +128,7 @@ class GameState():
             return
         self._set_decisive_result(winner, GameTermination.TIMEOUT)
 
-    def record_illegal_move(self, loser: chess.Color, move: chess.Move):
+    def record_illegal_move(self, loser: chess.Color, move: Turn | str):
         winner = not loser
         self._set_decisive_result(winner, GameTermination.ILLEGAL_MOVE, str(move))
 

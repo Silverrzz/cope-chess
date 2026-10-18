@@ -1,4 +1,5 @@
 import chess
+from cope.variants import Position
 
 
 def setoption_command(name: str, value: str | int | bool) -> str:
@@ -7,7 +8,7 @@ def setoption_command(name: str, value: str | int | bool) -> str:
     return f"setoption name {name} value {value}"
 
 
-def position_command(board: chess.Board) -> str:
+def position_command(board: Position) -> str:
     root = board.root()
     moves = " ".join(move.uci() for move in board.move_stack)
 

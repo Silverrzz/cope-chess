@@ -4,9 +4,10 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from cope.variants import VariantId, get_variant
 
 
-WORKER_PROTOCOL_VERSION = 20
+WORKER_PROTOCOL_VERSION = 21
 BENCHMARK_PROTOCOL_VERSION = 16
 PROTOCOL_VERSION = WORKER_PROTOCOL_VERSION
 ENGINE_PROCESS_MEMORY_OVERHEAD_MB = 64
@@ -216,7 +217,8 @@ FormatOptions = (
 
 
 class TournamentConfig(StrictModel):
-    variant: Literal["standard", "dfrc"] = "standard"
+    variant: VariantId = "standard"
+    rules_revision: str = ""
     format: TournamentFormat
     format_options: FormatOptions
     participants: list[int] = Field(min_length=2)
@@ -256,8 +258,16 @@ class TournamentConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_format_options(self) -> TournamentConfig:
-        if self.variant == "dfrc" and self.opening_suite_id is None:
-            raise ValueError("DFRC tournaments require a starting-position suite")
+        variant = get_variant(self.variant)
+        if self.rules_revision and self.rules_revision != variant.rules_revision:
+            raise ValueError("Unsupported variant rules revision")
+        object.__setattr__(self, "rules_revision", variant.rules_revision)
+        if variant.requires_openings and self.opening_suite_id is None:
+            raise ValueError(f"{variant.name} tournaments require a starting-position suite")
+        if variant.duck and (self.adjudication.draw is not None or self.adjudication.resign is not None):
+            raise ValueError("Duck tournaments do not support evaluation adjudication")
+        if any(name.strip().lower() in {"uci_variant", "uci_chess960", "duck960"} for name in self.uci_options):
+            raise ValueError("Variant options are controlled by the tournament variant")
         expected: dict[TournamentFormat, type[StrictModel]] = {
             TournamentFormat.ROUND_ROBIN: RoundRobinFormatOptions,
             TournamentFormat.SWISS: SwissFormatOptions,
@@ -426,6 +436,8 @@ class GameBenchmarkReference(StrictModel):
 
 
 class WorkerGameAssignment(StrictModel):
+    variant: VariantId = "standard"
+    rules_revision: str = "chess1"
     assignment: GameAssignment
     tournament_name: str = Field(min_length=1)
     round: int = Field(gt=0)
@@ -437,6 +449,12 @@ class WorkerGameAssignment(StrictModel):
     required_resources: WorkerResources
     benchmark_reference: GameBenchmarkReference | None = None
     workflow: tuple[WorkflowStep, ...] = Field(default_factory=game_setup_workflow)
+
+    @model_validator(mode="after")
+    def validate_variant(self) -> WorkerGameAssignment:
+        if get_variant(self.variant).rules_revision != self.rules_revision:
+            raise ValueError("Assignment variant rules revision is unsupported")
+        return self
 
     @field_validator("engines")
     @classmethod
@@ -860,7 +878,7 @@ class BootstrapEnvelope(_EnvelopeBase):
 
 
 class Envelope(_EnvelopeBase):
-    v: Literal[20] = WORKER_PROTOCOL_VERSION
+    v: Literal[21] = WORKER_PROTOCOL_VERSION
 
 
 class BenchmarkEnvelope(_EnvelopeBase):

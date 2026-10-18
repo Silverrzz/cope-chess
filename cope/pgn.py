@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import chess
+from cope.variants import create_board, get_variant
 
 from cope.db import MoveRecord
 
@@ -63,11 +64,8 @@ class PgnGame:
 
 
 def render_annotated_pgn(game: PgnGame) -> str:
-    board = (
-        chess.Board(chess960=game.variant == "dfrc")
-        if not game.start_fen or game.start_fen == "startpos"
-        else chess.Board(game.start_fen, chess960=game.variant == "dfrc")
-    )
+    variant = get_variant(game.variant)
+    board = create_board(game.start_fen, variant=game.variant)
     date, utc_time = _date_headers(game.started_at)
     headers = [
         ("Event", game.event),
@@ -78,10 +76,8 @@ def render_annotated_pgn(game: PgnGame) -> str:
         ("Black", game.black),
         ("Result", game.result),
     ]
-    if game.variant == "dfrc":
-        headers.append(("Variant", "Chess960"))
-        headers.append(("CopeVariant", "DFRC"))
-    if board.fen() != chess.STARTING_FEN:
+    headers.extend(variant.pgn_headers().items())
+    if board.fen() != chess.STARTING_FEN or variant.chess960:
         headers.extend((("FEN", board.fen()), ("SetUp", "1")))
     headers.extend(
         (
@@ -112,10 +108,10 @@ def render_annotated_pgn(game: PgnGame) -> str:
     for move_record in game.moves:
         try:
             move = board.parse_uci(move_record.uci)
-        except ValueError:
-            break
+        except ValueError as exc:
+            raise ValueError(f"Game {game.id}: invalid turn at ply {move_record.ply}: {move_record.uci}") from exc
         if move not in board.legal_moves:
-            break
+            raise ValueError(f"Game {game.id}: illegal turn at ply {move_record.ply}")
         mover = board.turn
         move_number = board.fullmove_number
         san = board.san(move)

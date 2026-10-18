@@ -1,7 +1,8 @@
 import chess
+from cope.variants import Position, Turn
 from collections.abc import Callable, Iterable
 
-from .engine_instance import EngineInstance, EngineSearchResult
+from .engine_instance import EngineInstance, EngineSearchResult, IllegalEngineTurn
 from .game_state import GameState
 from .time_control import TimeControlCategory, TimeManager, TimeOutError
 from .tournament import Game
@@ -136,7 +137,10 @@ class GameRunner:
                     self._on_clock_sync(side_to_move, False, 0)
             else:
                 clock.stop_clock_after_timeout()
-                self._get_game_state().record_engine_error(side_to_move, error)
+                if isinstance(error, IllegalEngineTurn):
+                    self._get_game_state().record_illegal_move(side_to_move, str(error))
+                else:
+                    self._get_game_state().record_engine_error(side_to_move, error)
                 if self._on_clock_sync is not None:
                     self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
                 return None
@@ -188,7 +192,7 @@ class GameRunner:
     def _capture_search_result(
         self,
         engine: EngineInstance,
-        board: chess.Board,
+        board: Position,
     ) -> EngineSearchResult | None:
         result = (
             engine.capture_latest_info_result(board)
@@ -235,7 +239,7 @@ class GameRunner:
     def _get_game_state(self) -> GameState:
         return self._game.state
 
-    def _get_board(self) -> chess.Board:
+    def _get_board(self) -> Position:
         return self._get_game_state().get_board()
 
     def get_engine_to_move(self) -> EngineInstance:
@@ -250,7 +254,7 @@ class GameRunner:
 
         return self._game.black_tm
 
-    def push_legal_move(self, move: chess.Move, side_to_move: chess.Color) -> bool:
+    def push_legal_move(self, move: Turn, side_to_move: chess.Color) -> bool:
         board = self._get_board()
 
         if move not in board.legal_moves:

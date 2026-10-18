@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from cope.core.models import TournamentConfig
+from cope.variants import VariantId, create_board, get_variant
+from cope.db.repo import validate_rating_list_variant, validate_tournament_variant
 from cope.db import (
     create_dockerfile_pull_job, create_engine, create_engine_version, create_tournament,
     engine_build_is_benchmarked, get_common_benchmark_reference, get_engine,
@@ -26,7 +28,7 @@ class Preset(Input):
     name: str = Field(min_length=1, max_length=100)
     rating_list_id: int = Field(gt=0)
     category: Literal["bullet", "rapid", "classical"]
-    variant: Literal["standard", "dfrc"] = "standard"
+    variant: VariantId = "standard"
     config: TournamentConfig
     opponent_count: int = Field(default=9, ge=1, le=499)
 
@@ -51,8 +53,10 @@ def save_preset(connection, principal, payload: Preset):
         row = connection.execute("SELECT id FROM opening_suites WHERE id = ?", (payload.config.opening_suite_id,)).fetchone()
         if row is None:
             raise ValueError("Opening suite does not exist")
-    if payload.variant == "dfrc" and payload.config.opening_suite_id is None:
-        raise ValueError("DFRC presets require an explicit DFRC opening suite")
+    validate_rating_list_variant(connection, payload.rating_list_id, payload.config)
+    validate_tournament_variant(connection, payload.config)
+    if get_variant(payload.variant).requires_openings and payload.config.opening_suite_id is None:
+        raise ValueError(f"{get_variant(payload.variant).name} presets require an explicit starting-position suite")
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", (f"control-preset:{payload.key}",))
     revision = connection.execute("SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM control_presets WHERE key = ?", (payload.key,)).fetchone()["revision"]
     connection.execute(
@@ -78,6 +82,7 @@ class IntakeEngine(Input):
     author: str = Field(default="", max_length=120)
     uci_options: dict[str, str | int | bool] = Field(default_factory=dict)
     dfrc: Literal["supported", "unsupported", "unknown"] = "unknown"
+    variant_capabilities: dict[VariantId, Literal["supported", "unsupported", "unknown"]] = Field(default_factory=dict)
     capability_evidence: str = Field(default="", max_length=2000)
     top20: bool | None = None
     estimated_elo: float | None = Field(default=None, ge=-10000, le=10000, allow_inf_nan=False)
@@ -85,12 +90,12 @@ class IntakeEngine(Input):
 
     @model_validator(mode="after")
     def require_evidence(self):
-        if self.dfrc != "unknown" and not self.capability_evidence:
-            raise ValueError("A DFRC capability assessment requires evidence")
+        if (self.dfrc != "unknown" or any(value != "unknown" for value in self.variant_capabilities.values())) and not self.capability_evidence:
+            raise ValueError("A variant capability assessment requires evidence")
         if (self.top20 is not None or self.estimated_elo is not None) and not self.strength_evidence:
             raise ValueError("A strength assessment requires evidence")
-        if any(not name or name.lower() in {"threads", "hash", "uci_chess960"} for name in self.uci_options):
-            raise ValueError("Threads, Hash and UCI_Chess960 are controlled by the tournament")
+        if any(not name or name.lower() in {"threads", "hash", "uci_chess960", "uci_variant", "duck960"} for name in self.uci_options):
+            raise ValueError("Resource and variant options are controlled by the tournament")
         return self
 
 
@@ -99,7 +104,7 @@ class IntakeRequest(Input):
     queue_revision: int = Field(ge=0)
     repository_base_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     engines: list[IntakeEngine] = Field(min_length=1, max_length=100)
-    preset_keys: list[str] = Field(min_length=2, max_length=20)
+    preset_keys: list[str] = Field(min_length=1, max_length=20)
     top20_rating_list_id: int | None = Field(default=None, gt=0)
 
 
@@ -132,7 +137,7 @@ def compile_intake(connection, payload: IntakeRequest):
         raise ValueError("Choose distinct existing tournament presets")
     chosen = [presets[key] for key in payload.preset_keys]
     categories = {item["category"] for item in chosen if item["variant"] == "standard"}
-    if not {"bullet", "rapid"}.issubset(categories):
+    if categories and not {"bullet", "rapid"}.issubset(categories):
         raise ValueError("Select standard bullet and rapid presets")
     if "classical" in categories and payload.top20_rating_list_id is None:
         raise ValueError("Choose the rating list used to assess top-20 eligibility")
@@ -287,8 +292,10 @@ def register_engine(context, payload):
     connection.execute(
         """INSERT INTO control_engine_capabilities(build_hash, dfrc, evidence, actor) VALUES (?, ?, ?, ?)
            ON CONFLICT(build_hash) DO UPDATE SET dfrc = EXCLUDED.dfrc, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()""",
-        (expected, item.dfrc, item.capability_evidence, context.actor),
+        (expected, item.variant_capabilities.get("dfrc", item.dfrc), item.capability_evidence, context.actor),
     )
+    for variant, status in {"dfrc": item.dfrc, **item.variant_capabilities}.items():
+        connection.execute("INSERT INTO engine_variant_capabilities(build_hash, variant, status, evidence, actor) VALUES (?, ?, ?, ?, ?) ON CONFLICT(build_hash, variant) DO UPDATE SET status = EXCLUDED.status, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()", (expected, variant, status, item.capability_evidence, context.actor))
     connection.execute("UPDATE engine_acknowledged_queue SET engine_version_id = ? WHERE id = ?", (version_id, submission["id"]))
     from cope.db import schedule_benchmark_jobs
 
@@ -319,7 +326,8 @@ def queue_plans(context, payload):
         priority = 1 if preset["variant"] == "dfrc" else 0
         plan = {"preset": preset, "assessment": {"top20": payload.engine.top20, "estimated_elo": payload.engine.estimated_elo,
                 "evidence": payload.engine.strength_evidence, "reference_list_id": payload.top20_rating_list_id},
-                "dfrc": payload.engine.dfrc, "capability_evidence": payload.engine.capability_evidence,
+                "dfrc": payload.engine.variant_capabilities.get("dfrc", payload.engine.dfrc),
+                "variant_capabilities": payload.engine.variant_capabilities, "capability_evidence": payload.engine.capability_evidence,
                 "ordering_policy": {"revision": 1, "nominal_moves": 80, "dfrc_last": True, "oldest_first": True}}
         row = connection.execute(
             """INSERT INTO engine_waiting_test_queue(engine_version_id, rating_list_id, position, submitted_at,
@@ -393,10 +401,12 @@ def _materialise_one(context, queue_id):
             return {"queue_id": queue_id, "status": "waiting", "reason": "Awaiting top-20 strength evidence on the reference rating list"}
         if not eligible:
             return {"queue_id": queue_id, "status": "skipped", "reason": "Does not qualify for top-20 classical", "assessment": assessment}
-    capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (hero.build_hash,)).fetchone()
-    dfrc = capability["dfrc"] if capability else "unknown"
-    if preset["variant"] == "dfrc" and dfrc != "supported":
-        return {"queue_id": queue_id, "status": "skipped" if dfrc == "unsupported" else "waiting", "reason": f"DFRC capability is {dfrc}"}
+    validate_rating_list_variant(connection, preset["rating_list_id"], TournamentConfig.model_validate(preset["config"]))
+    if preset["variant"] != "standard":
+        capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (hero.build_hash, preset["variant"])).fetchone()
+        status = capability["status"] if capability else "unknown"
+        if status != "supported":
+            return {"queue_id": queue_id, "status": "skipped" if status == "unsupported" else "waiting", "reason": f"{preset['variant']} capability is {status}"}
     if not engine_build_is_benchmarked(connection, engine_version_id=hero_id, build_hash=hero.build_hash):
         jobs = list(connection.execute("SELECT status, error FROM benchmark_jobs WHERE build_hash = ?", (hero.build_hash,)))
         if jobs and all(job["status"] == "failed" for job in jobs):
@@ -413,9 +423,9 @@ def _materialise_one(context, queue_id):
             continue
         if not engine_build_is_benchmarked(connection, engine_version_id=record.id, build_hash=record.build_hash):
             continue
-        if preset["variant"] == "dfrc":
-            capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (record.build_hash,)).fetchone()
-            if capability is None or capability["dfrc"] != "supported":
+        if preset["variant"] != "standard":
+            capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (record.build_hash, preset["variant"])).fetchone()
+            if capability is None or capability["status"] != "supported":
                 continue
         candidates.append(row)
     candidates.sort(key=lambda row: (abs(row.elo - target) if target is not None else -row.elo, row.games_played, row.engine.engine_id))
@@ -445,7 +455,7 @@ def _materialise_one(context, queue_id):
         if not openings:
             raise ValueError("Tournament opening suite is empty")
         for opening in openings:
-            board = chess.Board(opening.start_fen, chess960=config.variant == "dfrc")
+            board = create_board(opening.start_fen, variant=config.variant)
             if not board.is_valid():
                 raise ValueError("Opening suite contains a position invalid for the selected variant")
     tournament_id = create_tournament(connection, f"{hero.name} {hero.version} · {preset['name']}"[:160], config)
@@ -500,6 +510,26 @@ def assess_capability(context, payload):
            ON CONFLICT(build_hash) DO UPDATE SET dfrc = EXCLUDED.dfrc, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()""",
         (payload.build_hash, payload.dfrc, payload.evidence, context.actor),
     )
+    context.connection.execute("INSERT INTO engine_variant_capabilities(build_hash, variant, status, evidence, actor) VALUES (?, ?, ?, ?, ?) ON CONFLICT(build_hash, variant) DO UPDATE SET status = EXCLUDED.status, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()", (payload.build_hash, "dfrc", payload.dfrc, payload.evidence, context.actor))
+    return payload.model_dump()
+
+
+class VariantCapability(Input):
+    engine_version_id: int = Field(gt=0)
+    build_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    variant: VariantId
+    status: Literal["supported", "unsupported", "unknown"]
+    evidence: str = Field(min_length=1, max_length=2000)
+
+
+@action("engines.assess_variant", "Record variant capability evidence for an exact engine build", "engines:write", VariantCapability)
+def assess_variant(context, payload):
+    engine = get_engine(context.connection, payload.engine_version_id)
+    if engine is None or engine.build_hash != payload.build_hash:
+        raise ValueError("Engine build no longer matches the capability assessment")
+    context.connection.execute("INSERT INTO engine_variant_capabilities(build_hash, variant, status, evidence, actor) VALUES (?, ?, ?, ?, ?) ON CONFLICT(build_hash, variant) DO UPDATE SET status = EXCLUDED.status, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()", (payload.build_hash, payload.variant, payload.status, payload.evidence, context.actor))
+    if payload.variant == "dfrc":
+        context.connection.execute("INSERT INTO control_engine_capabilities(build_hash, dfrc, evidence, actor) VALUES (?, ?, ?, ?) ON CONFLICT(build_hash) DO UPDATE SET dfrc = EXCLUDED.dfrc, evidence = EXCLUDED.evidence, actor = EXCLUDED.actor, recorded_at = clock_timestamp()", (payload.build_hash, payload.status, payload.evidence, context.actor))
     return payload.model_dump()
 
 
@@ -510,7 +540,7 @@ class DfrcSuite(Input):
 
 
 @action("openings.generate_dfrc", "Create a reproducible double Fischer random opening suite", "openings:write", DfrcSuite)
-def generate_dfrc_suite(context, payload):
+def generate_dfrc_suite(context, payload, variant: str = "dfrc"):
     import chess
     import random
     from cope.core.models import OpeningLine
@@ -527,10 +557,15 @@ def generate_dfrc_suite(context, payload):
                 board.set_piece_at(square, other.piece_at(square))
         board.castling_rights = (board.rooks & board.occupied_co[chess.WHITE] & chess.BB_RANK_1) | (board.rooks & board.occupied_co[chess.BLACK] & chess.BB_RANK_8)
         fen = board.fen(shredder=True)
-        positions.append(OpeningLine(name=f"DFRC {white}/{black} #{index + 1}", start_fen=fen, fen=fen))
-    suite_id = create_opening_suite(context.connection, name=payload.name, description=f"DFRC seed {payload.seed}; {payload.positions} independently sampled starting positions")
+        positions.append(OpeningLine(name=f"{get_variant(variant).name} {white}/{black} #{index + 1}", start_fen=fen, fen=fen))
+    suite_id = create_opening_suite(context.connection, name=payload.name, description=f"{get_variant(variant).name} seed {payload.seed}; {payload.positions} independently sampled starting positions", variant=variant)
     replace_suite_openings(context.connection, suite_id, positions)
     return {"opening_suite_id": suite_id, "seed": payload.seed, "positions": payload.positions}
+
+
+@action("openings.generate_duck960", "Create a reproducible Duck960 opening suite", "openings:write", DfrcSuite)
+def generate_duck960_suite(context, payload):
+    return generate_dfrc_suite(context, payload, variant="duck960")
 
 
 class WorkerDrain(Input):

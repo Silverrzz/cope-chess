@@ -21,6 +21,8 @@ interface RatingEngine {
 }
 
 interface RatingList {
+  variant?: TournamentSettings['variant']
+  rules_revision?: string
   id: number
   name: string
   engines: RatingEngine[]
@@ -75,6 +77,12 @@ const renamingId = ref<number | null>(null)
 
 const selectedDivisionList = computed(() => context.value?.rating_lists.find((item) => item.id === divisionListId.value) ?? null)
 const selectedGauntletList = computed(() => context.value?.rating_lists.find((item) => item.id === gauntletListId.value) ?? null)
+watch(selectedDivisionList, (list) => {
+  if (list?.variant && list.variant !== divisionSettings.value.variant) divisionSettings.value = { ...divisionSettings.value, variant: list.variant, rules_revision: list.rules_revision || (list.variant.startsWith('duck') ? 'duck1' : 'chess1'), opening_suite_id: null, adjudication: { ...divisionSettings.value.adjudication, draw: null, resign: null } }
+})
+watch(selectedGauntletList, (list) => {
+  if (list?.variant && list.variant !== gauntletSettings.value.variant) gauntletSettings.value = { ...gauntletSettings.value, variant: list.variant, rules_revision: list.rules_revision || (list.variant.startsWith('duck') ? 'duck1' : 'chess1'), opening_suite_id: null, adjudication: { ...gauntletSettings.value.adjudication, draw: null, resign: null } }
+})
 const maxDivisions = computed(() => Math.max(1, Math.min(100, Math.floor((selectedDivisionList.value?.engines.length ?? 0) / 2))))
 
 const divisionDrafts = computed<DivisionDraft[]>(() => {

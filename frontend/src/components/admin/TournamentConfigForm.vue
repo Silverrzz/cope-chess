@@ -61,7 +61,7 @@ function validate(): string {
   if (!Number.isInteger(config.value.concurrency) || config.value.concurrency < 1) return 'Concurrent games must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_threads) || config.value.engine_threads < 1) return 'Engine threads must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_hash_mb) || config.value.engine_hash_mb < 1) return 'Engine hash must be a whole number of at least 1 MB.'
-  if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
+  if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash', 'uci_variant', 'uci_chess960', 'duck960'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
   if (config.value.adjudication.max_moves !== null && (!Number.isInteger(config.value.adjudication.max_moves) || config.value.adjudication.max_moves < 1)) return 'Maximum moves must be a whole number of at least 1.'
   const draw = config.value.adjudication.draw
   if (draw && (!Number.isInteger(draw.min_fullmove) || draw.min_fullmove < 1)) return 'Draw adjudication must start from a whole full move of at least 1.'
@@ -71,6 +71,7 @@ function validate(): string {
   if (resign && (!Number.isInteger(resign.min_abs_cp) || resign.min_abs_cp < 1)) return 'Win evaluation must be a whole number of at least 1 centipawn.'
   if (resign && (!Number.isInteger(resign.consecutive_plies) || resign.consecutive_plies < 2)) return 'Win adjudication requires at least 2 consecutive plies.'
 
+  if (['dfrc', 'duck960'].includes(config.value.variant || '') && !config.value.opening_suite_id) return 'Choose a starting-position suite for this variant.'
   const options = config.value.format_options
   if (config.value.format === 'round_robin' && (!('cycles' in options) || !Number.isInteger(options.cycles) || options.cycles < 1)) return 'Cycles must be a whole number of at least 1.'
   if (config.value.format === 'swiss' && (!('rounds' in options) || !Number.isInteger(options.rounds) || options.rounds < 1)) return 'Swiss rounds must be a whole number of at least 1.'

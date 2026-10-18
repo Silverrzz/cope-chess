@@ -1,6 +1,16 @@
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
 export type Color = 'white' | 'black'
+export type Variant = 'standard' | 'dfrc' | 'duck' | 'duck960'
+export const VARIANT_OPTIONS = [
+  { id: 'standard', name: 'Standard' }, { id: 'dfrc', name: 'DFRC' },
+  { id: 'duck', name: 'Duck' }, { id: 'duck960', name: 'Duck960' },
+] as const
+
+export function isTurn(move: string): boolean {
+  const match = /^([a-h][1-8])([a-h][1-8])([qrbn]?)(?:,([a-h][1-8])([a-h][1-8]))?$/.exec(move.toLowerCase())
+  return Boolean(match && (!match[4] || match[4] === match[2]))
+}
 export type Piece = 'P' | 'N' | 'B' | 'R' | 'Q' | 'K' | 'p' | 'n' | 'b' | 'r' | 'q' | 'k'
 
 export interface BoardArrow {
@@ -12,6 +22,7 @@ export interface BoardArrow {
 }
 
 export interface Position {
+  duckSquare: number | null
   squares: Array<Piece | null>
   turn: 'w' | 'b'
   castling: string
@@ -44,6 +55,7 @@ export function parseFen(fen?: string | null): Position {
   const fields = normalizedFen(fen).split(/\s+/)
   const ranks = fields[0]?.split('/') || []
   const squares: Array<Piece | null> = Array(64).fill(null)
+  let duckSquare: number | null = null
 
   ranks.slice(0, 8).forEach((rank, rankIndex) => {
     let file = 0
@@ -51,6 +63,9 @@ export function parseFen(fen?: string | null): Position {
       const empty = Number(value)
       if (Number.isInteger(empty) && empty > 0) {
         file += empty
+      } else if (value === '*' && file < 8) {
+        duckSquare = rankIndex * 8 + file
+        file += 1
       } else if (isPiece(value) && file < 8) {
         squares[rankIndex * 8 + file] = value
         file += 1
@@ -60,6 +75,7 @@ export function parseFen(fen?: string | null): Position {
 
   return {
     squares,
+    duckSquare,
     turn: fields[1] === 'b' ? 'b' : 'w',
     castling: fields[2] && fields[2] !== '' ? fields[2] : '-',
     enPassant: fields[3] && fields[3] !== '' ? fields[3] : '-',
@@ -68,10 +84,11 @@ export function parseFen(fen?: string | null): Position {
   }
 }
 
-export function applyUci(position: Position, move: string): Position {
+export function applyUci(position: Position, move: string, variant?: Variant): Position {
   const next = clonePosition(position)
-  const normalized = move.trim().toLowerCase()
-  if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(normalized)) return next
+  const turn = move.trim().toLowerCase()
+  if (!isTurn(turn)) return next
+  const [normalized = '', duck] = turn.split(',')
 
   const fromSquare = normalized.slice(0, 2)
   const toSquare = normalized.slice(2, 4)
@@ -105,7 +122,7 @@ export function applyUci(position: Position, move: string): Position {
     next.squares[kingTo] = piece
     next.squares[rookTo] = isWhite ? 'R' : 'r'
     captured = null
-  } else if (isKing && Math.abs(toFile - fromFile) === 2) {
+  } else if (isKing && variant !== 'duck960' && variant !== 'dfrc' && Math.abs(toFile - fromFile) === 2) {
     const rank = fromSquare[1]
     const kingSide = toFile > fromFile
     const rookFrom = squareIndex(`${kingSide ? 'h' : 'a'}${rank}`)
@@ -123,6 +140,9 @@ export function applyUci(position: Position, move: string): Position {
   }
 
   next.castling = updateCastling(next.castling, piece, fromSquare, toSquare, captured)
+  if (captured === 'K') next.castling = next.castling.replace(/[A-Z]/g, '') || '-'
+  if (captured === 'k') next.castling = next.castling.replace(/[a-z]/g, '') || '-'
+  if (duck) next.duckSquare = squareIndex(duck.slice(2))
   next.enPassant = isPawn && Math.abs(toRank - fromRank) === 2
     ? `${fromSquare[0]}${(fromRank + toRank) / 2}`
     : '-'
@@ -132,10 +152,10 @@ export function applyUci(position: Position, move: string): Position {
   return next
 }
 
-export function buildPositions(fen: string | null | undefined, moves: string[]): Position[] {
+export function buildPositions(fen: string | null | undefined, moves: string[], variant?: Variant): Position[] {
   const positions = [parseFen(fen)]
   for (const move of moves) {
-    positions.push(applyUci(positions.at(-1)!, move))
+    positions.push(applyUci(positions.at(-1)!, move, variant))
   }
   return positions
 }
@@ -146,7 +166,7 @@ export function positionFen(position: Position): string {
     let value = ''
     let empty = 0
     for (let file = 0; file < 8; file += 1) {
-      const piece = position.squares[rank * 8 + file]
+      const piece = position.duckSquare === rank * 8 + file ? '*' : position.squares[rank * 8 + file]
       if (piece) {
         if (empty) value += String(empty)
         empty = 0

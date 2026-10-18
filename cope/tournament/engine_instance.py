@@ -6,10 +6,12 @@ import threading
 import time
 import select
 import os
+import re
 from collections.abc import Callable, Sequence
 from typing import Protocol, runtime_checkable
 
 import chess
+from cope.variants import Position, Turn
 
 from cope.core.stream import (
     clamp_uci_info_line,
@@ -22,7 +24,7 @@ from .uci import position_command, setoption_command
 
 @dataclass(frozen=True, slots=True)
 class EngineSearchResult:
-    bestmove: chess.Move
+    bestmove: Turn
     command_elapsed_ms: int | None = None
     eval_cp: int | None = None
     eval_mate: int | None = None
@@ -57,6 +59,10 @@ class EngineCommandOutput:
     elapsed_ms: int | None = None
 
 
+class IllegalEngineTurn(RuntimeError):
+    pass
+
+
 @runtime_checkable
 class EngineCommandTransport(Protocol):
     def execute_engine_command(
@@ -77,6 +83,7 @@ class EngineInstance:
         self._stdout_buffer = ""
         self._io_lock = threading.Lock()
         self._started = False
+        self._advertised_options: dict[str, str] = {}
         self._search_executor = ThreadPoolExecutor(max_workers=1)
         self._search_future: Future | None = None
         self._last_search_result: EngineSearchResult | None = None
@@ -112,24 +119,24 @@ class EngineInstance:
     def start_new_game(self):
         if self._is_remote():
             self._ensure_engine_started()
-            for name, value in self._options.items():
+            for name, value in self._configured_options().items():
                 self._send_remote_command(setoption_command(name, value))
             self._send_remote_command("ucinewgame")
             self._read_remote_until_token("isready", "readyok")
             return
 
         self._ensure_engine_started()
-        for name, value in self._options.items():
+        for name, value in self._configured_options().items():
             self._send_uci_command(setoption_command(name, value))
 
         self._send_uci_command("ucinewgame")
         self._send_uci_command("isready")
         self._read_until_token("readyok")
 
-    def get_move(self, board: chess.Board, go_command_arg: str) -> chess.Move:
+    def get_move(self, board: Position, go_command_arg: str) -> Turn:
         return self.get_search_result(board, go_command_arg).bestmove
 
-    def prepare_position(self, board: chess.Board) -> None:
+    def prepare_position(self, board: Position) -> None:
         self._ensure_engine_started()
         command = position_command(board)
         if self._is_remote():
@@ -137,7 +144,7 @@ class EngineInstance:
             return
         self._send_uci_command(command)
 
-    def get_search_result(self, board: chess.Board, go_command_arg: str) -> EngineSearchResult:
+    def get_search_result(self, board: Position, go_command_arg: str) -> EngineSearchResult:
         self._ensure_engine_started()
         self._current_search_info = None
         self._current_info_line = None
@@ -171,7 +178,7 @@ class EngineInstance:
                 self._last_search_result = result
                 return result
 
-    def start_search(self, board: chess.Board, go_command_arg: str = "go"):
+    def start_search(self, board: Position, go_command_arg: str = "go"):
         if self.is_searching():
             raise RuntimeError(f"{self._name} is already searching")
 
@@ -194,7 +201,7 @@ class EngineInstance:
 
     def capture_latest_info_result(
         self,
-        board: chess.Board,
+        board: Position,
     ) -> EngineSearchResult | None:
         info = self._current_search_info
         if info is None or not info.pv:
@@ -281,7 +288,10 @@ class EngineInstance:
         if self._is_remote():
             if self._started:
                 return
-            self._send_remote_command("uci")
+            output = self._send_remote_command("uci")
+            if "uciok" not in output.lines:
+                raise RuntimeError(f"{self._name} did not complete UCI initialization")
+            self._remember_options(output.lines)
             self._read_remote_until_token("isready", "readyok")
             self._started = True
             return
@@ -291,10 +301,46 @@ class EngineInstance:
             if self._started:
                 return
             self._send_raw("uci")
-            self._read_until_token("uciok")
+            self._remember_options(self._read_until_token("uciok"))
             self._send_raw("isready")
             self._read_until_token("readyok")
             self._started = True
+
+    def _remember_options(self, lines: list[str]) -> None:
+        self._advertised_options = {}
+        for line in lines:
+            match = re.match(r"option name (.+?) type ", line, re.IGNORECASE)
+            if match:
+                self._advertised_options[match[1].lower()] = line
+
+    def _configured_options(self) -> dict[str, str | int | bool]:
+        options = dict(self._options)
+        duck = options.get("UCI_Variant") == "duck"
+        if duck:
+            declaration = self._advertised_options.get("uci_variant", "")
+            if not re.search(r"(?:var|default) duck(?:\s|$)", declaration, re.IGNORECASE):
+                raise RuntimeError(f"{self._name} does not advertise UCI_Variant duck")
+        elif options.get("UCI_Variant") == "chess":
+            declaration = self._advertised_options.get("uci_variant", "")
+            if not declaration:
+                options.pop("UCI_Variant", None)
+            elif not re.search(r"(?:var|default) chess(?:\s|$)", declaration, re.IGNORECASE):
+                if re.search(r"(?:var|default) standard(?:\s|$)", declaration, re.IGNORECASE):
+                    options["UCI_Variant"] = "standard"
+                else:
+                    raise RuntimeError(f"{self._name} does not advertise standard chess support")
+        if options.get("UCI_Chess960") is True and "uci_chess960" not in self._advertised_options:
+            declaration = self._advertised_options.get("uci_variant", "")
+            if duck and re.search(r"var duck960(?:\s|$)", declaration, re.IGNORECASE):
+                options["UCI_Variant"] = "duck960"
+            else:
+                raise RuntimeError(f"{self._name} does not advertise Chess960 support")
+        if "uci_chess960" not in self._advertised_options:
+            options.pop("UCI_Chess960", None)
+        if duck:
+            options = {name: value for name, value in options.items()
+                       if name.lower() not in {"threads", "hash"} or name.lower() in self._advertised_options}
+        return options
 
     def _ensure_process(self) -> subprocess.Popen[str]:
         if self._process is not None and self._process.poll() is None:
@@ -348,12 +394,14 @@ class EngineInstance:
 
     def _read_until_token(self, token: str):
         deadline = time.monotonic() + 10.0
+        lines = []
         while True:
             if time.monotonic() > deadline:
                 raise RuntimeError(f"{self._name} timed out waiting for {token}")
             line = self._read_line()
+            lines.append(line)
             if line == token:
-                return
+                return lines
 
     def is_searching(self) -> bool:
         return self._search_future is not None and not self._search_future.done()
@@ -370,7 +418,7 @@ class EngineInstance:
             return True
         return True
 
-    def get_search_move(self) -> chess.Move:
+    def get_search_move(self) -> Turn:
         if self._search_future is None:
             raise RuntimeError(f"{self._name} has no active search")
 
@@ -493,14 +541,14 @@ class EngineInstance:
 
 def _parse_search_result(
     lines: list[str],
-    board: chess.Board,
+    board: Position,
     engine_name: str,
     *,
     command_elapsed_ms: int | None = None,
     initial_info: EngineSearchInfo | None = None,
     initial_info_line: str | None = None,
 ) -> EngineSearchResult:
-    bestmove: chess.Move | None = None
+    bestmove: Turn | None = None
     search_info = initial_info or EngineSearchInfo()
     info_line = initial_info_line
     for line in lines:
@@ -525,12 +573,12 @@ def _parse_search_result(
                     bestmove_uci = f"{bestmove_uci[:4]}{bestmove_uci[4].lower()}"
                 bestmove = board.parse_uci(bestmove_uci)
             except ValueError as exc:
-                raise RuntimeError(f"{engine_name} returned malformed bestmove: {line}") from exc
+                raise IllegalEngineTurn(f"{engine_name} returned illegal or malformed bestmove: {line}") from exc
 
     if bestmove is None:
         raise RuntimeError(f"{engine_name} did not return bestmove")
     if bestmove not in board.legal_moves:
-        raise RuntimeError(f"{engine_name} returned illegal bestmove: {bestmove.uci()}")
+        raise IllegalEngineTurn(f"{engine_name} returned illegal bestmove: {bestmove.uci()}")
 
     return EngineSearchResult(
         bestmove=bestmove,
