@@ -51,7 +51,7 @@ function score(engineId: string | number | null): string {
           <div class="duck-orbit__rings" aria-hidden="true"><span></span><span></span><span></span></div><span class="duck-vs" aria-hidden="true">VS</span>
           <article v-for="(member, index) in roster" :key="member.id" class="duck-node" :class="`duck-node--${index + 1}`">
             <div class="duck-node__beacon"><span><img v-if="index === 0" :src="wakwak" alt="" /><FishMark v-else /></span></div>
-            <div class="duck-node__card"><strong>{{ member.display_name }}</strong><span>{{ member.profile }}</span><b v-if="played.length || live" class="duck-score">{{ score(member.engine_version_id) }}</b><small v-else>64 threads</small></div>
+            <div class="duck-node__card" :data-cheer-origin="member.id"><strong>{{ member.display_name }}</strong><span>{{ member.profile }}</span><b v-if="played.length || live" class="duck-score">{{ score(member.engine_version_id) }}</b><small v-else>64 threads</small></div>
           </article>
         </div>
         <p class="duck-format">20 games <i>·</i> 20m + 12s <i>·</i> Lichess UHO</p>

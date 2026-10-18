@@ -150,7 +150,7 @@ async function loadViewer(gameId?: string): Promise<void> {
     <section ref="arenaElement" class="arena" aria-label="Wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
-          <EnginePanel :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
+          <EnginePanel :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>

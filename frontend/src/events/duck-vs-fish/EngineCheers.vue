@@ -60,7 +60,7 @@ function launch(cheer: CheerEvent): void {
   seen.add(cheer.id);
   if (seen.size > 128) seen.delete(seen.values().next().value!);
   if (!confettiEnabled.value || window.matchMedia("(prefers-reduced-motion: reduce)").matches || bursts.value.length >= 6) return;
-  const bounds = document.querySelector<HTMLElement>(`[data-cheer-engine="${member.id}"]`)?.getBoundingClientRect();
+  const bounds = document.querySelector<HTMLElement>(`[data-cheer-origin="${member.id}"]`)?.getBoundingClientRect();
   const left = props.members[0]?.id === member.id;
   bursts.value.push({
     id: cheer.id,
