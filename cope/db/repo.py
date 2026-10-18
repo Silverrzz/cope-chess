@@ -4700,14 +4700,15 @@ def _client_deployment_target(
         WHERE target.target_kind = ?
           AND target.target_id = ?
           AND target.target_commit IS NOT NULL
-          AND target.status IN ('waiting', 'updating', 'restarting', 'deferred', 'failed')
           AND job.status != 'failed'
-        ORDER BY target.job_id DESC
+        ORDER BY target.job_id DESC, target.id DESC
         LIMIT 1
         """,
         (target_kind, target_id),
     ).fetchone()
-    return None if row is None else _deployment_target_from_row(row)
+    if row is None or row["status"] == "pending":
+        return None
+    return _deployment_target_from_row(row)
 
 
 def worker_deployment_target(
@@ -4734,14 +4735,15 @@ def _reconcile_client_deployment(
     if target is None:
         return None
     if target.target_commit == app_commit:
-        update_deployment_target_status(
-            connection,
-            target.id,
-            "succeeded",
-            current_commit=app_commit,
-        )
+        if target.status != "succeeded":
+            update_deployment_target_status(
+                connection,
+                target.id,
+                "succeeded",
+                current_commit=app_commit,
+            )
         return None
-    if target.status in {"failed", "deferred"}:
+    if target.status in {"failed", "deferred", "succeeded"}:
         update_deployment_target_status(
             connection,
             target.id,
@@ -4767,7 +4769,11 @@ def reconcile_worker_deployment(
     app_commit: str,
 ) -> DeploymentTargetRecord | None:
     target = worker_deployment_target(connection, worker_id)
-    if target is not None and target.target_commit == app_commit:
+    if (
+        target is not None
+        and target.status != "succeeded"
+        and target.target_commit == app_commit
+    ):
         connection.execute(
             "DELETE FROM worker_failures WHERE worker_id = ?",
             (worker_id,),
