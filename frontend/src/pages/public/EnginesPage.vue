@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { api } from '@/api/client'
@@ -185,7 +186,7 @@ function clearFilters(): void {
               <span class="engine-card__mark" aria-hidden="true"><AppIcon name="engine" :size="21" /></span>
               <div>
                 <h3>{{ engine.name }}</h3>
-                <p>{{ engine.version_count }} {{ engine.version_count === 1 ? 'version' : 'versions' }} · latest {{ engine.latest_version }}</p>
+                <p v-if="engineVersionLabel(engine.latest_version)">{{ engine.version_count }} {{ engine.version_count === 1 ? 'version' : 'versions' }} · latest {{ engineVersionLabel(engine.latest_version) }}</p>
               </div>
               <StatusPill :status="engine.active ? 'ready' : 'unavailable'" />
             </header>
@@ -195,8 +196,8 @@ function clearFilters(): void {
               <div><dt>Score</dt><dd>{{ scoreLabel(engine) }}</dd></div>
               <div><dt>W–D–L</dt><dd>{{ recordLabel(engine) }}</dd></div>
             </dl>
-            <div class="engine-card__versions">
-              <span v-for="version in engine.versions.slice(0, 3)" :key="version.id">{{ version.version }}</span>
+            <div v-if="engine.versions.some(version => engineVersionLabel(version.version))" class="engine-card__versions">
+              <span v-for="version in engine.versions.filter(version => engineVersionLabel(version.version)).slice(0, 3)" :key="version.id">{{ engineVersionLabel(version.version) }}</span>
               <span v-if="engine.versions.length > 3">+{{ engine.versions.length - 3 }}</span>
             </div>
             <footer class="engine-card__footer">
