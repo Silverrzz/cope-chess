@@ -22,6 +22,7 @@ interface WaitingItem {
   engine_name: string
   engine_version: string
   rating_list_name: string
+  preset_key?: string
 }
 
 interface EngineVersionChoice {
@@ -39,6 +40,7 @@ interface RatingListChoice {
 }
 
 interface QueueResponse {
+  revision: number
   acknowledged: AcknowledgedItem[]
   waiting_for_test: WaitingItem[]
   engine_versions: EngineVersionChoice[]
@@ -51,6 +53,7 @@ type QueueItem = AcknowledgedItem | WaitingItem
 
 const toast = useToast()
 const acknowledged = ref<AcknowledgedItem[]>([])
+const revision = ref(0)
 const waiting = ref<WaitingItem[]>([])
 const engineVersions = ref<EngineVersionChoice[]>([])
 const ratingLists = ref<RatingListChoice[]>([])
@@ -75,6 +78,7 @@ async function load(): Promise<void> {
   try {
     const response = await api.get<QueueResponse>("/api/admin/engines/queue")
     acknowledged.value = response.acknowledged
+    revision.value = response.revision
     waiting.value = response.waiting_for_test
     engineVersions.value = response.engine_versions
     ratingLists.value = response.rating_lists
@@ -161,8 +165,11 @@ async function save(): Promise<void> {
   try {
     const response = await api.put<QueueResponse>("/api/admin/engines/queue", {
       body: {
-        acknowledged: acknowledged.value.map((item) => ({ name: item.name.trim(), version: item.version.trim() })),
+        revision: revision.value,
+        acknowledged: acknowledged.value.map((item) => ({ id: item.id > 0 ? item.id : undefined, name: item.name.trim(), version: item.version.trim() })),
         waiting_for_test: waiting.value.map((item) => ({
+          id: item.id > 0 ? item.id : undefined,
+          preset_key: item.preset_key ?? "legacy",
           engine_version_id: item.engine_version_id,
           rating_list_id: item.rating_list_id,
         })),
@@ -170,6 +177,7 @@ async function save(): Promise<void> {
     })
     acknowledged.value = response.acknowledged
     waiting.value = response.waiting_for_test
+    revision.value = response.revision
     toast.success(response.message ?? "Engine queues updated.")
   } catch (cause) {
     error.value = errorText(cause)

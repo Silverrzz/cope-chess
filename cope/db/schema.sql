@@ -1392,7 +1392,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 54)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 55)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);

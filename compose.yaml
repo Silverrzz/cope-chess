@@ -16,6 +16,7 @@ x-cope-service: &cope-service
     COPE_WEB_EVENT_TOKEN_FILE: /run/secrets/cope_event_token
     COPE_WEB_STREAM_URL: ws://web:8701/internal/stream
     COPE_WORKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/worker
+    COPE_DOMAIN: ${COPE_DOMAIN}
     COPE_BENCHMARKER_SERVER_URL: wss://${COPE_DOMAIN:?Set COPE_DOMAIN}/benchmarker
     COPE_BENCHMARK_PREPARATION_TIMEOUT_S: ${COPE_BENCHMARK_PREPARATION_TIMEOUT_S:-1800}
     COPE_ENGINE_ARTIFACT_DIR: /var/lib/cope/engine-artifacts
@@ -103,6 +104,10 @@ services:
       COPE_SERVICE_NAME: web
       COPE_UPDATE_REPOSITORY_URL: ${COPE_UPDATE_REPOSITORY_URL:-}
       COPE_UPDATE_REF: ${COPE_UPDATE_REF:-main}
+      COPE_DOMAIN: ${COPE_DOMAIN}
+      COPE_CONTROL_ALLOWED_HOSTS: ${COPE_CONTROL_ALLOWED_HOSTS:-}
+      COPE_CONTROL_REPOSITORY_URL: ${COPE_CONTROL_REPOSITORY_URL:-}
+      COPE_CONTROL_REPOSITORY_BRANCH: ${COPE_CONTROL_REPOSITORY_BRANCH:-main}
     command: ["web", "--host", "0.0.0.0", "--port", "8701"]
     depends_on:
       migrate:
@@ -123,6 +128,22 @@ services:
       <<: *cope-environment
       COPE_SERVICE_NAME: scheduler
     command: ["scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+
+  control-runner:
+    <<: *cope-service
+    environment:
+      <<: *cope-environment
+      COPE_SERVICE_NAME: control-runner
+      COPE_UPDATE_REPOSITORY_URL: ${COPE_UPDATE_REPOSITORY_URL:-}
+      COPE_UPDATE_REF: ${COPE_UPDATE_REF:-main}
+      COPE_CONTROL_REPOSITORY_URL: ${COPE_CONTROL_REPOSITORY_URL:-}
+      COPE_CONTROL_REPOSITORY_BRANCH: ${COPE_CONTROL_REPOSITORY_BRANCH:-main}
+    command: ["control-runner"]
     depends_on:
       migrate:
         condition: service_completed_successfully

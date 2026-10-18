@@ -166,6 +166,12 @@ const router = createRouter({
           meta: { title: "Engine queue" },
         },
         {
+          path: "control",
+          name: "admin-control",
+          component: () => import("@/pages/admin/ControlPage.vue"),
+          meta: { title: "Cope Control" },
+        },
+        {
           path: "engines/:id",
           name: "admin-engine",
           component: () => import("@/pages/admin/EngineFormPage.vue"),

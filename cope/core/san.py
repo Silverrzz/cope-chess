@@ -5,7 +5,7 @@ def pv_to_san(pv: str | None, root_fen: str | None = None, *, numbered: bool = T
     if not pv or root_fen is None:
         return pv
     try:
-        board = chess.Board(root_fen) if root_fen and root_fen != "startpos" else chess.Board()
+        board = chess.Board(root_fen, chess960=True) if root_fen and root_fen != "startpos" else chess.Board(chess960=True)
     except ValueError:
         return pv
 
@@ -13,7 +13,7 @@ def pv_to_san(pv: str | None, root_fen: str | None = None, *, numbered: bool = T
     out: list[str] = []
     for index, token in enumerate(tokens):
         try:
-            move = chess.Move.from_uci(token)
+            move = board.parse_uci(token)
         except ValueError:
             out.extend(tokens[index:])  
             break

@@ -83,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("doctor", help="check database and production configuration")
     subparsers.add_parser("version", help="print the COPE release and protocol version")
+    control_parser = subparsers.add_parser("control-runner", help="execute durable Cope control operations")
+    control_parser.add_argument("--database-url", dest="db_path", default=_default_database_url())
+    control_parser.add_argument("--poll-interval-s", type=float, default=2.0)
 
     mint_worker_parser = subparsers.add_parser(
         "mint-worker-token",
@@ -437,6 +440,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if args.role == "control-runner":
+        from .control.runner import run_control_runner
+
+        run_control_runner(args.db_path, args.poll_interval_s)
+        return 0
 
     if args.role == "version":
         from .core.models import BENCHMARK_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION

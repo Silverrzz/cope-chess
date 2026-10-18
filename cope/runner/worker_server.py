@@ -998,6 +998,10 @@ class WorkerHandshakeServer:
     def _claim_next_tool_job(self, worker: WorkerRecord) -> ToolJobAssignment | None:
         connection = connect_database(self._config.db_path)
         try:
+            drain = connection.execute("SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)).fetchone()
+            if drain is not None and drain["draining"]:
+                connection.commit()
+                return None
             capacity = worker.capacity
             if capacity is None:
                 connection.commit()

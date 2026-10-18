@@ -614,37 +614,17 @@ def _admin_ratings_payload(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _engine_queues_payload(connection: sqlite3.Connection) -> dict[str, Any]:
-    acknowledged = [
-        {
-            "id": int(row["id"]),
-            "name": str(row["name"]),
-            "version": str(row["version"]),
-        }
-        for row in connection.execute(
-            "SELECT id, name, version FROM engine_acknowledged_queue ORDER BY position, id"
-        )
-    ]
-    waiting_for_test = [
-        {
-            "id": int(row["id"]),
-            "engine_version_id": int(row["engine_version_id"]),
-            "rating_list_id": int(row["rating_list_id"]),
-            "engine_name": str(row["engine_name"]),
-            "engine_version": str(row["engine_version"]),
-            "rating_list_name": str(row["rating_list_name"]),
-        }
-        for row in connection.execute(
-            """SELECT queue.id, queue.engine_version_id, queue.rating_list_id,
-                      engine.name AS engine_name, version.version AS engine_version,
-                      rating_list.name AS rating_list_name
-               FROM engine_waiting_test_queue queue
-               JOIN engine_versions version ON version.id = queue.engine_version_id
-               JOIN engines engine ON engine.id = version.engine_id
-               JOIN rating_lists rating_list ON rating_list.id = queue.rating_list_id
-               ORDER BY queue.position, queue.id"""
-        )
-    ]
-    return {"acknowledged": acknowledged, "waiting_for_test": waiting_for_test}
+    from cope.control.intake import queue_snapshot
+
+    snapshot = queue_snapshot(connection)
+    return {
+        "revision": snapshot["revision"],
+        "acknowledged": [{key: item[key] for key in ("id", "name", "version", "submitted_at")} for item in snapshot["acknowledged"]],
+        "waiting_for_test": [{key: item[key] for key in (
+            "id", "engine_version_id", "rating_list_id", "engine_name", "engine_version", "rating_list_name",
+            "preset_key", "status", "reason", "tournament_id", "tournament_status", "submitted_at",
+        )} for item in snapshot["waiting_for_test"]],
+    }
 
 
 class TournamentPayload(BaseModel):
@@ -755,6 +735,7 @@ class EnginePayload(BaseModel):
 
 
 class AcknowledgedEngineQueueItemPayload(BaseModel):
+    id: int | None = Field(default=None, gt=0)
     name: str = Field(min_length=1, max_length=120)
     version: str = Field(min_length=1, max_length=120)
 
@@ -768,18 +749,21 @@ class AcknowledgedEngineQueueItemPayload(BaseModel):
 
 
 class WaitingEngineQueueItemPayload(BaseModel):
+    id: int | None = Field(default=None, gt=0)
+    preset_key: str = "legacy"
     engine_version_id: int = Field(gt=0)
     rating_list_id: int = Field(gt=0)
 
 
 class EngineQueuesPayload(BaseModel):
+    revision: int = Field(ge=0)
     acknowledged: list[AcknowledgedEngineQueueItemPayload] = Field(max_length=1000)
     waiting_for_test: list[WaitingEngineQueueItemPayload] = Field(max_length=1000)
 
     @model_validator(mode="after")
     def unique_waiting_plans(self) -> EngineQueuesPayload:
         plans = {
-            (item.engine_version_id, item.rating_list_id)
+            (item.engine_version_id, item.rating_list_id, item.preset_key)
             for item in self.waiting_for_test
         }
         if len(plans) != len(self.waiting_for_test):
@@ -3816,25 +3800,13 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=422, detail="Choose a valid engine version.")
         if any(item.rating_list_id not in rating_list_ids for item in payload.waiting_for_test):
             raise HTTPException(status_code=422, detail="Choose a valid rating list.")
-        connection.execute("DELETE FROM engine_waiting_test_queue")
-        connection.execute("DELETE FROM engine_acknowledged_queue")
-        if payload.acknowledged:
-            connection.executemany(
-                "INSERT INTO engine_acknowledged_queue (name, version, position) VALUES (?, ?, ?)",
-                (
-                    (item.name, item.version, position)
-                    for position, item in enumerate(payload.acknowledged)
-                ),
-            )
-        if payload.waiting_for_test:
-            connection.executemany(
-                """INSERT INTO engine_waiting_test_queue
-                     (engine_version_id, rating_list_id, position) VALUES (?, ?, ?)""",
-                (
-                    (item.engine_version_id, item.rating_list_id, position)
-                    for position, item in enumerate(payload.waiting_for_test)
-                ),
-            )
+        from cope.control.queues import replace_queues
+
+        try:
+            replace_queues(connection, payload)
+        except ValueError as error:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(error)) from error
         connection.commit()
         _publish_admin_change(web_app, request)
         return _json({**_engine_queues_payload(connection), "message": "Engine queues updated."})
@@ -6031,6 +6003,11 @@ def _validated_tournament_config(
         raise HTTPException(status_code=422, detail="Every participant must be active and ready to run.")
 
     _validate_opening_suite_reference(connection, submitted.opening_suite_id)
+    if submitted.variant == "dfrc":
+        for engine_id in submitted.participants:
+            capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (records[engine_id].build_hash,)).fetchone()
+            if capability is None or capability["dfrc"] != "supported":
+                raise HTTPException(status_code=422, detail="DFRC participants require recorded capability evidence for their current build.")
     return submitted
 
 
