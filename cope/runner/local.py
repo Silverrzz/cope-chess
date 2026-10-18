@@ -18,6 +18,7 @@ from cope.chat import (
     announce_tournament_finished,
 )
 from cope.core.san import pv_to_san
+from cope.variants import Position, create_board, get_variant
 from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
@@ -593,7 +594,9 @@ def run_worker_assignment_game(
         return current is not None and current.status == "paused"
 
     opening = get_opening_position(connection, game_record.opening_id)
-    board = _starting_board(opening, chess960=tournament.config.variant == "dfrc")
+    board = _starting_board(opening, variant=tournament.config.variant)
+    if (assignment.variant, assignment.rules_revision) != (tournament.config.variant, tournament.config.rules_revision):
+        raise RuntimeError("Assignment variant does not match the tournament")
     recorded_moves = list_moves(connection, game_record.id)
     checkpoint = get_game_pause_checkpoint(connection, game_record.id)
     opening_moves = () if opening is None else opening.moves
@@ -604,7 +607,7 @@ def run_worker_assignment_game(
     _validate_new_game_attempt(recorded_moves, checkpoint is not None)
     if recorded_moves:
         for recorded_move in recorded_moves:
-            move = chess.Move.from_uci(recorded_move.uci)
+            move = board.parse_uci(recorded_move.uci)
             if move not in board.legal_moves or recorded_move.ply != board.ply() + 1:
                 raise RuntimeError(
                     f"pause checkpoint move history is invalid at ply {recorded_move.ply}"
@@ -614,6 +617,8 @@ def run_worker_assignment_game(
             raise RuntimeError("resumed game is missing its pause checkpoint")
         checkpoint_ply = int(checkpoint.state.get("ply", -1))
         checkpoint_fen = str(checkpoint.state.get("fen", ""))
+        if checkpoint.state.get("variant", tournament.config.variant) != tournament.config.variant or checkpoint.state.get("rules_revision", "chess1") != tournament.config.rules_revision:
+            raise RuntimeError("Pause checkpoint variant does not match the tournament")
         if checkpoint_ply != board.ply() or checkpoint_fen != board.fen():
             raise RuntimeError("pause checkpoint does not match the recorded game position")
     connection.commit()
@@ -1021,6 +1026,8 @@ def run_worker_assignment_game(
             assignment.assignment.assignment_key,
             {
                 "version": 1,
+                "variant": tournament.config.variant,
+                "rules_revision": tournament.config.rules_revision,
                 "ply": board.ply(),
                 "fen": board.fen(),
                 "white_clock": game.white_tm.snapshot(),
@@ -1288,7 +1295,9 @@ class _LiveGameReporter:
         engine_data.update(self._relay_engine_data.get(engine_id, {}))
         root_fen = root_fen or self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen
-        engine_data["pv_san"] = pv_to_san(info.pv, root_fen) or "not recorded"
+        variant = getattr(self._game.state.get_board(), "variant", "dfrc" if self._game.state.get_board().chess960 else "standard")
+        engine_data["variant"] = variant
+        engine_data["pv_san"] = pv_to_san(info.pv, root_fen, variant=variant) or "not recorded"
         engine_data["info"] = line
         publish_engine_info(
             self._tournament_id,
@@ -1381,6 +1390,8 @@ def _worker_assignment_payload(
 
     relay = relay_assignment_for_game(connection, game)
     return WorkerGameAssignment(
+        variant=tournament.config.variant,
+        rules_revision=tournament.config.rules_revision,
         assignment=GameAssignment(
             assignment_id=assignment.id,
             assignment_key=assignment.assignment_key,
@@ -1398,7 +1409,7 @@ def _worker_assignment_payload(
         ),
         tournament_name=tournament.name,
         round=game.round,
-        initial_fen=_starting_board(opening, chess960=tournament.config.variant == "dfrc").fen(),
+        initial_fen=_starting_board(opening, variant=tournament.config.variant).fen(),
         opening_name=None if opening is None else opening.name,
         opening_moves=() if opening is None else opening.moves,
         max_plies=_assignment_max_plies(connection, tournament, opening),
@@ -1572,8 +1583,7 @@ def _tournament_engine_options(
     relay: EngineRelayAssignment | None = None,
 ) -> dict[str, str | int | bool]:
     options = dict(tournament.config.uci_options)
-    if tournament.config.variant == "dfrc":
-        options["UCI_Chess960"] = True
+    options.update(get_variant(tournament.config.variant).uci_options())
     member = (
         next(
             (
@@ -1864,10 +1874,8 @@ def _finish_tournament_if_complete(
     return True
 
 
-def _starting_board(opening: OpeningPositionRecord | None, *, chess960: bool = False) -> chess.Board:
-    if opening is None or opening.start_fen == "startpos":
-        return chess.Board(chess960=chess960)
-    return chess.Board(opening.start_fen, chess960=chess960)
+def _starting_board(opening: OpeningPositionRecord | None, *, variant: str = "standard") -> Position:
+    return create_board(None if opening is None else opening.start_fen, variant=variant)
 
 
 def _validate_new_game_attempt(
@@ -1998,6 +2006,8 @@ def _max_moves_result(
     tournament: TournamentRecord,
     moves: Sequence[MoveRecord],
 ) -> tuple[str, str]:
+    if get_variant(tournament.config.variant).duck:
+        return "1/2-1/2", "max moves"
     score = _latest_white_relative_score(moves)
     if score is None:
         return "1/2-1/2", "max moves"

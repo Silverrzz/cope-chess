@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS control_presets (
   name TEXT NOT NULL,
   rating_list_id BIGINT NOT NULL REFERENCES rating_lists(id),
   category TEXT NOT NULL CHECK (category IN ('bullet', 'rapid', 'classical')),
-  variant TEXT NOT NULL CHECK (variant IN ('standard', 'dfrc')),
+  variant TEXT NOT NULL CHECK (variant IN ('standard', 'dfrc', 'duck', 'duck960')),
   config TEXT NOT NULL,
   opponent_count INTEGER NOT NULL CHECK (opponent_count BETWEEN 1 AND 499),
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS control_engine_capabilities (
   actor TEXT NOT NULL,
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+ALTER TABLE control_presets DROP CONSTRAINT IF EXISTS control_presets_variant_check;
+ALTER TABLE control_presets ADD CONSTRAINT control_presets_variant_check CHECK (variant IN ('standard', 'dfrc', 'duck', 'duck960'));
+CREATE TABLE IF NOT EXISTS engine_variant_capabilities (
+  build_hash TEXT NOT NULL,
+  variant TEXT NOT NULL CHECK (variant IN ('standard', 'dfrc', 'duck', 'duck960')),
+  status TEXT NOT NULL CHECK (status IN ('supported', 'unsupported', 'unknown')),
+  evidence TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (build_hash, variant)
+);
+INSERT INTO engine_variant_capabilities (build_hash, variant, status, evidence, actor, recorded_at)
+SELECT build_hash, 'dfrc', dfrc, evidence, actor, recorded_at FROM control_engine_capabilities
+ON CONFLICT (build_hash, variant) DO NOTHING;
 
 ALTER TABLE engine_acknowledged_queue ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
 ALTER TABLE engine_acknowledged_queue ADD COLUMN IF NOT EXISTS intake_operation_id TEXT REFERENCES control_operations(id);

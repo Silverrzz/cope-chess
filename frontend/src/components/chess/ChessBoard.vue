@@ -12,6 +12,8 @@ import {
   buildPositions,
   materialSummary,
   positionFen,
+  isTurn,
+  type Variant,
   type BoardArrow,
   type Color,
 } from './chess'
@@ -27,6 +29,7 @@ const arrowBrushes: DrawBrushes = {
 
 const props = withDefaults(defineProps<{
   fen?: string | null
+  variant?: Variant | undefined
   moves?: string[]
   sanMoves?: string[]
   modelValue?: number
@@ -60,9 +63,17 @@ const board = ref<HTMLElement | null>(null)
 let ground: ChessgroundApi | null = null
 const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
-const positions = computed(() => buildPositions(props.fen, props.moves))
+const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const currentFen = computed(() => positionFen(position.value))
+const duckStyle = computed(() => {
+  const square = position.value.duckSquare
+  if (square === null) return {}
+  const file = square % 8
+  const rank = Math.floor(square / 8)
+  const flipped = props.orientation === 'black'
+  return { left: `${(flipped ? 7 - file : file) * 12.5}%`, top: `${(flipped ? 7 - rank : rank) * 12.5}%` }
+})
 const material = computed(() => materialSummary(position.value))
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
@@ -74,7 +85,9 @@ const status = computed(() => {
 
 const positionDescription = computed(() => {
   const side = position.value.turn === 'w' ? 'White' : 'Black'
-  return `${status.value}. ${side} to move. ${material.value.label}.`
+  const duck = position.value.duckSquare
+  const duckLabel = duck === null ? '' : ` Neutral duck on ${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}.`
+  return `${status.value}. ${side} to move. ${material.value.label}.${duckLabel}`
 })
 
 watch(() => props.modelValue, (next) => {
@@ -141,7 +154,7 @@ function renderBoard(): void {
     ? [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
     : []
   const arrows = props.arrows
-    .filter((arrow) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(arrow.move.toLowerCase()))
+    .filter((arrow) => isTurn(arrow.move))
     .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
   const styledArrows = arrows.filter((arrow) => arrow.fillColor)
   const outlinedArrows = styledArrows.filter((arrow) => arrow.outlineColor)
@@ -169,6 +182,12 @@ function renderBoard(): void {
     },
   ]))
   const autoShapes = [
+    ...(move.includes(',') ? [{ orig: move.slice(-2) as Key, brush: 'yellow' }] : []),
+    ...arrows.filter((arrow) => arrow.move.includes(',')).map<DrawShape>((arrow) => ({
+      orig: arrow.move.slice(-2).toLowerCase() as Key,
+      brush: 'yellow',
+      label: { text: '🦆' },
+    })),
     ...outlinedShapes,
     ...arrows.map<DrawShape>((arrow) => ({
       orig: arrow.move.slice(0, 2).toLowerCase() as Key,
@@ -180,7 +199,7 @@ function renderBoard(): void {
     })),
   ]
   const config: ChessgroundConfig = {
-    fen: currentFen.value,
+    fen: currentFen.value.replaceAll('*', '1'),
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
@@ -223,7 +242,10 @@ defineExpose({ selectPly, focusBoard })
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
-    <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
+    <div class="board-frame">
+      <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
+      <div v-if="position.duckSquare !== null" class="duck-piece" :style="duckStyle" aria-label="Neutral duck">🦆</div>
+    </div>
 
     <div v-if="controls" class="board-controls">
       <div class="board-controls__buttons" role="group" aria-label="Replay controls">
@@ -249,6 +271,8 @@ defineExpose({ selectPly, focusBoard })
 </template>
 
 <style scoped>
+.board-frame { position: relative; container-type: inline-size; }
+.duck-piece { position: absolute; width: 12.5%; height: 12.5%; display: grid; place-items: center; font-size: 9cqw; line-height: 1; pointer-events: none; z-index: 4; filter: drop-shadow(0 1px 2px #0008); }
 .chess-viewer {
   width: 100%;
   min-width: 0;

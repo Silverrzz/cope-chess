@@ -2,6 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
+import VariantPicker from '@/components/admin/VariantPicker.vue'
+import type { Variant } from '@/components/chess/chess'
 import { api } from '@/api/client'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
@@ -9,7 +11,7 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText, formatNumber } from '@/components/admin/format'
 import { useToast } from '@/composables/useToast'
 
-interface RatingList { id: number; name: string; created_at: string; engine_versions: number; games: number; tournaments: number }
+interface RatingList { variant: string; id: number; name: string; created_at: string; engine_versions: number; games: number; tournaments: number }
 interface Response { rating_lists: RatingList[] }
 
 const router = useRouter()
@@ -20,6 +22,7 @@ const pending = ref(false)
 const error = ref('')
 const showCreate = ref(false)
 const name = ref('')
+const variant = ref<Variant>('standard')
 
 const totalRatedEngines = computed(() => (data.value?.rating_lists ?? []).reduce((sum, item) => sum + item.engine_versions, 0))
 
@@ -35,7 +38,7 @@ async function createList(): Promise<void> {
   if (!name.value.trim()) { error.value = 'Enter a name for the rating list.'; return }
   pending.value = true
   try {
-    const response = await api.post<{ id: number; message: string }>('/api/admin/rating-lists', { body: { name: name.value.trim() } })
+    const response = await api.post<{ id: number; message: string }>('/api/admin/rating-lists', { body: { name: name.value.trim(), variant: variant.value } })
     toast.success(response.message)
     await router.push(`/admin/ratings/${response.id}`)
   } catch (cause) { error.value = errorText(cause); toast.error(cause) }
@@ -54,6 +57,7 @@ onMounted(load)
 
     <form v-if="showCreate" class="panel create-list" @submit.prevent="createList">
       <label><span>List name</span><input v-model="name" class="input" maxlength="120" autofocus placeholder="e.g. Classical" /></label>
+      <label><span>Variant</span><VariantPicker v-model="variant" /></label>
       <div><button class="button button--ghost" type="button" @click="showCreate = false">Cancel</button><button class="button button--primary" :disabled="pending">{{ pending ? 'Creating…' : 'Create list' }}</button></div>
     </form>
 
@@ -61,7 +65,7 @@ onMounted(load)
     <div v-if="loading" class="panel loading" role="status">Loading rating lists…</div>
     <section v-else-if="data?.rating_lists.length" class="list-grid">
       <RouterLink v-for="ratingList in data.rating_lists" :key="ratingList.id" class="panel list-card" :to="`/admin/ratings/${ratingList.id}`">
-        <div><h2>{{ ratingList.name }}</h2><span>Open rating list →</span></div>
+        <div><h2>{{ ratingList.name }}</h2><small>{{ ratingList.variant }}</small><span>Open rating list →</span></div>
         <dl><div><dt>Engine versions</dt><dd>{{ formatNumber(ratingList.engine_versions) }}</dd></div><div><dt>Games</dt><dd>{{ formatNumber(ratingList.games) }}</dd></div><div><dt>Tournaments</dt><dd>{{ formatNumber(ratingList.tournaments) }}</dd></div></dl>
       </RouterLink>
     </section>

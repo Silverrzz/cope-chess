@@ -101,14 +101,14 @@ def context_payload(connection, identity):
         "actor": identity.actor, "scopes": identity.scopes,
         "queue": queue_snapshot(connection), "presets": list_presets(connection),
         "engines": engines,
-        "rating_lists": [{"id": item.id, "name": item.name} for item in list_rating_lists(connection)],
-        "opening_suites": [{"id": item.id, "name": item.name} for item in list_opening_suites(connection)],
+        "rating_lists": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_rating_lists(connection)],
+        "opening_suites": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_opening_suites(connection)],
         "worker_controls": [dict(row) for row in connection.execute("SELECT * FROM control_worker_settings ORDER BY worker_id")],
         "git_hosts": [{"id": item.id, "name": item.name, "base_url": item.base_url} for item in list_git_hosts(connection, enabled_only=True)],
         "actions": describe_actions(), "intake_schema": IntakeRequest.model_json_schema(),
         "preset_schema": Preset.model_json_schema(),
         "ordering": ["standard before DFRC", "estimated game duration at 80 moves", "original submission time", "stable legacy position"],
-        "features": {"durable_operations": True, "engine_intake": True, "dfrc": True, "oauth": False},
+        "features": {"durable_operations": True, "engine_intake": True, "dfrc": True, "duck": True, "duck960": True, "oauth": False},
     }
 
 

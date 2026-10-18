@@ -7,6 +7,7 @@ export type TimeControl =
   | { category: 'movenodes'; nodes: number }
 
 export interface TournamentConfig {
+  variant?: 'standard' | 'dfrc' | 'duck' | 'duck960'
   participants?: Identifier[]
   format?: string | { value?: string }
   time_control?: TimeControl

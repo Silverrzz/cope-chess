@@ -225,6 +225,8 @@ from cope.web.engine_sources import (
     search_repositories,
 )
 from cope.web.openings import format_opening, parse_opening_input
+from cope.variants import VARIANTS, VariantId, get_variant
+from cope.db.repo import validate_tournament_variant, set_rating_list_variant
 from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
@@ -247,6 +249,8 @@ OPENING_EDITOR_POSITION_LIMIT = 10_000
 ADMIN_GAME_RESULT_TYPES = frozenset(
     {
         "win_checkmate",
+        "win_king_capture",
+        "win_no_legal_move",
         "win_adjudication",
         "win_max_moves",
         "win_timeout",
@@ -684,7 +688,12 @@ class RatingCommitPayload(BaseModel):
     rating_list_ids: list[int] = Field(min_length=1)
 
 
+class RatingListVariantPayload(BaseModel):
+    variant: VariantId
+
+
 class RatingListPayload(BaseModel):
+    variant: VariantId = "standard"
     name: str = Field(min_length=1, max_length=120)
 
     @field_validator("name")
@@ -1648,7 +1657,7 @@ def register_api_routes(app: FastAPI) -> None:
             if viewer_game and not cross_table
             else None
         )
-        engine_data = web_app._engine_data(viewer_game, viewer_moves, opening)
+        engine_data = web_app._engine_data(viewer_game, viewer_moves, opening, variant=tournament.config.variant)
         clocks = web_app._clock_data(viewer_moves)
         clock_state = web_app._persisted_clock_state(viewer_game, viewer_moves)
         if isinstance(game_live, dict):
@@ -1696,7 +1705,7 @@ def register_api_routes(app: FastAPI) -> None:
                     if viewer_game
                     else None
                 ),
-                "viewer_moves": web_app._move_payloads(viewer_moves, opening),
+                "viewer_moves": web_app._move_payloads(viewer_moves, opening, variant=tournament.config.variant),
                 "viewer_locked": viewer_locked,
                 "engine_data": engine_data,
                 "clocks": clocks,
@@ -2250,13 +2259,29 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         try:
-            rating_list_id = create_rating_list(connection, payload.name)
+            rating_list_id = create_rating_list(connection, payload.name, payload.variant)
             connection.commit()
         except sqlite3.IntegrityError as exc:
             connection.rollback()
             raise HTTPException(status_code=409, detail="A rating list with that name already exists.") from exc
         _publish_admin_change(web_app, request)
         return _json({"id": rating_list_id, "message": "Rating list created."}, status_code=201)
+
+    @app.put("/api/admin/rating-lists/{rating_list_id}/variant")
+    def admin_set_rating_list_variant(
+        rating_list_id: int,
+        payload: RatingListVariantPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            set_rating_list_variant(connection, rating_list_id, payload.variant)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"message": "Rating list variant updated."})
 
     @app.get("/api/admin/rating-lists/{rating_list_id}")
     def admin_rating_list(
@@ -2731,7 +2756,7 @@ def register_api_routes(app: FastAPI) -> None:
             "engines": engines,
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
-            "rating_lists": list_rating_lists(connection),
+            "rating_lists": [item for item in list_rating_lists(connection) if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)],
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
             "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
@@ -4336,12 +4361,14 @@ def register_api_routes(app: FastAPI) -> None:
                 _opening_values,
                 values.get("positions", ""),
                 files,
+                values.get("variant", "standard"),
             )
             suite_id = await asyncio.to_thread(
                 _create_opening_import,
                 connection,
                 name=name,
                 description=values.get("description", "").strip(),
+                variant=values.get("variant", "standard"),
                 openings=openings,
             )
         except (ValueError, sqlite3.IntegrityError) as exc:
@@ -4378,6 +4405,7 @@ def register_api_routes(app: FastAPI) -> None:
                     _opening_values,
                     values.get("positions", ""),
                     files,
+                    values.get("variant", "standard"),
                 )
             position_count = await asyncio.to_thread(
                 _update_opening_import,
@@ -4385,6 +4413,7 @@ def register_api_routes(app: FastAPI) -> None:
                 suite_id,
                 name=name,
                 description=values.get("description", "").strip(),
+                variant=values.get("variant", "standard"),
                 openings=openings,
                 mode=mode,
             )
@@ -4633,6 +4662,8 @@ def register_api_routes(app: FastAPI) -> None:
                 {
                     "id": rating_list.id,
                     "name": rating_list.name,
+                    "variant": rating_list.variant,
+                    "rules_revision": rating_list.rules_revision,
                     "engines": engines,
                     "unavailable_engines": unavailable_engines,
                 }
@@ -6003,10 +6034,14 @@ def _validated_tournament_config(
         raise HTTPException(status_code=422, detail="Every participant must be active and ready to run.")
 
     _validate_opening_suite_reference(connection, submitted.opening_suite_id)
+    try:
+        validate_tournament_variant(connection, submitted)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if submitted.variant == "dfrc":
         for engine_id in submitted.participants:
-            capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (records[engine_id].build_hash,)).fetchone()
-            if capability is None or capability["dfrc"] != "supported":
+            capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (records[engine_id].build_hash, submitted.variant)).fetchone()
+            if capability is None or capability["status"] != "supported":
                 raise HTTPException(status_code=422, detail="DFRC participants require recorded capability evidence for their current build.")
     return submitted
 
@@ -6056,6 +6091,7 @@ def _tournament_form_payload(
         "participants": participants,
         "engine_options": engines,
         "opening_suites": list_opening_suites(connection),
+        "variants": [dict(id=v.id, name=v.name, rules_revision=v.rules_revision) for v in VARIANTS.values()],
     }
 
 
@@ -6065,12 +6101,14 @@ def _create_opening_import(
     name: str,
     description: str,
     openings: list[OpeningLine],
+    variant: str = "standard",
 ) -> int:
     try:
         suite_id = create_opening_suite(
             connection,
             name=name,
             description=description,
+            variant=variant,
         )
         replace_suite_openings(connection, suite_id, openings)
         connection.commit()
@@ -6088,18 +6126,22 @@ def _update_opening_import(
     description: str,
     openings: list[OpeningLine],
     mode: str,
+    variant: str = "standard",
 ) -> int:
     try:
+        if mode == "replace":
+            if connection.execute("SELECT 1 FROM games JOIN openings ON openings.id = games.opening_id WHERE openings.suite_id = ? LIMIT 1", (suite_id,)).fetchone() is not None:
+                raise ValueError("This suite has scheduled or recorded games. Append positions or create a new suite to preserve their starting positions.")
+            replace_suite_openings(connection, suite_id, openings)
         update_opening_suite(
             connection,
             suite_id,
             name=name,
             description=description,
+            variant=variant,
         )
         if mode == "append":
             append_suite_openings(connection, suite_id, openings)
-        elif mode == "replace":
-            replace_suite_openings(connection, suite_id, openings)
         position_count = suite_opening_count(connection, suite_id)
         connection.commit()
         return position_count
@@ -6133,9 +6175,10 @@ async def _read_opening_form(
 def _opening_values(
     positions: str,
     files: list[tuple[str, str]],
+    variant: str = "standard",
 ) -> list[OpeningLine]:
     try:
-        openings = parse_opening_input(positions, files)
+        openings = parse_opening_input(positions, files, variant)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     openings = _deduplicate_openings(openings)

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import VariantPicker from './VariantPicker.vue'
+import type { Variant } from '@/components/chess/chess'
 import EngineVersionPicker from './EngineVersionPicker.vue'
 import type { Engine, OpeningSuite, TimeControlCategory, TournamentFormat, TournamentSettings } from './types'
 
@@ -39,6 +41,12 @@ const participantEngines = computed(() => props.engines.filter((engine) => props
 
 function patch(patchValue: Partial<TournamentSettings>): void {
   model.value = { ...model.value, ...patchValue }
+}
+
+function setVariant(variant: Variant): void {
+  const duck = variant === 'duck' || variant === 'duck960'
+  patch({ variant, rules_revision: duck ? 'duck1' : 'chess1', opening_suite_id: null,
+    adjudication: duck ? { ...model.value.adjudication, draw: null, resign: null } : model.value.adjudication })
 }
 
 function setFormat(format: TournamentFormat): void {
@@ -121,6 +129,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
 
 <template>
   <div class="settings-editor">
+    <label v-if="allowFormat && allowOpeningSuite" class="field"><span class="field__label">Variant</span><VariantPicker :model-value="model.variant || 'standard'" @update:model-value="setVariant" /></label>
     <fieldset v-if="allowFormat" class="form-section">
       <legend>Format</legend>
       <div class="field-grid field-grid--wide">
@@ -209,7 +218,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
     <fieldset v-if="!structureOnly" class="form-section">
       <legend>Adjudication</legend>
       <label class="choice-row">
-        <input type="checkbox" :checked="model.adjudication.draw !== null" @change="setDrawAdjudication(($event.target as HTMLInputElement).checked)">
+        <input type="checkbox" :disabled="model.variant?.startsWith('duck')" :checked="model.adjudication.draw !== null" @change="setDrawAdjudication(($event.target as HTMLInputElement).checked)">
         <span>
           <strong>Draw agreement</strong>
           <small>End the game as a draw after both engines remain within the configured evaluation range.</small>
@@ -231,7 +240,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
       </div>
 
       <label class="choice-row">
-        <input type="checkbox" :checked="model.adjudication.resign !== null" @change="setWinAdjudication(($event.target as HTMLInputElement).checked)">
+        <input type="checkbox" :disabled="model.variant?.startsWith('duck')" :checked="model.adjudication.resign !== null" @change="setWinAdjudication(($event.target as HTMLInputElement).checked)">
         <span>
           <strong>Win adjudication</strong>
           <small>End the game when both engines consistently evaluate the same side beyond the configured threshold.</small>
@@ -267,7 +276,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
           <span class="field__label">Opening suite</span>
           <select class="input" :value="model.opening_suite_id ?? ''" @change="patch({ opening_suite_id: Number(($event.target as HTMLSelectElement).value) || null })">
             <option value="">No opening suite</option>
-            <option v-for="suite in openingSuites" :key="suite.id" :value="suite.id">{{ suite.name }}</option>
+            <option v-for="suite in openingSuites.filter(item => !item.variant || item.variant === (model.variant || 'standard') || item.variant === 'legacy' && !model.variant?.startsWith('duck'))" :key="suite.id" :value="suite.id">{{ suite.name }}</option>
           </select>
         </label>
       </div>

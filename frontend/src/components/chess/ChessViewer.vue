@@ -4,10 +4,11 @@ import { computed, ref, watch } from 'vue'
 import type { MoveRecord, OpeningRecord } from '@/components/public/types'
 
 import ChessBoard from './ChessBoard.vue'
-import type { BoardArrow, Color } from './chess'
+import type { BoardArrow, Color, Variant } from './chess'
 
 const props = withDefaults(defineProps<{
   opening?: OpeningRecord | null
+  variant?: Variant | undefined
   moves?: MoveRecord[]
   modelValue?: number
   label?: string
@@ -83,6 +84,7 @@ function fallbackCopy(value: string): void {
 <template>
   <div class="viewer-shell">
     <ChessBoard
+      :variant="variant"
       :fen="opening.fen"
       :moves="uciMoves"
       :san-moves="sanMoves"

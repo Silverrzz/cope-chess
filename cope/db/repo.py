@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
 from cope.engine_dockerfiles import engine_build_hash
+from cope.variants import create_board, get_variant
 from cope.core.models import (
     AssignmentProgress,
     EngineArtifactSpec,
@@ -29,6 +30,8 @@ class RatingListRecord:
     anchor_engine_id: int | None
     anchor_elo: float
     created_at: str
+    variant: str = "standard"
+    rules_revision: str = "chess1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +301,8 @@ class OpeningSuiteRecord:
     name: str
     description: str
     created_at: str
+    variant: str = "standard"
+    rules_revision: str = "chess1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1082,6 +1087,28 @@ def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -
     return tuple(_engine_from_row(row) for row in connection.execute(sql, params))
 
 
+def validate_tournament_variant(connection, config: TournamentConfig) -> None:
+    if config.opening_suite_id is None:
+        return
+    suite = get_opening_suite(connection, config.opening_suite_id)
+    if suite is None:
+        raise ValueError("Opening suite does not exist")
+    if suite.variant == "legacy":
+        if get_variant(config.variant).duck:
+            raise ValueError("Choose a duck opening suite")
+    elif (suite.variant, suite.rules_revision) != (config.variant, config.rules_revision):
+        raise ValueError("Opening suite variant does not match the tournament")
+
+
+def validate_rating_list_variant(connection, rating_list_id: int, config: TournamentConfig) -> None:
+    row = connection.execute("SELECT * FROM rating_lists WHERE id = ? FOR SHARE", (rating_list_id,)).fetchone()
+    if row is None:
+        raise ValueError("Rating list does not exist")
+    rating = _rating_list_from_row(row)
+    if (rating.variant, rating.rules_revision) != (config.variant, config.rules_revision):
+        raise ValueError(f"Rating list {rating.name} ({rating.variant}/{rating.rules_revision}) is incompatible with {config.variant}/{config.rules_revision}")
+
+
 def create_tournament(
     connection: sqlite3.Connection,
     name: str,
@@ -1090,6 +1117,7 @@ def create_tournament(
     status: str = "draft",
     scheduled_start_at: str | None = None,
 ) -> int:
+    validate_tournament_variant(connection, config)
     if status == "scheduled" and scheduled_start_at is None:
         raise ValueError("scheduled tournaments require a start time")
     if scheduled_start_at is not None:
@@ -1405,6 +1433,14 @@ def update_tournament(
     config: TournamentConfig,
 ) -> None:
     """Update a tournament's name, config, and participant list."""
+    validate_tournament_variant(connection, config)
+    previous = get_tournament(connection, tournament_id)
+    if previous is not None and (previous.config.variant, previous.config.rules_revision) != (config.variant, config.rules_revision):
+        if previous.status != "draft" or connection.execute("SELECT 1 FROM games WHERE tournament_id = ? LIMIT 1", (tournament_id,)).fetchone() is not None:
+            raise ValueError("The variant cannot change after a tournament has been scheduled or has games")
+    if previous is not None and previous.config.opening_suite_id != config.opening_suite_id:
+        if connection.execute("SELECT 1 FROM games WHERE tournament_id = ? LIMIT 1", (tournament_id,)).fetchone() is not None:
+            raise ValueError("The opening suite cannot change after games have been created")
     relay = connection.execute(
         """
         SELECT id
@@ -1483,10 +1519,10 @@ def set_tournament_participants(
             engine = get_engine(connection, engine_id, tournament_id=tournament.id)
             if engine is None:
                 raise ValueError("Tournament participant is unavailable")
-            if config.variant == "dfrc":
-                capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (engine.build_hash,)).fetchone()
-                if capability is None or capability["dfrc"] != "supported":
-                    raise ValueError("DFRC participants require recorded capability evidence")
+            if config.variant != "standard":
+                capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (engine.build_hash, config.variant)).fetchone()
+                if capability is None or capability["status"] != "supported":
+                    raise ValueError("Variant participants require recorded capability evidence")
             connection.execute(
                 "INSERT INTO control_tournament_builds(tournament_id, engine_version_id, build_hash, engine_spec) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                 (tournament.id, engine_id, engine.build_hash, engine.model_dump_json()),
@@ -1725,6 +1761,8 @@ def list_games_for_tournaments(
 
 _WIN_TERMINATIONS = (
     "checkmate",
+    "king capture",
+    "no legal move",
     "timeout",
     "illegal move",
     "engine error",
@@ -1761,6 +1799,8 @@ def _game_result_filter(
     )
     filters: dict[str, tuple[str, tuple[str, ...]]] = {
         "win_checkmate": (f"{decisive} AND {termination} = ?", ("checkmate",)),
+        "win_king_capture": (f"{decisive} AND {termination} = ?", ("king capture",)),
+        "win_no_legal_move": (f"{decisive} AND {termination} = ?", ("no legal move",)),
         "win_adjudication": (f"{decisive} AND {termination} LIKE ?", ("win adjudication%",)),
         "win_max_moves": (f"{decisive} AND {termination} LIKE ?", ("max moves%",)),
         "win_timeout": (f"{decisive} AND {termination} = ?", ("timeout",)),
@@ -3741,13 +3781,15 @@ def create_opening_suite(
     *,
     name: str,
     description: str = "",
+    variant: str = "standard",
 ) -> int:
+    definition = get_variant(variant)
     cursor = connection.execute(
         """
-        INSERT INTO opening_suites (name, description, created_at)
-        VALUES (?, ?, ?)
+        INSERT INTO opening_suites (name, description, created_at, variant, rules_revision)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (name, description, utc_now()),
+        (name, description, utc_now(), definition.id, definition.rules_revision),
     )
     return int(cursor.lastrowid)
 
@@ -3758,7 +3800,19 @@ def update_opening_suite(
     *,
     name: str,
     description: str = "",
+    variant: str | None = None,
 ) -> None:
+    if variant is not None:
+        definition = get_variant(variant)
+        suite = get_opening_suite(connection, suite_id)
+        if suite is not None and suite.variant != variant:
+            if any(t.config.opening_suite_id == suite_id for t in list_tournaments(connection)):
+                raise ValueError("The variant of a referenced opening suite cannot change")
+            for opening in list_suite_openings(connection, suite_id):
+                board = create_board(opening.start_fen, variant=variant)
+                for turn in opening.moves:
+                    board.push(board.parse_uci(turn))
+        connection.execute("UPDATE opening_suites SET variant = ?, rules_revision = ? WHERE id = ?", (variant, definition.rules_revision, suite_id))
     connection.execute(
         "UPDATE opening_suites SET name = ?, description = ? WHERE id = ?",
         (name, description, suite_id),
@@ -4834,7 +4888,7 @@ def request_tournament_rating_commit(
     ).fetchone() is not None:
         raise ValueError("engine relay tournaments are never eligible for ratings")
     if rating_list_ids is None:
-        rating_list_ids = (item.id for item in list_rating_lists(connection))
+        rating_list_ids = (item.id for item in list_rating_lists(connection) if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision))
     selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
     if not selected or any(value <= 0 for value in selected):
         raise ValueError("choose at least one rating list")
@@ -4851,6 +4905,7 @@ def request_tournament_rating_commit(
     requested = 0
     now = utc_now()
     for rating_list_id in selected:
+        validate_rating_list_variant(connection, rating_list_id, tournament.config)
         existing = connection.execute(
             "SELECT * FROM tournament_rating_list_commits WHERE tournament_id = ? AND rating_list_id = ?",
             (tournament.id, rating_list_id),
@@ -4908,12 +4963,24 @@ def list_tournament_rating_commits(
     )
 
 
-def create_rating_list(connection: sqlite3.Connection, name: str) -> int:
+def create_rating_list(connection: sqlite3.Connection, name: str, variant: str = "standard") -> int:
+    definition = get_variant(variant)
     cursor = connection.execute(
-        "INSERT INTO rating_lists (name, created_at) VALUES (?, ?)",
-        (name.strip(), utc_now()),
+        "INSERT INTO rating_lists (name, created_at, variant, rules_revision) VALUES (?, ?, ?, ?)",
+        (name.strip(), utc_now(), definition.id, definition.rules_revision),
     )
     return int(cursor.lastrowid)
+
+
+def set_rating_list_variant(connection, rating_list_id: int, variant: str) -> None:
+    definition = get_variant(variant)
+    if connection.execute("SELECT id FROM rating_lists WHERE id = ? FOR UPDATE", (rating_list_id,)).fetchone() is None:
+        raise ValueError("Rating list does not exist")
+    for row in connection.execute("SELECT tournament_id FROM tournament_rating_list_commits WHERE rating_list_id = ? AND status IN ('pending', 'claimed', 'applied')", (rating_list_id,)):
+        tournament = get_tournament(connection, row["tournament_id"])
+        if tournament is not None and (tournament.config.variant, tournament.config.rules_revision) != (variant, definition.rules_revision):
+            raise ValueError("Uncommit incompatible tournaments before changing the list variant")
+    connection.execute("UPDATE rating_lists SET variant = ?, rules_revision = ? WHERE id = ?", (variant, definition.rules_revision, rating_list_id))
 
 
 def get_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> RatingListRecord | None:
@@ -4968,6 +5035,8 @@ def _rating_list_from_row(row: sqlite3.Row) -> RatingListRecord:
         name=row["name"],
         anchor_engine_id=row["anchor_engine_id"],
         anchor_elo=float(row["anchor_elo"]),
+        variant=row["variant"],
+        rules_revision=row["rules_revision"],
         created_at=row["created_at"],
     )
 
@@ -5054,6 +5123,8 @@ def _opening_suite_from_row(row: sqlite3.Row) -> OpeningSuiteRecord:
         id=row["id"],
         name=row["name"],
         description=row["description"],
+        variant=row["variant"],
+        rules_revision=row["rules_revision"],
         created_at=row["created_at"],
     )
 

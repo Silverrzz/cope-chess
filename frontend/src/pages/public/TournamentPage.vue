@@ -938,7 +938,7 @@ function pvMoves(value: string | null | undefined): string[] {
   return parts
     .slice(pvIndex >= 0 ? pvIndex + 1 : 0)
     .map(normalizedUci)
-    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(move))
+    .filter((move) => /^[a-h][1-8][a-h][1-8][qrbn]?(?:,[a-h][1-8][a-h][1-8])?$/.test(move))
 }
 
 function movePv(move: MoveRecord): string[] {
@@ -1190,6 +1190,7 @@ function forgetManualFollowPauseGame(): void {
       <section v-else-if="viewerGame" ref="arenaElement" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
+            :variant="data.tournament.config?.variant"
             side="black"
             :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
             :engine-id="viewerGame.black_engine_id"
@@ -1200,6 +1201,7 @@ function forgetManualFollowPauseGame(): void {
             :loading="isPreparing"
           />
           <EnginePanel
+            :variant="data.tournament.config?.variant"
             side="white"
             :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
             :engine-id="viewerGame.white_engine_id"
@@ -1219,6 +1221,7 @@ function forgetManualFollowPauseGame(): void {
 
         <div ref="boardColumnElement" class="board-column">
           <ChessViewer
+            :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
             :moves="isPreparing ? [] : moves"
             :model-value="isPreparing ? 0 : selectedPly"

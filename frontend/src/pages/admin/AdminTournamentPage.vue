@@ -44,6 +44,8 @@ const resultFilterGroups: Array<{ label: string; options: ResultFilterOption[] }
     label: 'Wins',
     options: [
       { value: 'win_checkmate', label: 'Checkmate' },
+      { value: 'win_king_capture', label: 'King capture' },
+      { value: 'win_no_legal_move', label: 'No legal move' },
       { value: 'win_adjudication', label: 'Adjudication' },
       { value: 'win_max_moves', label: 'Maximum moves' },
       { value: 'win_timeout', label: 'Timeout' },

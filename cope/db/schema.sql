@@ -1392,7 +1392,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_event_id ON chat_messages(event_id,
 CREATE INDEX IF NOT EXISTS idx_chat_messages_tournament_id ON chat_messages(tournament_id, id DESC)
   WHERE tournament_id IS NOT NULL;
 
-INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 55)
+INSERT INTO schema_metadata (key, value) VALUES ('schema_version', 56)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 CREATE INDEX IF NOT EXISTS idx_runner_commands_status_created ON runner_commands(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -1445,3 +1445,27 @@ CREATE INDEX IF NOT EXISTS idx_environment_clone_jobs_status_created
   ON environment_clone_jobs(status, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_environment_clone_events_job_id
   ON environment_clone_events(job_id, id);
+
+ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS variant TEXT;
+ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS rules_revision TEXT;
+UPDATE rating_lists rating SET
+  variant = COALESCE((SELECT CASE WHEN COUNT(DISTINCT COALESCE(t.config::jsonb->>'variant', 'standard')) > 1 THEN 'legacy' ELSE MIN(COALESCE(t.config::jsonb->>'variant', 'standard')) END
+    FROM tournament_rating_list_commits c JOIN tournaments t ON t.id = c.tournament_id WHERE c.rating_list_id = rating.id AND c.status = 'applied'), 'standard'),
+  rules_revision = 'chess1'
+WHERE rating.variant IS NULL;
+ALTER TABLE rating_lists ALTER COLUMN variant SET DEFAULT 'standard';
+ALTER TABLE rating_lists ALTER COLUMN variant SET NOT NULL;
+ALTER TABLE rating_lists ALTER COLUMN rules_revision SET DEFAULT 'chess1';
+ALTER TABLE rating_lists ALTER COLUMN rules_revision SET NOT NULL;
+
+ALTER TABLE opening_suites ADD COLUMN IF NOT EXISTS variant TEXT;
+ALTER TABLE opening_suites ADD COLUMN IF NOT EXISTS rules_revision TEXT;
+UPDATE opening_suites suite SET
+  variant = COALESCE((SELECT CASE WHEN COUNT(DISTINCT COALESCE(t.config::jsonb->>'variant', 'standard')) > 1 THEN 'legacy' ELSE MIN(COALESCE(t.config::jsonb->>'variant', 'standard')) END
+    FROM tournaments t WHERE (t.config::jsonb->>'opening_suite_id')::bigint = suite.id), 'standard'),
+  rules_revision = 'chess1'
+WHERE suite.variant IS NULL;
+ALTER TABLE opening_suites ALTER COLUMN variant SET DEFAULT 'standard';
+ALTER TABLE opening_suites ALTER COLUMN variant SET NOT NULL;
+ALTER TABLE opening_suites ALTER COLUMN rules_revision SET DEFAULT 'chess1';
+ALTER TABLE opening_suites ALTER COLUMN rules_revision SET NOT NULL;
