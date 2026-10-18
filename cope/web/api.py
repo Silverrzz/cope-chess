@@ -2972,7 +2972,7 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         tournament = _require_tournament(connection, tournament_id)
         _ensure_tournament_games_mutable(connection, tournament_id)
-        _validate_live_participant_engine(connection, payload.engine_id)
+        _validate_live_participant_engine(connection, payload.engine_id, tournament.config.variant)
         try:
             result = add_running_tournament_participant(
                 connection,
@@ -5877,6 +5877,7 @@ def _ensure_tournament_games_mutable(
 def _validate_live_participant_engine(
     connection: sqlite3.Connection,
     engine_id: int,
+    variant: str = "standard",
 ) -> None:
     record = get_engine_record(connection, engine_id)
     if record is None:
@@ -5886,6 +5887,15 @@ def _validate_live_participant_engine(
             status_code=422,
             detail="Choose an active engine version that is ready to run.",
         )
+    _validate_engine_variant(connection, record, variant)
+
+
+def _validate_engine_variant(connection: sqlite3.Connection, record, variant: str) -> None:
+    if variant == "standard":
+        return
+    capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (record.build_hash, variant)).fetchone()
+    if capability is None or capability["status"] != "supported":
+        raise HTTPException(status_code=422, detail=f"{variant} participants require recorded capability evidence for their current build.")
 
 
 def _engine_is_tournament_ready(
@@ -6038,11 +6048,8 @@ def _validated_tournament_config(
         validate_tournament_variant(connection, submitted)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if submitted.variant == "dfrc":
-        for engine_id in submitted.participants:
-            capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (records[engine_id].build_hash, submitted.variant)).fetchone()
-            if capability is None or capability["status"] != "supported":
-                raise HTTPException(status_code=422, detail="DFRC participants require recorded capability evidence for their current build.")
+    for engine_id in submitted.participants:
+        _validate_engine_variant(connection, records[engine_id], submitted.variant)
     return submitted
 
 

@@ -326,7 +326,8 @@ def queue_plans(context, payload):
         priority = 1 if preset["variant"] == "dfrc" else 0
         plan = {"preset": preset, "assessment": {"top20": payload.engine.top20, "estimated_elo": payload.engine.estimated_elo,
                 "evidence": payload.engine.strength_evidence, "reference_list_id": payload.top20_rating_list_id},
-                "dfrc": payload.engine.dfrc, "capability_evidence": payload.engine.capability_evidence,
+                "dfrc": payload.engine.variant_capabilities.get("dfrc", payload.engine.dfrc),
+                "variant_capabilities": payload.engine.variant_capabilities, "capability_evidence": payload.engine.capability_evidence,
                 "ordering_policy": {"revision": 1, "nominal_moves": 80, "dfrc_last": True, "oldest_first": True}}
         row = connection.execute(
             """INSERT INTO engine_waiting_test_queue(engine_version_id, rating_list_id, position, submitted_at,

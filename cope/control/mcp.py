@@ -129,7 +129,7 @@ def install_mcp(app):
     from .operations import Plan, Step
     import inspect
 
-    for action_name in ("engines.assess_capability", "openings.generate_dfrc", "workers.set_drain", "recipes.publish", "queue.remove_plans"):
+    for action_name in ("engines.assess_capability", "engines.assess_variant", "openings.generate_dfrc", "openings.generate_duck960", "workers.set_drain", "recipes.publish", "queue.remove_plans"):
         registered = catalog()[action_name]
         def independent_tool(registered):
             async def call(payload, ctx, idempotency_key):

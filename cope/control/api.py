@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import Field
 
 from cope.db import connect_database, list_engine_records, list_git_hosts, list_rating_lists, list_opening_suites
+from cope.variants import VARIANTS
 
 from .intake import IntakeRequest, Preset, compile_intake, list_presets, queue_snapshot, save_preset
 from .operations import (
@@ -93,14 +94,23 @@ class ActionRequest(Input):
 
 def context_payload(connection, identity):
     identity.require("operations:read")
+    capabilities = {}
+    for row in connection.execute("SELECT build_hash, variant, status, evidence, actor, recorded_at FROM engine_variant_capabilities ORDER BY build_hash, variant"):
+        capabilities.setdefault(row["build_hash"], {})[row["variant"]] = {
+            key: row[key] for key in ("status", "evidence", "actor", "recorded_at")
+        }
     engines = [{"id": item.id, "engine_id": item.engine_id, "name": item.name, "version": item.version,
                 "build_hash": item.build_hash, "active": item.active and item.engine_active,
-                "repository_full_name": item.repository_full_name, "source_ref": item.source_ref}
+                "repository_full_name": item.repository_full_name, "source_ref": item.source_ref,
+                "variant_capabilities": capabilities.get(item.build_hash, {})}
                for item in list_engine_records(connection)]
     return {
         "actor": identity.actor, "scopes": identity.scopes,
         "queue": queue_snapshot(connection), "presets": list_presets(connection),
         "engines": engines,
+        "variants": [{"id": item.id, "name": item.name, "rules_revision": item.rules_revision,
+                      "chess960": item.chess960, "requires_openings": item.requires_openings,
+                      "uci_options": item.uci_options()} for item in VARIANTS.values()],
         "rating_lists": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_rating_lists(connection)],
         "opening_suites": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_opening_suites(connection)],
         "worker_controls": [dict(row) for row in connection.execute("SELECT * FROM control_worker_settings ORDER BY worker_id")],
