@@ -150,7 +150,6 @@ async function loadViewer(gameId?: string): Promise<void> {
     <section ref="arenaElement" class="arena" aria-label="Wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
-          <div class="relay-team-strip"><strong>{{ memberForSide(side)?.display_name }}</strong><div class="relay-team-strip__track"><span class="current">64 threads</span></div></div>
           <EnginePanel :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
@@ -211,16 +210,9 @@ async function loadViewer(gameId?: string): Promise<void> {
 .arena { display: grid; grid-template-columns: minmax(25rem, 29rem) var(--arena-board-size) minmax(28rem, 1fr); gap: clamp(.7rem, 1.5vw, 1.2rem); align-items: start; height: var(--arena-content-height); min-height: 0; }
 .engine-column, .activity-column { display: grid; min-height: 0; gap: var(--space-sm, .5rem); }
 .engine-column { grid-template-rows: repeat(2, minmax(0, 1fr)) auto; height: var(--arena-content-height); }
-.relay-engine-slot { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: .3rem; min-width: 0; min-height: 0; padding: .25rem; border-radius: calc(var(--radius-md, .5rem) + .25rem); background: color-mix(in srgb, var(--relay-primary) 5%, transparent); box-shadow: 0 0 1.35rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
+.relay-engine-slot { display: grid; grid-template-rows: minmax(0, 1fr); min-width: 0; min-height: 0; padding: .25rem; border-radius: calc(var(--radius-md, .5rem) + .25rem); background: color-mix(in srgb, var(--relay-primary) 5%, transparent); box-shadow: 0 0 1.35rem color-mix(in srgb, var(--relay-primary) 22%, transparent); }
 .relay-engine-slot :deep(.engine-panel) { min-height: 0; border-color: var(--color-border, #d5dbe1); }
 .relay-engine-slot :deep(.engine-panel--active) { border-color: var(--color-border-strong, #99a8bb); box-shadow: 0 0 0 1px var(--color-border-strong, #99a8bb); }
-.relay-team-strip { display: flex; align-items: center; gap: .3rem; min-width: 0; min-height: 1.75rem; padding-inline: .35rem; }
-.relay-team-strip strong { flex: 0 0 auto; margin-right: .15rem; color: var(--relay-primary); font-size: .62rem; }
-.relay-team-strip__track { display: flex; flex: 1 1 auto; align-items: center; gap: .3rem; min-width: 0; overflow: hidden; }
-.relay-team-strip span { flex: 0 0 auto; padding: .2rem .38rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: 999px; background: var(--color-surface, #fff); color: var(--color-text-muted, #607080); font-size: .52rem; font-weight: 680; white-space: nowrap; transition: transform .38s ease, border-color .2s ease, background-color .2s ease, color .2s ease; }
-.relay-team-strip span.current { border-color: var(--relay-primary); background: color-mix(in srgb, var(--relay-primary) 12%, var(--color-surface, #fff)); color: var(--color-text, #17202a); }
-.relay-chip-enter-active, .relay-chip-leave-active { transition: opacity .2s ease; }
-.relay-chip-enter-from, .relay-chip-leave-to { opacity: 0; }
 .board-column { width: var(--arena-board-size); min-width: 0; justify-self: center; }
 .activity-column { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); height: var(--arena-content-height); }
 .activity-column > * { min-width: 0; min-height: 0; height: 100%; }
