@@ -274,6 +274,28 @@ def delete_event(connection: sqlite3.Connection, event_id: int) -> EventRecord |
     return event
 
 
+def list_event_tournament_links(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int | None = None,
+    tournament_id: int | None = None,
+) -> tuple[Any, ...]:
+    return tuple(connection.execute(
+        """
+        SELECT event_id, tournament_id FROM (
+          SELECT event_id, tournament_id FROM engine_relay_fixtures
+          UNION
+          SELECT event_id, tournament_id FROM puzzle_gauntlet_events WHERE tournament_id IS NOT NULL
+          UNION
+          SELECT id AS event_id, (config::jsonb->>'tournament_id')::bigint AS tournament_id
+          FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' IS NOT NULL
+        ) links
+        WHERE (?::bigint IS NULL OR event_id = ?) AND (?::bigint IS NULL OR tournament_id = ?)
+        """,
+        (event_id, event_id, tournament_id, tournament_id),
+    ))
+
+
 def reset_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
     event = get_event(connection, event_id)
     if event is None:
@@ -642,6 +664,22 @@ def reconcile_engine_relay_events_for_tournament(
             updated = get_event(connection, event.id)
             if updated is not None:
                 reconciled.append(updated)
+    for row in connection.execute(
+        "SELECT id FROM events WHERE handler_key = 'duck-vs-fish' AND (config::jsonb->>'tournament_id')::bigint = ? FOR UPDATE",
+        (tournament_id,),
+    ):
+        tournament = connection.execute("SELECT * FROM tournaments WHERE id = ?", (tournament_id,)).fetchone()
+        event = get_event(connection, int(row["id"]))
+        if tournament is None or event is None:
+            continue
+        status = {"draft": "announced" if event.published_at else "draft", "scheduled": "scheduled", "running": "live", "paused": "intermission", "finished": "completed", "aborted": "cancelled"}[tournament["status"]]
+        connection.execute(
+            "UPDATE events SET status = ?, scheduled_start_at = ?, started_at = ?, finished_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+            (status, tournament["scheduled_start_at"], tournament["started_at"], tournament["finished_at"], utc_now(), event.id),
+        )
+        updated = get_event(connection, event.id)
+        if updated is not None:
+            reconciled.append(updated)
     return tuple(reconciled)
 
 

@@ -1,4 +1,7 @@
 import type { Component } from "vue";
+import DuckVsFishArchiveHero from "./duck-vs-fish/DuckVsFishArchiveHero.vue";
+import DuckVsFishBroadcast from "./duck-vs-fish/DuckVsFishBroadcast.vue";
+import DuckVsFishControlRoom from "./duck-vs-fish/DuckVsFishControlRoom.vue";
 import EngineRelayArchiveHero from "./engine-relay/EngineRelayArchiveHero.vue";
 import EngineRelayBroadcast from "./engine-relay/EngineRelayBroadcast.vue";
 import EngineRelayControlRoom from "./engine-relay/EngineRelayControlRoom.vue";
@@ -60,4 +63,11 @@ registerEventComponents("puzzle-gauntlet", {
   publicPresentation: "immersive",
   archive: PuzzleGauntletArchiveHero,
   admin: PuzzleGauntletControlRoom,
+});
+
+registerEventComponents("duck-vs-fish", {
+  public: DuckVsFishBroadcast,
+  publicPresentation: "immersive",
+  archive: DuckVsFishArchiveHero,
+  admin: DuckVsFishControlRoom,
 });

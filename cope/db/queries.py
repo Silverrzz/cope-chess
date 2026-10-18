@@ -153,6 +153,11 @@ def list_upcoming_games(
             SELECT 1 FROM engine_relay_fixtures fixture
             WHERE fixture.tournament_id = games.tournament_id
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM events event
+            WHERE event.handler_key = 'duck-vs-fish'
+              AND (event.config::jsonb->>'tournament_id')::bigint = games.tournament_id
+          )
         ORDER BY
           CASE WHEN tournaments.status = 'scheduled' THEN 0 ELSE 1 END,
           tournaments.scheduled_start_at NULLS LAST,
