@@ -6,6 +6,7 @@ import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import type { Key } from 'chessground/types'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 
 import {
@@ -147,6 +148,23 @@ function selectPly(ply: number): void {
   emit('update:modelValue', next)
 }
 
+function predictionShapes(arrow: BoardArrow, brush: string): DrawShape[] {
+  const shapes: DrawShape[] = [{
+    orig: arrow.move.slice(0, 2).toLowerCase() as Key,
+    dest: arrow.move.slice(2, 4).toLowerCase() as Key,
+    brush,
+  }]
+  if (arrow.move.includes(',')) {
+    const square = position.value.duckSquare
+    const orig = square === null
+      ? arrow.move.slice(2, 4).toLowerCase() as Key
+      : `${'abcdefgh'[square % 8]}${8 - Math.floor(square / 8)}` as Key
+    const dest = arrow.move.slice(-2).toLowerCase() as Key
+    if (orig !== dest) shapes.push({ orig, dest, brush })
+  }
+  return shapes
+}
+
 function renderBoard(): void {
   if (!ground) return
   const move = lastMove.value
@@ -158,11 +176,7 @@ function renderBoard(): void {
     .sort((left, right) => left.color === right.color ? 0 : left.color === 'black' ? -1 : 1)
   const styledArrows = arrows.filter((arrow) => arrow.fillColor)
   const outlinedArrows = styledArrows.filter((arrow) => arrow.outlineColor)
-  const outlinedShapes = outlinedArrows.map<DrawShape>((arrow, index) => ({
-    orig: arrow.move.slice(0, 2).toLowerCase() as Key,
-    dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-    brush: `engineOutline${index}`,
-  }))
+  const outlinedShapes = outlinedArrows.flatMap((arrow, index) => predictionShapes(arrow, `engineOutline${index}`))
   const fillBrushes = Object.fromEntries(styledArrows.map((arrow, index) => [
     `engineTeam${index}`,
     {
@@ -182,21 +196,15 @@ function renderBoard(): void {
     },
   ]))
   const autoShapes = [
-    ...(move.includes(',') ? [{ orig: move.slice(-2) as Key, brush: 'yellow' }] : []),
-    ...arrows.filter((arrow) => arrow.move.includes(',')).map<DrawShape>((arrow) => ({
-      orig: arrow.move.slice(-2).toLowerCase() as Key,
-      brush: 'yellow',
-      label: { text: '🦆' },
-    })),
     ...outlinedShapes,
-    ...arrows.map<DrawShape>((arrow) => ({
-      orig: arrow.move.slice(0, 2).toLowerCase() as Key,
-      dest: arrow.move.slice(2, 4).toLowerCase() as Key,
-      brush: arrow.fillColor
+    ...arrows.flatMap((arrow) => {
+      const brush = arrow.fillColor
         ? `engineTeam${styledArrows.indexOf(arrow)}`
-        : arrow.color === 'white' ? 'engineWhite' : 'engineBlack',
-      ...(arrow.label ? { label: { text: arrow.label } } : {}),
-    })),
+        : arrow.color === 'white' ? 'engineWhite' : 'engineBlack'
+      const shapes = predictionShapes(arrow, brush)
+      if (arrow.label) shapes[0]!.label = { text: arrow.label }
+      return shapes
+    }),
   ]
   const config: ChessgroundConfig = {
     fen: currentFen.value.replaceAll('*', '1'),
@@ -244,7 +252,7 @@ defineExpose({ selectPly, focusBoard })
   >
     <div class="board-frame">
       <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
-      <div v-if="position.duckSquare !== null" class="duck-piece" :style="duckStyle" aria-label="Neutral duck">🦆</div>
+      <img v-if="position.duckSquare !== null" class="duck-piece" :style="duckStyle" :src="duckIcon" alt="Neutral duck" :draggable="false">
     </div>
 
     <div v-if="controls" class="board-controls">
@@ -272,7 +280,7 @@ defineExpose({ selectPly, focusBoard })
 
 <style scoped>
 .board-frame { position: relative; container-type: inline-size; }
-.duck-piece { position: absolute; width: 12.5%; height: 12.5%; display: grid; place-items: center; font-size: 9cqw; line-height: 1; pointer-events: none; z-index: 4; filter: drop-shadow(0 1px 2px #0008); }
+.duck-piece { position: absolute; width: 12.5%; height: 12.5%; object-fit: contain; pointer-events: none; z-index: 4; filter: drop-shadow(0 1px 2px #0008); }
 .chess-viewer {
   width: 100%;
   min-width: 0;

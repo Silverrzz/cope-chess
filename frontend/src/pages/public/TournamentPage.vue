@@ -210,7 +210,7 @@ const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
 const blackClock = computed(() => clockForSide('black'))
 const suggestedMoves = computed<BoardArrow[]>(() => {
-  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci))
+  const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci), data.value?.tournament.config?.variant)
   const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length))
   const viewedFen = positionFen(positions[viewedPly]!)
   const sideToMove = parseFen(viewedFen).turn === 'w' ? 'white' : 'black'
@@ -580,7 +580,7 @@ function applyCrossTableMove(payload: GameMoveEvent): void {
     scheduleSnapshotRefresh()
     return
   }
-  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci)
+  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci, data.value.tournament.config?.variant)
   const activeSide = nextPosition.turn === 'w' ? 'white' : 'black'
   const moverSide = payload.ply % 2 === 1 ? 'white' : 'black'
   Object.assign(game, {
@@ -896,6 +896,7 @@ function analysisForSide(side: 'white' | 'black'): EngineAnalysis {
     root_fen: positionFen(buildPositions(
       opening.value.fen,
       moves.value.slice(0, moveIndex).map((item) => item.uci),
+      data.value?.tournament.config?.variant,
     ).at(-1)!),
   }
   if (move.depth !== undefined) analysis.depth = move.depth
