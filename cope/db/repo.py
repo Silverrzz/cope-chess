@@ -2585,6 +2585,49 @@ def list_game_assignment_stage_progress(
     return tuple(_game_progress_from_row(row) for row in rows)
 
 
+def compact_game_assignment_progress(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 2000,
+) -> tuple[int, int]:
+    cutoff = (utc_now_datetime() - timedelta(days=7)).isoformat(timespec="seconds")
+    ids = tuple(
+        int(row["id"])
+        for row in connection.execute(
+            """
+            SELECT id FROM game_assignments
+            WHERE status = 'finished' AND finished_at < ?
+              AND progress_compacted_at IS NULL
+            ORDER BY id
+            LIMIT ?
+            FOR UPDATE SKIP LOCKED
+            """,
+            (cutoff, max(1, min(limit, 10000))),
+        )
+    )
+    if not ids:
+        return 0, 0
+    placeholders = ", ".join("?" for _ in ids)
+    deleted = connection.execute(
+        f"""
+        DELETE FROM game_assignment_progress
+        WHERE assignment_id IN ({placeholders}) AND status <> 'failed'
+          AND id NOT IN (
+            SELECT DISTINCT ON (assignment_id, stage, engine_id) id
+            FROM game_assignment_progress
+            WHERE assignment_id IN ({placeholders})
+            ORDER BY assignment_id, stage, engine_id, id DESC
+          )
+        """,
+        (*ids, *ids),
+    ).rowcount
+    connection.execute(
+        f"UPDATE game_assignments SET progress_compacted_at = ? WHERE id IN ({placeholders})",
+        (utc_now(), *ids),
+    )
+    return len(ids), deleted
+
+
 def _get_game_assignment(
     connection: sqlite3.Connection,
     column: str,
