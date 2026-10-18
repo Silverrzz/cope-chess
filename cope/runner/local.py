@@ -178,7 +178,9 @@ def run_tournament_matches(
 
 def finish_completed_tournaments(connection: sqlite3.Connection) -> int:
     tournaments_finished = 0
-    for tournament in list_tournaments(connection):
+    from cope.control.queues import dispatch_tournaments
+
+    for tournament in dispatch_tournaments(connection, list_tournaments(connection)):
         if tournament.status != "running":
             continue
 
@@ -228,6 +230,9 @@ def next_worker_assignment(
     excluded_engine_ids: frozenset[int] = frozenset(),
     excluded_game_ids: frozenset[int] = frozenset(),
 ) -> WorkerGameAssignment | None:
+    drain = connection.execute("SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)).fetchone()
+    if drain is not None and drain["draining"]:
+        return None
     available_resources = _worker_available_resources(
         connection,
         worker,
@@ -588,7 +593,7 @@ def run_worker_assignment_game(
         return current is not None and current.status == "paused"
 
     opening = get_opening_position(connection, game_record.opening_id)
-    board = _starting_board(opening)
+    board = _starting_board(opening, chess960=tournament.config.variant == "dfrc")
     recorded_moves = list_moves(connection, game_record.id)
     checkpoint = get_game_pause_checkpoint(connection, game_record.id)
     opening_moves = () if opening is None else opening.moves
@@ -776,7 +781,7 @@ def run_worker_assignment_game(
             total=len(opening_moves_to_apply),
             metadata={"move": uci, "book_ply": book_index},
         )
-        move = chess.Move.from_uci(uci)
+        move = board.parse_uci(uci)
         if move not in board.legal_moves:
             raise RuntimeError(
                 f"opening move {uci} is illegal at book ply {book_index}"
@@ -1393,7 +1398,7 @@ def _worker_assignment_payload(
         ),
         tournament_name=tournament.name,
         round=game.round,
-        initial_fen=_starting_board(opening).fen(),
+        initial_fen=_starting_board(opening, chess960=tournament.config.variant == "dfrc").fen(),
         opening_name=None if opening is None else opening.name,
         opening_moves=() if opening is None else opening.moves,
         max_plies=_assignment_max_plies(connection, tournament, opening),
@@ -1436,7 +1441,7 @@ def _assignment_engines(
             puzzle_gauntlet_engine_ids_for_tournament(connection, game.tournament_id)
         )
     for engine_id in engine_ids:
-        engine = get_engine(connection, engine_id)
+        engine = get_engine(connection, engine_id, tournament_id=game.tournament_id)
         if engine is None:
             raise RuntimeError(f"unknown engine {engine_id}")
         engines[engine_id] = engine
@@ -1567,6 +1572,8 @@ def _tournament_engine_options(
     relay: EngineRelayAssignment | None = None,
 ) -> dict[str, str | int | bool]:
     options = dict(tournament.config.uci_options)
+    if tournament.config.variant == "dfrc":
+        options["UCI_Chess960"] = True
     member = (
         next(
             (
@@ -1857,10 +1864,10 @@ def _finish_tournament_if_complete(
     return True
 
 
-def _starting_board(opening: OpeningPositionRecord | None) -> chess.Board:
+def _starting_board(opening: OpeningPositionRecord | None, *, chess960: bool = False) -> chess.Board:
     if opening is None or opening.start_fen == "startpos":
-        return chess.Board()
-    return chess.Board(opening.start_fen)
+        return chess.Board(chess960=chess960)
+    return chess.Board(opening.start_fen, chess960=chess960)
 
 
 def _validate_new_game_attempt(
@@ -2088,5 +2095,6 @@ def _build_pgn(
             time_control=tournament.config.time_control.model_dump(mode="json"),
             moves=moves,
             extra_headers=extra_headers,
+            variant=tournament.config.variant,
         )
     )

@@ -83,6 +83,8 @@ DATASETS = (
     CloneDataset("openings", "Opening positions", "FENs, move sequences, and ordering for opening suites.", "Openings", "openings", ("opening_suites",), serial=True),
     CloneDataset("tournaments", "Tournament definitions", "Tournament configuration, state, and scheduling fields.", "Tournaments", "tournaments", ("engine_versions", "opening_suites"), serial=True),
     CloneDataset("participants", "Tournament participants", "Seeded engine participants.", "Tournaments", "participants", ("tournaments", "engine_versions")),
+    CloneDataset("control_tournament_builds", "Pinned tournament builds", "Exact engine build specifications retained by managed tournaments.", "Tournaments", "control_tournament_builds", ("tournaments", "engine_versions", "engine_artifacts")),
+    CloneDataset("control_engine_capabilities", "Engine capability evidence", "DFRC capability evidence for exact engine builds.", "Engines", "control_engine_capabilities", ("engine_versions",), default=True),
     CloneDataset("tournament_matches", "Tournament matches", "Knockout and pairing match structure.", "Tournaments", "tournament_matches", ("tournaments", "engine_versions"), serial=True),
     CloneDataset("games", "Games and PGNs", "Game records, results, PGNs, and hardware descriptions.", "Games", "games", ("tournaments", "tournament_matches", "engine_versions", "openings"), serial=True),
     CloneDataset("moves", "Moves and analysis", "Moves, evaluations, PVs, nodes, clocks, and engine telemetry.", "Games", "moves", ("games", "engine_versions")),

@@ -1032,7 +1032,14 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
     )
 
 
-def get_engine(connection: sqlite3.Connection, engine_id: int) -> EngineSpec | None:
+def get_engine(connection: sqlite3.Connection, engine_id: int, *, tournament_id: int | None = None) -> EngineSpec | None:
+    if tournament_id is not None:
+        pinned = connection.execute(
+            "SELECT engine_spec FROM control_tournament_builds WHERE tournament_id = ? AND engine_version_id = ?",
+            (tournament_id, engine_id),
+        ).fetchone()
+        if pinned is not None:
+            return EngineSpec.model_validate_json(pinned["engine_spec"])
     row = connection.execute(
         """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
                   artifact.artifact_sha256, artifact.artifact_size,
@@ -1470,6 +1477,20 @@ def set_tournament_participants(
             "hero_engine_id": gauntlet_hero_engine_id,
         }
     config = TournamentConfig.model_validate(config_data)
+    pinned = connection.execute("SELECT 1 FROM control_tournament_builds WHERE tournament_id = ? LIMIT 1", (tournament.id,)).fetchone()
+    if pinned is not None:
+        for engine_id in participants:
+            engine = get_engine(connection, engine_id, tournament_id=tournament.id)
+            if engine is None:
+                raise ValueError("Tournament participant is unavailable")
+            if config.variant == "dfrc":
+                capability = connection.execute("SELECT dfrc FROM control_engine_capabilities WHERE build_hash = ?", (engine.build_hash,)).fetchone()
+                if capability is None or capability["dfrc"] != "supported":
+                    raise ValueError("DFRC participants require recorded capability evidence")
+            connection.execute(
+                "INSERT INTO control_tournament_builds(tournament_id, engine_version_id, build_hash, engine_spec) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (tournament.id, engine_id, engine.build_hash, engine.model_dump_json()),
+            )
     connection.execute(
         "UPDATE tournaments SET config = ? WHERE id = ?",
         (config.model_dump_json(), tournament.id),

@@ -216,6 +216,7 @@ FormatOptions = (
 
 
 class TournamentConfig(StrictModel):
+    variant: Literal["standard", "dfrc"] = "standard"
     format: TournamentFormat
     format_options: FormatOptions
     participants: list[int] = Field(min_length=2)
@@ -255,6 +256,8 @@ class TournamentConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_format_options(self) -> TournamentConfig:
+        if self.variant == "dfrc" and self.opening_suite_id is None:
+            raise ValueError("DFRC tournaments require a starting-position suite")
         expected: dict[TournamentFormat, type[StrictModel]] = {
             TournamentFormat.ROUND_ROBIN: RoundRobinFormatOptions,
             TournamentFormat.SWISS: SwissFormatOptions,

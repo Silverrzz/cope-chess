@@ -59,13 +59,14 @@ class PgnGame:
     time_control: Mapping[str, Any] | None
     moves: Sequence[MoveRecord]
     extra_headers: Mapping[str, Any] | None = None
+    variant: str = "standard"
 
 
 def render_annotated_pgn(game: PgnGame) -> str:
     board = (
-        chess.Board()
+        chess.Board(chess960=game.variant == "dfrc")
         if not game.start_fen or game.start_fen == "startpos"
-        else chess.Board(game.start_fen)
+        else chess.Board(game.start_fen, chess960=game.variant == "dfrc")
     )
     date, utc_time = _date_headers(game.started_at)
     headers = [
@@ -77,6 +78,9 @@ def render_annotated_pgn(game: PgnGame) -> str:
         ("Black", game.black),
         ("Result", game.result),
     ]
+    if game.variant == "dfrc":
+        headers.append(("Variant", "Chess960"))
+        headers.append(("CopeVariant", "DFRC"))
     if board.fen() != chess.STARTING_FEN:
         headers.extend((("FEN", board.fen()), ("SetUp", "1")))
     headers.extend(
@@ -106,7 +110,10 @@ def render_annotated_pgn(game: PgnGame) -> str:
     move_lines: list[str] = []
     move_line: str | None = None
     for move_record in game.moves:
-        move = chess.Move.from_uci(move_record.uci)
+        try:
+            move = board.parse_uci(move_record.uci)
+        except ValueError:
+            break
         if move not in board.legal_moves:
             break
         mover = board.turn
@@ -188,6 +195,7 @@ def iter_pgn_export(
                 started_at=row["started_at"],
                 time_control=time_controls[raw_config],
                 moves=moves_by_game.get(game_id, ()),
+                variant=json.loads(raw_config).get("variant", "standard"),
             )
             yield f"{render_annotated_pgn(game)}\n\n"
         after_id = game_ids[-1]

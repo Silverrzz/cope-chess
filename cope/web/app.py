@@ -660,7 +660,7 @@ def create_app(
             _is_platform_access_request(request)
             and await asyncio.to_thread(_platform_is_private, app)
         )
-        protected = admin_api or admin_page or private_event_page or private_platform_request
+        protected = (admin_api or admin_page or private_event_page or private_platform_request) and not request.scope.get("cope.control.internal")
         admin_token = _admin_token(request) if protected else None
         manager_token = _manager_token(request) if protected else None
 
@@ -734,6 +734,8 @@ def create_app(
             return response
 
         response = await call_next(request)
+        if path.startswith(("/api/control", "/api/admin/control")) or path == "/mcp":
+            response.headers["Cache-Control"] = "no-store"
         if (
             protected
             and not admin_api
@@ -1107,6 +1109,11 @@ def create_app(
     from cope.web.api import register_api_routes
 
     register_api_routes(app)
+    from cope.control.api import register_control_routes
+    from cope.control.mcp import install_mcp
+
+    register_control_routes(app)
+    install_mcp(app)
     return app
 
 
@@ -1131,6 +1138,7 @@ def _is_spa_request(request: Request) -> bool:
         "/internal",
         "/openapi.json",
         "/redoc",
+        "/mcp",
     }:
         return False
     if path.startswith(
@@ -1505,6 +1513,13 @@ def _security_error(
 
 
 def _database(request: Request) -> Iterator[sqlite3.Connection]:
+    internal = request.scope.get("cope.control.internal")
+    if internal is not None:
+        route = request.scope.get("route")
+        if route is None or route.path != internal["route_path"]:
+            raise HTTPException(status_code=403, detail="Control action does not match the selected API route")
+        yield internal["connection"]
+        return
     # check_same_thread=False: FastAPI runs sync dependencies in a threadpool
     # while async endpoints run on the event loop, so a request's connection
     # crosses threads. Each connection is still scoped to a single request.
@@ -1763,7 +1778,8 @@ def _manager_token(request: Request) -> str | None:
 
 
 def _load_access_tokens(request: Request) -> None:
-    if getattr(request.app.state, "access_tokens_loaded", False):
+    now = time.monotonic()
+    if getattr(request.app.state, "access_tokens_loaded", False) and now - getattr(request.app.state, "access_tokens_loaded_at", 0.0) < 1.0:
         return
     connection = connect_database(request.app.state.db_path)
     try:
@@ -1780,9 +1796,13 @@ def _load_access_tokens(request: Request) -> None:
         elif row["role"] == "manager" and row["token"]:
             request.app.state.manager_token = str(row["token"])
     request.app.state.access_tokens_loaded = True
+    request.app.state.access_tokens_loaded_at = now
 
 
 def _admin_session_role(request: Request) -> str | None:
+    internal = request.scope.get("cope.control.internal")
+    if internal is not None:
+        return "admin" if "*" in internal["principal"].scopes else "manager"
     admin_token = _admin_token(request)
     if admin_token and _admin_session_valid(request, admin_token):
         return "admin"
@@ -2297,6 +2317,7 @@ def _worker_admin_api_payload(
         },
         "worker": _worker_record_payload(worker),
         "settings": {
+            "draining": bool((connection.execute("SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)).fetchone() or {}).get("draining", False)),
             "core_limit": worker.core_limit,
             "effective_cores": (
                 worker.capacity.threads if worker.capacity is not None else None
@@ -3179,7 +3200,7 @@ def _cross_table_games_payload(
     for game in games:
         start_fen = opening_fens.get(game.opening_id, "startpos")
         try:
-            boards[game.id] = chess.Board() if start_fen == "startpos" else chess.Board(start_fen)
+            boards[game.id] = chess.Board(chess960=True) if start_fen == "startpos" else chess.Board(start_fen, chess960=True)
         except ValueError:
             boards[game.id] = chess.Board()
         clocks_by_game[game.id] = {"white": None, "black": None}
@@ -3377,7 +3398,7 @@ def _move_root_fens(
     start_fen = (opening or {}).get("fen") or "startpos"
     try:
         board: chess.Board | None = (
-            chess.Board() if start_fen == "startpos" else chess.Board(start_fen)
+            chess.Board(chess960=True) if start_fen == "startpos" else chess.Board(start_fen, chess960=True)
         )
     except ValueError:
         board = None

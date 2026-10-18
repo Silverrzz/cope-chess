@@ -2,6 +2,8 @@ import chess
 
 
 def setoption_command(name: str, value: str | int | bool) -> str:
+    if isinstance(value, bool):
+        value = "true" if value else "false"
     return f"setoption name {name} value {value}"
 
 
@@ -12,7 +14,7 @@ def position_command(board: chess.Board) -> str:
     if root.fen() == chess.STARTING_FEN:
         command = "position startpos"
     else:
-        command = f"position fen {root.fen()}"
+        command = f"position fen {root.fen(shredder=board.chess960)}"
 
     if moves:
         command = f"{command} moves {moves}"

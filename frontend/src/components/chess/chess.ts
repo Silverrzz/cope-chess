@@ -83,7 +83,7 @@ export function applyUci(position: Position, move: string): Position {
   const isWhite = piece === piece.toUpperCase()
   const isPawn = piece.toLowerCase() === 'p'
   const isKing = piece.toLowerCase() === 'k'
-  const captured = next.squares[to] ?? null
+  let captured = next.squares[to] ?? null
   const fromFile = fileIndex(fromSquare)
   const toFile = fileIndex(toSquare)
   const fromRank = rankNumber(fromSquare)
@@ -94,7 +94,18 @@ export function applyUci(position: Position, move: string): Position {
     next.squares[squareIndex(`${toSquare[0]}${capturedRank}`)] = null
   }
 
-  if (isKing && Math.abs(toFile - fromFile) === 2) {
+  const ownRook = isKing && captured === (isWhite ? 'R' : 'r')
+  if (ownRook) {
+    const rank = fromSquare[1]
+    const kingSide = toFile > fromFile
+    const kingTo = squareIndex(`${kingSide ? 'g' : 'c'}${rank}`)
+    const rookTo = squareIndex(`${kingSide ? 'f' : 'd'}${rank}`)
+    next.squares[from] = null
+    next.squares[to] = null
+    next.squares[kingTo] = piece
+    next.squares[rookTo] = isWhite ? 'R' : 'r'
+    captured = null
+  } else if (isKing && Math.abs(toFile - fromFile) === 2) {
     const rank = fromSquare[1]
     const kingSide = toFile > fromFile
     const rookFrom = squareIndex(`${kingSide ? 'h' : 'a'}${rank}`)
@@ -103,11 +114,13 @@ export function applyUci(position: Position, move: string): Position {
     next.squares[rookFrom] = null
   }
 
-  next.squares[from] = null
-  const promotion = normalized[4]
-  next.squares[to] = promotion
-    ? (isWhite ? promotion.toUpperCase() : promotion) as Piece
-    : piece
+  if (!ownRook) {
+    next.squares[from] = null
+    const promotion = normalized[4]
+    next.squares[to] = promotion
+      ? (isWhite ? promotion.toUpperCase() : promotion) as Piece
+      : piece
+  }
 
   next.castling = updateCastling(next.castling, piece, fromSquare, toSquare, captured)
   next.enPassant = isPawn && Math.abs(toRank - fromRank) === 2
@@ -201,8 +214,8 @@ function updateCastling(
   captured: Piece | null,
 ): string {
   let rights = current === '-' ? '' : current
-  if (piece === 'K') rights = rights.replace(/[KQ]/g, '')
-  if (piece === 'k') rights = rights.replace(/[kq]/g, '')
+  if (piece === 'K') rights = rights.replace(/[A-Z]/g, '')
+  if (piece === 'k') rights = rights.replace(/[a-z]/g, '')
 
   const rightsByRookSquare: Record<string, string> = {
     a1: 'Q',
@@ -213,8 +226,16 @@ function updateCastling(
   if (piece.toLowerCase() === 'r' && rightsByRookSquare[from]) {
     rights = rights.replace(rightsByRookSquare[from], '')
   }
+  if (piece.toLowerCase() === 'r') {
+    const fileRight = piece === 'R' ? from[0]!.toUpperCase() : from[0]!
+    rights = rights.replace(fileRight, '')
+  }
   if (captured?.toLowerCase() === 'r' && rightsByRookSquare[to]) {
     rights = rights.replace(rightsByRookSquare[to], '')
+  }
+  if (captured?.toLowerCase() === 'r') {
+    const fileRight = captured === 'R' ? to[0]!.toUpperCase() : to[0]!
+    rights = rights.replace(fileRight, '')
   }
   return rights || '-'
 }

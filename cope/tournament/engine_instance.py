@@ -523,7 +523,7 @@ def _parse_search_result(
                 bestmove_uci = parts[1]
                 if len(bestmove_uci) == 5 and bestmove_uci[4] in "QRBN":
                     bestmove_uci = f"{bestmove_uci[:4]}{bestmove_uci[4].lower()}"
-                bestmove = chess.Move.from_uci(bestmove_uci)
+                bestmove = board.parse_uci(bestmove_uci)
             except ValueError as exc:
                 raise RuntimeError(f"{engine_name} returned malformed bestmove: {line}") from exc
 

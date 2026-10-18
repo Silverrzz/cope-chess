@@ -434,6 +434,7 @@ def _iso(value: datetime) -> str:
 
 def _config_fingerprint(config: TournamentConfig) -> str:
     value = {
+        "variant": config.variant,
         "time_control": config.time_control.model_dump(mode="json"),
         "adjudication": config.adjudication.model_dump(mode="json"),
         "engine_threads": config.engine_threads,

@@ -44,7 +44,7 @@ from cope.version import app_version
 LOG = logging.getLogger("cope.updater")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}$")
-PLATFORM_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server", "clone-runner")
+PLATFORM_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server", "clone-runner", "control-runner")
 
 
 def _default_compose_files() -> tuple[Path, ...]:
