@@ -73,7 +73,7 @@ const duckStyle = computed(() => {
   const file = square % 8
   const rank = Math.floor(square / 8)
   const flipped = props.orientation === 'black'
-  return { left: `${(flipped ? 7 - file : file) * 12.5}%`, top: `${(flipped ? 7 - rank : rank) * 12.5}%` }
+  return { transform: `translate(${(flipped ? 7 - file : file) * 100}%, ${(flipped ? 7 - rank : rank) * 100}%)` }
 })
 const material = computed(() => materialSummary(position.value))
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
@@ -252,7 +252,7 @@ defineExpose({ selectPly, focusBoard })
   >
     <div class="board-frame">
       <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
-      <img v-if="position.duckSquare !== null" class="duck-piece" :style="duckStyle" :src="duckIcon" alt="Neutral duck" :draggable="false">
+      <img v-if="position.duckSquare !== null" :key="orientation" class="duck-piece" :style="duckStyle" :src="duckIcon" alt="Neutral duck" :draggable="false">
     </div>
 
     <div v-if="controls" class="board-controls">
@@ -280,7 +280,28 @@ defineExpose({ selectPly, focusBoard })
 
 <style scoped>
 .board-frame { position: relative; container-type: inline-size; }
-.duck-piece { position: absolute; width: 12.5%; height: 12.5%; object-fit: contain; pointer-events: none; z-index: 4; filter: drop-shadow(0 1px 2px #0008); }
+.duck-piece {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 12.5%;
+  height: 12.5%;
+  object-fit: contain;
+  pointer-events: none;
+  z-index: 4;
+  filter: drop-shadow(0 1px 2px #0008);
+  transition: transform 150ms cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+.chess-viewer--compact .duck-piece {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .duck-piece {
+    transition: none;
+  }
+}
 .chess-viewer {
   width: 100%;
   min-width: 0;
