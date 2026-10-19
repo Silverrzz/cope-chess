@@ -561,26 +561,28 @@ def _admin_rating_list_tournaments(
           FROM tournament_rating_list_commits rating_commit
           WHERE rating_commit.status = 'applied'{rating_list_filter}
         ),
-        hardware_by_game AS (
-          SELECT score.game_id, COUNT(*) AS score_count
-          FROM game_hardware_scores score
-          JOIN games game ON game.id = score.game_id
-          WHERE game.tournament_id IN (
-            SELECT tournament_id FROM selected_commits
-          )
-          GROUP BY score.game_id
-        ),
-        game_stats AS (
-          SELECT game.tournament_id,
-                 COUNT(*) AS games,
-                 COUNT(*) FILTER (WHERE hardware.score_count = 2) AS hardware_games
+        selected_games AS MATERIALIZED (
+          SELECT game.id, game.tournament_id
           FROM games game
-          LEFT JOIN hardware_by_game hardware ON hardware.game_id = game.id
           WHERE game.status = 'finished'
             AND game.result IN ('1-0', '0-1', '1/2-1/2')
             AND game.tournament_id IN (
               SELECT tournament_id FROM selected_commits
             )
+        ),
+        hardware_by_game AS (
+          SELECT score.game_id
+          FROM game_hardware_scores score
+          JOIN selected_games game ON game.id = score.game_id
+          GROUP BY score.game_id
+          HAVING COUNT(*) = 2
+        ),
+        game_stats AS (
+          SELECT game.tournament_id,
+                 COUNT(*) AS games,
+                 COUNT(*) FILTER (WHERE hardware.game_id IS NOT NULL) AS hardware_games
+          FROM selected_games game
+          LEFT JOIN hardware_by_game hardware ON hardware.game_id = game.id
           GROUP BY game.tournament_id
         )
         SELECT rating_commit.*, tournament.name AS tournament_name,
@@ -1443,7 +1445,11 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engines = web_app._engine_names(connection)
-        running_tournaments = web_app._home_tournament_cards(connection, engines)
+        running_tournaments = web_app._home_tournament_cards(
+            connection,
+            engines,
+            estimate_cache=request.app.state.tournament_estimate_cache,
+        )
         for item in running_tournaments:
             summary = item["tournament"]
             summary["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
@@ -1488,6 +1494,7 @@ def register_api_routes(app: FastAPI) -> None:
             estimator=estimator,
             include_completed_estimates=False,
             include_active_estimates=False,
+            estimate_cache=request.app.state.tournament_estimate_cache,
         )
         for item in items:
             item["spectator_count"] = request.app.state.stream_hub.tournament_spectator_count(
@@ -1613,6 +1620,7 @@ def register_api_routes(app: FastAPI) -> None:
             connection,
             (tournament,),
             engines,
+            estimate_cache=request.app.state.tournament_estimate_cache,
         )[0]
         total_games = count_games(connection, tournament.id, status="finished")
         games = list_games_page(
@@ -2560,6 +2568,7 @@ def register_api_routes(app: FastAPI) -> None:
 
     @app.get("/api/admin/tournaments")
     def admin_tournaments(
+        request: Request,
         status: str = "",
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
@@ -2583,6 +2592,7 @@ def register_api_routes(app: FastAPI) -> None:
             estimator=estimator,
             include_completed_estimates=False,
             include_active_estimates=False,
+            estimate_cache=request.app.state.tournament_estimate_cache,
         )
         return _json(
             {
@@ -2719,6 +2729,7 @@ def register_api_routes(app: FastAPI) -> None:
             connection,
             (tournament,),
             engines,
+            estimate_cache=request.app.state.tournament_estimate_cache,
         )[0]
         total_games = count_games(
             connection,

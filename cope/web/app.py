@@ -102,6 +102,7 @@ from cope.network import (
     default_worker_port,
 )
 from cope.web.forms import form_value
+from cope.web.estimate_cache import TournamentEstimateCache
 from cope.version import app_version
 from cope.tournament.estimates import TournamentEstimate, TournamentEstimator, completed_tournament_estimate
 
@@ -550,6 +551,20 @@ def _enqueue_ephemeral_subscribers(
         subscription.enqueue_ephemeral(event)
 
 
+@contextlib.asynccontextmanager
+async def _web_lifespan(app: FastAPI):
+    task = asyncio.create_task(
+        app.state.tournament_estimate_cache.run(app.state.db_path),
+        name="tournament-estimates",
+    )
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 def create_app(
     db_path: str | Path = DEFAULT_DATABASE_URL,
     *,
@@ -558,7 +573,7 @@ def create_app(
     event_token: str | None = None,
     admin_token: str | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="COPE Chess")
+    app = FastAPI(title="COPE Chess", lifespan=_web_lifespan)
     app.state.db_path = str(db_path)
     app.state.worker_server_url = worker_server_url
     app.state.benchmarker_server_url = benchmarker_server_url
@@ -572,6 +587,7 @@ def create_app(
     app.state.platform_privacy_cache = None
     app.state.worker_snapshot_task = None
     app.state.tournament_snapshot_tasks = {}
+    app.state.tournament_estimate_cache = TournamentEstimateCache()
     app.add_middleware(GZipMiddleware, minimum_size=1_000)
     frontend_assets = FRONTEND_DIST_DIR / "assets"
     if frontend_assets.is_dir():
@@ -1348,17 +1364,18 @@ def _social_preview_html(request: Request) -> str | None:
         ):
             return None
 
-        games = list_games(connection, tournament.id)
-        engines = _engine_names(connection)
         game = None
         raw_game_id = request.query_params.get("game_id")
         if raw_game_id is not None:
             game_id = _positive_int(raw_game_id)
-            game = next((item for item in games if item.id == game_id), None)
+            game = get_game(connection, game_id) if game_id is not None else None
+            if game is not None and game.tournament_id != tournament.id:
+                game = None
 
         format_label = tournament.config.format.value.replace("_", " ").title()
         time_control = _time_control_label(tournament.config.time_control)
         if game is not None:
+            engines = _engine_names(connection)
             white = engines.get(game.white_engine_id, f"Engine {game.white_engine_id}")
             black = engines.get(game.black_engine_id, f"Engine {game.black_engine_id}")
             title = f"{white} vs {black} | {tournament.name} | COPE Chess"
@@ -1379,7 +1396,15 @@ def _social_preview_html(request: Request) -> str | None:
                 f"{format_label}, {time_control}."
             )
         else:
-            summary = _summarize_games(games)
+            summary = connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE status = 'finished') AS finished
+                FROM games
+                WHERE tournament_id = ?
+                """,
+                (tournament.id,),
+            ).fetchone()
             participant_count = len(tournament.config.participants)
             status = tournament.status.replace("_", " ").title()
             title = f"{tournament.name} | COPE Chess"
@@ -2879,15 +2904,26 @@ def _selected_viewer_game(request: Request, games: tuple[GameRecord, ...]) -> Ga
 def _home_tournament_cards(
     connection: sqlite3.Connection,
     engines: dict[int, str],
+    *,
+    estimate_cache: TournamentEstimateCache | None = None,
 ) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
-    estimator = TournamentEstimator(connection)
     event_tournament_ids = _puzzle_gauntlet_tournament_ids(connection)
-    for tournament in list_tournaments(connection):
-        if tournament.id in event_tournament_ids:
-            continue
-        if tournament.status not in {"running", "paused"}:
-            continue
+    tournaments = tuple(
+        tournament
+        for tournament in list_tournaments(connection)
+        if tournament.id not in event_tournament_ids
+        and tournament.status in {"running", "paused"}
+    )
+    summaries = _tournament_summaries(
+        connection,
+        tournaments,
+        engines,
+        include_completed_estimates=False,
+        include_active_estimates=False,
+        estimate_cache=estimate_cache,
+    )
+    for tournament, summary in zip(tournaments, summaries, strict=True):
         active_games = list_active_games(
             connection,
             tournament_id=tournament.id,
@@ -2899,12 +2935,7 @@ def _home_tournament_cards(
         moves = list_moves(connection, game.id) if game is not None else ()
         cards.append(
             {
-                "tournament": _tournament_summary(
-                    connection,
-                    tournament,
-                    engines,
-                    estimator=estimator,
-                ),
+                "tournament": summary,
                 "preview": None
                 if game is None
                 else {
@@ -3509,12 +3540,14 @@ def _standings(
             int(row["white_engine_id"]),
             int(row["black_engine_id"]),
             row["result"],
+            int(row["games"]),
         )
         for row in connection.execute(
             """
-            SELECT white_engine_id, black_engine_id, result
+            SELECT white_engine_id, black_engine_id, result, COUNT(*) AS games
             FROM games
             WHERE tournament_id = ? AND record_eligible = 1 AND result IS NOT NULL
+            GROUP BY white_engine_id, black_engine_id, result
             """,
             (tournament.id,),
         )
@@ -3525,27 +3558,27 @@ def _standings(
     draws: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
     losses: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
     head_to_head: dict[int, dict[int, dict[str, Any]]] = {}
-    for white_engine_id, black_engine_id, result in games:
+    for white_engine_id, black_engine_id, result, game_count in games:
         for engine_id in (white_engine_id, black_engine_id):
             points.setdefault(engine_id, 0.0)
             played.setdefault(engine_id, 0)
             wins.setdefault(engine_id, 0)
             draws.setdefault(engine_id, 0)
             losses.setdefault(engine_id, 0)
-            played[engine_id] += 1
+            played[engine_id] += game_count
         if result == "1-0":
-            points[white_engine_id] += 1
-            wins[white_engine_id] += 1
-            losses[black_engine_id] += 1
+            points[white_engine_id] += game_count
+            wins[white_engine_id] += game_count
+            losses[black_engine_id] += game_count
         elif result == "0-1":
-            points[black_engine_id] += 1
-            wins[black_engine_id] += 1
-            losses[white_engine_id] += 1
+            points[black_engine_id] += game_count
+            wins[black_engine_id] += game_count
+            losses[white_engine_id] += game_count
         else:
-            points[white_engine_id] += 0.5
-            points[black_engine_id] += 0.5
-            draws[white_engine_id] += 1
-            draws[black_engine_id] += 1
+            points[white_engine_id] += 0.5 * game_count
+            points[black_engine_id] += 0.5 * game_count
+            draws[white_engine_id] += game_count
+            draws[black_engine_id] += game_count
 
         white_score = 1.0 if result == "1-0" else 0.0 if result == "0-1" else 0.5
         for engine_id, opponent_id, score in (
@@ -3556,11 +3589,11 @@ def _standings(
                 opponent_id,
                 {"points": 0.0, "played": 0, "wins": 0, "draws": 0, "losses": 0},
             )
-            matchup["points"] += score
-            matchup["played"] += 1
-            matchup["wins"] += int(score == 1.0)
-            matchup["draws"] += int(score == 0.5)
-            matchup["losses"] += int(score == 0.0)
+            matchup["points"] += score * game_count
+            matchup["played"] += game_count
+            matchup["wins"] += int(score == 1.0) * game_count
+            matchup["draws"] += int(score == 0.5) * game_count
+            matchup["losses"] += int(score == 0.0) * game_count
 
     matches = list_tournament_matches(connection, tournament.id)
     bye_points: dict[int, float] = {}
@@ -3572,9 +3605,9 @@ def _standings(
 
     buchholz = {engine_id: 0.0 for engine_id in points}
     if tournament.config.format == TournamentFormat.SWISS:
-        for white_engine_id, black_engine_id, _result in games:
-            buchholz[white_engine_id] += points[black_engine_id]
-            buchholz[black_engine_id] += points[white_engine_id]
+        for white_engine_id, black_engine_id, _result, game_count in games:
+            buchholz[white_engine_id] += points[black_engine_id] * game_count
+            buchholz[black_engine_id] += points[white_engine_id] * game_count
 
     stage = {engine_id: 0 for engine_id in points}
     if tournament.config.format == TournamentFormat.KNOCKOUT:
@@ -3653,10 +3686,19 @@ def _tournament_rating_summaries(
     history_by_list: dict[int, list[dict[str, Any]]] = {}
     for item in connection.execute(
         """
-        SELECT rating_history.id, rating_history.rating_list_id,
-               rating_history.engine_id, rating_history.elo_before,
-               rating_history.elo, rating_history.elo_change,
-               rating_history.score, opponent.elo_before AS opponent_elo
+        SELECT rating_history.rating_list_id, rating_history.engine_id,
+               (array_agg(rating_history.elo_before
+                 ORDER BY rating_history.id))[1] AS elo_before,
+               (array_agg(rating_history.elo
+                 ORDER BY rating_history.id DESC))[1] AS elo_after,
+               SUM(rating_history.elo_change::text::double precision
+                 ORDER BY rating_history.id) AS elo_change,
+               SUM(rating_history.score::double precision) AS score,
+               COUNT(*) AS games,
+               COUNT(*) FILTER (WHERE rating_history.score = 1) AS wins,
+               COUNT(*) FILTER (WHERE rating_history.score = 0.5) AS draws,
+               COUNT(*) FILTER (WHERE rating_history.score = 0) AS losses,
+               array_agg(opponent.elo_before ORDER BY rating_history.id) AS opponent_elos
         FROM rating_list_history rating_history
         JOIN rating_list_history opponent
           ON opponent.game_id = rating_history.game_id
@@ -3667,49 +3709,30 @@ def _tournament_rating_summaries(
          AND rating_commit.rating_list_id = rating_history.rating_list_id
          AND rating_commit.status = 'applied'
         WHERE rating_history.tournament_id = ?
-        ORDER BY rating_history.rating_list_id, rating_history.id
+        GROUP BY rating_history.rating_list_id, rating_history.engine_id
+        ORDER BY rating_history.rating_list_id, MIN(rating_history.id)
         """,
         (tournament_id,),
     ):
-        history_by_list.setdefault(int(item["rating_list_id"]), []).append(item)
+        history_by_list.setdefault(int(item["rating_list_id"]), []).append(
+            {
+                "engine_id": int(item["engine_id"]),
+                "elo_before": float(item["elo_before"]),
+                "elo_after": float(item["elo_after"]),
+                "elo_change": float(item["elo_change"]),
+                "score": float(item["score"]),
+                "games": int(item["games"]),
+                "wins": int(item["wins"]),
+                "draws": int(item["draws"]),
+                "losses": int(item["losses"]),
+                "average_opponent_elo": sum(item["opponent_elos"]) / int(item["games"]),
+            }
+        )
     summaries: list[dict[str, Any]] = []
     for commit in commits:
-        history = history_by_list.get(int(commit["rating_list_id"]), ())
-        by_engine: dict[int, dict[str, Any]] = {}
-        for item in history:
-            engine_id = int(item["engine_id"])
-            values = by_engine.setdefault(
-                engine_id,
-                {
-                    "engine_id": engine_id,
-                    "elo_before": float(item["elo_before"]),
-                    "elo_after": float(item["elo"]),
-                    "elo_change": 0.0,
-                    "score": 0.0,
-                    "games": 0,
-                    "wins": 0,
-                    "draws": 0,
-                    "losses": 0,
-                    "opponent_elos": [],
-                },
-            )
-            score = float(item["score"])
-            values["elo_after"] = float(item["elo"])
-            values["elo_change"] += float(item["elo_change"])
-            values["score"] += score
-            values["games"] += 1
-            values["opponent_elos"].append(float(item["opponent_elo"]))
-            if score == 1.0:
-                values["wins"] += 1
-            elif score == 0.5:
-                values["draws"] += 1
-            else:
-                values["losses"] += 1
-
         rows: list[dict[str, Any]] = []
-        for values in by_engine.values():
-            opponent_elos = values.pop("opponent_elos")
-            average_opponent_elo = sum(opponent_elos) / len(opponent_elos)
+        for values in history_by_list.get(int(commit["rating_list_id"]), ()):
+            average_opponent_elo = values["average_opponent_elo"]
             score_fraction = values["score"] / values["games"]
             if score_fraction <= 0:
                 performance_difference = -800.0
@@ -3800,6 +3823,7 @@ def _tournament_summaries(
     estimator: TournamentEstimator | None = None,
     include_completed_estimates: bool = True,
     include_active_estimates: bool = True,
+    estimate_cache: TournamentEstimateCache | None = None,
 ) -> list[dict[str, Any]]:
     if not tournaments:
         return []
@@ -3842,14 +3866,22 @@ def _tournament_summaries(
                COUNT(*) FILTER (WHERE status = 'live') AS live,
                COUNT(*) FILTER (WHERE status = 'finished') AS finished,
                COUNT(*) FILTER (WHERE status = 'abandoned') AS abandoned,
-               COUNT(DISTINCT (
-                 LEAST(white_engine_id, black_engine_id),
-                 GREATEST(white_engine_id, black_engine_id),
-                 opening_id,
-                 match_id,
-                 (game_number - 1) / 2,
-                 tiebreak_kind
-               )) AS pairs,
+               (
+                 SELECT COUNT(*)
+                 FROM (
+                   SELECT 1
+                   FROM games pair_game
+                   WHERE pair_game.tournament_id = games.tournament_id
+                     AND pair_game.record_eligible = 1
+                   GROUP BY
+                     LEAST(pair_game.white_engine_id, pair_game.black_engine_id),
+                     GREATEST(pair_game.white_engine_id, pair_game.black_engine_id),
+                     pair_game.opening_id,
+                     pair_game.match_id,
+                     (pair_game.game_number - 1) / 2,
+                     pair_game.tiebreak_kind
+                 ) game_pairs
+               ) AS pairs,
                {duration_columns}
         FROM games
         WHERE tournament_id IN ({placeholders}) AND record_eligible = 1
@@ -3880,7 +3912,9 @@ def _tournament_summaries(
     active_ids = tuple(
         tournament.id
         for tournament in tournaments
-        if include_active_estimates and tournament.status not in {"finished", "aborted"}
+        if include_active_estimates
+        and estimate_cache is None
+        and tournament.status not in {"finished", "aborted"}
     )
     games_by_tournament: dict[int, list[GameRecord]] = {
         tournament_id: [] for tournament_id in active_ids
@@ -3912,7 +3946,9 @@ def _tournament_summaries(
                 ),
                 sample_size=(values["duration_sample"] if values is not None else 0),
             )
-        elif not include_active_estimates:
+        elif estimate_cache is not None and (cached_estimate := estimate_cache.get(tournament)) is not None:
+            tournament_estimate = cached_estimate
+        elif estimate_cache is not None or not include_active_estimates:
             tournament_estimate = TournamentEstimate(
                 estimated_finish_at=None,
                 estimated_remaining_seconds=None,

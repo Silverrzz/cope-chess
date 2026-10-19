@@ -55,7 +55,7 @@ const query = ref('')
 const deleting = ref<number | null>(null)
 const copying = ref<number | null>(null)
 const bulkPending = ref<'pause' | 'resume' | null>(null)
-const status = computed(() => typeof route.query.status === 'string' ? route.query.status : 'active')
+const status = computed(() => typeof route.query.status === 'string' ? route.query.status : 'all')
 const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
   const tournaments = [...(data.value?.tournaments ?? [])].sort((left, right) => {
@@ -81,7 +81,7 @@ async function load(): Promise<void> {
 }
 
 async function setStatus(next: string): Promise<void> {
-  await router.push({ query: next === 'active' ? {} : { status: next } })
+  await router.push({ query: next === 'all' ? {} : { status: next } })
 }
 
 async function bulkStatus(action: 'pause' | 'resume'): Promise<void> {
@@ -182,8 +182,8 @@ onMounted(load)
         <label class="status-filter">
           <span>Status</span>
           <select class="input" :value="status" @change="setStatus(($event.target as HTMLSelectElement).value)">
-            <option value="active">Active tournaments</option>
             <option value="all">All tournaments</option>
+            <option value="active">Active tournaments</option>
             <option v-for="option in data?.statuses ?? []" :key="option" :value="option">{{ humanize(option) }}</option>
           </select>
         </label>
