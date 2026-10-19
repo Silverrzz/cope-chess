@@ -3,7 +3,8 @@ import { Chessground } from 'chessground'
 import type { Api as ChessgroundApi } from 'chessground/api'
 import type { Config as ChessgroundConfig } from 'chessground/config'
 import type { DrawBrushes, DrawShape } from 'chessground/draw'
-import type { Key } from 'chessground/types'
+import { read as readGroundFen } from 'chessground/fen'
+import type { Key, PiecesDiff, Role } from 'chessground/types'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import duckIcon from '@/assets/duck.svg'
@@ -27,6 +28,7 @@ const arrowBrushes: DrawBrushes = {
   engineBlack: { key: 'engine-black', color: '#000000', opacity: 0.56, lineWidth: 14 },
   engineWhite: { key: 'engine-white', color: '#ffffff', opacity: 0.72, lineWidth: 8 },
 }
+const duckImage = `url("${duckIcon}")`
 
 const props = withDefaults(defineProps<{
   fen?: string | null
@@ -67,14 +69,6 @@ const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const currentFen = computed(() => positionFen(position.value))
-const duckStyle = computed(() => {
-  const square = position.value.duckSquare
-  if (square === null) return {}
-  const file = square % 8
-  const rank = Math.floor(square / 8)
-  const flipped = props.orientation === 'black'
-  return { transform: `translate(${(flipped ? 7 - file : file) * 100}%, ${(flipped ? 7 - rank : rank) * 100}%)` }
-})
 const material = computed(() => materialSummary(position.value))
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
@@ -114,6 +108,7 @@ watch([
   lastMove,
   () => props.orientation,
   () => props.coordinates,
+  () => props.compact,
   () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}:${arrow.outlineColor || ''}:${arrow.label || ''}`).join('|'),
 ], renderBoard)
 
@@ -207,13 +202,21 @@ function renderBoard(): void {
     }),
   ]
   const config: ChessgroundConfig = {
-    fen: currentFen.value.replaceAll('*', '1'),
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
+    animation: { enabled: !props.compact, duration: 150 },
     drawable: { autoShapes, brushes: { ...arrowBrushes, ...fillBrushes, ...outlineBrushes } },
   }
+  const pieces: PiecesDiff = new Map([...ground.state.pieces.keys()].map((key) => [key, undefined]))
+  for (const [key, piece] of readGroundFen(currentFen.value.replaceAll('*', '1'))) pieces.set(key, piece)
+  const duck = position.value.duckSquare
+  if (duck !== null) {
+    const key = `${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}` as Key
+    pieces.set(key, { role: 'duck' as Role, color: 'white' })
+  }
   ground.set(config)
+  ground.setPieces(pieces)
 }
 
 function handleKey(event: KeyboardEvent): void {
@@ -252,7 +255,6 @@ defineExpose({ selectPly, focusBoard })
   >
     <div class="board-frame">
       <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
-      <img v-if="position.duckSquare !== null" :key="orientation" class="duck-piece" :style="duckStyle" :src="duckIcon" alt="Neutral duck" :draggable="false">
     </div>
 
     <div v-if="controls" class="board-controls">
@@ -280,27 +282,11 @@ defineExpose({ selectPly, focusBoard })
 
 <style scoped>
 .board-frame { position: relative; container-type: inline-size; }
-.duck-piece {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 12.5%;
-  height: 12.5%;
-  object-fit: contain;
-  pointer-events: none;
-  z-index: 4;
-  filter: drop-shadow(0 1px 2px #0008);
-  transition: transform 150ms cubic-bezier(0.65, 0, 0.35, 1);
-}
-
-.chess-viewer--compact .duck-piece {
-  transition: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .duck-piece {
-    transition: none;
-  }
+.board-mount :deep(piece.duck) {
+  background-image: v-bind(duckImage);
+  background-size: 85%;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .chess-viewer {
   width: 100%;
