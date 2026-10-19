@@ -971,7 +971,7 @@ function gameLabel(game: GameRecord): string {
   const position = game.round && game.pair_index
     ? `Round ${game.round}, board ${game.pair_index}${leg ? `, game ${leg}` : ''}`
     : 'Tournament game'
-  return `${position}, ${white} vs ${black}${outcome}`
+  return `${white} vs ${black}, ${position}${outcome}`
 }
 
 function tabTarget(tab: TabKey): RouteLocationRaw {
