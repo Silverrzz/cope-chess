@@ -1141,47 +1141,57 @@ function forgetManualFollowPauseGame(): void {
     <template v-else-if="data">
       <header ref="headingElement" class="tournament-heading">
         <div class="tournament-heading__title">
-          <div class="title-line">
-            <h1>{{ data.tournament.name }}<template v-if="headerTimeControl"> ({{ headerTimeControl }})</template></h1>
+          <h1 :title="`${data.tournament.name}${headerTimeControl ? ` (${headerTimeControl})` : ''}`">
+            <span class="tournament-heading__name">{{ data.tournament.name }}</span>
+            <span v-if="headerTimeControl" class="tournament-heading__time-control">({{ headerTimeControl }})</span>
+          </h1>
+          <div class="tournament-heading__meta">
             <StatusPill :status="data.tournament.status" />
             <SpectatorCount :count="data.spectator_count ?? 0" />
+            <p>
+              {{ format ? statusLabel(format) : 'Tournament' }}
+              <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
+              <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
+              <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>
+              <template v-else-if="data.tournament.status === 'running' && data.estimate?.estimated_finish_at"> / Estimated finish {{ formatDate(data.estimate.estimated_finish_at, true) }}</template>
+            </p>
           </div>
-          <p>
-            {{ format ? statusLabel(format) : 'Tournament' }}
-            <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
-            <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
-            <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>
-            <template v-else-if="data.tournament.status === 'running' && data.estimate?.estimated_finish_at"> / Estimated finish {{ formatDate(data.estimate.estimated_finish_at, true) }}</template>
-          </p>
         </div>
 
         <div class="tournament-heading__controls">
-          <nav class="view-toggle" aria-label="Tournament viewer mode">
-            <RouterLink :to="viewTarget('focus')" :aria-current="viewerMode === 'focus' ? 'page' : undefined">Game</RouterLink>
-            <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Multi-View</RouterLink>
-          </nav>
-          <div v-if="gameTotal" class="pgn-downloads">
-            <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
-            <a v-if="viewerMode === 'focus' && gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
+          <div class="tournament-heading__actions">
+            <nav class="view-toggle" aria-label="Tournament viewer mode">
+              <RouterLink :to="viewTarget('focus')" :aria-current="viewerMode === 'focus' ? 'page' : undefined">Game</RouterLink>
+              <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Multi-View</RouterLink>
+            </nav>
+            <div v-if="gameTotal" class="pgn-downloads">
+              <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
+              <a v-if="viewerMode === 'focus' && gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
+            </div>
           </div>
-          <label v-if="viewerMode === 'focus' && viewerGames.length" class="game-picker">
-            <span class="game-picker__heading">
-              <span>Active games</span>
-              <StreamIndicator v-if="!tournamentComplete" :state="streamState" />
-            </span>
-            <select :value="pickerGameId" @change="selectGame">
-              <option v-if="!pickerGameId" value="" disabled>Select live or assigned game</option>
-              <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
-            </select>
-          </label>
-          <FollowEnginePicker
-            v-if="viewerMode === 'focus' && participantEngines.length"
-            v-model="followedEngineId"
-            :engines="participantEngines"
-            :state="followState"
-            :state-label="followStateLabel"
-            @resume="resumeFollowing"
-          />
+          <div
+            v-if="viewerMode === 'focus' && (viewerGames.length || participantEngines.length)"
+            class="tournament-heading__pickers"
+          >
+            <label v-if="viewerMode === 'focus' && viewerGames.length" class="game-picker">
+              <span class="game-picker__heading">
+                <span>Active games</span>
+                <StreamIndicator v-if="!tournamentComplete" :state="streamState" />
+              </span>
+              <select :value="pickerGameId" @change="selectGame">
+                <option v-if="!pickerGameId" value="" disabled>Select live or assigned game</option>
+                <option v-for="game in viewerGames" :key="game.id" :value="String(game.id)">{{ gameLabel(game) }}</option>
+              </select>
+            </label>
+            <FollowEnginePicker
+              v-if="viewerMode === 'focus' && participantEngines.length"
+              v-model="followedEngineId"
+              :engines="participantEngines"
+              :state="followState"
+              :state-label="followStateLabel"
+              @resume="resumeFollowing"
+            />
+          </div>
         </div>
       </header>
 
@@ -1343,10 +1353,11 @@ function forgetManualFollowPauseGame(): void {
 }
 
 .tournament-heading {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: var(--space-xl, 2rem);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  gap: 1rem;
   padding-block-end: 0.55rem;
   border-block-end: 1px solid var(--color-border, #d5dbe1);
 }
@@ -1355,13 +1366,24 @@ function forgetManualFollowPauseGame(): void {
   display: grid;
   align-items: center;
   min-width: 0;
+  gap: 0.2rem;
 }
 
-.title-line {
+.tournament-heading__meta {
   display: flex;
   align-items: center;
-  gap: var(--space-sm, 0.5rem);
+  gap: 0.55rem;
   min-width: 0;
+}
+
+.tournament-heading__meta :deep(.status-pill),
+.tournament-heading__meta :deep(.spectator-count) {
+  flex: 0 0 auto;
+}
+
+.tournament-heading__meta :deep(.status-pill) {
+  min-height: 1.35rem;
+  font-size: 0.62rem;
 }
 
 .tournament-heading h1,
@@ -1371,25 +1393,54 @@ function forgetManualFollowPauseGame(): void {
 }
 
 .tournament-heading h1 {
-  max-width: 54rem;
-  font-size: clamp(1.45rem, 2.7vw, 2.15rem);
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
+  min-width: 0;
+  font-size: clamp(1.15rem, 1.6vw, 1.65rem);
   letter-spacing: -0.035em;
-  line-height: 1.05;
-  overflow-wrap: anywhere;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
-.tournament-heading__title > p {
-  margin-block-start: 0.18rem;
+.tournament-heading__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tournament-heading__time-control {
+  flex: 0 0 auto;
+}
+
+.tournament-heading__meta > p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-text-muted, #607080);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 
 .tournament-heading__controls {
   display: flex;
-  flex-wrap: wrap;
   align-items: end;
-  justify-content: flex-end;
-  gap: 0.65rem;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.tournament-heading__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.tournament-heading__pickers {
+  display: flex;
+  align-items: end;
+  gap: 0.6rem;
+  min-width: 0;
 }
 
 .view-toggle {
@@ -1449,7 +1500,7 @@ function forgetManualFollowPauseGame(): void {
   background: color-mix(in srgb, var(--color-text, #17202a) 4%, transparent);
 }
 
-.tournament-heading__controls > label,
+.game-picker,
 .follow-engine-picker {
   display: grid;
   gap: 0.25rem;
@@ -1466,11 +1517,11 @@ function forgetManualFollowPauseGame(): void {
 }
 
 .game-picker {
-  width: clamp(16rem, 27vw, 27rem);
+  width: clamp(12rem, 19vw, 22rem);
 }
 
 .follow-engine-picker {
-  width: clamp(13rem, 19vw, 18rem);
+  width: clamp(11rem, 14vw, 16rem);
 }
 
 .game-picker__heading {
@@ -1496,6 +1547,7 @@ function forgetManualFollowPauseGame(): void {
 
 .tournament-heading select {
   width: 100%;
+  min-width: 0;
   min-height: 2.35rem;
   padding: 0.4rem 2rem 0.4rem 0.65rem;
   border: 1px solid var(--color-border, #d5dbe1);
@@ -1504,6 +1556,16 @@ function forgetManualFollowPauseGame(): void {
   color: var(--color-text, #17202a);
   font: inherit;
   font-size: 0.77rem;
+  text-overflow: ellipsis;
+}
+
+.tournament-heading__pickers :deep(.follow-picker__trigger) {
+  min-height: 2.35rem;
+  padding-block: 0.25rem;
+}
+
+.tournament-heading__pickers :deep(.follow-picker__selection) {
+  line-height: 1.15;
 }
 
 .tournament-heading select:focus {
@@ -1716,10 +1778,10 @@ function forgetManualFollowPauseGame(): void {
 }
 
 @media (max-width: 58rem) {
-  .tournament-heading { align-items: stretch; flex-direction: column; }
-  .tournament-heading__controls { justify-content: space-between; }
-  .tournament-heading__controls > label,
-  .follow-engine-picker { width: auto; min-width: 0; flex: 1; }
+  .tournament-heading { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
+  .tournament-heading__controls { overflow-x: auto; padding: 0.15rem 0.15rem 0.3rem; }
+  .tournament-heading__actions,
+  .tournament-heading__pickers { flex: 0 0 auto; }
   .arena { grid-template-columns: 1fr; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
   .engine-column .game-facts { grid-column: 1 / -1; }
@@ -1728,11 +1790,6 @@ function forgetManualFollowPauseGame(): void {
 }
 
 @media (max-width: 40rem) {
-  .tournament-heading__controls { align-items: stretch; flex-direction: column-reverse; }
-  .view-toggle { order: 1; }
-  .view-toggle a { flex: 1; justify-content: center; }
-  .tournament-heading__controls > label,
-  .follow-engine-picker { width: 100%; }
   .engine-column { grid-template-columns: 1fr; }
   .engine-column .game-facts { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
