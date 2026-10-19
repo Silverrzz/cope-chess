@@ -222,7 +222,7 @@ function deleteFixture(fixture: RelayFixture): void {
 function fixtureCycles(fixture: RelayFixture): number | string {
   if (isFinale.value) return "Sudden death";
   const options = fixture.tournament?.config?.format_options as { cycles?: number } | undefined;
-  return options?.cycles ?? "—";
+  return options?.cycles ?? "-";
 }
 </script>
 

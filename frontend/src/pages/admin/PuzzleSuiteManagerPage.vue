@@ -314,11 +314,11 @@ function threadAdjustedElo(engineId: number): number {
 }
 
 function percent(value: number | null): string {
-  return value == null ? '—' : `${(value * 100).toFixed(1)}%`
+  return value == null ? '-' : `${(value * 100).toFixed(1)}%`
 }
 
 function nodes(value: number | null): string {
-  return value == null ? '—' : formatNumber(value)
+  return value == null ? '-' : formatNumber(value)
 }
 
 function statusText(value: string): string {
@@ -476,7 +476,7 @@ onBeforeUnmount(() => {
                     <td><strong>{{ puzzle.verified_solution || puzzle.solutions.join(', ') }}</strong><small v-if="puzzle.second_move">runner-up {{ puzzle.second_move }}</small></td>
                     <td><strong>{{ percent(puzzle.best_sigmoid) }}</strong><small v-if="puzzle.sigmoid_gap != null">gap {{ percent(puzzle.sigmoid_gap) }}</small></td>
                     <td><strong>{{ nodes(puzzle.uniqueness_nodes) }}</strong><small v-if="resultMap.get(puzzle.id)?.length">{{ resultMap.get(puzzle.id)?.filter((result) => result.status === 'solved').length }}/{{ resultMap.get(puzzle.id)?.length }} engines solved</small></td>
-                    <td><strong>{{ puzzle.difficulty_elo == null ? '—' : Math.round(puzzle.difficulty_elo) }}</strong><small v-if="puzzle.difficulty_elo != null">puzzle Elo</small></td>
+                    <td><strong>{{ puzzle.difficulty_elo == null ? '-' : Math.round(puzzle.difficulty_elo) }}</strong><small v-if="puzzle.difficulty_elo != null">puzzle Elo</small></td>
                     <td><span class="row-status" :class="`row-status--${puzzle.uniqueness_status}`">{{ statusText(puzzle.uniqueness_status) }}</span></td>
                   </tr>
                 </tbody>

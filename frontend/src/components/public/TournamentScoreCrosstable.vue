@@ -30,7 +30,6 @@ function matchupLabel(name: string, opponent: string, score?: HeadToHeadScore): 
   <section class="score-crosstable" aria-labelledby="score-crosstable-title">
     <header>
       <h3 id="score-crosstable-title">Score crosstable</h3>
-      <p>Points / games against each opponent. Columns follow the standings rank. — means no completed games.</p>
     </header>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Head-to-head tournament scores">
       <table>
@@ -60,7 +59,7 @@ function matchupLabel(name: string, opponent: string, score?: HeadToHeadScore): 
             >
               <span v-if="cell.self" aria-hidden="true">×</span>
               <template v-else-if="cell.score?.played">{{ cell.score.points }}<span class="games-count"> / {{ cell.score.played }}</span></template>
-              <span v-else aria-hidden="true">—</span>
+              <span v-else aria-hidden="true">-</span>
             </td>
             <td class="total-cell">{{ row.standing.points }}</td>
           </tr>
@@ -83,12 +82,6 @@ header {
 h3 {
   margin: 0;
   font-size: 1rem;
-}
-
-header p {
-  margin: 0.25rem 0 0;
-  color: var(--color-text-muted, #607080);
-  font-size: 0.75rem;
 }
 
 .table-wrap {

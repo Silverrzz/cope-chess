@@ -143,7 +143,7 @@ function segmentStyle(value: number, total: number): Record<string, string> {
 }
 
 function formatResource(value: number): string {
-  if (!Number.isFinite(value)) return '—'
+  if (!Number.isFinite(value)) return '-'
   if (value >= 1024) return `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: value >= 10240 ? 0 : 1 })} GB`
   return `${value.toLocaleString(undefined, { maximumFractionDigits: value >= 100 ? 0 : 1 })} MB`
 }
@@ -319,7 +319,7 @@ onBeforeUnmount(() => source?.close())
           <div class="mission-work__pulse" :class="{ active: allocations.length || eventClaim }"><AppIcon :name="allocations.length || eventClaim ? 'activity' : 'radio'" :size="18" /></div>
           <div v-if="eventClaim"><span>Event reservation</span><strong>{{ eventClaim.fixture_title }}</strong><small>{{ eventClaim.status === 'scheduled' ? eventClaim.assignment_status === 'acked' ? 'Every fixture engine is built and ready at the start barrier.' : 'Building and benchmarking the fixture engines now.' : 'All scheduler capacity is dedicated to this event fixture.' }}</small></div>
           <div v-else><span>{{ allocations.length ? 'Current operation' : 'Scheduler state' }}</span><strong>{{ data.row.work?.summary ?? 'No active assignment' }}</strong><small>{{ data.row.work?.detail || (allocations.length ? 'Work is progressing normally.' : 'Standing by for a compatible assignment.') }}</small></div>
-          <div class="mission-work__meta"><span>{{ eventClaim ? 'Exclusive event' : `${allocations.length} active` }}</span><span>{{ eventClaim ? `${effectiveCoreCount || '—'}/${effectiveCoreCount || '—'} threads allocated` : `${reservedThreads}/${effectiveCoreCount || '—'} threads reserved` }}</span><span>{{ eventClaim?.scheduled_start_at ? `Starts ${formatDate(eventClaim.scheduled_start_at)}` : `Seen ${formatDate(data.worker.last_seen)}` }}</span></div>
+          <div class="mission-work__meta"><span>{{ eventClaim ? 'Exclusive event' : `${allocations.length} active` }}</span><span>{{ eventClaim ? `${effectiveCoreCount || '-'}/${effectiveCoreCount || '-'} threads allocated` : `${reservedThreads}/${effectiveCoreCount || '-'} threads reserved` }}</span><span>{{ eventClaim?.scheduled_start_at ? `Starts ${formatDate(eventClaim.scheduled_start_at)}` : `Seen ${formatDate(data.worker.last_seen)}` }}</span></div>
         </div>
       </section>
 
@@ -333,7 +333,7 @@ onBeforeUnmount(() => source?.close())
         <section class="resource-kpis" aria-label="Live resource status">
           <article class="resource-kpi">
             <div class="radial-meter radial-meter--cpu" :style="meterStyle(cpuPercent)"><span><strong>{{ Math.round(cpuPercent) }}%</strong><small>host load</small></span></div>
-            <div><span>CPU now</span><strong>{{ latest ? `${formatCores(workerCpuCores)} cores` : 'Awaiting data' }}</strong><small>{{ latest ? `${formatCores(latest.engine_cpu_cores)} workload · ${formatCores(latest.coordinator_cpu_cores)} control` : `${effectiveCoreCount || '—'} scheduler threads available` }}</small></div>
+            <div><span>CPU now</span><strong>{{ latest ? `${formatCores(workerCpuCores)} cores` : 'Awaiting data' }}</strong><small>{{ latest ? `${formatCores(latest.engine_cpu_cores)} workload · ${formatCores(latest.coordinator_cpu_cores)} control` : `${effectiveCoreCount || '-'} scheduler threads available` }}</small></div>
           </article>
           <article class="resource-kpi">
             <div class="radial-meter radial-meter--memory" :style="meterStyle(memoryPercent)"><span><strong>{{ Math.round(memoryPercent) }}%</strong><small>host used</small></span></div>
@@ -421,12 +421,12 @@ onBeforeUnmount(() => source?.close())
               <p>Choose whether the scheduler can use every detected thread or a deliberate ceiling.</p>
               <div class="choice-switch" role="radiogroup" aria-label="CPU limit mode"><button type="button" role="radio" :aria-checked="coreLimit === ''" :class="{ active: coreLimit === '' }" @click="setCoreMode('automatic')"><AppIcon name="activity" :size="16" /><span><strong>Automatic</strong><small>Use all detected capacity</small></span></button><button type="button" role="radio" :aria-checked="coreLimit !== ''" :class="{ active: coreLimit !== '' }" @click="setCoreMode('custom')"><AppIcon name="gauge" :size="16" /><span><strong>Custom ceiling</strong><small>Hold capacity in reserve</small></span></button></div>
               <div class="capacity-dial">
-                <div><span>Scheduler ceiling</span><strong>{{ coreLimit === '' ? detectedCoreCount ?? '—' : coreLimit }} <small>threads</small></strong></div>
+                <div><span>Scheduler ceiling</span><strong>{{ coreLimit === '' ? detectedCoreCount ?? '-' : coreLimit }} <small>threads</small></strong></div>
                 <input v-if="coreLimit !== ''" v-model.number="coreLimit" type="range" min="1" :max="detectedCoreCount ?? 1" step="1" aria-label="Maximum scheduler threads">
                 <div v-else class="automatic-track"><span></span></div>
                 <div class="range-labels"><span>1</span><span>{{ detectedCoreCount ?? 'Detected maximum' }}</span></div>
               </div>
-              <div class="capacity-impact"><div><span>Reserved now</span><strong>{{ reservedThreads }}</strong></div><div><span>Future ceiling</span><strong>{{ coreLimit === '' ? detectedCoreCount ?? '—' : coreLimit }}</strong></div><div><span>Physical cores</span><strong>{{ data.worker.hw?.physical_cores ?? '—' }}</strong></div></div>
+              <div class="capacity-impact"><div><span>Reserved now</span><strong>{{ reservedThreads }}</strong></div><div><span>Future ceiling</span><strong>{{ coreLimit === '' ? detectedCoreCount ?? '-' : coreLimit }}</strong></div><div><span>Physical cores</span><strong>{{ data.worker.hw?.physical_cores ?? '-' }}</strong></div></div>
             </fieldset>
 
             <fieldset class="tournament-control">
@@ -483,8 +483,8 @@ onBeforeUnmount(() => source?.close())
         <section v-if="data.failures.length" class="panel failure-panel" aria-labelledby="worker-failures-title">
           <header class="section-heading"><div><span class="eyebrow">Attention required</span><h2 id="worker-failures-title">Recent engine failures</h2><p>Open an incident to see the full worker-reported error.</p></div><span class="failure-count">{{ data.failures.length }}</span></header>
           <details v-for="(failure, index) in data.failures" :key="failure.id" class="failure-entry" :open="index === 0">
-            <summary><span class="failure-icon"><AppIcon name="alert-circle" :size="17" /></span><span><strong>{{ failure.engine_name }}</strong><small>{{ failure.stage }} failed · Game #{{ failure.game_id ?? '—' }}</small></span><time :datetime="failure.occurred_at">{{ formatDate(failure.occurred_at) }}</time><AppIcon name="chevron-down" :size="16" /></summary>
-            <div class="failure-entry__body"><dl><div><dt>Worker</dt><dd>{{ failure.worker_label }} (#{{ failure.worker_id ?? data.worker.id }})</dd></div><div><dt>Machine</dt><dd>{{ failure.machine_id ?? 'Unknown' }}</dd></div><div><dt>Assignment</dt><dd>#{{ failure.assignment_id ?? '—' }}</dd></div><div><dt>Engine</dt><dd>{{ failure.engine_name }} (#{{ failure.engine_id ?? '—' }})</dd></div></dl><pre>{{ failure.error }}</pre></div>
+            <summary><span class="failure-icon"><AppIcon name="alert-circle" :size="17" /></span><span><strong>{{ failure.engine_name }}</strong><small>{{ failure.stage }} failed · Game #{{ failure.game_id ?? '-' }}</small></span><time :datetime="failure.occurred_at">{{ formatDate(failure.occurred_at) }}</time><AppIcon name="chevron-down" :size="16" /></summary>
+            <div class="failure-entry__body"><dl><div><dt>Worker</dt><dd>{{ failure.worker_label }} (#{{ failure.worker_id ?? data.worker.id }})</dd></div><div><dt>Machine</dt><dd>{{ failure.machine_id ?? 'Unknown' }}</dd></div><div><dt>Assignment</dt><dd>#{{ failure.assignment_id ?? '-' }}</dd></div><div><dt>Engine</dt><dd>{{ failure.engine_name }} (#{{ failure.engine_id ?? '-' }})</dd></div></dl><pre>{{ failure.error }}</pre></div>
           </details>
         </section>
 

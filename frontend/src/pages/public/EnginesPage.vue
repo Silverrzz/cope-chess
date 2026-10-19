@@ -128,7 +128,7 @@ function score(engine: EngineFamilyRecord): number {
 
 function scoreLabel(engine: EngineFamilyRecord): string {
   const value = score(engine)
-  return value < 0 ? '—' : `${Math.round(value)}%`
+  return value < 0 ? '-' : `${Math.round(value)}%`
 }
 
 function recordLabel(engine: EngineFamilyRecord): string {
