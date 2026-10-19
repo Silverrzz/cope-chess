@@ -287,28 +287,7 @@ def recalculate_ratings(
                 )
             )
         if history_rows:
-            connection.executemany(
-                """
-                INSERT INTO rating_list_history (
-                  engine_id, rating_list_id, tournament_id, opponent_engine_id,
-                  elo_before, elo, elo_change, score, expected_score,
-                  hardware_score, opponent_hardware_score, game_id, at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (rating_list_id, game_id, engine_id) DO UPDATE SET
-                  tournament_id = EXCLUDED.tournament_id,
-                  opponent_engine_id = EXCLUDED.opponent_engine_id,
-                  elo_before = EXCLUDED.elo_before,
-                  elo = EXCLUDED.elo,
-                  elo_change = EXCLUDED.elo_change,
-                  score = EXCLUDED.score,
-                  expected_score = EXCLUDED.expected_score,
-                  hardware_score = EXCLUDED.hardware_score,
-                  opponent_hardware_score = EXCLUDED.opponent_hardware_score,
-                  at = EXCLUDED.at
-                """,
-                history_rows,
-            )
+            _store_rating_history(connection, history_rows)
         rating_metrics[rating_list_id] = category_metrics
 
     engines_updated = 0
@@ -397,6 +376,60 @@ def recalculate_ratings(
         tournaments_applied=len(commits),
         games_applied=games_applied,
         engines_updated=engines_updated,
+    )
+
+
+def _store_rating_history(connection: sqlite3.Connection, rows: list[tuple]) -> None:
+    columns = (
+        "engine_id, rating_list_id, tournament_id, opponent_engine_id, "
+        "elo_before, elo, elo_change, score, expected_score, "
+        "hardware_score, opponent_hardware_score, game_id, at"
+    )
+    connection.execute(
+        f"""
+        CREATE TEMP TABLE IF NOT EXISTS pg_temp.cope_rating_history_stage ON COMMIT DROP
+        AS SELECT {columns}, 0::bigint AS row_order
+        FROM rating_list_history WITH NO DATA
+        """
+    )
+    connection.execute("TRUNCATE pg_temp.cope_rating_history_stage")
+    connection.copy_rows(
+        f"COPY pg_temp.cope_rating_history_stage ({columns}, row_order) FROM STDIN",
+        ((*row, index) for index, row in enumerate(rows)),
+    )
+    connection.execute(
+        f"""
+        INSERT INTO rating_list_history ({columns})
+        SELECT {', '.join(f'stage.{column.strip()}' for column in columns.split(','))}
+        FROM pg_temp.cope_rating_history_stage stage
+        LEFT JOIN rating_list_history existing
+          ON existing.rating_list_id = stage.rating_list_id
+         AND existing.game_id = stage.game_id
+         AND existing.engine_id = stage.engine_id
+        WHERE existing.id IS NULL OR (
+          existing.tournament_id, existing.opponent_engine_id,
+          existing.elo_before, existing.elo, existing.elo_change,
+          existing.score, existing.expected_score,
+          existing.hardware_score, existing.opponent_hardware_score, existing.at
+        ) IS DISTINCT FROM (
+          stage.tournament_id, stage.opponent_engine_id,
+          stage.elo_before, stage.elo, stage.elo_change,
+          stage.score, stage.expected_score,
+          stage.hardware_score, stage.opponent_hardware_score, stage.at
+        )
+        ORDER BY stage.row_order
+        ON CONFLICT (rating_list_id, game_id, engine_id) DO UPDATE SET
+          tournament_id = EXCLUDED.tournament_id,
+          opponent_engine_id = EXCLUDED.opponent_engine_id,
+          elo_before = EXCLUDED.elo_before,
+          elo = EXCLUDED.elo,
+          elo_change = EXCLUDED.elo_change,
+          score = EXCLUDED.score,
+          expected_score = EXCLUDED.expected_score,
+          hardware_score = EXCLUDED.hardware_score,
+          opponent_hardware_score = EXCLUDED.opponent_hardware_score,
+          at = EXCLUDED.at
+        """
     )
 
 
