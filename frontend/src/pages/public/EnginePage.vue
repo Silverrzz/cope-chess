@@ -341,7 +341,7 @@ async function load(): Promise<void> {
               <div class="form-dots" aria-label="Recent results"><span v-for="(result, index) in recentForm" :key="index" :data-result="result">{{ result }}</span></div>
               <div class="form-facts">
                 <div><span>Current run</span><strong>{{ streakLabel }}</strong></div>
-                <div><span>Most faced lately</span><strong>{{ mostPlayedOpponent ? `${mostPlayedOpponent.name} · ${mostPlayedOpponent.games}` : '—' }}</strong></div>
+                <div><span>Most faced lately</span><strong>{{ mostPlayedOpponent ? `${mostPlayedOpponent.name} · ${mostPlayedOpponent.games}` : '-' }}</strong></div>
               </div>
             </div>
             <p v-else class="panel-empty">No completed games yet.</p>
@@ -360,8 +360,8 @@ async function load(): Promise<void> {
         <div class="technical-content">
           <dl>
             <div v-if="engineVersionLabel(data.engine.version)"><dt>Version</dt><dd>{{ engineVersionLabel(data.engine.version) }}</dd></div>
-            <div><dt>Source</dt><dd v-if="data.engine.distribution === 'worker_local'">Worker-local private binary</dd><dd v-else>{{ data.engine.source_kind || '—' }} · <code>{{ data.engine.source_ref || '—' }}</code></dd></div>
-            <div v-if="data.engine.distribution !== 'worker_local'"><dt>Repository</dt><dd><a v-if="data.engine.repository_url" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>—</span></dd></div>
+            <div><dt>Source</dt><dd v-if="data.engine.distribution === 'worker_local'">Worker-local private binary</dd><dd v-else>{{ data.engine.source_kind || '-' }} · <code>{{ data.engine.source_ref || '-' }}</code></dd></div>
+            <div v-if="data.engine.distribution !== 'worker_local'"><dt>Repository</dt><dd><a v-if="data.engine.repository_url" :href="data.engine.repository_url.replace(/\.git$/, '')" target="_blank" rel="noopener">{{ data.engine.repository_full_name || data.engine.repository_url }}</a><span v-else>-</span></dd></div>
             <div><dt>Added</dt><dd>{{ formatDate(data.engine.created_at) }}</dd></div>
           </dl>
           <div v-if="uciOptions.length" class="uci-options"><span v-for="([name, value]) in uciOptions" :key="name"><strong>{{ name }}</strong><code>{{ String(value) }}</code></span></div>

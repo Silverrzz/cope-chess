@@ -137,11 +137,11 @@ const kibitzerAnalysis = computed(() => {
 });
 const kibitzerLabel = computed(() => {
   const analysis = kibitzerAnalysis.value;
-  if (!analysis) return "—";
+  if (!analysis) return "-";
   const factor = parseFen(analysis.root_fen || currentPositionFen.value).turn === "b" ? -1 : 1;
   if (analysis.eval_mate !== null && analysis.eval_mate !== undefined) return `#${factor * analysis.eval_mate}`;
   const cp = Number(analysis.eval_cp);
-  return Number.isFinite(cp) ? `${factor * cp >= 0 ? "+" : ""}${(factor * cp / 100).toFixed(2)}` : String(analysis.eval ?? "—");
+  return Number.isFinite(cp) ? `${factor * cp >= 0 ? "+" : ""}${(factor * cp / 100).toFixed(2)}` : String(analysis.eval ?? "-");
 });
 const kibitzerPercent = computed(() => {
   const analysis = kibitzerAnalysis.value;
@@ -1206,11 +1206,11 @@ function handleUserActivation(): void {
       <div class="engine-column">
         <div class="relay-engine-slot" :style="teamStyle(blackTeam)" :data-relay-team-id="blackTeam?.id">
           <div class="relay-team-strip"><strong>{{ blackTeam?.name ?? "Black team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in blackRoster" :key="member.id" :class="{ current: blackMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
-          <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '—'" :analysis="displayedBlackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
+          <EnginePanel side="black" :name="blackCardMember?.display_name || blackTeam?.name || ''" :engine-id="blackCardMember?.engine_id ?? null" :clock="gameData.clocks?.black ?? '-'" :analysis="displayedBlackAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'black'" />
         </div>
         <div class="relay-engine-slot" :style="teamStyle(whiteTeam)" :data-relay-team-id="whiteTeam?.id">
           <div class="relay-team-strip"><strong>{{ whiteTeam?.name ?? "White team" }}</strong><TransitionGroup name="relay-chip" tag="div" class="relay-team-strip__track"><span v-for="member in whiteRoster" :key="member.id" :class="{ current: whiteMember?.id === member.id }">{{ member.label || member.name }}</span></TransitionGroup></div>
-          <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '—'" :analysis="displayedWhiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
+          <EnginePanel side="white" :name="whiteCardMember?.display_name || whiteTeam?.name || ''" :engine-id="whiteCardMember?.engine_id ?? null" :clock="gameData.clocks?.white ?? '-'" :analysis="displayedWhiteAnalysis" :position-fen="currentPositionFen" :active="activeSide === 'white'" />
         </div>
         <div class="arena-cheers" aria-label="Cheer for a team">
           <button v-if="blackTeam" type="button" class="cheer-button cheer-button--arena" :style="teamStyle(blackTeam)" @click="cheer(blackTeam)"><AppIcon name="trophy" :size="14" /> Cheer {{ blackTeam.short_name || blackTeam.name }}</button>

@@ -168,7 +168,7 @@ async function loadViewer(gameId?: string): Promise<void> {
       </nav>
       <section v-if="activeTab === 'standings'" class="data-panel" aria-labelledby="standings-title">
         <header><h2 id="standings-title">Standings</h2></header>
-        <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th></tr></thead><tbody><tr v-for="(standing, index) in standings" :key="standing.member.id"><td class="rank-cell">{{ index + 1 }}</td><td class="team-cell">{{ standing.member.display_name }}</td><td class="number-cell">{{ standing.points }}</td><td class="number-cell">{{ completed.length ? `${(standing.points / completed.length * 100).toFixed(1)}%` : '—' }}</td><td class="number-cell">{{ completed.length }}</td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th></tr></thead><tbody><tr v-for="(standing, index) in standings" :key="standing.member.id"><td class="rank-cell">{{ index + 1 }}</td><td class="team-cell">{{ standing.member.display_name }}</td><td class="number-cell">{{ standing.points }}</td><td class="number-cell">{{ completed.length ? `${(standing.points / completed.length * 100).toFixed(1)}%` : '-' }}</td><td class="number-cell">{{ completed.length }}</td></tr></tbody></table></div>
       </section>
       <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
         <header><h2 id="games-title">Games</h2></header>

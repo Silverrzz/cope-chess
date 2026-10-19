@@ -130,7 +130,7 @@ const updaterDifferentRelease = computed(() => Boolean(
 ));
 
 function shortVersion(value: string | null): string {
-  if (!value) return "—";
+  if (!value) return "-";
   return /^[0-9a-f]{40}$/.test(value) ? value.slice(0, 12) : value;
 }
 
