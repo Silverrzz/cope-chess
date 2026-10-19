@@ -59,7 +59,7 @@ function boardLabel(game: CrossTableGame): string {
   <section class="cross-table" aria-labelledby="cross-table-title">
     <header class="cross-table__header">
       <div>
-        <p>Cross-table</p>
+        <p>Multi-View</p>
         <h2 id="cross-table-title">All active games</h2>
       </div>
       <div class="cross-table__status">

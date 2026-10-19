@@ -15,6 +15,7 @@ import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import StreamIndicator from '@/components/public/StreamIndicator.vue'
 import TournamentCrossTable from '@/components/public/TournamentCrossTable.vue'
+import TournamentScoreCrosstable from '@/components/public/TournamentScoreCrosstable.vue'
 import {
   clockLabel,
   engineName,
@@ -1157,7 +1158,7 @@ function forgetManualFollowPauseGame(): void {
         <div class="tournament-heading__controls">
           <nav class="view-toggle" aria-label="Tournament viewer mode">
             <RouterLink :to="viewTarget('focus')" :aria-current="viewerMode === 'focus' ? 'page' : undefined">Game</RouterLink>
-            <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Cross-table</RouterLink>
+            <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Multi-View</RouterLink>
           </nav>
           <div v-if="gameTotal" class="pgn-downloads">
             <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
@@ -1285,6 +1286,7 @@ function forgetManualFollowPauseGame(): void {
             </table>
           </div>
           <ContentState v-else kind="empty" compact title="No standings yet" />
+          <TournamentScoreCrosstable v-if="data.standings?.length" :standings="data.standings" />
         </section>
 
         <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
