@@ -882,7 +882,8 @@ ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_engine_id BIGINT REFERE
 ALTER TABLE rating_lists ADD COLUMN IF NOT EXISTS anchor_elo REAL NOT NULL DEFAULT 1500;
 
 INSERT INTO rating_lists (name, created_at)
-VALUES ('Default', '1970-01-01T00:00:00+00:00')
+SELECT 'Default', '1970-01-01T00:00:00+00:00'
+WHERE NOT EXISTS (SELECT 1 FROM rating_lists)
 ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS rating_list_ratings (
