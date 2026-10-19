@@ -3575,6 +3575,7 @@ def _standings(
     wins: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
     draws: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
     losses: dict[int, int] = {engine_id: 0 for engine_id in tournament.config.participants}
+    head_to_head: dict[int, dict[int, dict[str, Any]]] = {}
     for white_engine_id, black_engine_id, result in games:
         for engine_id in (white_engine_id, black_engine_id):
             points.setdefault(engine_id, 0.0)
@@ -3596,6 +3597,21 @@ def _standings(
             points[black_engine_id] += 0.5
             draws[white_engine_id] += 1
             draws[black_engine_id] += 1
+
+        white_score = 1.0 if result == "1-0" else 0.0 if result == "0-1" else 0.5
+        for engine_id, opponent_id, score in (
+            (white_engine_id, black_engine_id, white_score),
+            (black_engine_id, white_engine_id, 1.0 - white_score),
+        ):
+            matchup = head_to_head.setdefault(engine_id, {}).setdefault(
+                opponent_id,
+                {"points": 0.0, "played": 0, "wins": 0, "draws": 0, "losses": 0},
+            )
+            matchup["points"] += score
+            matchup["played"] += 1
+            matchup["wins"] += int(score == 1.0)
+            matchup["draws"] += int(score == 0.5)
+            matchup["losses"] += int(score == 0.0)
 
     matches = list_tournament_matches(connection, tournament.id)
     bye_points: dict[int, float] = {}
@@ -3637,6 +3653,7 @@ def _standings(
             "wins": wins[engine_id],
             "draws": draws[engine_id],
             "losses": losses[engine_id],
+            "head_to_head": head_to_head.get(engine_id, {}),
             "buchholz": buchholz[engine_id],
             "bye_points": bye_points.get(engine_id, 0.0),
             "stage": stage[engine_id],

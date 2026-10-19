@@ -160,6 +160,14 @@ export interface TournamentEstimate {
   state: 'estimated' | 'paused' | 'complete' | 'unavailable'
 }
 
+export interface HeadToHeadScore {
+  points: number
+  played: number
+  wins: number
+  draws: number
+  losses: number
+}
+
 export interface StandingRecord {
   engine_id: Identifier
   name: string
@@ -169,6 +177,7 @@ export interface StandingRecord {
   wins: number
   draws: number
   losses: number
+  head_to_head?: Record<string, HeadToHeadScore>
   buchholz?: number
   bye_points?: number
   stage?: number
