@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { ApiError, api } from "@/api/client";
+import { useViewerPresence } from "@/composables/useViewerPresence";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import StatusPill from "@/components/public/StatusPill.vue";
@@ -14,6 +15,7 @@ import type { EventCastMember, EventContest, EventDetailResponse, EventSession }
 const props = withDefaults(defineProps<{ slug: string; arena?: boolean }>(), { arena: false });
 const route = useRoute();
 const router = useRouter();
+const { viewerStreamUrl, syncViewerIdentity } = useViewerPresence();
 const data = ref<EventDetailResponse | null>(null);
 const loading = ref(true);
 const loadError = ref("");
@@ -75,8 +77,8 @@ async function load(silent = false): Promise<void> {
 function connect(): void {
   if (typeof EventSource === "undefined") return;
   stream?.close();
-  stream = new EventSource(`/events/${encodeURIComponent(props.slug)}/stream`);
-  stream.onopen = () => { connected.value = true; };
+  stream = new EventSource(viewerStreamUrl(`/events/${encodeURIComponent(props.slug)}/stream`));
+  stream.onopen = () => { connected.value = true; void syncViewerIdentity(); };
   stream.onerror = () => { connected.value = false; };
   stream.addEventListener("event.changed", () => { void load(true); });
   stream.addEventListener("event.snapshot", updateSpectators);

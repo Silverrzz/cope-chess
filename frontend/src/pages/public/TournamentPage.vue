@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdat
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError, api } from '@/api/client'
+import { useViewerPresence } from '@/composables/useViewerPresence'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
 import { applyUci, buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
@@ -469,6 +470,8 @@ function applyDetail(response: TournamentDetailResponse): void {
   reconcileFollowedGame()
 }
 
+const { viewerStreamUrl, syncViewerIdentity } = useViewerPresence()
+
 function connectStream(): void {
   if (typeof EventSource === 'undefined' || !data.value) return
   const nextKey = viewerMode.value === 'cross'
@@ -483,8 +486,9 @@ function connectStream(): void {
   const query = viewerMode.value === 'cross'
     ? '?cross_table=1'
     : selectedGameId.value ? `?game_id=${encodeURIComponent(selectedGameId.value)}` : ''
-  eventSource = new EventSource(`/tournaments/${encodeURIComponent(tournamentId.value)}/events${query}`)
+  eventSource = new EventSource(viewerStreamUrl(`/tournaments/${encodeURIComponent(tournamentId.value)}/events${query}`))
   eventSource.onopen = () => {
+    void syncViewerIdentity()
     streamState.value = 'live'
     if (viewerMode.value === 'cross' && streamNeedsRefresh) scheduleSnapshotRefresh()
     streamNeedsRefresh = false

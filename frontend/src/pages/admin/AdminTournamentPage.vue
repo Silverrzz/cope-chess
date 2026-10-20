@@ -23,8 +23,10 @@ interface GameSummary { total: number; pairs: number; pending: number; assigned:
 interface LiveParticipantSummary { engine_id: number; total: number; pending: number; assigned: number; live: number; finished: number; abandoned: number }
 interface LiveTournamentRoster { editable: boolean; reason: string; available_engines: Engine[]; participants: LiveParticipantSummary[]; hero_engine_id: number | null }
 interface ResultFilterOption { value: string; label: string }
+interface TournamentViewer { id: string; name: string; name_source: 'current' | 'history' | 'anonymous'; connections: number }
 interface Response {
   tournament: Tournament
+  viewers: TournamentViewer[]
   games: Game[]
   engines: Engine[] | Record<string, Engine | string>
   settings?: Array<[string, string] | { label: string; value: string }> | Record<string, string>
@@ -93,6 +95,9 @@ const selectedResultTypes = ref<string[]>([])
 const gamePage = ref(1)
 let loadSequence = 0
 let clockTimer: number | undefined
+let viewersTimer: number | undefined
+let viewersController: AbortController | null = null
+const viewersError = ref('')
 const id = computed(() => Number(route.params.id))
 const hasCommittableGames = computed(() => (data.value?.game_summary.finished || 0) > 0)
 const activeGames = computed(() => (
@@ -176,6 +181,23 @@ async function setGamePage(page: number): Promise<void> {
   if (page < 1 || page > pages || page === gamePage.value) return
   gamePage.value = page
   await load()
+}
+
+async function loadViewers(): Promise<void> {
+  if (!data.value || viewersController) return
+  const tournamentId = id.value
+  viewersController = new AbortController()
+  try {
+    const response = await api.get<{ viewers: TournamentViewer[] }>(`/api/admin/tournaments/${tournamentId}/viewers`, { signal: viewersController.signal })
+    if (id.value === tournamentId && data.value) {
+      data.value.viewers = response.viewers
+      viewersError.value = ''
+    }
+  } catch (cause) {
+    if ((cause as { name?: string }).name !== 'AbortError') viewersError.value = 'Viewer list could not refresh. Retrying…'
+  } finally {
+    viewersController = null
+  }
 }
 
 async function applyResultFilters(): Promise<void> {
@@ -425,12 +447,17 @@ async function invalidateGame(game: Game): Promise<void> {
 
 onMounted(() => {
   void load()
+  viewersTimer = window.setInterval(() => { void loadViewers() }, 5_000)
   clockTimer = window.setInterval(() => {
     clock.value = Date.now()
     if (data.value && ['scheduled', 'running', 'paused'].includes(data.value.tournament.status)) void load()
   }, 10_000)
 })
-onBeforeUnmount(() => window.clearInterval(clockTimer))
+onBeforeUnmount(() => {
+  window.clearInterval(clockTimer)
+  window.clearInterval(viewersTimer)
+  viewersController?.abort()
+})
 </script>
 
 <template>
@@ -452,6 +479,21 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
           <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit">Commit ratings</button>
           <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="button button--danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
         </div>
+      </section>
+
+      <section class="panel viewers-panel" aria-labelledby="viewers-heading">
+        <div class="viewers-panel__heading">
+          <div><h2 id="viewers-heading">Viewing now <span>{{ data.viewers.length }}</span></h2><p>Current chat name, or last saved name when blank. Refreshes every 5 seconds.</p></div>
+        </div>
+        <p v-if="viewersError" class="viewers-panel__message" role="status">{{ viewersError }}</p>
+        <ul v-if="data.viewers.length" class="viewer-list">
+          <li v-for="viewer in data.viewers" :key="viewer.id">
+            <AppIcon name="user" :size="16" />
+            <div><strong>{{ viewer.name }}</strong><small>{{ viewer.name_source === 'history' ? 'Last saved name' : viewer.name_source === 'anonymous' ? 'No name available' : 'Current name' }}</small></div>
+            <span v-if="viewer.connections > 1">{{ viewer.connections }} tabs</span>
+          </li>
+        </ul>
+        <p v-else class="viewers-panel__message">No one is currently viewing this tournament.</p>
       </section>
 
       <TournamentScheduleEditor
@@ -587,6 +629,18 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 </template>
 
 <style scoped>
+.viewers-panel { overflow: hidden; padding: 0; }
+.viewers-panel__heading { border-bottom: 1px solid var(--color-border); padding: .85rem 1rem; }
+.viewers-panel h2 { align-items: center; display: flex; font-size: .92rem; gap: .5rem; margin: 0; }
+.viewers-panel h2 span { background: var(--color-surface-subtle); border-radius: 999px; font-size: .72rem; padding: .15rem .45rem; }
+.viewers-panel__heading p, .viewers-panel__message { color: var(--color-text-muted); font-size: .73rem; margin: .2rem 0 0; }
+.viewers-panel__message { padding: .85rem 1rem; }
+.viewer-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); list-style: none; margin: 0; max-height: 24rem; overflow-y: auto; padding: .35rem 1rem; }
+.viewer-list li { align-items: center; display: flex; gap: .65rem; min-width: 0; padding: .65rem 0; }
+.viewer-list li > div { display: grid; gap: .15rem; min-width: 0; }
+.viewer-list strong { font-size: .78rem; overflow-wrap: anywhere; }
+.viewer-list small, .viewer-list li > span { color: var(--color-text-muted); font-size: .68rem; }
+.viewer-list li > span { margin-left: auto; padding-right: .75rem; white-space: nowrap; }
 .detail-loading { color: var(--color-text-muted, #64748b); min-height: 18rem; padding: 2rem; }
 .control-bar { align-items: center; display: flex; gap: 1rem; justify-content: space-between; padding: .8rem 1rem; }
 .control-bar__status { align-items: center; display: flex; gap: .65rem; }
