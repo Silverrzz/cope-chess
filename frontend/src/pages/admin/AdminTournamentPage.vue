@@ -89,6 +89,7 @@ const tournamentName = ref('')
 const showCommit = ref(false)
 const showSchedule = ref(false)
 const showRename = ref(false)
+const moreMenu = ref<HTMLDetailsElement | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const activePanel = ref<'games' | 'participants' | 'settings'>('games')
 const clock = ref(Date.now())
@@ -494,116 +495,121 @@ onBeforeUnmount(() => {
     <div v-if="loading" class="panel detail-loading" role="status">Loading tournament…</div>
     <template v-else-if="data">
       <InlineFeedback :message="error" />
+      <div class="tournament-links"><RouterLink to="/admin/tournaments">← All tournaments</RouterLink><RouterLink :to="`/tournaments/${id}`">Public page ↗</RouterLink></div>
       <section class="panel tournament-workspace">
         <header class="tournament-heading">
-          <div class="tournament-heading__navigation">
-            <RouterLink to="/admin/tournaments">← All tournaments</RouterLink>
-            <div><a :href="`/api/pgn?tournament_id=${encodeURIComponent(id)}`" download>Download PGN</a><RouterLink :to="`/tournaments/${id}`">Public page <span aria-hidden="true">↗</span></RouterLink></div>
+          <div class="tournament-identity">
+            <div class="tournament-heading__title">
+              <form v-if="showRename" class="rename-form" @submit.prevent="renameTournament" @keydown.esc="showRename = false">
+                <input ref="nameInput" v-model="tournamentName" class="input" required maxlength="160" aria-label="Tournament name">
+                <button class="button button--primary button--small" type="submit" :disabled="!!pending || !tournamentName.trim() || tournamentName.trim() === data.tournament.name">{{ pending === 'name' ? 'Saving…' : 'Save' }}</button>
+                <button class="button button--ghost button--small" type="button" :disabled="!!pending" @click="showRename = false">Cancel</button>
+              </form>
+              <template v-else>
+                <h1>{{ data.tournament.name }}</h1>
+              </template>
+            </div>
+            <div class="tournament-heading__meta"><StatusBadge :status="data.tournament.status" /><span>{{ humanize(data.tournament.config.format) }}</span><span>{{ formatTimeControl(data.tournament.config.time_control) }}</span><span>{{ data.tournament.config.participants.length }} engines</span><span>{{ data.tournament.config.rated ? 'Rated' : 'Unrated' }}</span></div>
           </div>
-          <div class="tournament-heading__title">
-            <form v-if="showRename" class="rename-form" @submit.prevent="renameTournament" @keydown.esc="showRename = false">
-              <input ref="nameInput" v-model="tournamentName" class="input" required maxlength="160" aria-label="Tournament name">
-              <button class="button button--primary button--small" type="submit" :disabled="!!pending || !tournamentName.trim() || tournamentName.trim() === data.tournament.name">{{ pending === 'name' ? 'Saving…' : 'Save' }}</button>
-              <button class="button button--ghost button--small" type="button" :disabled="!!pending" @click="showRename = false">Cancel</button>
-            </form>
-            <template v-else>
-              <h1>{{ data.tournament.name }}</h1>
-              <button v-if="data.tournament.status !== 'draft'" class="rename-trigger" type="button" @click="beginRename">Rename</button>
-            </template>
-            <StatusBadge :status="data.tournament.status" />
+          <div class="heading-actions">
+            <button v-if="data.capabilities.schedulable" class="button button--primary button--small" type="button" :disabled="!!pending" @click="showSchedule = !showSchedule">{{ data.tournament.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button>
+            <template v-for="(_, action) in data.actions" :key="action"><button v-if="action !== 'abort'" class="button button--primary button--small" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? (action === 'pause' ? 'Finishing current moves…' : 'Working…') : humanize(String(action)) }}</button></template>
+            <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary button--small" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit; activePanel = 'settings'">Commit ratings</button>
+            <details ref="moreMenu" class="more-menu" @keydown.esc="moreMenu?.removeAttribute('open')">
+              <summary class="button button--secondary button--small" aria-label="More tournament actions">More <span aria-hidden="true">⌄</span></summary>
+              <div class="more-menu__items" @click="moreMenu?.removeAttribute('open')">
+                <button v-if="data.tournament.status !== 'draft'" type="button" :disabled="!!pending" @click="beginRename">Rename tournament</button>
+                <button type="button" :disabled="copyingDetails" @click="copyDetails">{{ copyingDetails ? 'Copying…' : detailsCopied ? 'Copied' : 'Copy details' }}</button>
+                <a :href="`/api/pgn?tournament_id=${encodeURIComponent(id)}`" download>Download PGN</a>
+                <button v-if="data.capabilities.unschedulable" type="button" :disabled="!!pending" @click="unschedule">{{ pending === 'unschedule' ? 'Working…' : 'Return to draft' }}</button>
+                <button v-if="data.actions.abort" class="more-menu__danger" type="button" :disabled="!!pending" @click="changeStatus('abort')">{{ pending === 'abort' ? 'Working…' : 'Abort tournament' }}</button>
+                <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="more-menu__danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete tournament' }}</button>
+              </div>
+            </details>
           </div>
-          <div class="tournament-heading__meta"><span>{{ humanize(data.tournament.config.format) }}</span><span>{{ formatTimeControl(data.tournament.config.time_control) }}</span><span>{{ data.tournament.config.participants.length }} engines</span><span>{{ data.tournament.config.rated ? 'Rated' : 'Unrated' }}</span><span class="created-at">Created {{ formatDate(data.tournament.created_at) }}</span></div>
         </header>
-
-        <div v-if="data.tournament.status !== 'draft'" class="tournament-overview">
+        <div v-if="data.tournament.status !== 'draft'" class="tournament-summary">
           <div class="tournament-progress">
             <div><strong>{{ data.game_summary.finished.toLocaleString() }} <span>/ {{ data.game_summary.total.toLocaleString() }} completed</span></strong><span>{{ completedPercent }}%</span></div>
             <div class="progress-track" role="progressbar" aria-label="Completed games" :aria-valuenow="completedPercent" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: `${completedPercent}%` }" /></div>
             <small>{{ activeGames }} active · {{ data.game_summary.pending.toLocaleString() }} queued<template v-if="data.game_summary.abandoned"> · {{ data.game_summary.abandoned.toLocaleString() }} abandoned</template></small>
           </div>
-          <div class="tournament-timing"><span>{{ lifecycleStartLabel }}</span><strong>{{ formatDate(lifecycleStartAt) }}</strong><small v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at">{{ formatRelativeDate(data.tournament.scheduled_start_at, clock) }}</small></div>
-          <div class="tournament-timing" :title="estimateBasis" tabindex="0" :aria-label="`${['finished', 'aborted'].includes(data.tournament.status) ? 'Finished' : 'Estimated finish'}. ${estimateBasis}`">
-            <span>{{ ['finished', 'aborted'].includes(data.tournament.status) ? 'Finished' : 'Estimated finish' }}</span>
-            <strong v-if="['finished', 'aborted'].includes(data.tournament.status)">{{ formatDate(data.tournament.finished_at) }}</strong>
-            <strong v-else-if="data.estimate.estimated_finish_at">{{ formatDate(data.estimate.estimated_finish_at) }}</strong>
-            <strong v-else-if="data.estimate.state === 'paused'">{{ formatDuration(data.estimate.estimated_remaining_seconds) }} after resume</strong>
-            <strong v-else>Calculating</strong>
-            <small v-if="data.estimate.estimated_finish_at">{{ formatRelativeDate(data.estimate.estimated_finish_at, clock) }}</small>
-          </div>
-        </div>
 
-        <div class="tournament-toolbar">
-          <div class="tournament-toolbar__actions">
-            <button class="button button--secondary button--small" type="button" :disabled="copyingDetails" @click="copyDetails"><AppIcon name="copy" :size="14" />{{ copyingDetails ? 'Copying…' : detailsCopied ? 'Copied' : 'Copy details' }}</button>
-            <button v-if="data.capabilities.schedulable" class="button button--primary button--small" type="button" :disabled="!!pending" @click="showSchedule = !showSchedule">{{ data.tournament.status === 'scheduled' ? 'Reschedule' : 'Schedule' }}</button>
-            <button v-if="data.capabilities.unschedulable" class="button button--secondary button--small" type="button" :disabled="!!pending" @click="unschedule">{{ pending === 'unschedule' ? 'Working…' : 'Return to draft' }}</button>
-            <button v-for="(_, action) in data.actions" :key="action" class="button button--small" :class="action === 'abort' ? 'button--danger' : 'button--primary'" type="button" :disabled="!!pending" @click="changeStatus(String(action))">{{ pending === action ? (action === 'pause' ? 'Finishing current moves…' : 'Working…') : humanize(String(action)) }}</button>
-            <button v-if="['finished', 'aborted'].includes(data.tournament.status) && hasCommittableGames && data.tournament.config.rated" class="button button--primary button--small" type="button" :disabled="!!pending || !data.rating_lists.length" @click="showCommit = !showCommit; activePanel = 'settings'">Commit ratings</button>
-            <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="button button--danger button--small" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete' }}</button>
+          <div class="timing-info">
+            <div :title="formatDate(lifecycleStartAt)"><span>{{ lifecycleStartLabel }}</span><strong>{{ lifecycleStartAt ? formatRelativeDate(lifecycleStartAt, clock) : 'Not started' }}</strong></div>
+            <div :title="`${formatDate(['finished', 'aborted'].includes(data.tournament.status) ? data.tournament.finished_at : data.estimate.estimated_finish_at)}. ${estimateBasis}`">
+              <span>{{ ['finished', 'aborted'].includes(data.tournament.status) ? 'Finished' : 'Est. finish' }}</span>
+              <strong v-if="['finished', 'aborted'].includes(data.tournament.status)">{{ data.tournament.finished_at ? formatRelativeDate(data.tournament.finished_at, clock) : 'Not finished' }}</strong>
+              <strong v-else-if="data.estimate.estimated_finish_at">{{ formatRelativeDate(data.estimate.estimated_finish_at, clock) }}</strong>
+              <strong v-else-if="data.estimate.state === 'paused'">{{ formatDuration(data.estimate.estimated_remaining_seconds) }} after resume</strong>
+              <strong v-else>Calculating</strong>
+            </div>
           </div>
           <form v-if="['running', 'paused'].includes(data.tournament.status)" class="concurrency-form" @submit.prevent="saveConcurrency">
             <label for="tournament-concurrency">Concurrency</label><input id="tournament-concurrency" v-model.number="concurrency" class="input" type="number" min="1" step="1" required>
             <button v-if="concurrency !== data.tournament.config.concurrency" class="button button--primary button--small" type="submit" :disabled="!!pending">{{ pending === 'concurrency' ? 'Saving…' : 'Save' }}</button>
           </form>
         </div>
-
         <TournamentScheduleEditor v-if="showSchedule && data.capabilities.schedulable" class="inline-schedule" :initial-value="data.tournament.scheduled_start_at" :pending="['schedule', 'start'].includes(pending)" @submit="saveSchedule" @start="startTournament" @cancel="showSchedule = false" />
-
-        <div class="viewer-strip" aria-label="Current viewers">
-          <span class="viewer-strip__label"><AppIcon name="user" :size="14" />Viewing now <strong>{{ data.viewers.length }}</strong></span>
-          <ul v-if="data.viewers.length" class="viewer-list">
-            <li v-for="viewer in data.viewers" :key="viewer.id" :title="viewer.name_source === 'history' ? 'Last saved chat name' : viewer.name_source === 'anonymous' ? 'No saved chat name' : 'Current chat name'">{{ viewer.name }}<small v-if="viewer.name_source === 'history'">saved</small><small v-if="viewer.connections > 1">{{ viewer.connections }} tabs</small></li>
-          </ul>
-          <span v-else class="viewer-strip__empty">No viewers</span>
-          <span v-if="viewersError" class="viewer-strip__error" role="status">{{ viewersError }}</span>
-        </div>
-
-        <nav class="workspace-tabs" role="tablist" aria-label="Tournament sections" @keydown="switchTab">
-          <button id="games-tab" role="tab" type="button" :aria-selected="activePanel === 'games'" :tabindex="activePanel === 'games' ? 0 : -1" aria-controls="tournament-games" @click="activePanel = 'games'">Games <span>{{ data.game_summary.total.toLocaleString() }}</span></button>
-          <button id="participants-tab" role="tab" type="button" :aria-selected="activePanel === 'participants'" :tabindex="activePanel === 'participants' ? 0 : -1" aria-controls="tournament-participants" @click="activePanel = 'participants'">Participants <span>{{ data.tournament.config.participants.length }}</span></button>
-          <button id="settings-tab" role="tab" type="button" :aria-selected="activePanel === 'settings'" :tabindex="activePanel === 'settings' ? 0 : -1" aria-controls="tournament-settings" @click="activePanel = 'settings'">Settings<template v-if="data.commits.length"> &amp; ratings</template></button>
-        </nav>
-      <section id="tournament-games" v-show="activePanel === 'games'" class="games-panel" role="tabpanel" aria-labelledby="games-tab" :aria-busy="gamesLoading">
-        <div class="games-panel__heading">
-          <div>
-            <h2>Games</h2>
-            <p v-if="selectedResultTypes.length">{{ data.game_pagination.total }} matching game{{ data.game_pagination.total === 1 ? '' : 's' }} of {{ data.game_summary.total }} generated</p>
-            <p v-else>{{ data.game_pagination.total }} generated game{{ data.game_pagination.total === 1 ? '' : 's' }} · {{ data.game_summary.pairs }} game pair{{ data.game_summary.pairs === 1 ? '' : 's' }}</p>
-          </div>
-          <details class="result-filter">
-            <summary class="button button--secondary button--small">{{ resultFilterLabel }}</summary>
-            <div class="result-filter__menu">
-              <div class="result-filter__topline">
-                <strong>Result type</strong>
-                <button v-if="selectedResultTypes.length" class="button button--ghost button--small" type="button" @click="clearResultFilters">Clear</button>
-              </div>
-              <fieldset v-for="group in resultFilterGroups" :key="group.label">
-                <legend>{{ group.label }}</legend>
-                <label v-for="option in group.options" :key="option.value">
-                  <input v-model="selectedResultTypes" type="checkbox" :value="option.value" @change="applyResultFilters">
-                  <span>{{ group.label === 'Wins' ? 'Win' : 'Draw' }} - {{ option.label }}</span>
-                </label>
-              </fieldset>
+        <div class="workspace-navigation">
+          <nav class="workspace-tabs" role="tablist" aria-label="Tournament sections" @keydown="switchTab">
+            <button id="games-tab" role="tab" type="button" :aria-selected="activePanel === 'games'" :tabindex="activePanel === 'games' ? 0 : -1" aria-controls="tournament-games" @click="activePanel = 'games'">Games <span>{{ data.game_summary.total.toLocaleString() }}</span></button>
+            <button id="participants-tab" role="tab" type="button" :aria-selected="activePanel === 'participants'" :tabindex="activePanel === 'participants' ? 0 : -1" aria-controls="tournament-participants" @click="activePanel = 'participants'">Participants <span>{{ data.tournament.config.participants.length }}</span></button>
+            <button id="settings-tab" role="tab" type="button" :aria-selected="activePanel === 'settings'" :tabindex="activePanel === 'settings' ? 0 : -1" aria-controls="tournament-settings" @click="activePanel = 'settings'">Settings<template v-if="data.commits.length"> &amp; ratings</template></button>
+          </nav>
+          <details class="viewer-popover">
+            <summary :aria-label="`Viewing now: ${data.viewers.length}`"><AppIcon name="user" :size="14" /><span>Viewing</span><strong>{{ data.viewers.length }}</strong><span aria-hidden="true">⌄</span></summary>
+            <div class="viewer-popover__content">
+              <strong class="viewer-popover__heading">Viewing now</strong>
+              <ul v-if="data.viewers.length" class="viewer-list">
+                <li v-for="viewer in data.viewers" :key="viewer.id" :title="viewer.name_source === 'history' ? 'Last saved chat name' : viewer.name_source === 'anonymous' ? 'No saved chat name' : 'Current chat name'">{{ viewer.name }}<small v-if="viewer.name_source === 'history'">saved</small><small v-if="viewer.connections > 1">{{ viewer.connections }} tabs</small></li>
+              </ul>
+              <span v-else class="viewer-empty">No viewers</span>
+              <span v-if="viewersError" class="viewer-error" role="status">{{ viewersError }}</span>
             </div>
           </details>
         </div>
-        <div v-if="data.games.length" class="game-table-wrap">
-          <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
-            <tr v-for="game in data.games" :key="game.id">
-              <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td><td><div class="game-actions"><button v-if="game.status === 'finished' && game.result" class="button button--secondary button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Replay this completed game'" @click="replayGame(game)">{{ pending === `replay-${game.id}` ? 'Resetting…' : 'Replay' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Invalidate this game pair'" @click="invalidateGame(game)">{{ pending === `invalidate-${game.id}` ? 'Invalidating…' : 'Invalidate' }}</button></div></td>
-            </tr>
-          </tbody></table>
-        </div>
-        <AdminEmptyState v-else :title="selectedResultTypes.length ? 'No games match these result types' : 'No games generated'" />
-        <nav v-if="data.game_pagination.pages > 1" class="pagination" aria-label="Game pages">
-          <button class="button button--secondary button--small" type="button" :disabled="gamePage <= 1 || gamesLoading" @click="setGamePage(gamePage - 1)">Previous</button>
-          <span>Page {{ gamePage.toLocaleString() }} of {{ data.game_pagination.pages.toLocaleString() }}</span>
-          <button class="button button--secondary button--small" type="button" :disabled="gamePage >= data.game_pagination.pages || gamesLoading" @click="setGamePage(gamePage + 1)">Next</button>
-        </nav>
-      </section>
+        <section id="tournament-games" v-show="activePanel === 'games'" class="games-panel" role="tabpanel" aria-labelledby="games-tab" :aria-busy="gamesLoading">
+          <div class="games-panel__heading">
+            <div>
+              <p v-if="selectedResultTypes.length">{{ data.game_pagination.total }} matching game{{ data.game_pagination.total === 1 ? '' : 's' }} of {{ data.game_summary.total }} generated</p>
+              <p v-else>{{ data.game_summary.pairs.toLocaleString() }} game pair{{ data.game_summary.pairs === 1 ? '' : 's' }}</p>
+            </div>
+            <details class="result-filter">
+              <summary class="button button--secondary button--small">{{ resultFilterLabel }}</summary>
+              <div class="result-filter__menu">
+                <div class="result-filter__topline">
+                  <strong>Result type</strong>
+                  <button v-if="selectedResultTypes.length" class="button button--ghost button--small" type="button" @click="clearResultFilters">Clear</button>
+                </div>
+                <fieldset v-for="group in resultFilterGroups" :key="group.label">
+                  <legend>{{ group.label }}</legend>
+                  <label v-for="option in group.options" :key="option.value">
+                    <input v-model="selectedResultTypes" type="checkbox" :value="option.value" @change="applyResultFilters">
+                    <span>{{ group.label === 'Wins' ? 'Win' : 'Draw' }} - {{ option.label }}</span>
+                  </label>
+                </fieldset>
+              </div>
+            </details>
+          </div>
+          <div v-if="data.games.length" class="game-table-wrap">
+            <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
+              <tr v-for="game in data.games" :key="game.id">
+                <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td><td><div class="game-actions"><button v-if="game.status === 'finished' && game.result" class="button button--secondary button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Replay this completed game'" @click="replayGame(game)">{{ pending === `replay-${game.id}` ? 'Resetting…' : 'Replay' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Invalidate this game pair'" @click="invalidateGame(game)">{{ pending === `invalidate-${game.id}` ? 'Invalidating…' : 'Invalidate' }}</button></div></td>
+              </tr>
+            </tbody></table>
+          </div>
+          <AdminEmptyState v-else :title="selectedResultTypes.length ? 'No games match these result types' : 'No games generated'" />
+          <nav v-if="data.game_pagination.pages > 1" class="pagination" aria-label="Game pages">
+            <button class="button button--secondary button--small" type="button" :disabled="gamePage <= 1 || gamesLoading" @click="setGamePage(gamePage - 1)">Previous</button>
+            <span>Page {{ gamePage.toLocaleString() }} of {{ data.game_pagination.pages.toLocaleString() }}</span>
+            <button class="button button--secondary button--small" type="button" :disabled="gamePage >= data.game_pagination.pages || gamesLoading" @click="setGamePage(gamePage + 1)">Next</button>
+          </nav>
+        </section>
         <section id="tournament-settings" v-show="activePanel === 'settings'" class="configuration-panel" role="tabpanel" aria-labelledby="settings-tab">
           <TournamentConfigForm v-if="data.tournament.status === 'draft' && data.form" :seed="data.form" :pending="pending === 'save'" submit-label="Save draft" @submit="saveDraft" @cancel="router.push('/admin/tournaments')" />
           <div v-else class="settings-panel">
+            <p class="settings-created">Created {{ formatDate(data.tournament.created_at) }}</p>
         <dl v-if="settingsRows.length" class="definition-list">
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
         </dl>
@@ -644,56 +650,65 @@ onBeforeUnmount(() => {
 .tournament-page { display: grid; gap: .75rem; min-width: 0; }
 .detail-loading { color: var(--color-text-muted); min-height: 18rem; padding: 2rem; }
 .tournament-workspace { min-width: 0; padding: 0; }
-.tournament-heading { padding: 1rem 1.15rem .8rem; }
-.tournament-heading__navigation, .tournament-heading__navigation > div { align-items: center; display: flex; gap: 1.1rem; }
-.tournament-heading__navigation { justify-content: space-between; margin-bottom: .8rem; }
-.tournament-heading__navigation a { color: var(--color-text-muted); font-size: .72rem; font-weight: 600; }
-.tournament-heading__navigation a:hover { color: var(--color-accent); }
-.tournament-heading__title { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem .75rem; min-width: 0; }
-.tournament-heading h1 { font-size: clamp(1.15rem, 2vw, 1.65rem); letter-spacing: -.025em; line-height: 1.3; margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.rename-trigger { background: transparent; border: 0; color: var(--color-text-muted); cursor: pointer; font-size: .68rem; padding: .2rem 0; }
-.rename-trigger:hover { color: var(--color-accent); text-decoration: underline; }
-.tournament-heading__meta { align-items: center; color: var(--color-text-muted); display: flex; flex-wrap: wrap; font-size: .7rem; gap: .3rem .6rem; margin-top: .45rem; }
+.tournament-links { align-items: center; display: flex; justify-content: space-between; padding: 0 .2rem; }
+.tournament-links a { color: var(--color-text-muted); font-size: .7rem; }
+.tournament-heading { align-items: start; display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) auto; padding: 1.1rem 1.15rem .65rem; }
+.tournament-identity { min-width: 0; }
+.tournament-heading__title { min-width: 0; }
+.tournament-heading h1 { font-size: clamp(1.15rem, 2vw, 1.55rem); letter-spacing: -.025em; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+.tournament-heading__meta { align-items: center; color: var(--color-text-muted); display: flex; flex-wrap: wrap; font-size: .68rem; gap: .3rem .6rem; margin-top: .45rem; }
 .tournament-heading__meta > span + span::before { content: '·'; margin-right: .6rem; opacity: .6; }
-.tournament-heading__meta .created-at { margin-left: auto; }
-.tournament-heading__meta .created-at::before { content: none; }
-.rename-form { align-items: center; display: flex; flex: 1; flex-wrap: wrap; gap: .4rem; min-width: 0; }
+.heading-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .4rem; padding-top: .1rem; }
+.heading-actions .button { font-size: .72rem; min-height: 1.95rem; padding: .35rem .65rem; }
+.more-menu { position: relative; }
+.more-menu > summary { cursor: pointer; list-style: none; }
+.more-menu > summary::-webkit-details-marker, .viewer-popover > summary::-webkit-details-marker { display: none; }
+.more-menu__items { background: var(--color-surface-raised); border: 1px solid var(--color-border-strong); border-radius: .5rem; box-shadow: var(--shadow-md); display: grid; min-width: 12rem; padding: .3rem; position: absolute; right: 0; top: calc(100% + .4rem); z-index: 25; }
+.more-menu__items > * { background: transparent; border: 0; border-radius: .3rem; color: var(--color-text); cursor: pointer; font-size: .73rem; padding: .55rem .6rem; text-align: left; text-decoration: none; }
+.more-menu__items > *:hover:not(:disabled) { background: var(--color-surface-hover); }
+.more-menu__items > :disabled { cursor: not-allowed; opacity: .5; }
+.more-menu__items .more-menu__danger { color: var(--color-danger); }
+.rename-form { align-items: center; display: flex; flex-wrap: wrap; gap: .4rem; min-width: 0; }
 .rename-form .input { flex: 1 1 15rem; min-width: 0; }
-.tournament-overview { align-items: start; display: grid; gap: 1.5rem; grid-template-columns: minmax(12rem, 1.3fr) repeat(2, minmax(10rem, 1fr)); padding: .5rem 1.15rem .9rem; }
+.tournament-summary { align-items: center; display: grid; gap: 1rem 2rem; grid-template-columns: minmax(12rem, 17rem) auto auto; justify-content: start; padding: .3rem 1.15rem 1rem; }
 .tournament-progress > div:first-child { align-items: baseline; display: flex; gap: .6rem; justify-content: space-between; }
-.tournament-progress strong { font-size: .86rem; font-variant-numeric: tabular-nums; }
-.tournament-progress strong span, .tournament-progress > div > span { color: var(--color-text-muted); font-size: .7rem; font-weight: 500; }
-.progress-track { background: var(--color-surface-subtle); border-radius: 999px; height: .3rem; margin: .5rem 0 .35rem; overflow: hidden; }
+.tournament-progress strong { font-size: .8rem; font-variant-numeric: tabular-nums; }
+.tournament-progress strong span, .tournament-progress > div > span { color: var(--color-text-muted); font-size: .66rem; font-weight: 500; }
+.progress-track { background: var(--color-surface-subtle); border-radius: 999px; height: .22rem; margin: .45rem 0 .3rem; overflow: hidden; }
 .progress-track > span { background: var(--color-accent); border-radius: inherit; display: block; height: 100%; transition: width .25s ease; }
-.tournament-progress small, .tournament-timing small { color: var(--color-text-muted); font-size: .66rem; }
-.tournament-timing { display: grid; gap: .2rem; }
-.tournament-timing > span { color: var(--color-text-muted); font-size: .64rem; }
-.tournament-timing strong { font-size: .76rem; font-weight: 650; }
-.tournament-timing small { color: var(--color-accent); }
-.tournament-toolbar { align-items: center; border-top: 1px solid var(--color-border); display: flex; flex-wrap: wrap; gap: .65rem 1rem; justify-content: space-between; padding: .65rem 1.15rem; }
-.tournament-toolbar__actions { display: flex; flex-wrap: wrap; gap: .4rem; }
-.tournament-toolbar .button { font-size: .72rem; min-height: 1.95rem; padding: .35rem .65rem; }
-.concurrency-form { align-items: center; display: flex; gap: .5rem; }
-.concurrency-form label { color: var(--color-text-muted); font-size: .7rem; }
-.concurrency-form .input { font-size: .75rem; min-height: 1.95rem; padding: .3rem .5rem; width: 4.5rem; }
+.tournament-progress small { color: var(--color-text-muted); font-size: .63rem; }
+.timing-info { align-items: baseline; display: flex; flex-wrap: wrap; gap: .45rem 1.5rem; }
+.timing-info > div { display: grid; gap: .2rem; }
+.timing-info span { color: var(--color-text-muted); font-size: .63rem; }
+.timing-info strong { font-size: .72rem; font-weight: 600; }
+.concurrency-form { align-items: center; display: flex; gap: .45rem; }
+.concurrency-form label { color: var(--color-text-muted); font-size: .65rem; }
+.concurrency-form .input { font-size: .72rem; min-height: 1.85rem; padding: .25rem .45rem; width: 3.8rem; }
+.concurrency-form .button { font-size: .68rem; min-height: 1.85rem; padding: .3rem .5rem; }
 .inline-schedule { border: 0; border-radius: 0; border-top: 1px solid var(--color-border); box-shadow: none; }
-.viewer-strip { align-items: baseline; border-top: 1px solid var(--color-border); display: flex; flex-wrap: wrap; gap: .4rem .75rem; padding: .55rem 1.15rem; }
-.viewer-strip__label { align-items: center; color: var(--color-text-muted); display: inline-flex; flex: 0 0 auto; font-size: .66rem; gap: .35rem; }
-.viewer-strip__label strong { color: var(--color-text); font-variant-numeric: tabular-nums; }
-.viewer-list { display: flex; flex: 1 1 10rem; flex-wrap: wrap; gap: .3rem; list-style: none; margin: 0; max-height: 5rem; overflow-y: auto; padding: 0; }
-.viewer-list li { align-items: baseline; background: var(--color-surface-subtle); border: 1px solid var(--color-border); border-radius: .3rem; display: inline-flex; font-size: .67rem; gap: .3rem; max-width: 100%; overflow-wrap: anywhere; padding: .18rem .4rem; }
-.viewer-list small { color: var(--color-text-muted); font-size: .6rem; white-space: nowrap; }
-.viewer-strip__empty, .viewer-strip__error { color: var(--color-text-muted); font-size: .66rem; }
-.viewer-strip__error { flex-basis: 100%; }
-.workspace-tabs { border-bottom: 1px solid var(--color-border); border-top: 1px solid var(--color-border); display: flex; gap: .3rem; padding: 0 .9rem; }
-.workspace-tabs button { align-items: center; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; display: inline-flex; font-size: .75rem; font-weight: 650; gap: .4rem; margin-bottom: -1px; padding: .75rem .7rem; white-space: nowrap; }
+.workspace-navigation { align-items: center; border-bottom: 1px solid var(--color-border); border-top: 1px solid var(--color-border); display: flex; gap: .4rem; justify-content: space-between; padding: 0 1.15rem 0 .55rem; }
+.workspace-tabs { display: flex; gap: .3rem; min-width: 0; }
+.workspace-tabs button { align-items: center; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; display: inline-flex; font-size: .73rem; font-weight: 650; gap: .4rem; margin-bottom: -1px; padding: .7rem .6rem; white-space: nowrap; }
 .workspace-tabs button[aria-selected='true'] { border-bottom-color: var(--color-accent); color: var(--color-accent); }
 .workspace-tabs button:hover { color: var(--color-text); }
-.workspace-tabs button span { color: var(--color-text-muted); font-size: .63rem; font-variant-numeric: tabular-nums; font-weight: 500; }
+.workspace-tabs button span { color: var(--color-text-muted); font-size: .62rem; font-variant-numeric: tabular-nums; font-weight: 500; }
+.viewer-popover { flex: 0 0 auto; position: relative; }
+.viewer-popover > summary { align-items: center; color: var(--color-text-muted); cursor: pointer; display: flex; font-size: .65rem; gap: .35rem; list-style: none; padding: .5rem 0; }
+.viewer-popover > summary:hover { color: var(--color-text); }
+.viewer-popover > summary strong { color: var(--color-text); font-variant-numeric: tabular-nums; }
+.viewer-popover__content { background: var(--color-surface-raised); border: 1px solid var(--color-border-strong); border-radius: .5rem; box-shadow: var(--shadow-md); max-width: calc(100vw - 3rem); padding: .8rem; position: absolute; right: 0; top: calc(100% + .3rem); width: 17rem; z-index: 20; }
+.viewer-popover__heading { display: block; font-size: .73rem; margin-bottom: .6rem; }
+.viewer-list { display: grid; gap: .45rem; list-style: none; margin: 0; max-height: 15rem; overflow-y: auto; padding: 0; }
+.viewer-list li { align-items: baseline; display: flex; flex-wrap: wrap; font-size: .73rem; gap: .35rem; overflow-wrap: anywhere; }
+.viewer-list small { color: var(--color-text-muted); font-size: .63rem; }
+.viewer-empty, .viewer-error { color: var(--color-text-muted); display: block; font-size: .66rem; }
+.viewer-error { margin-top: .5rem; }
+.settings-created { color: var(--color-text-muted); font-size: .68rem; margin: 0; padding: .85rem 1.15rem .2rem; }
 .games-panel { min-width: 0; }
 .games-panel h2 { font-size: .82rem; margin: 0; }
-.games-panel__heading { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem; justify-content: space-between; padding: .8rem 1.15rem; }
-.games-panel__heading p { color: var(--color-text-muted); font-size: .68rem; margin: .2rem 0 0; }
+.games-panel__heading { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem; justify-content: space-between; padding: .55rem 1.15rem; }
+.games-panel__heading p { color: var(--color-text-muted); font-size: .68rem; margin: 0; }
+.games-panel__heading .button { font-size: .7rem; min-height: 1.9rem; padding: .35rem .6rem; }
 .configuration-panel, .participants-panel { min-width: 0; }
 .participants-panel :deep(.live-roster) { border: 0; border-radius: 0; box-shadow: none; }
 .participants-panel :deep(.participant-roster) { max-height: 35rem; }
@@ -732,29 +747,26 @@ onBeforeUnmount(() => {
 .data-table td { font-size: .72rem; padding: .5rem .85rem; }
 .game-actions .button { font-size: .66rem; min-height: 1.75rem; padding: .3rem .5rem; }
 @media (max-width: 65rem) {
-  .tournament-heading__meta .created-at { margin-left: 0; }
-  .tournament-heading__meta .created-at::before { content: '·'; }
-  .tournament-overview { gap: 1rem; grid-template-columns: minmax(10rem, 1.1fr) repeat(2, minmax(0, 1fr)); }
+  .tournament-summary { gap: 1rem; grid-template-columns: minmax(10rem, 1fr) minmax(0, 1fr) auto; }
+  .timing-info { gap: .4rem 1rem; }
 }
 @media (max-width: 42rem) {
-  .tournament-heading { padding: .85rem; }
-  .tournament-heading__navigation, .tournament-heading__navigation > div { gap: .65rem; }
-  .tournament-heading__navigation a { font-size: .65rem; }
-  .tournament-heading__title { gap: .4rem .6rem; }
-  .tournament-heading h1 { flex-basis: 100%; font-size: 1.15rem; }
+  .tournament-heading { gap: .7rem; grid-template-columns: minmax(0, 1fr); padding: .85rem .85rem .6rem; }
+  .tournament-heading h1 { font-size: 1.15rem; }
   .tournament-heading__meta { font-size: .65rem; }
-  .tournament-heading__meta .created-at { flex-basis: 100%; }
-  .tournament-heading__meta .created-at::before { content: none; }
-  .tournament-overview { gap: .85rem; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: .2rem .85rem .8rem; }
+  .heading-actions { padding: 0; }
+  .tournament-summary { gap: .8rem 1rem; grid-template-columns: minmax(0, 1fr) auto; padding: .2rem .85rem .85rem; }
   .tournament-progress { grid-column: 1 / -1; }
-  .tournament-timing strong { font-size: .7rem; }
-  .tournament-toolbar { align-items: stretch; gap: .65rem; padding: .65rem .85rem; }
-  .tournament-toolbar__actions { flex: 1 1 100%; }
-  .concurrency-form { justify-content: flex-end; margin-left: auto; }
-  .viewer-strip { padding: .55rem .85rem; }
-  .workspace-tabs { gap: 0; padding: 0 .35rem; }
-  .workspace-tabs button { font-size: .69rem; gap: .3rem; padding: .7rem .5rem; }
-  .workspace-tabs button span { font-size: .6rem; }
+  .timing-info { gap: .4rem .8rem; }
+  .timing-info strong { font-size: .68rem; }
+  .concurrency-form { flex-wrap: wrap; justify-content: flex-end; max-width: 7rem; }
+  .concurrency-form label { font-size: .6rem; }
+  .workspace-navigation { gap: .15rem; padding: 0 .65rem 0 .25rem; }
+  .workspace-tabs { gap: 0; }
+  .workspace-tabs button { font-size: .66rem; gap: .25rem; padding: .7rem .4rem; }
+  .workspace-tabs button span { font-size: .58rem; }
+  .viewer-popover > summary { gap: .25rem; }
+  .viewer-popover > summary > span { display: none; }
   .games-panel__heading { padding: .75rem .85rem; }
   .result-filter__menu { grid-template-columns: 1fr; }
   .result-filter__topline { grid-column: auto; }
