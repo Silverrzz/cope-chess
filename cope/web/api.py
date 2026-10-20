@@ -1141,8 +1141,25 @@ def _tournament_status_matches(current: str, requested: str) -> bool:
     return current == requested
 
 
+class ViewerIdentityPayload(BaseModel):
+    viewer_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=40)
+    previous_name: str = Field(default="", max_length=40)
+
+
 def register_api_routes(app: FastAPI) -> None:
     from cope.web import app as web_app
+
+    @app.post("/api/viewer-identity")
+    def update_viewer_identity(payload: ViewerIdentityPayload, request: Request):
+        name = payload.name.strip()
+        previous_name = payload.previous_name.strip()
+        request.app.state.stream_hub.update_viewer_identity(
+            payload.viewer_id,
+            name if name.casefold() != "system" else "",
+            previous_name if previous_name.casefold() != "system" else "",
+        )
+        return _json({"ok": True})
 
     # ------------------------------------------------------------------
     # Session
@@ -2709,6 +2726,15 @@ def register_api_routes(app: FastAPI) -> None:
             status_code=201,
         )
 
+    @app.get("/api/admin/tournaments/{tournament_id}/viewers")
+    def admin_tournament_viewers(
+        tournament_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        _require_tournament(connection, tournament_id)
+        return _json({"viewers": request.app.state.stream_hub.tournament_viewers(tournament_id)})
+
     @app.get("/api/admin/tournaments/{tournament_id}")
     def admin_tournament(
         tournament_id: int,
@@ -2738,6 +2764,7 @@ def register_api_routes(app: FastAPI) -> None:
         )
         payload: dict[str, Any] = {
             "tournament": tournament,
+            "viewers": request.app.state.stream_hub.tournament_viewers(tournament_id),
             "games": list_games_page(
                 connection,
                 tournament.id,

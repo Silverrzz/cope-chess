@@ -141,6 +141,9 @@ class StreamSubscription:
         self.queue: asyncio.Queue[StreamEnvelope | None] = asyncio.Queue(maxsize=max_queue)
         self.closed = False
         self.excluded_types = excluded_types
+        self.viewer_id = ""
+        self.viewer_name = ""
+        self.viewer_previous_name = ""
 
     def enqueue(self, event: StreamEnvelope) -> None:
         if self.closed or event.type in self.excluded_types:
@@ -191,6 +194,7 @@ class StreamHub:
         *topics: str,
         spectator: bool = True,
         excluded_types: frozenset[str] | None = None,
+        viewer_id: str = "",
     ) -> StreamSubscription:
         with self._lock:
             count = sum(len(items) for items in self._subscribers.values())
@@ -201,6 +205,7 @@ class StreamHub:
                 max_queue=self._max_queue,
                 excluded_types=excluded_types or frozenset(),
             )
+            subscription.viewer_id = viewer_id[:64]
             for topic in topics:
                 self._subscribers.setdefault(topic, set()).add(subscription)
             if not spectator:
@@ -221,12 +226,37 @@ class StreamHub:
 
     def tournament_spectator_count(self, tournament_id: int) -> int:
         with self._lock:
-            subscriptions = self._spectator_subscribers(f"tournament.{tournament_id}")
-            for event_id in self._tournament_events.get(tournament_id, ()):
-                subscriptions.update(self._spectator_subscribers(f"event.{event_id}"))
-                for linked_tournament_id in self._event_tournaments.get(event_id, ()):
-                    subscriptions.update(self._spectator_subscribers(f"tournament.{linked_tournament_id}"))
-            return len(subscriptions)
+            return len(self._tournament_spectators(tournament_id))
+
+    def _tournament_spectators(self, tournament_id: int) -> set[StreamSubscription]:
+        subscriptions = self._spectator_subscribers(f"tournament.{tournament_id}")
+        for event_id in self._tournament_events.get(tournament_id, ()):
+            subscriptions.update(self._spectator_subscribers(f"event.{event_id}"))
+            for linked_tournament_id in self._event_tournaments.get(event_id, ()):
+                subscriptions.update(self._spectator_subscribers(f"tournament.{linked_tournament_id}"))
+        return subscriptions
+
+    def update_viewer_identity(self, viewer_id: str, name: str, previous_name: str) -> None:
+        with self._lock:
+            for subscriptions in self._subscribers.values():
+                for subscription in subscriptions:
+                    if subscription.viewer_id == viewer_id:
+                        subscription.viewer_name = name
+                        subscription.viewer_previous_name = previous_name
+
+    def tournament_viewers(self, tournament_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            viewers: dict[str, dict[str, Any]] = {}
+            for subscription in self._tournament_spectators(tournament_id):
+                key = subscription.viewer_id or str(id(subscription))
+                name = subscription.viewer_name or subscription.viewer_previous_name
+                source = "current" if subscription.viewer_name else "history" if name else "anonymous"
+                if key not in viewers:
+                    viewers[key] = {"id": key, "name": name or "Anonymous", "name_source": source, "connections": 0}
+                viewers[key]["connections"] += 1
+                if source == "current" or (source == "history" and viewers[key]["name_source"] == "anonymous"):
+                    viewers[key].update(name=name, name_source=source)
+            return sorted(viewers.values(), key=lambda viewer: (viewer["name"].casefold(), viewer["id"]))
 
     def link_event_tournaments(self, event_id: int, tournament_ids: tuple[int, ...]) -> None:
         with self._lock:
@@ -250,7 +280,11 @@ class StreamHub:
             return len(subscriptions)
 
     def _spectator_subscribers(self, topic: str) -> set[StreamSubscription]:
-        return self._subscribers.get(topic, set()) - self._non_spectator_subscriptions
+        return {
+            subscription
+            for subscription in self._subscribers.get(topic, set()) - self._non_spectator_subscriptions
+            if not subscription.closed
+        }
 
     def publish_event_spectators(self, event_id: int) -> int:
         with self._lock:
@@ -821,6 +855,7 @@ def create_app(
                 topic,
                 spectator=counts_as_spectator,
                 excluded_types=frozenset({"engine.info"}) if cross_table else None,
+                viewer_id=request.query_params.get("viewer_id", ""),
             )
             if counts_as_spectator:
                 hub.publish_tournament_spectators(tournament_id)
@@ -934,7 +969,7 @@ def create_app(
 
         async def stream():
             topic = f"event.{event.id}"
-            subscription = hub.subscribe(topic)
+            subscription = hub.subscribe(topic, viewer_id=request.query_params.get("viewer_id", ""))
             hub.publish_event_spectators(event.id)
             try:
                 yield sse_stream_event(

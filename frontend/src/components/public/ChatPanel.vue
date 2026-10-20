@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { api } from '@/api/client'
+import { savedViewerName, saveViewerName } from '@/composables/useViewerPresence'
 
 import { errorMessage, formatDate } from './format'
 import type { ChatMessage, ChatSettings, Identifier } from './types'
@@ -22,7 +23,6 @@ const emit = defineEmits<{
   sent: [message: ChatMessage]
 }>()
 
-const STORAGE_KEY = 'cope.chat.displayName'
 const log = ref<HTMLElement | null>(null)
 const activeTab = ref<'chat' | 'system'>('chat')
 const displayName = ref('')
@@ -49,17 +49,12 @@ const reservedName = computed(() => displayName.value.trim().toLocaleLowerCase()
 const canSend = computed(() => (props.tournamentId !== null || !!props.eventSlug) && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
 
 onMounted(() => {
-  try { displayName.value = localStorage.getItem(STORAGE_KEY) || '' } catch { /* Storage can be disabled. */ }
+  displayName.value = savedViewerName()
   scrollToLatest()
 })
 
 watch(() => [activeTab.value, visibleMessages.value.length], scrollToLatest)
-watch(displayName, (value) => {
-  try {
-    if (value.trim()) localStorage.setItem(STORAGE_KEY, value.trim())
-    else localStorage.removeItem(STORAGE_KEY)
-  } catch { /* Storage can be disabled. */ }
-})
+watch(displayName, saveViewerName)
 
 async function submit(): Promise<void> {
   if (!canSend.value) return
