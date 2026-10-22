@@ -71,7 +71,7 @@ function score(engineId: string | number | null): string {
 <style scoped>
 .duck-event { margin-block: calc(0px - clamp(var(--space-6), 4vw, var(--space-12))) -3rem; }
 .duck-event--arena { min-height: calc(100dvh - 2.85rem); margin: 0; background: var(--color-bg, #f3f6fa); }
-.duck-hero { position: relative; isolation: isolate; display: grid; grid-template-rows: 1fr auto; min-height: calc(100dvh - var(--header-height, 4rem)); overflow: hidden; border-bottom: 1px solid #29443a; background: radial-gradient(ellipse at 50% 45%, #244c3c60, transparent 65%), #070f12; color: #eff3e9; }
+.duck-hero { position: relative; isolation: isolate; display: grid; grid-template-rows: 1fr auto; min-height: calc(100dvh - var(--header-height, 4rem) - 1px); overflow: hidden; border-bottom: 1px solid #29443a; background: radial-gradient(ellipse at 50% 45%, #244c3c60, transparent 65%), #070f12; color: #eff3e9; }
 .duck-hero__content { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(.65rem, 1.8dvh, 1.2rem); width: min(100%, 84rem); margin-inline: auto; padding: clamp(1rem, 2.5dvh, 2rem) 1.25rem; }
 .duck-heading { display: grid; justify-items: center; gap: .6rem; text-align: center; }
 .duck-kicker { display: inline-flex; align-items: center; gap: .45rem; padding: .35rem .85rem; border: 1px solid #b4c98d36; border-radius: 999px; background: #101d18bf; color: #b8cea1; font-size: .65rem; font-weight: 820; letter-spacing: .075em; text-transform: uppercase; }
