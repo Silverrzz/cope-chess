@@ -60,17 +60,15 @@ function eventComponent(event: EventSummary) {
     <div v-if="loading" class="page-container state-wrap"><ContentState kind="loading" title="Opening the event archive" /></div>
     <div v-else-if="loadError" class="page-container state-wrap"><ContentState kind="error" :message="loadError" action-label="Try again" @action="load" /></div>
     <template v-else-if="response">
-      <header class="events-intro page-container">
-        <h1>Events</h1>
-        <h2 v-if="response.current" id="upcoming-events-title">Upcoming event</h2>
-      </header>
+      <h1 class="sr-only">Events</h1>
 
       <section v-if="response.current" class="upcoming-section" aria-labelledby="upcoming-events-title">
+        <div class="section-heading section-header page-container"><h2 id="upcoming-events-title">Upcoming event</h2></div>
         <component :is="eventComponent(response.current)" :summary="response.current" :current="true" :now-ms="nowMs" />
       </section>
 
       <section class="archive-section" aria-labelledby="event-archive-title">
-        <div class="archive-header page-container">
+        <div class="archive-header section-header page-container">
           <div class="section-heading"><h2 id="event-archive-title">Past events</h2></div>
           <div class="archive-tools">
             <label class="archive-search"><AppIcon name="search" :size="17" /><span class="sr-only">Search past events</span><input v-model="query" type="search" placeholder="Search events" /></label>
@@ -89,16 +87,13 @@ function eventComponent(event: EventSummary) {
 <style scoped>
 .events-page { margin-block: calc(0px - clamp(var(--space-6), 4vw, var(--space-12))) -3rem; }
 .state-wrap { padding-block: 3rem; }
-.events-intro { display: flex; align-items: baseline; gap: 1rem; padding-block: .85rem; }
-.events-intro h1 { margin: 0; font-size: 1.5rem; letter-spacing: -.04em; line-height: 1.2; }
-.events-intro h2 { margin: 0; padding-left: 1rem; border-left: 1px solid var(--color-border); color: var(--color-text-muted); font-size: .8rem; font-weight: 600; }
 .upcoming-section, .archive-section { display: grid; }
 .section-heading { display: grid; gap: .25rem; }
 .section-heading h2 { margin: 0; font-size: clamp(1.6rem, 3vw, 2.25rem); letter-spacing: -.035em; }
+.section-header { padding-block: 1rem; }
 .archive-empty { display: flex; align-items: center; gap: .8rem; min-height: 6rem; margin-bottom: 2rem; border: 1px dashed var(--color-border-strong); border-radius: var(--radius-lg); color: var(--color-text-muted); }
 .archive-empty strong { color: var(--color-text); font-size: .82rem; }
-.archive-section { padding-top: clamp(.5rem, 1.5vw, 1.25rem); }
-.archive-header { display: grid; gap: 1.25rem; padding-bottom: 1.4rem; }
+.archive-header { display: grid; gap: 1.25rem; }
 .archive-tools { display: flex; align-items: center; gap: 1rem; }
 .archive-search { display: flex; width: min(22rem, 100%); min-height: 2.35rem; align-items: center; gap: .45rem; border: 1px solid var(--color-border-strong); border-radius: var(--radius-round); background: var(--color-surface-raised); padding: 0 .75rem; color: var(--color-text-muted); }
 .archive-search:focus-within { border-color: var(--color-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-focus) 18%, transparent); }

@@ -24,7 +24,7 @@ const timing = computed(() => {
 
 <template>
   <RouterLink class="duck-archive" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
-    <PondScene />
+    <PondScene archive />
     <div class="duck-orbit" aria-hidden="true"><img :src="wakwak" alt="" /><img class="fish-mark" :src="fairyStockfish" alt="" /><span>VS</span></div>
     <div class="duck-copy">
       <span class="duck-kicker"><AppIcon name="trophy" :size="16" />{{ current ? live ? 'Live' : 'Upcoming' : event.status === 'cancelled' ? 'Cancelled' : 'Completed' }}</span>
@@ -36,7 +36,7 @@ const timing = computed(() => {
 </template>
 
 <style scoped>
-.duck-archive { --duck-blue: var(--archive-primary); position: relative; isolation: isolate; display: grid; min-height: clamp(30rem, 72vh, 46rem); overflow: hidden; align-items: end; padding: clamp(2rem, 6vw, 6.5rem); background: radial-gradient(circle at 77% 46%, color-mix(in srgb, var(--archive-accent) 23%, transparent), transparent 24%), linear-gradient(125deg, color-mix(in srgb, var(--archive-background) 92%, black) 5%, var(--archive-surface) 51%, var(--archive-background)); color: var(--archive-text); text-decoration: none; }
+.duck-archive { --duck-blue: var(--archive-primary); position: relative; isolation: isolate; display: grid; min-height: clamp(30rem, 72vh, 46rem); overflow: hidden; align-items: end; padding-block: clamp(2rem, 6vw, 6.5rem); padding-inline: max(clamp(var(--space-4), 3vw, var(--space-10)), calc((100% - var(--content-max)) / 2 + clamp(var(--space-4), 3vw, var(--space-10)))); background: radial-gradient(circle at 77% 46%, color-mix(in srgb, var(--archive-accent) 23%, transparent), transparent 24%), linear-gradient(125deg, color-mix(in srgb, var(--archive-background) 92%, black) 5%, var(--archive-surface) 51%, var(--archive-background)); color: var(--archive-text); text-decoration: none; }
 .duck-archive::after { position: absolute; z-index: 5; inset: 0; border: 1px solid rgb(110 166 255 / 20%); content: ""; pointer-events: none; }
 .duck-grid { position: absolute; z-index: -1; inset: 0; background-image: linear-gradient(rgb(82 140 230 / 8%) 1px, transparent 1px), linear-gradient(90deg, rgb(82 140 230 / 8%) 1px, transparent 1px); background-size: 4rem 4rem; mask-image: linear-gradient(90deg, black, transparent 78%); }
 .duck-copy { position: relative; z-index: 2; width: min(55rem, 72%); }
