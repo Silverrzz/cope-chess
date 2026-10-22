@@ -151,14 +151,14 @@ async function loadViewer(gameId?: string): Promise<void> {
       <div class="tournament-heading__controls"><button v-if="selected && ['live', 'intermission'].includes(detail.event.status)" type="button" class="event-page-link" @click="selected = null; loadViewer()">Follow live <AppIcon name="arrow-right" :size="14" /></button><RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink></div>
     </header>
     <ContentState v-if="error" kind="error" :message="error" action-label="Try again" compact @action="loadViewer()" />
-    <section ref="arenaElement" class="arena" aria-label="wakwak versus Fairy-Stockfish Duck NNUE">
+    <section ref="arenaElement" class="arena" aria-label="wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
           <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>
-      <div ref="boardColumnElement" class="board-column"><ChessViewer variant="duck" :key="viewerGame?.id ?? 'pending'" :opening="opening" :moves="moves" :model-value="selectedPly" label="wakwak versus Fairy-Stockfish Duck NNUE" @update:model-value="selectedPly = $event" @position="currentFen = $event.fen" /></div>
+      <div ref="boardColumnElement" class="board-column"><ChessViewer variant="duck" :key="viewerGame?.id ?? 'pending'" :opening="opening" :moves="moves" :model-value="selectedPly" label="wakwak versus Fairy-Stockfish" @update:model-value="selectedPly = $event" @position="currentFen = $event.fen" /></div>
       <aside class="activity-column" aria-label="Game activity">
         <MoveList class="arena-moves" :moves="moves.map(move => move.san || move.uci)" :uci-moves="moves.map(move => move.uci)" :fen="opening.fen" :book-plies="opening.book_moves?.length ?? 0" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
         <ChatPanel class="arena-chat" :messages="messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="localMessages.push($event)" />
