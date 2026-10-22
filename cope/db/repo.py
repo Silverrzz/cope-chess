@@ -3068,6 +3068,9 @@ def list_worker_event_fixture_candidates(
               SELECT tournament_id, event_id, 0 AS position, event_id AS id
               FROM puzzle_gauntlet_events
               WHERE tournament_id IS NOT NULL
+              UNION ALL
+              SELECT (config::jsonb->>'tournament_id')::bigint, id, 0, id
+              FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' IS NOT NULL
             )
             SELECT fixture.tournament_id
             FROM event_fixtures fixture
@@ -3132,6 +3135,9 @@ def event_fixture_has_worker_permissions(
           SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
           WHERE tournament_id IS NOT NULL
+          UNION ALL
+          SELECT (config::jsonb->>'tournament_id')::bigint, id
+          FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' IS NOT NULL
         )
         SELECT 1
         FROM event_fixtures fixture
@@ -3171,6 +3177,9 @@ def claim_event_fixture_worker(
           SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
           WHERE tournament_id IS NOT NULL
+          UNION ALL
+          SELECT (config::jsonb->>'tournament_id')::bigint, id
+          FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' IS NOT NULL
         )
         INSERT INTO event_fixture_workers (
           tournament_id, event_id, worker_id, claimed_at

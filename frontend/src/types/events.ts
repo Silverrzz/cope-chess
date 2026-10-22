@@ -163,6 +163,7 @@ export interface EventSummary {
 }
 
 export interface EventDetailResponse {
+  arena_available?: boolean;
   server_time: string;
   event: EventRecord;
   handler: EventHandlerState;

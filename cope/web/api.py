@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
+from cope.db.events import list_event_tournament_links
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
 from cope.environment_clone import (
@@ -1575,6 +1576,12 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         event = _require_viewable_event(connection, slug, request)
         payload = _event_detail_payload(connection, event, admin=False)
+        payload["arena_available"] = (
+            web_app._event_arena_is_public(event)
+            or web_app._admin_request_authenticated(request)
+        )
+        if event.handler_key == "duck-vs-fish" and not payload["arena_available"]:
+            payload["custom"] = {**payload["custom"], "tournament": None, "games": []}
         payload["spectator_count"] = request.app.state.stream_hub.event_spectator_count(
             event.id
         )
@@ -1621,6 +1628,8 @@ def register_api_routes(app: FastAPI) -> None:
         tournament = _require_tournament(connection, tournament_id)
         if slug is not None and request.url.path.startswith("/api/events/"):
             event = _require_viewable_event(connection, slug, request)
+            if not web_app._event_arena_is_public(event) and not web_app._admin_request_authenticated(request):
+                raise HTTPException(status_code=403, detail="The arena opens when the event goes live.")
             if not web_app._event_has_tournament(
                 connection,
                 event.id,
@@ -2142,15 +2151,7 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Event not found.")
         linked_tournaments = [
             get_tournament(connection, int(row["tournament_id"]))
-            for row in connection.execute(
-                """
-                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
-                UNION
-                SELECT tournament_id FROM puzzle_gauntlet_events
-                WHERE event_id = ? AND tournament_id IS NOT NULL
-                """,
-                (event_id, event_id),
-            )
+            for row in list_event_tournament_links(connection, event_id=event_id)
         ]
         gauntlet = connection.execute(
             "SELECT opening_suite_id FROM puzzle_gauntlet_events WHERE event_id = ?",
@@ -2194,15 +2195,7 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="Event not found.")
         linked_tournaments = [
             get_tournament(connection, int(row["tournament_id"]))
-            for row in connection.execute(
-                """
-                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
-                UNION
-                SELECT tournament_id FROM puzzle_gauntlet_events
-                WHERE event_id = ? AND tournament_id IS NOT NULL
-                """,
-                (event_id, event_id),
-            )
+            for row in list_event_tournament_links(connection, event_id=event_id)
         ]
         active = [
             tournament
@@ -2223,6 +2216,10 @@ def register_api_routes(app: FastAPI) -> None:
                 from cope.events.puzzle_gauntlet import reset_puzzle_gauntlet
 
                 reset_puzzle_gauntlet(connection, event_id)
+            elif event.handler_key == "duck-vs-fish":
+                from cope.events.duck_vs_fish import reset_match
+
+                reset_match(connection, event_id)
             connection.commit()
         except (sqlite3.IntegrityError, ValueError) as exc:
             connection.rollback()

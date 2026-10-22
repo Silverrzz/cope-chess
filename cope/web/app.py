@@ -78,6 +78,7 @@ from cope.db import (
     list_worker_engine_discoveries,
     touch_service_heartbeat,
 )
+from cope.db.events import list_event_tournament_links
 from cope.core.san import pv_to_san
 from cope.variants import Position, create_board, get_variant
 from cope.core.models import ENGINE_PROCESS_MEMORY_OVERHEAD_MB, HardwareInfo, TournamentFormat
@@ -1279,6 +1280,7 @@ def _public_tournament_exists(
         return bool(
             event is not None
             and (_event_is_public(event) or admin_authenticated)
+            and (_event_arena_is_public(event) or admin_authenticated)
             and _event_has_tournament(connection, event.id, tournament_id)
         )
     finally:
@@ -1297,6 +1299,12 @@ def _event_is_public(event: EventRecord) -> bool:
     return event.published_at is not None and event.status != "draft"
 
 
+def _event_arena_is_public(event: EventRecord) -> bool:
+    return event.handler_key != "duck-vs-fish" or bool(
+        event.status in {"live", "intermission", "completed"}
+    )
+
+
 def _admin_request_authenticated(request: Request) -> bool:
     return bool(
         _request_is_secure_or_local(request)
@@ -1312,7 +1320,10 @@ def _private_event_page(app: FastAPI, path: str) -> bool:
     if match is None:
         return False
     event = _event_by_slug(app, match.group(1))
-    return event is not None and not _event_is_public(event)
+    return event is not None and (
+        not _event_is_public(event)
+        or (path.rstrip("/").endswith("/arena") and not _event_arena_is_public(event))
+    )
 
 
 def _event_tournament_page(app: FastAPI, path: str) -> bool:
@@ -1327,16 +1338,7 @@ def _event_tournament_page(app: FastAPI, path: str) -> bool:
 
 
 def _event_linked_tournament_ids(connection: sqlite3.Connection) -> set[int]:
-    return {
-        int(row["tournament_id"])
-        for row in connection.execute(
-            """
-            SELECT tournament_id FROM engine_relay_fixtures
-            UNION
-            SELECT tournament_id FROM puzzle_gauntlet_events WHERE tournament_id IS NOT NULL
-            """
-        )
-    }
+    return {int(row["tournament_id"]) for row in list_event_tournament_links(connection)}
 
 
 def _puzzle_gauntlet_tournament_ids(connection: sqlite3.Connection) -> set[int]:
@@ -1349,49 +1351,17 @@ def _puzzle_gauntlet_tournament_ids(connection: sqlite3.Connection) -> set[int]:
 
 
 def _is_event_tournament(connection: sqlite3.Connection, tournament_id: int) -> bool:
-    return connection.execute(
-        """
-        SELECT 1 FROM engine_relay_fixtures WHERE tournament_id = ?
-        UNION ALL
-        SELECT 1 FROM puzzle_gauntlet_events WHERE tournament_id = ?
-        LIMIT 1
-        """,
-        (tournament_id, tournament_id),
-    ).fetchone() is not None
+    return bool(list_event_tournament_links(connection, tournament_id=tournament_id))
 
 
-def _event_has_tournament(
-    connection: sqlite3.Connection,
-    event_id: int,
-    tournament_id: int,
-) -> bool:
-    return connection.execute(
-        """
-        SELECT 1 FROM engine_relay_fixtures WHERE event_id = ? AND tournament_id = ?
-        UNION ALL
-        SELECT 1 FROM puzzle_gauntlet_events WHERE event_id = ? AND tournament_id = ?
-        LIMIT 1
-        """,
-        (event_id, tournament_id, event_id, tournament_id),
-    ).fetchone() is not None
+def _event_has_tournament(connection: sqlite3.Connection, event_id: int, tournament_id: int) -> bool:
+    return bool(list_event_tournament_links(connection, event_id=event_id, tournament_id=tournament_id))
 
 
 def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:
     connection = connect_database(app.state.db_path)
     try:
-        try:
-            rows = connection.execute(
-                """
-                SELECT tournament_id FROM engine_relay_fixtures WHERE event_id = ?
-                UNION
-                SELECT tournament_id FROM puzzle_gauntlet_events
-                WHERE event_id = ? AND tournament_id IS NOT NULL
-                """,
-                (event_id, event_id),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return ()
-        return tuple(int(row["tournament_id"]) for row in rows)
+        return tuple(int(row["tournament_id"]) for row in list_event_tournament_links(connection, event_id=event_id))
     finally:
         connection.close()
 
@@ -1399,18 +1369,7 @@ def _event_tournament_ids(app: FastAPI, event_id: int) -> tuple[int, ...]:
 def _tournament_event_ids(app: FastAPI, tournament_id: int) -> tuple[int, ...]:
     connection = connect_database(app.state.db_path)
     try:
-        try:
-            rows = connection.execute(
-                """
-                SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?
-                UNION
-                SELECT event_id FROM puzzle_gauntlet_events WHERE tournament_id = ?
-                """,
-                (tournament_id, tournament_id),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return ()
-        return tuple(int(row["event_id"]) for row in rows)
+        return tuple(int(row["event_id"]) for row in list_event_tournament_links(connection, tournament_id=tournament_id))
     finally:
         connection.close()
 

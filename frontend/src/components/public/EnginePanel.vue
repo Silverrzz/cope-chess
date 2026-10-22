@@ -12,6 +12,7 @@ const props = withDefaults(defineProps<{
   side: 'white' | 'black'
   variant?: Variant | undefined
   name?: string
+  icon?: string
   engineId?: Identifier | null
   clock?: string
   analysis?: EngineAnalysis | null
@@ -61,7 +62,8 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
     <template v-else>
       <header>
-        <div class="engine-panel__identity">
+        <div class="engine-panel__identity" :class="{ 'engine-panel__identity--icon': icon }">
+          <img v-if="icon" class="engine-panel__icon" :src="icon" alt="" />
           <span>{{ side }}</span>
           <strong>
             <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
@@ -192,6 +194,9 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   min-width: 0;
   flex-direction: column;
 }
+
+.engine-panel__identity--icon { position: relative; min-height: 2.5rem; justify-content: center; padding-left: 3rem; }
+.engine-panel__icon { position: absolute; top: 0; left: 0; width: 2.5rem; height: 2.5rem; object-fit: contain; }
 
 .engine-panel header span,
 .evaluation span,

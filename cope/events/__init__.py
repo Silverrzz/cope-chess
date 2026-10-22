@@ -9,6 +9,7 @@ from .registry import (
 )
 from . import engine_relay as _engine_relay
 from . import puzzle_gauntlet as _puzzle_gauntlet
+from . import duck_vs_fish as _duck_vs_fish
 
 __all__ = [
     "EventModule",
