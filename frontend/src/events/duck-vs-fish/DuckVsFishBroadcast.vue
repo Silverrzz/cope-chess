@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import wakwak from "@/assets/wakwak-event.png";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import { useCountdownMusic } from "@/composables/useCountdownMusic";
+import { useViewerSettings } from "@/composables/useViewerSettings";
 import fairyStockfish from "@/assets/fairy-stockfish-event.png";
 import EngineCheers from "./EngineCheers.vue";
 import type { EventDetailResponse } from "@/types/events";
@@ -10,27 +10,92 @@ import DuckVsFishArena from "./DuckVsFishArena.vue";
 import PondScene from "./PondScene.vue";
 import { pondRoster, type PondPayload } from "./types";
 
-const props = defineProps<{ detail: EventDetailResponse; view?: "event" | "arena"; clockOffsetMs?: number }>();
+const props = withDefaults(defineProps<{ detail: EventDetailResponse; view?: "event" | "arena"; clockOffsetMs?: number }>(), { view: "event", clockOffsetMs: 0 });
 const payload = computed(() => props.detail.custom as PondPayload);
 const games = computed(() => payload.value.games);
-const now = ref(Date.now());
+const { eventMusicEnabled, setEventMusicEnabled } = useViewerSettings();
+const nowMs = ref(authoritativeNow());
+const countdownFinished = ref(false);
+const countdownBeat = ref(-1);
+const soundState = ref<"armed" | "loading" | "playing" | "blocked" | "unavailable" | "finished">("loading");
+const soundRequested = ref(false);
+const soundPrimed = ref(false);
+let countdownTimer: number | undefined;
+let countdownFrame: number | undefined;
+let countdownAudio: HTMLAudioElement | null = null;
+let audioPlayPending = false;
+let countdownAudioStarted = false;
+const countdownAudioUrl = "/audio/openbench-engine-clash-countdown.wav";
+const countdownAudioLengthMs = 60_000;
 const live = computed(() => ["live", "intermission"].includes(props.detail.event.status));
 const played = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
 const roster = computed(() => pondRoster(props.detail.cast));
 const timing = computed(() => props.detail.event.scheduled_start_at
   ? new Intl.DateTimeFormat(undefined, { dateStyle: "long", timeStyle: "short" }).format(new Date(props.detail.event.scheduled_start_at))
   : "Start date TBD");
-const remaining = computed(() => Math.max(0, Date.parse(props.detail.event.scheduled_start_at ?? "") - now.value - (props.clockOffsetMs ?? 0)) || 0);
-const countdownActive = computed(() => props.view !== "arena" && ["announced", "scheduled"].includes(props.detail.event.status) && remaining.value > 0);
-const { label: musicLabel, state: musicState, eventMusicEnabled, toggle: toggleMusic } = useCountdownMusic(remaining, countdownActive);
+const targetTime = computed(() => {
+  const value = props.detail.event.scheduled_start_at;
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+});
+const remainingMs = computed(() => Math.max(0, (targetTime.value ?? nowMs.value) - nowMs.value));
+const countdownVisible = computed(() => targetTime.value !== null && remainingMs.value > 0 && !countdownFinished.value);
+const finalMinuteActive = computed(() => countdownVisible.value && remainingMs.value <= countdownAudioLengthMs);
+const countdownActive = computed(() => props.view !== "arena" && ["announced", "scheduled"].includes(props.detail.event.status) && countdownVisible.value);
+const musicLabel = computed(() => !eventMusicEnabled.value ? "Enable countdown music"
+  : soundState.value === "blocked" ? "Play countdown music"
+  : soundState.value === "unavailable" ? "Retry countdown music"
+  : soundState.value === "playing" ? "Mute countdown music" : "Countdown music on");
 const arenaOpen = computed(() => ["live", "intermission", "completed"].includes(props.detail.event.status));
 const countdown = computed(() => {
-  const seconds = Math.ceil(remaining.value / 1000);
+  const seconds = Math.ceil(remainingMs.value / 1000);
   return [{ label: "days", value: Math.floor(seconds / 86400) }, { label: "hours", value: Math.floor(seconds % 86400 / 3600) }, { label: "mins", value: Math.floor(seconds % 3600 / 60) }, { label: "secs", value: seconds % 60 }];
 });
 const status = computed(() => ({ announced: "Announced", scheduled: "Scheduled", live: "Live", intermission: "Intermission", completed: "Completed", cancelled: "Cancelled", postponed: "Postponed", draft: "Draft" }[props.detail.event.status]));
-const timer = window.setInterval(() => { now.value = Date.now(); }, 250);
-onBeforeUnmount(() => { window.clearInterval(timer); });
+watch(targetTime, (value, previous) => {
+  if (value !== previous) resetCountdownForTarget();
+});
+watch(eventMusicEnabled, (enabled) => {
+  if (!enabled) {
+    releaseCountdownAudio();
+    soundRequested.value = false;
+    soundPrimed.value = false;
+    soundState.value = "loading";
+    return;
+  }
+  if (props.view === "event" && countdownVisible.value) void enableCountdownSound();
+});
+
+onMounted(() => {
+  if (props.view !== "event") return;
+  restoreCountdownCompletion();
+  if (eventMusicEnabled.value) prepareCountdownAudio();
+  syncCountdown();
+  countdownTimer = window.setInterval(syncCountdown, 100);
+  document.addEventListener("visibilitychange", handleCountdownResume);
+  window.addEventListener("focus", handleCountdownResume);
+  window.addEventListener("pageshow", handleCountdownResume);
+  window.addEventListener("pointerdown", handleUserActivation, { passive: true });
+  window.addEventListener("keydown", handleUserActivation);
+});
+onBeforeUnmount(() => {
+  if (countdownTimer !== undefined) window.clearInterval(countdownTimer);
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  document.removeEventListener("visibilitychange", handleCountdownResume);
+  window.removeEventListener("focus", handleCountdownResume);
+  window.removeEventListener("pageshow", handleCountdownResume);
+  window.removeEventListener("pointerdown", handleUserActivation);
+  window.removeEventListener("keydown", handleUserActivation);
+  releaseCountdownAudio();
+});
+
+async function toggleMusic(): Promise<void> {
+  if (eventMusicEnabled.value && !["blocked", "unavailable"].includes(soundState.value)) {
+    setEventMusicEnabled(false);
+    return;
+  }
+  await enableCountdownSound(true);
+}
 
 function score(engineId: string | number | null): string {
   let total = 0;
@@ -39,6 +104,209 @@ function score(engineId: string | number | null): string {
     else if ((game.result === "1-0" && String(game.white_engine_id) === String(engineId)) || (game.result === "0-1" && String(game.black_engine_id) === String(engineId))) total += 1;
   }
   return String(total).replace(".5", "½").replace(/^0½$/, "½");
+}
+
+function countdownCompletionKey(): string {
+  return `cope.event.${props.detail.event.id}.countdown-finished.${targetTime.value ?? "unscheduled"}`;
+}
+
+function authoritativeNow(): number {
+  return Date.now() + props.clockOffsetMs;
+}
+
+function restoreCountdownCompletion(): void {
+  try {
+    countdownFinished.value = window.localStorage.getItem(countdownCompletionKey()) === "1";
+  } catch {
+    countdownFinished.value = false;
+  }
+  if (!countdownFinished.value && targetTime.value !== null && targetTime.value <= authoritativeNow()) finishCountdown();
+}
+
+function resetCountdownForTarget(): void {
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  countdownFrame = undefined;
+  releaseCountdownAudio();
+  countdownFinished.value = false;
+  countdownBeat.value = -1;
+  soundRequested.value = false;
+  soundPrimed.value = false;
+  soundState.value = "loading";
+  nowMs.value = authoritativeNow();
+  if (props.view !== "event") return;
+  restoreCountdownCompletion();
+  if (countdownFinished.value || targetTime.value === null) return;
+  prepareCountdownAudio();
+  syncCountdown(true);
+}
+
+function prepareCountdownAudio(force = false): void {
+  if (!eventMusicEnabled.value || countdownFinished.value || typeof Audio === "undefined") return;
+  if (countdownAudio && !force) return;
+  if (countdownAudio) releaseCountdownAudio();
+  const audio = new Audio();
+  countdownAudio = audio;
+  audio.preload = "auto";
+  audio.src = countdownAudioUrl;
+  soundState.value = "loading";
+  audio.addEventListener("canplay", () => {
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    if (!finalMinuteActive.value) soundState.value = "armed";
+    syncCountdown(true);
+  });
+  audio.addEventListener("playing", () => {
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    if (!finalMinuteActive.value) return;
+    soundState.value = "playing";
+  });
+  audio.addEventListener("error", () => {
+    if (countdownAudio === audio && !countdownFinished.value) soundState.value = "unavailable";
+  });
+  audio.load();
+}
+
+function releaseCountdownAudio(): void {
+  if (!countdownAudio) return;
+  countdownAudio.pause();
+  countdownAudio.removeAttribute("src");
+  countdownAudio.load();
+  countdownAudio = null;
+  audioPlayPending = false;
+  countdownAudioStarted = false;
+}
+
+function expectedCountdownAudioTime(): number | null {
+  if (!finalMinuteActive.value || targetTime.value === null) return null;
+  return Math.max(0, Math.min(60, (countdownAudioLengthMs - (targetTime.value - authoritativeNow())) / 1000));
+}
+
+function seekCountdownAudio(audio: HTMLAudioElement, expected: number): void {
+  const maximum = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - .015) : 60;
+  const position = Math.min(expected, maximum);
+  try {
+    audio.currentTime = position;
+  } catch {
+    soundState.value = "loading";
+  }
+}
+
+async function playCountdownAudio(expected: number, force = false): Promise<void> {
+  if (!eventMusicEnabled.value) return;
+  prepareCountdownAudio(soundState.value === "unavailable");
+  const audio = countdownAudio;
+  if (!audio || audioPlayPending || countdownAudioStarted || countdownFinished.value) return;
+  if (!audio.paused) return;
+  if (!force && soundState.value === "blocked") return;
+  audio.loop = false;
+  audio.volume = 1;
+  seekCountdownAudio(audio, expected);
+  audio.playbackRate = 1;
+  audioPlayPending = true;
+  try {
+    await audio.play();
+    if (countdownAudio !== audio || countdownFinished.value) return;
+    countdownAudioStarted = true;
+    soundPrimed.value = true;
+    soundState.value = "playing";
+  } catch (cause) {
+    const name = (cause as { name?: string })?.name;
+    soundState.value = name === "NotAllowedError" ? "blocked" : "unavailable";
+  } finally {
+    audioPlayPending = false;
+  }
+}
+
+function syncCountdown(forceAudio = false): void {
+  if (props.view !== "event") return;
+  nowMs.value = authoritativeNow();
+  if (countdownFinished.value || targetTime.value === null) return;
+  if (targetTime.value <= nowMs.value) {
+    finishCountdown();
+    return;
+  }
+  if (!finalMinuteActive.value) {
+    if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+    countdownFrame = undefined;
+    countdownBeat.value = -1;
+    if (soundState.value === "playing") soundState.value = "armed";
+    return;
+  }
+  const expected = expectedCountdownAudioTime();
+  if (expected === null) return;
+  scheduleCountdownFrame();
+  const beat = Math.floor(expected + .025);
+  if (beat !== countdownBeat.value) countdownBeat.value = beat;
+  if (countdownAudioStarted || (countdownAudio && !countdownAudio.paused)) {
+    soundState.value = "playing";
+    return;
+  }
+  void playCountdownAudio(expected, forceAudio);
+}
+
+function scheduleCountdownFrame(): void {
+  if (countdownFrame !== undefined || countdownFinished.value || !finalMinuteActive.value) return;
+  countdownFrame = window.requestAnimationFrame(() => {
+    countdownFrame = undefined;
+    syncCountdown();
+  });
+}
+
+function finishCountdown(): void {
+  if (countdownFinished.value) return;
+  countdownFinished.value = true;
+  if (countdownFrame !== undefined) window.cancelAnimationFrame(countdownFrame);
+  countdownFrame = undefined;
+  countdownBeat.value = -1;
+  soundState.value = "finished";
+  try {
+    window.localStorage.setItem(countdownCompletionKey(), "1");
+  } catch {
+    countdownFinished.value = true;
+  }
+  releaseCountdownAudio();
+}
+
+async function enableCountdownSound(dismiss = false): Promise<void> {
+  if (dismiss) {
+    soundRequested.value = true;
+    setEventMusicEnabled(true);
+  }
+  if (!eventMusicEnabled.value) return;
+  if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
+  prepareCountdownAudio(soundState.value === "unavailable");
+  const expected = expectedCountdownAudioTime();
+  if (expected !== null) {
+    await playCountdownAudio(expected, true);
+    return;
+  }
+  const audio = countdownAudio;
+  if (!audio || audioPlayPending || !audio.paused || soundPrimed.value) return;
+  audio.loop = true;
+  audio.volume = 0;
+  audioPlayPending = true;
+  try {
+    await audio.play();
+    audio.pause();
+    audio.currentTime = 0;
+    soundPrimed.value = true;
+    soundState.value = "armed";
+  } catch {
+    soundState.value = "blocked";
+  } finally {
+    audio.loop = false;
+    audio.volume = 1;
+    audioPlayPending = false;
+  }
+}
+
+function handleCountdownResume(): void {
+  if (document.visibilityState === "hidden") return;
+  syncCountdown();
+}
+
+function handleUserActivation(): void {
+  if (countdownFinished.value || !countdownVisible.value || soundState.value === "playing") return;
+  if (!soundPrimed.value || finalMinuteActive.value || ["blocked", "unavailable"].includes(soundState.value)) void enableCountdownSound();
 }
 
 </script>
@@ -50,7 +318,7 @@ function score(engineId: string | number | null): string {
       <div class="duck-hero__content">
         <header class="duck-heading"><span class="duck-kicker"><AppIcon name="trophy" :size="15" /> Duck Chess</span><h1 id="duck-event-title">{{ detail.event.title }}</h1></header>
         <div v-if="countdownActive" class="duck-countdown" aria-label="Time until event"><div v-for="part in countdown" :key="part.label"><strong>{{ String(part.value).padStart(2, '0') }}</strong><span>{{ part.label }}</span></div></div>
-        <div class="duck-timing"><p class="duck-schedule"><AppIcon name="clock" :size="15" /> {{ timing }}</p><button v-if="countdownActive" class="duck-music" type="button" :aria-pressed="eventMusicEnabled" :title="musicState === 'unavailable' ? 'Audio could not load. Click to retry.' : 'Music plays during the final minute.'" @click="toggleMusic"><AppIcon :name="musicState === 'playing' ? 'pause' : 'play'" :size="14" />{{ musicLabel }}</button></div>
+        <div class="duck-timing"><p class="duck-schedule"><AppIcon name="clock" :size="15" /> {{ timing }}</p><button v-if="countdownActive" class="duck-music" type="button" :aria-pressed="eventMusicEnabled" :title="soundState === 'unavailable' ? 'Audio could not load. Click to retry.' : 'Music plays during the final minute.'" @click="toggleMusic"><AppIcon :name="soundState === 'playing' ? 'pause' : 'play'" :size="14" />{{ musicLabel }}</button></div>
         <div class="duck-orbit duck-orbit--2">
           <span class="duck-vs" aria-hidden="true">VS</span>
           <article v-for="(member, index) in roster" :key="member.id" class="duck-node" :class="`duck-node--${index + 1}`">
