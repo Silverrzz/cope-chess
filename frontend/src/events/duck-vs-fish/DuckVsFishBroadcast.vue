@@ -7,7 +7,7 @@ import EngineCheers from "./EngineCheers.vue";
 import type { EventDetailResponse } from "@/types/events";
 import DuckVsFishArena from "./DuckVsFishArena.vue";
 import PondScene from "./PondScene.vue";
-import type { PondPayload } from "./types";
+import { pondRoster, type PondPayload } from "./types";
 
 const props = defineProps<{ detail: EventDetailResponse; view?: "event" | "arena"; clockOffsetMs?: number }>();
 const payload = computed(() => props.detail.custom as PondPayload);
@@ -15,7 +15,7 @@ const games = computed(() => payload.value.games);
 const now = ref(Date.now());
 const live = computed(() => ["live", "intermission"].includes(props.detail.event.status));
 const played = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
-const roster = computed(() => props.detail.cast.filter(member => member.parent_id === null));
+const roster = computed(() => pondRoster(props.detail.cast));
 const timing = computed(() => props.detail.event.scheduled_start_at
   ? new Intl.DateTimeFormat(undefined, { dateStyle: "long", timeStyle: "short" }).format(new Date(props.detail.event.scheduled_start_at))
   : "Start date TBD");
