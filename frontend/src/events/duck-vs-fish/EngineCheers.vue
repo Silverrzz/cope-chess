@@ -95,6 +95,8 @@ function launch(cheer: CheerEvent): void {
 
 <style scoped>
 .engine-cheers { display: flex; flex-wrap: wrap; justify-content: center; gap: .65rem; }
+.engine-cheers:not(.engine-cheers--compact) { width: min(100%, 26rem); }
+.engine-cheers:not(.engine-cheers--compact) button { flex: 1 1 0; min-width: 0; }
 .engine-cheers button { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .6rem; min-width: 10rem; min-height: 3.15rem; padding: .4rem .9rem .4rem .45rem; border: 1px solid color-mix(in srgb, var(--engine-color) 30%, transparent); border-radius: .6rem; background: var(--color-surface, #102019); color: var(--color-text, #e1e8d8); font: inherit; text-align: left; cursor: pointer; transition: transform .18s ease, border-color .18s ease; }
 .engine-cheers button:hover { border-color: var(--engine-color); transform: translateY(-2px); }.engine-cheers button:active { transform: scale(.98); }.engine-cheers button:focus-visible { outline: 3px solid var(--engine-color); outline-offset: 3px; }
 .cheer-icon { display: grid; width: 2.25rem; height: 2.25rem; place-items: center; border-radius: .5rem; background: color-mix(in srgb, var(--engine-color) 10%, transparent); }.cheer-icon img, .cheer-icon svg { width: 1.9rem; height: 1.9rem; }.engine-cheers button > span:last-child { display: grid; gap: .12rem; }.engine-cheers small { color: var(--color-text-muted, #8a9e90); font-size: .55rem; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }.engine-cheers strong { font-size: .76rem; }
