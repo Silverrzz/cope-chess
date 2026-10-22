@@ -12,6 +12,9 @@ import { resultLabel } from "@/components/public/format";
 import type { ChatMessage, GameRecord, Identifier, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
 import EngineCheers from "./EngineCheers.vue";
+import PondScene from "./PondScene.vue";
+import wakwak from "@/assets/wakwak-event.png";
+import fairyStockfish from "@/assets/fairy-stockfish-event.png";
 import type { PondPayload } from "./types";
 
 const props = defineProps<{ detail: EventDetailResponse }>();
@@ -139,6 +142,7 @@ async function loadViewer(gameId?: string): Promise<void> {
 
 <template>
   <section class="relay-viewer">
+    <PondScene />
     <header ref="headingElement" class="tournament-heading">
       <div class="tournament-heading__title">
         <div class="title-line"><h1>{{ detail.event.title }}</h1><span class="relay-status">{{ gameLabel }}</span><span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ (detail.spectator_count ?? 0).toLocaleString() }}</span></div>
@@ -150,7 +154,7 @@ async function loadViewer(gameId?: string): Promise<void> {
     <section ref="arenaElement" class="arena" aria-label="Wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
-          <EnginePanel :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
+          <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>
@@ -187,6 +191,7 @@ async function loadViewer(gameId?: string): Promise<void> {
   --arena-board-size: clamp(30rem, calc(100dvh - 15rem), 42rem);
   --arena-content-height: calc(var(--arena-board-size) + 6.35rem);
   position: relative;
+  isolation: isolate;
   display: grid;
   overflow-anchor: none;
   width: 100%;

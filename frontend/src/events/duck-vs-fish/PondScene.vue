@@ -1,27 +1,47 @@
+<script setup lang="ts">
+import { useId } from "vue";
+import duck from "@/assets/duck.svg";
+import fish from "@/assets/fairy-stockfish-event.png";
+
+const id = useId();
+</script>
+
 <template>
   <div class="pond-scene" aria-hidden="true">
     <svg class="pond-water" viewBox="0 0 1200 700" preserveAspectRatio="xMidYMid slice">
       <defs>
-        <radialGradient id="pond-water"><stop stop-color="#244537" /><stop offset="1" stop-color="#080f13" /></radialGradient>
-        <radialGradient id="pond-leaf"><stop stop-color="#798c49" /><stop offset="1" stop-color="#35462b" /></radialGradient>
-        <linearGradient id="pond-fish" x2=".8" y2="1"><stop stop-color="#d2e9d4" /><stop offset="1" stop-color="#639c99" /></linearGradient>
-        <g id="pond-pad"><path d="M0 0 43-30A65 44 0 1 0 48 25Z" fill="url(#pond-leaf)" stroke="#bfd08b" stroke-opacity=".25" /><path d="M0 0-53-10M0 0-32 28M0 0 10 38M0 0-15-37" stroke="#d3dba1" stroke-opacity=".24" fill="none" /></g>
+        <radialGradient :id="`${id}-leaf`"><stop stop-color="#788951" /><stop offset="1" stop-color="#354b35" /></radialGradient>
+        <g :id="`${id}-pad`"><path d="M0 0 45-45A64 64 0 1 0 58 27Z" :fill="`url(#${id}-leaf)`" stroke="#b2c18a" stroke-opacity=".18" /><path d="M0 0-49-12M0 0-29 43M0 0 18 49M0 0-16-49" stroke="#c2ce99" stroke-opacity=".16" fill="none" /></g>
       </defs>
-      <path fill="url(#pond-water)" d="M0 0h1200v700H0z" />
-      <g fill="none" stroke="#b1d9be" stroke-opacity=".12">
-        <ellipse cx="825" cy="330" rx="285" ry="110" /><ellipse cx="825" cy="330" rx="230" ry="85" /><ellipse cx="825" cy="330" rx="170" ry="58" />
-        <ellipse cx="60" cy="130" rx="110" ry="35" /><ellipse cx="1130" cy="100" rx="135" ry="42" /><ellipse cx="1090" cy="590" rx="150" ry="45" />
-        <path d="M20 300q140-22 260-5m-140 310q230-34 380-5m490-400q100 10 180-5M240 85q100 15 220 0M660 660q120-20 210-5" />
+      <g class="pond-pads">
+        <use :href="`#${id}-pad`" transform="translate(45 105) scale(.85 .38) rotate(-35)" />
+        <use :href="`#${id}-pad`" transform="translate(1125 100) scale(.8 .36) rotate(65)" />
+        <use :href="`#${id}-pad`" transform="translate(1080 610) scale(1.2 .58) rotate(-50)" />
+        <use :href="`#${id}-pad`" transform="translate(100 600) scale(1.25 .6) rotate(115)" />
+        <use :href="`#${id}-pad`" transform="translate(1175 420) scale(.7 .32) rotate(170)" />
+        <use :href="`#${id}-pad`" transform="translate(480 685) scale(.7 .34) rotate(25)" />
       </g>
-      <g class="pond-pads"><use href="#pond-pad" transform="translate(32 125) rotate(-20)" /><use href="#pond-pad" transform="translate(1130 92) rotate(20) scale(.9)" /><use href="#pond-pad" transform="translate(1055 605) rotate(-25) scale(1.15)" /><use href="#pond-pad" transform="translate(94 613) rotate(50) scale(1.3)" /><use href="#pond-pad" transform="translate(1180 440) rotate(130) scale(.65)" /><use href="#pond-pad" transform="translate(500 680) rotate(-10) scale(.6)" /></g>
-      <g transform="translate(1105 80)" fill="#f2dfd4"><path d="M0 6Q-25-12-16-23Q0-19 0 6M0 6Q25-12 16-23Q0-19 0 6" /><path d="M0 8Q-13-14 0-30Q13-14 0 8" /><ellipse cy="7" rx="13" ry="4" fill="#edc653" /></g>
-      <g fill="none" stroke="#9fb371" stroke-width="5" stroke-linecap="round"><path d="M5 700q25-100 5-190M21 700q5-70 43-165M1190 700q-40-90-22-190M1170 700q-6-90-45-140" /></g>
+      <g class="pond-creatures">
+        <image :href="duck" x="145" y="185" width="55" height="45" transform="rotate(-8 172 207)" />
+        <image :href="duck" x="1020" y="340" width="45" height="37" transform="translate(2085 0) scale(-1 1)" />
+        <image :href="fish" x="900" y="160" width="65" height="65" transform="rotate(-20 932 192)" />
+        <image :href="fish" x="240" y="530" width="80" height="80" transform="rotate(25 280 570)" />
+        <image :href="fish" x="1110" y="490" width="44" height="44" transform="rotate(-35 1132 512)" />
+      </g>
+      <g class="pond-pieces" fill="#a9c2ad" text-anchor="middle" font-family="Georgia, serif" font-size="54">
+        <text x="310" y="150" transform="rotate(-18 310 130)">&#9822;</text>
+        <text x="940" y="600" transform="rotate(15 940 580)">&#9820;</text>
+        <text x="70" y="395" transform="rotate(-12 70 375)">&#9823;</text>
+        <text x="740" y="665" transform="rotate(20 740 645)">&#9815;</text>
+      </g>
     </svg>
   </div>
 </template>
 
 <style scoped>
-.pond-scene { position: absolute; z-index: -1; inset: 0; overflow: hidden; pointer-events: none; opacity: .38; }
+.pond-scene { position: absolute; z-index: -1; inset: 0; overflow: hidden; pointer-events: none; }
 .pond-water { width: 100%; height: 100%; }
-.pond-pads { opacity: .7; }
+.pond-pads { opacity: .28; }
+.pond-creatures { opacity: .12; }
+.pond-pieces { opacity: .1; }
 </style>

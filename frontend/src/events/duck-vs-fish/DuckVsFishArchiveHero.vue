@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import wakwak from "@/assets/wakwak.svg";
+import wakwak from "@/assets/wakwak-event.png";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
-import FishMark from "./FishMark.vue";
+import fairyStockfish from "@/assets/fairy-stockfish-event.png";
 import PondScene from "./PondScene.vue";
 
 const props = defineProps<{ summary: EventSummary; current?: boolean; nowMs: number }>();
@@ -25,7 +25,7 @@ const timing = computed(() => {
 <template>
   <RouterLink class="duck-archive" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <PondScene />
-    <div class="duck-orbit" aria-hidden="true"><i></i><i></i><i></i><img :src="wakwak" alt="" /><FishMark /><span>VS</span></div>
+    <div class="duck-orbit" aria-hidden="true"><img :src="wakwak" alt="" /><img class="fish-mark" :src="fairyStockfish" alt="" /><span>VS</span></div>
     <div class="duck-copy">
       <span class="duck-kicker"><AppIcon name="trophy" :size="16" />{{ current ? live ? 'Live' : 'Upcoming' : event.status === 'cancelled' ? 'Cancelled' : 'Completed' }}</span>
       <h2>{{ event.title }}</h2>
@@ -56,7 +56,7 @@ const timing = computed(() => {
 .duck-orbit span { position: absolute; inset: 0; display: grid; place-items: center; color: #7ba8ef; font-size: clamp(5rem, 11vw, 10rem); text-shadow: 0 0 3rem rgb(58 124 240 / 52%); }
 
 .duck-archive { --archive-primary: #d9bd57; --archive-accent: #aac18d; --archive-background: #080f13; --archive-surface: #142b24; --archive-text: #eff3e9; }
-.duck-archive::after { border-color: #a8bf8c29; }.duck-copy h2 { color: var(--archive-text); }.duck-orbit { border-color: #a5c09130; box-shadow: 0 0 0 4rem #8ea96d05, 0 0 7rem #71945010; }.duck-orbit i { border-color: #a5c09130; }.duck-orbit img, .duck-orbit > svg { position: absolute; top: 50%; width: 32%; height: 32%; transform: translateY(-50%); }.duck-orbit img { left: 10%; }.duck-orbit > svg { right: 8%; }.duck-orbit > span { color: #acc18e; font-size: .8rem; font-weight: 850; text-shadow: none; }.duck-meta { color: #7f988b; }.duck-meta strong { color: #c8d9b4; }.duck-countdown { border-color: #a8bf8c38; background: #0b1813b8; }.duck-countdown span { border-color: #a8bf8c21; }.duck-countdown small { color: #859a75; }
+.duck-archive::after { border-color: #a8bf8c29; }.duck-copy h2 { color: var(--archive-text); }.duck-orbit { border: 0; box-shadow: none; }.duck-orbit i { border-color: #a5c09130; }.duck-orbit img, .duck-orbit > svg { position: absolute; top: 50%; width: 32%; height: 32%; transform: translateY(-50%); }.duck-orbit img { left: 8%; object-fit: contain; }.duck-orbit img.fish-mark { right: 6%; left: auto; }.duck-orbit > svg { right: 8%; }.duck-orbit > span { color: #acc18e; font-size: .8rem; font-weight: 850; text-shadow: none; }.duck-meta { color: #7f988b; }.duck-meta strong { color: #c8d9b4; }.duck-countdown { border-color: #a8bf8c38; background: #0b1813b8; }.duck-countdown span { border-color: #a8bf8c21; }.duck-countdown small { color: #859a75; }
 .duck-archive:hover .duck-orbit { transform: translateY(-50%) scale(1.025); transition: transform 350ms ease; }.duck-archive:hover .duck-meta strong { text-decoration: underline; text-underline-offset: .25rem; }.duck-archive:focus-visible { outline: 3px solid #a8bf8c; outline-offset: -3px; }
 @media (max-width: 58rem) { .duck-archive { min-height: 31rem; padding: 2rem 1.25rem; }.duck-copy { width: 100%; }.duck-copy h2 { max-width: 12ch; }.duck-orbit { top: 35%; right: -5rem; opacity: .35; }.duck-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
 @media (prefers-reduced-motion: reduce) { .duck-archive:hover .duck-orbit { transition: none; } }
