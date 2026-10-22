@@ -102,7 +102,7 @@ def _provision(connection: sqlite3.Connection) -> int:
         theme={"primary": "#edc653", "accent": "#b8d8a5", "background": "#080f13", "surface": "#142b24", "text": "#eff3e9"},
         config={"module": MODULE_KEY, "match": match.model_dump(mode="json"), "opening_book": suite.name},
     )
-    for position, (engine, label, color) in enumerate(zip(participants, ("wakwak", "Fairy-Stockfish Duck NNUE"), ("#edc653", "#a9d8d4"), strict=True)):
+    for position, (engine, label, color) in enumerate(zip(participants, ("wakwak", "Fairy-Stockfish"), ("#edc653", "#a9d8d4"), strict=True)):
         create_event_cast_member(
             connection, event_id, member_key=("duck", "fish")[position], kind="engine",
             display_name=label, short_name=label, role="Challenger" if position == 0 else "Opponent",
