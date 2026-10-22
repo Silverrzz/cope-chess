@@ -1280,6 +1280,7 @@ def _public_tournament_exists(
         return bool(
             event is not None
             and (_event_is_public(event) or admin_authenticated)
+            and (_event_arena_is_public(event) or admin_authenticated)
             and _event_has_tournament(connection, event.id, tournament_id)
         )
     finally:
@@ -1298,6 +1299,12 @@ def _event_is_public(event: EventRecord) -> bool:
     return event.published_at is not None and event.status != "draft"
 
 
+def _event_arena_is_public(event: EventRecord) -> bool:
+    return event.handler_key != "duck-vs-fish" or bool(
+        event.status in {"live", "intermission", "completed"}
+    )
+
+
 def _admin_request_authenticated(request: Request) -> bool:
     return bool(
         _request_is_secure_or_local(request)
@@ -1313,7 +1320,10 @@ def _private_event_page(app: FastAPI, path: str) -> bool:
     if match is None:
         return False
     event = _event_by_slug(app, match.group(1))
-    return event is not None and not _event_is_public(event)
+    return event is not None and (
+        not _event_is_public(event)
+        or (path.rstrip("/").endswith("/arena") and not _event_arena_is_public(event))
+    )
 
 
 def _event_tournament_page(app: FastAPI, path: str) -> bool:

@@ -1576,6 +1576,12 @@ def register_api_routes(app: FastAPI) -> None:
     ):
         event = _require_viewable_event(connection, slug, request)
         payload = _event_detail_payload(connection, event, admin=False)
+        payload["arena_available"] = (
+            web_app._event_arena_is_public(event)
+            or web_app._admin_request_authenticated(request)
+        )
+        if event.handler_key == "duck-vs-fish" and not payload["arena_available"]:
+            payload["custom"] = {**payload["custom"], "tournament": None, "games": []}
         payload["spectator_count"] = request.app.state.stream_hub.event_spectator_count(
             event.id
         )
@@ -1622,6 +1628,8 @@ def register_api_routes(app: FastAPI) -> None:
         tournament = _require_tournament(connection, tournament_id)
         if slug is not None and request.url.path.startswith("/api/events/"):
             event = _require_viewable_event(connection, slug, request)
+            if not web_app._event_arena_is_public(event) and not web_app._admin_request_authenticated(request):
+                raise HTTPException(status_code=403, detail="The arena opens when the event goes live.")
             if not web_app._event_has_tournament(
                 connection,
                 event.id,

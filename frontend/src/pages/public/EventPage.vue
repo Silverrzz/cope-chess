@@ -63,6 +63,9 @@ async function load(silent = false): Promise<void> {
     const serverTime = Date.parse(response.server_time);
     if (Number.isFinite(serverTime)) serverClockOffsetMs.value = serverTime - (requestedAt + receivedAt) / 2;
     data.value = response;
+    if (props.arena && response.arena_available === false) {
+      await router.replace({ name: "event", params: { slug: props.slug } });
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       await router.replace({ name: "admin-login", query: { redirect: route.fullPath } });
@@ -159,7 +162,7 @@ function sessionTiming(session: EventSession): string {
     </div>
 
     <template v-if="data && !loading">
-      <component :is="customComponent" v-if="customComponent && props.arena" :detail="data" :clock-offset-ms="serverClockOffsetMs" view="arena" />
+      <component :is="customComponent" v-if="customComponent && props.arena && data.arena_available !== false" :detail="data" :clock-offset-ms="serverClockOffsetMs" view="arena" />
 
       <component :is="customComponent" v-else-if="customComponent && immersiveCustom" :detail="data" :clock-offset-ms="serverClockOffsetMs" view="event" />
 
