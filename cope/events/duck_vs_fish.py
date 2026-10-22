@@ -31,6 +31,7 @@ from cope.db import (
     set_event_published,
     set_event_status,
     suite_opening_count,
+    update_tournament,
 )
 from cope.db.events import EventRecord, utc_now
 from cope.runner.scheduler import materialize_tournament_schedule
@@ -79,7 +80,7 @@ def _provision(connection: sqlite3.Connection) -> int:
         format=TournamentFormat.ROUND_ROBIN,
         format_options=RoundRobinFormatOptions(cycles=10),
         participants=[engine.id for engine in participants],
-        time_control=IncrementTimeControl(initial_ms=1_200_000, increment_ms=12_000),
+        time_control=IncrementTimeControl(initial_ms=180_000, increment_ms=1_800),
         concurrency=1,
         opening_suite_id=suite.id,
         adjudication=AdjudicationConfig(),
@@ -94,9 +95,9 @@ def _provision(connection: sqlite3.Connection) -> int:
         handler_key=MODULE_KEY,
         title="Duck vs Fish",
         subtitle="",
-        summary="wakwak vs Fairy-Stockfish Duck NNUE. Duck Chess, 20 games, 64 threads per engine, 20m + 12s.",
+        summary="wakwak vs Fairy-Stockfish Duck NNUE. Duck Blitz, 20 games, 64 threads per engine, 3m + 1.8s.",
         description="",
-        rules="20 unrated Duck Chess games in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
+        rules="20 unrated Duck Chess games at 3m + 1.8s in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
         status="announced",
         featured=True,
         theme={"primary": "#edc653", "accent": "#b8d8a5", "background": "#080f13", "surface": "#142b24", "text": "#eff3e9"},
@@ -134,6 +135,42 @@ class CheerPayload(BaseModel):
 
 def _register_api(app: FastAPI) -> None:
     from cope.web import app as web_app
+
+    @app.put("/api/admin/events/{event_id}/duck-vs-fish/time-control")
+    def time_control(
+        event_id: int,
+        payload: IncrementTimeControl,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        event = get_event(connection, event_id)
+        if event is None or event.handler_key != MODULE_KEY:
+            raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
+        row = connection.execute("SELECT id FROM events WHERE id = ? FOR UPDATE", (event_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
+        event = get_event(connection, event_id)
+        tournament_id = event.config.get("tournament_id")
+        tournament_row = connection.execute("SELECT status FROM tournaments WHERE id = ? FOR UPDATE", (tournament_id,)).fetchone()
+        if tournament_row is None or tournament_row["status"] != "draft":
+            raise HTTPException(status_code=409, detail="Return the match to draft before changing its time control.")
+        tournament = get_tournament(connection, tournament_id)
+        config = tournament.config.model_copy(update={"time_control": payload})
+        update_tournament(connection, tournament.id, name=tournament.name, config=config)
+        label = f"{payload.initial_ms / 60_000:g}m + {payload.increment_ms / 1000:g}s"
+        connection.execute(
+            "UPDATE events SET config = ?, summary = ?, rules = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+            (
+                json.dumps({**event.config, "match": config.model_dump(mode="json")}),
+                f"wakwak vs Fairy-Stockfish Duck NNUE. Duck Blitz, 20 games, {config.engine_threads} threads per engine, {label}.",
+                f"20 unrated Duck Chess games at {label} in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
+                utc_now(), event_id,
+            ),
+        )
+        connection.commit()
+        request.app.state.stream_hub.publish(f"event.{event_id}", "event.changed", {"event_id": event_id}, source="web")
+        request.app.state.stream_hub.publish("admin", "admin.changed", {"event_id": event_id}, source="web")
+        return JSONResponse({"message": "Event time control updated."})
 
     @app.post("/api/events/{slug}/duck-vs-fish/cheers")
     def cheer(
