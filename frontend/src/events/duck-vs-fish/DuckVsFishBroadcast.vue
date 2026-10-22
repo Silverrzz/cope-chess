@@ -42,10 +42,6 @@ const remainingMs = computed(() => Math.max(0, (targetTime.value ?? nowMs.value)
 const countdownVisible = computed(() => targetTime.value !== null && remainingMs.value > 0 && !countdownFinished.value);
 const finalMinuteActive = computed(() => countdownVisible.value && remainingMs.value <= countdownAudioLengthMs);
 const countdownActive = computed(() => props.view !== "arena" && ["announced", "scheduled"].includes(props.detail.event.status) && countdownVisible.value);
-const musicLabel = computed(() => !eventMusicEnabled.value ? "Enable countdown music"
-  : soundState.value === "blocked" ? "Play countdown music"
-  : soundState.value === "unavailable" ? "Retry countdown music"
-  : soundState.value === "playing" ? "Mute countdown music" : "Countdown music on");
 const arenaOpen = computed(() => ["live", "intermission", "completed"].includes(props.detail.event.status));
 const countdown = computed(() => {
   const seconds = Math.ceil(remainingMs.value / 1000);
@@ -89,13 +85,6 @@ onBeforeUnmount(() => {
   releaseCountdownAudio();
 });
 
-async function toggleMusic(): Promise<void> {
-  if (eventMusicEnabled.value && !["blocked", "unavailable"].includes(soundState.value)) {
-    setEventMusicEnabled(false);
-    return;
-  }
-  await enableCountdownSound(true);
-}
 
 function score(engineId: string | number | null): string {
   let total = 0;
@@ -318,7 +307,7 @@ function handleUserActivation(): void {
       <div class="duck-hero__content">
         <header class="duck-heading"><span class="duck-kicker"><AppIcon name="trophy" :size="15" /> Duck Chess</span><h1 id="duck-event-title">{{ detail.event.title }}</h1></header>
         <div v-if="countdownActive" class="duck-countdown" aria-label="Time until event"><div v-for="part in countdown" :key="part.label"><strong>{{ String(part.value).padStart(2, '0') }}</strong><span>{{ part.label }}</span></div></div>
-        <div class="duck-timing"><p class="duck-schedule"><AppIcon name="clock" :size="15" /> {{ timing }}</p><button v-if="countdownActive" class="duck-music" type="button" :aria-pressed="eventMusicEnabled" :title="soundState === 'unavailable' ? 'Audio could not load. Click to retry.' : 'Music plays during the final minute.'" @click="toggleMusic"><AppIcon :name="soundState === 'playing' ? 'pause' : 'play'" :size="14" />{{ musicLabel }}</button></div>
+        <div class="duck-timing"><p class="duck-schedule"><AppIcon name="clock" :size="15" /> {{ timing }}</p><button v-if="countdownActive && !soundRequested && !soundPrimed && soundState !== 'playing' && soundState !== 'finished'" class="duck-music" type="button" :aria-pressed="eventMusicEnabled" :title="soundState === 'unavailable' ? 'Audio could not load. Click to retry.' : 'Music plays during the final minute.'" @pointerdown.stop @click="enableCountdownSound(true)"><AppIcon name="radio" :size="14" />Enable countdown music</button></div>
         <div class="duck-orbit duck-orbit--2">
           <span class="duck-vs" aria-hidden="true">VS</span>
           <article v-for="(member, index) in roster" :key="member.id" class="duck-node" :class="`duck-node--${index + 1}`">
