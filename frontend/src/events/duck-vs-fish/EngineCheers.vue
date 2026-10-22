@@ -14,10 +14,9 @@ interface CheerEvent {
 
 interface CheerBurst {
   id: string;
-  color: string;
   x: number;
   y: number;
-  pieces: Array<{ x: number; y: number; rotation: number; duration: number; delay: number; size: number }>;
+  pieces: Array<{ color: string; x: number; y: number; rotation: number; duration: number; delay: number; size: number }>;
 }
 
 const props = defineProps<{ eventId: number; slug: string; members: EventCastMember[]; compact?: boolean }>();
@@ -61,12 +60,15 @@ function launch(cheer: CheerEvent): void {
   if (!confettiEnabled.value || window.matchMedia("(prefers-reduced-motion: reduce)").matches || bursts.value.length >= 6) return;
   const bounds = document.querySelector<HTMLElement>(`[data-cheer-origin="${member.id}"]`)?.getBoundingClientRect();
   const left = props.members[0]?.id === member.id;
+  const colors = /wakwak/i.test(member.display_name)
+    ? ["#237343", "#a76c46", "#439b58", "#c18a60"]
+    : ["#ff466d", "#ff9538", "#f6d94a", "#74d34e", "#2dd6cf", "#4b89ff", "#a75aff", "#e951c0"];
   bursts.value.push({
     id: cheer.id,
-    color: /^#[0-9a-f]{6}$/i.test(member.accent_color) ? member.accent_color : left ? "#edc653" : "#a9d8d4",
     x: bounds ? (bounds.left + bounds.width / 2) / window.innerWidth * 100 : left ? 20 : 80,
     y: bounds ? (bounds.top + bounds.height / 2) / window.innerHeight * 100 : 85,
-    pieces: Array.from({ length: 30 }, () => ({
+    pieces: Array.from({ length: 30 }, (_, index) => ({
+      color: colors[index % colors.length]!,
       x: -8 + Math.random() * 16,
       y: -5 - Math.random() * 12,
       rotation: -520 + Math.random() * 1040,
@@ -87,7 +89,7 @@ function launch(cheer: CheerEvent): void {
   <div class="engine-cheers" :class="{ 'engine-cheers--compact': compact }">
     <button v-for="(member, index) in members" :key="member.id" type="button" :data-cheer-engine="member.id" :aria-label="`Cheer for ${member.display_name}`" :style="{ '--engine-color': /^#[0-9a-f]{6}$/i.test(member.accent_color) ? member.accent_color : '#a9d8d4' }" @click="cheer(member)"><template v-if="compact"><img class="compact-engine-icon" :src="index === 0 ? wakwak : fairyStockfish" alt="" /> Cheer {{ member.short_name || member.display_name }}</template><template v-else><span class="cheer-icon"><img v-if="index === 0" :src="wakwak" alt="" /><img v-else class="fish-mark" :src="fairyStockfish" alt="" /></span><span><small>Cheer for</small><strong>{{ member.display_name }}</strong></span></template></button>
     <span class="sr-only" role="status">{{ message }}</span>
-    <Teleport to="body"><div v-if="confettiEnabled" class="cheer-layer" aria-hidden="true"><span v-for="burst in bursts" :key="burst.id" class="cheer-burst" :style="{ left: `${burst.x}%`, top: `${burst.y}%`, '--cheer-color': burst.color }"><i v-for="(piece, index) in burst.pieces" :key="index" :style="{ '--cheer-end-x': `${piece.x}rem`, '--cheer-end-y': `${piece.y}rem`, '--cheer-rotation': `${piece.rotation}deg`, '--cheer-duration': `${piece.duration}ms`, '--cheer-delay': `${piece.delay}ms`, '--cheer-size': `${piece.size}rem` }"></i></span></div></Teleport>
+    <Teleport to="body"><div v-if="confettiEnabled" class="cheer-layer" aria-hidden="true"><span v-for="burst in bursts" :key="burst.id" class="cheer-burst" :style="{ left: `${burst.x}%`, top: `${burst.y}%` }"><i v-for="(piece, index) in burst.pieces" :key="index" :style="{ '--cheer-color': piece.color, '--cheer-end-x': `${piece.x}rem`, '--cheer-end-y': `${piece.y}rem`, '--cheer-rotation': `${piece.rotation}deg`, '--cheer-duration': `${piece.duration}ms`, '--cheer-delay': `${piece.delay}ms`, '--cheer-size': `${piece.size}rem` }"></i></span></div></Teleport>
   </div>
 </template>
 
