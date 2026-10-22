@@ -8,7 +8,7 @@ import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import { resultLabel } from "@/components/public/format";
+import { resultLabel, timeControlLabel } from "@/components/public/format";
 import type { ChatMessage, GameRecord, Identifier, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
 import EngineCheers from "./EngineCheers.vue";
@@ -20,6 +20,12 @@ import { pondRoster, type PondPayload } from "./types";
 const props = defineProps<{ detail: EventDetailResponse }>();
 const route = useRoute();
 const payload = computed(() => props.detail.custom as PondPayload);
+const controlLabel = computed(() => timeControlLabel(payload.value.tournament?.config?.time_control));
+const initialClock = computed(() => {
+  const control = payload.value.tournament?.config?.time_control;
+  const milliseconds = control && (control.category === "increment" || control.category === "movestogo") ? control.initial_ms : 180_000;
+  return `${String(Math.floor(milliseconds / 60_000)).padStart(2, "0")}:${String(Math.floor(milliseconds / 1000) % 60).padStart(2, "0")}`;
+});
 const roster = computed(() => pondRoster(props.detail.cast));
 const games = ref<GameRecord[]>([]);
 const viewer = ref<TournamentDetailResponse | null>(null);
@@ -154,7 +160,7 @@ async function loadViewer(gameId?: string): Promise<void> {
     <section ref="arenaElement" class="arena" aria-label="wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
-          <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? '20:00'" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
+          <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? initialClock" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>
@@ -180,7 +186,7 @@ async function loadViewer(gameId?: string): Promise<void> {
       </section>
       <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
         <header><h2 id="settings-title">Settings</h2></header>
-        <dl class="settings-list"><div><dt>Variant</dt><dd>Duck Chess</dd></div><div><dt>Time control</dt><dd>20m + 12s</dd></div><div><dt>Threads per engine</dt><dd>64</dd></div><div><dt>Hash per engine</dt><dd>4096 MiB</dd></div><div><dt>Games</dt><dd>20 · 10 colour-swapped pairs</dd></div><div><dt>Opening book</dt><dd>{{ payload.opening_book }}</dd></div><div><dt>Rated</dt><dd>No</dd></div><div><dt>Start</dt><dd>{{ timing }}</dd></div></dl>
+        <dl class="settings-list"><div><dt>Variant</dt><dd>Duck Chess</dd></div><div><dt>Time control</dt><dd>{{ controlLabel }}</dd></div><div><dt>Threads per engine</dt><dd>64</dd></div><div><dt>Hash per engine</dt><dd>4096 MiB</dd></div><div><dt>Games</dt><dd>20 · 10 colour-swapped pairs</dd></div><div><dt>Opening book</dt><dd>{{ payload.opening_book }}</dd></div><div><dt>Rated</dt><dd>No</dd></div><div><dt>Start</dt><dd>{{ timing }}</dd></div></dl>
       </section>
     </section>
   </section>
