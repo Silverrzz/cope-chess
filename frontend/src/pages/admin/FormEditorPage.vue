@@ -90,8 +90,14 @@ async function newCopy(): Promise<void> {
 }
 async function check(): Promise<void> {
   clear(); checking.value = true
-  try { await applicationQuery('forms.definition.check.v1', { document: JSON.parse(JSON.stringify(document.value)) }); message.value = 'The current definition passes publication validation. Save it to select this content for publication.' }
-  catch (cause) { failure(cause) }
+  const snapshot = JSON.stringify(document.value)
+  try {
+    await applicationQuery('forms.definition.check.v1', { document: JSON.parse(snapshot) })
+    message.value = snapshot !== JSON.stringify(document.value) ? 'The earlier checked content passed. Your newer edits have been kept and need another check.'
+      : dirty.value ? 'The current definition passes publication validation. Save it to select this content for publication.'
+      : `Saved revision ${copy.value?.version} passes publication validation.`
+  }
+  catch (cause) { if (snapshot === JSON.stringify(document.value)) failure(cause); else error.value = 'The earlier check found errors. Your newer edits have been kept; check the current content again.' }
   finally { checking.value = false }
 }
 async function publish(): Promise<void> {

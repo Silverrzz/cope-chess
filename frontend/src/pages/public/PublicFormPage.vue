@@ -76,7 +76,7 @@ function useLatest(): void {
   const oldFields = form.value?.definition.fields ?? []
   const kept: FormAnswers = {}
   for (const field of newerRelease.value.definition.fields) {
-    if (oldFields.some((old) => old.id === field.id && JSON.stringify(old) === JSON.stringify(field)) && field.id in answers.value) kept[field.id] = answers.value[field.id]
+    if (oldFields.some((old) => old.id === field.id && old.kind === field.kind) && field.id in answers.value) kept[field.id] = answers.value[field.id]
   }
   form.value = newerRelease.value; newerRelease.value = null; answers.value = initialAnswers(form.value.definition.fields, kept); errors.value = {}; error.value = ''
 }

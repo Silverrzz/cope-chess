@@ -64,6 +64,8 @@ def form_principal(request: Request, connection=Depends(database)):
             raise HTTPException(401, "A valid bearer credential is required")
         try:
             identity = authenticate_bearer(connection, token)
+            if not isinstance(identity, Principal):
+                identity = Principal(identity.actor, tuple(identity.scopes), identity.token_id)
             if identity.credential_kind == "form_claim" and get_platform_settings(connection).privatise_platform:
                 raise HTTPException(401, "Sign in to access forms on this private platform")
             return identity

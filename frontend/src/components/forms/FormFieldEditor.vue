@@ -29,7 +29,7 @@ function move(index: number, direction: number): void {
 function changeKind(index: number, kind: FormKind): void {
   const old = props.modelValue[index]
   if (!old) return
-  const replacement: FormField = { id: old.id, label: old.label, help: old.help ?? '', required: old.required ?? false, when: old.when ?? null, kind }
+  const replacement: FormField = { id: `field_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, label: old.label, help: old.help ?? '', required: old.required ?? false, when: old.when ?? null, kind }
   if (kind === 'choice' || kind === 'multiple_choice') replacement.choices = [{ id: 'option_1', label: 'First option' }]
   if (kind === 'group') { replacement.fields = []; replacement.max_items = 20 }
   if (kind === 'reference') replacement.reference_type = 'engine'

@@ -163,6 +163,22 @@ def publish_form(context: CommandContext, payload: PublishForm) -> Outcome:
         raise ApplicationError("draft_basis_changed", "The form changed after this draft began. Preserve your work and reconcile it with a new draft.")
     definition = definition_from_json(draft["document"])
     binding = compile_binding(definition)
+    previous_release = context.target.data["published_release"]
+    if previous_release:
+        old = pinned_release(context.connection,context.target.object_id,str(previous_release),accepting=False)["definition"]
+
+        def check_field_identity(fields, previous_fields, parent=()):
+            previous = {field["id"]:field for field in previous_fields}
+            for field in fields:
+                earlier = previous.get(field.id)
+                if earlier is None:
+                    continue
+                if earlier["kind"] != field.kind or earlier.get("reference_type") != field.reference_type:
+                    raise ApplicationError("field_identity_changed","Changing a published answer type requires a new question identity.",422,
+                                           fields=[{"path":[*parent,field.id],"code":"new_field_identity_required","message":"Create a new question for the changed answer type."}])
+                check_field_identity(field.fields,earlier.get("fields",[]),(*parent,field.id))
+
+        check_field_identity(definition.fields,old["fields"])
     document = definition.model_dump(mode="json")
     digest = hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     number = context.connection.execute("SELECT COALESCE(max(number), 0) + 1 AS number FROM form_releases WHERE form_id = %s", (context.target.object_id,)).fetchone()["number"]
