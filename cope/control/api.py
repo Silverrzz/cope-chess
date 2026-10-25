@@ -10,13 +10,17 @@ from pydantic import Field
 from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
 from cope.application.commands import current_principal, describe_target
 from cope.infrastructure.postgres.application import run_application
+from cope.infrastructure.postgres.credentials import authenticate_bearer
+from cope.application.contracts import QueryRequest
+from cope.application.queries import execute_query, list_queries
+from cope.application.identity import browser_principal
 
 from cope.db import connect_database, list_engine_records, list_git_hosts, list_rating_lists, list_opening_suites
 from cope.variants import VARIANTS
 
 from .intake import IntakeRequest, Preset, compile_intake, list_presets, queue_snapshot, save_preset
 from .operations import (
-    Plan, Principal, audit, authenticate, change_operation, create_operation,
+    Plan, Principal, audit, change_operation, create_operation,
     get_operation, list_operations, mint_token,
 )
 from .registry import Input, describe_actions
@@ -41,8 +45,8 @@ def principal(request: Request, connection=Depends(database)):
         if scheme.lower() != "bearer" or not token:
             raise HTTPException(401, "A control bearer token is required", headers={"WWW-Authenticate": "Bearer"})
         try:
-            return authenticate(connection, token)
-        except PermissionError as error:
+            return authenticate_bearer(connection, token)
+        except ApplicationError as error:
             raise HTTPException(401, str(error), headers={"WWW-Authenticate": "Bearer"}) from error
     if request.url.path.startswith("/api/admin/control"):
         role = _admin_session_role(request)
@@ -50,7 +54,7 @@ def principal(request: Request, connection=Depends(database)):
             return Principal("browser:admin", ("*",))
         if role == "manager":
             if "/application/" in request.url.path:
-                return Principal("browser:manager", ("operations:read", "engines:write", "tournaments:write"))
+                return browser_principal("manager")
             return Principal("browser:manager", ("operations:read",))
     raise HTTPException(401, "A control bearer token is required", headers={"WWW-Authenticate": "Bearer"})
 
@@ -60,6 +64,9 @@ def perform(connection, handler, *args, **kwargs):
         result = handler(connection, *args, **kwargs)
         connection.commit()
         return result
+    except ApplicationError as error:
+        connection.rollback()
+        raise HTTPException(error.status, error.payload()) from error
     except PermissionError as error:
         connection.rollback()
         raise HTTPException(403, str(error)) from error
@@ -197,6 +204,14 @@ def register_control_routes(app):
     @router.post("/application/commands")
     def application_command(payload: CommandRequest, identity=Depends(principal), connection=Depends(database)):
         return application_result(connection, identity, execute_command, payload)
+
+    @router.get("/application/queries")
+    def application_queries(identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection, identity, lambda raw, actor: list_queries(current_principal(raw, actor)))
+
+    @router.post("/application/queries")
+    def application_query(payload: QueryRequest, identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection, identity, execute_query, payload)
 
     @router.get("/repository")
     def repository(identity=Depends(principal), connection=Depends(database)):

@@ -3,165 +3,82 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
-from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import ValidationError
 
+from .contracts import CommandContext, CommandReceipt, CommandRequest
 from .errors import ApplicationError
-from .identity import Principal
+from .identity import Principal, current_principal
+from .legacy_resources import commands as legacy_commands
 
 
-class Input(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+def command_catalog() -> dict:
+    from cope.domains.forms.application import commands as form_commands
+
+    providers = (legacy_commands(), form_commands())
+    result = {}
+    for provider in providers:
+        for command in provider:
+            if command.name in result:
+                raise RuntimeError(f"Duplicate application command: {command.name}")
+            result[command.name] = command
+    return result
 
 
-class Metadata(Input):
-    name: str = Field(min_length=1, max_length=80)
-    author: str = Field(max_length=120)
-
-
-class Rename(Input):
-    name: str = Field(min_length=1, max_length=160)
-
-
-class Drain(Input):
-    draining: StrictBool
-
-
-class DrainResult(Drain):
-    active_games: Literal["continue"]
-
-
-class CommandReceipt(Input):
-    receipt_id: str
-    status: Literal["completed"]
-    command: Literal["agents.set_drain.v1", "engines.update_metadata.v1", "competitions.rename.v1"]
-    object_id: str
-    legacy_id: int
-    version_channel: Literal["content_revision", "state_version"]
-    basis_version: int
-    version: int
-    output: Metadata | Rename | DrainResult
-
-
-class CommandRequest(Input):
-    command: Literal["agents.set_drain.v1", "engines.update_metadata.v1", "competitions.rename.v1"]
-    target: str = Field(min_length=1, max_length=100)
-    expected_version: int = Field(strict=True, gt=0)
-    idempotency_key: str = Field(min_length=1, max_length=160)
-    input: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class Command:
-    name: str
-    type_key: str
-    table: str
-    namespace: str
-    scope: str
-    version_channel: str
-    input_model: type[BaseModel]
-
-
-COMMANDS = {
-    item.name: item for item in (
-        Command("agents.set_drain.v1", "agent", "workers", "legacy.worker", "workers:write", "state_version", Drain),
-        Command("engines.update_metadata.v1", "engine", "engines", "legacy.engine", "engines:write", "content_revision", Metadata),
-        Command("competitions.rename.v1", "competition", "tournaments", "legacy.tournament", "tournaments:write", "content_revision", Rename),
-    )
-}
+COMMANDS = command_catalog()
 
 
 def list_commands(principal: Principal) -> list[dict]:
     return [
-        {"name": item.name, "type": item.type_key, "scope": item.scope,
-         "version_channel": item.version_channel, "input_schema": item.input_model.model_json_schema()}
+        {"name": item.name, "type": item.type_key, "scope": item.scope, "version_channel": item.version_channel,
+         "requires_target": item.requires_target, "requires_version": item.requires_version,
+         "input_schema": item.input_model.model_json_schema(), "output_schema": item.output_model.model_json_schema()}
         for item in COMMANDS.values() if "*" in principal.scopes or item.scope in principal.scopes
     ]
 
 
-def current_principal(connection, principal: Principal) -> Principal:
-    if principal.token_id is None:
-        return principal
-    if principal.actor != f"token:{principal.token_id}":
-        raise ApplicationError("credential_mismatch", "The credential does not match the acting identity.", 403)
-    row = connection.execute(
-        """SELECT scopes FROM control_tokens
-           WHERE id = %s AND revoked_at IS NULL AND expires_at > clock_timestamp() FOR SHARE""",
-        (principal.token_id,),
-    ).fetchone()
-    if row is None:
-        raise ApplicationError("credential_revoked", "The initiating credential is no longer valid.", 403)
-    allowed = set(json.loads(row["scopes"]))
-    effective = principal.scopes if "*" in allowed else tuple(allowed if "*" in principal.scopes else allowed.intersection(principal.scopes))
-    return Principal(principal.actor, effective, principal.token_id)
-
-
-def resolve_target(connection, command: Command, target: str, *, lock: bool = False) -> dict:
-    try:
-        object_id = uuid.UUID(target)
-    except ValueError:
-        if not target.isascii() or not target.isdecimal() or int(target) < 1 or len(target) > 18:
-            raise ApplicationError("invalid_target", "Supply an Object UUID or a positive legacy identifier.", 422)
-        clause, parameter = "id = %s", int(target)
-    else:
-        clause, parameter = "object_id = %s", object_id
-    row = connection.execute(
-        f"SELECT id, object_id FROM {command.table} WHERE {clause}" + (" FOR UPDATE" if lock else ""),
-        (parameter,),
-    ).fetchone()
-    if row is None:
-        raise ApplicationError("not_found", "The requested resource does not exist.", 404)
-    return dict(row)
+def get_command(name: str):
+    command = COMMANDS.get(name)
+    if command is None:
+        raise ApplicationError("unknown_command", "Unknown application command.", 404)
+    return command
 
 
 def describe_target(connection, principal: Principal, command_name: str, target: str) -> dict:
-    command = COMMANDS.get(command_name)
-    if command is None:
-        raise ApplicationError("unknown_command", "Unknown application command.", 404)
+    command = get_command(command_name)
     principal = current_principal(connection, principal)
     principal.require(command.scope)
-    try:
-        identity = uuid.UUID(target)
-    except ValueError:
-        if not target.isascii() or not target.isdecimal() or len(target) > 18 or int(target) < 1:
-            raise ApplicationError("invalid_target", "Supply an Object UUID or a positive legacy identifier.", 422)
-        predicate, value = "d.id = %s", int(target)
-    else:
-        predicate, value = "d.object_id = %s", identity
-    fields = "d.name, d.author" if command.type_key == "engine" else "d.name" if command.type_key == "competition" else "COALESCE(s.draining, FALSE) AS draining"
-    join = " LEFT JOIN control_worker_settings s ON s.worker_id = d.id" if command.type_key == "agent" else ""
-    row = connection.execute(
-        f"""SELECT d.id, d.object_id, o.{command.version_channel} AS version, {fields}
-            FROM {command.table} d JOIN application_objects o ON o.id = d.object_id AND o.type_key = %s
-            {join} WHERE {predicate}""", (command.type_key, value),
-    ).fetchone()
-    if row is None:
-        raise ApplicationError("not_found", "The requested resource does not exist.", 404)
-    values = {key: row[key] for key in command.input_model.model_fields}
-    return {"object_id": str(row["object_id"]), "legacy_id": row["id"], "type": command.type_key,
-            "version_channel": command.version_channel, "version": row["version"], "input": values}
+    if not command.requires_target:
+        raise ApplicationError("target_not_applicable", "This creation command has no existing target.", 422)
+    resolved = command.resolve(connection, principal, target, lock=False)
+    return command.describe(connection, principal, resolved)
 
 
 def execute_command(connection, principal: Principal, request: CommandRequest) -> dict:
-    command = COMMANDS[request.command]
+    command = get_command(request.command)
     principal = current_principal(connection, principal)
     principal.require(command.scope)
+    if command.requires_target != (request.target is not None):
+        raise ApplicationError("target_required" if command.requires_target else "target_not_applicable", "Check this command's target contract.", 422)
+    if command.requires_version != (request.expected_version is not None):
+        raise ApplicationError("version_required" if command.requires_version else "version_not_applicable", "Check this command's version contract.", 422)
     try:
         payload = command.input_model.model_validate(request.input)
     except ValidationError as exc:
         errors = [{"path": list(error["loc"]), "code": error["type"], "message": error["msg"]}
                   for error in exc.errors(include_input=False, include_context=False, include_url=False)]
         raise ApplicationError("invalid_input", "Check the supplied fields.", 422, fields=errors) from exc
-    connection.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-        (json.dumps([principal.actor, request.idempotency_key]),),
-    )
-    row = resolve_target(connection, command, request.target, lock=True)
-    canonical = {"command": command.name, "target": str(row["object_id"]),
+    connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (json.dumps([principal.actor, request.idempotency_key]),))
+    target = command.resolve(connection, principal, request.target, lock=True) if command.requires_target else None
+    canonical = {"command": command.name, "target": target.object_id if target else None,
                  "expected_version": request.expected_version, "input": payload.model_dump(mode="json")}
-    fingerprint = hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    try:
+        encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ApplicationError("invalid_input", "The command must contain supported JSON values.", 422) from exc
+    if len(encoded) > 2097152:
+        raise ApplicationError("command_too_large", "This command exceeds its input limit.", 413)
+    fingerprint = hashlib.sha256(encoded).hexdigest()
     existing = connection.execute(
         "SELECT request_hash, result FROM application_command_receipts WHERE actor = %s AND idempotency_key = %s",
         (principal.actor, request.idempotency_key),
@@ -171,67 +88,36 @@ def execute_command(connection, principal: Principal, request: CommandRequest) -
     if existing is not None:
         if existing["request_hash"] != fingerprint:
             raise ApplicationError("idempotency_conflict", "This idempotency key was used for another request.")
-        return existing["result"]
-    current = connection.execute(
-        f"SELECT {command.version_channel} AS version FROM application_objects WHERE id = %s AND type_key = %s FOR UPDATE",
-        (row["object_id"], command.type_key),
-    ).fetchone()
-    if current is None:
-        raise ApplicationError("identity_mismatch", "The resource identity is inconsistent.")
-    if current["version"] != request.expected_version:
+        return command.project(connection, principal, existing["result"])
+    if command.requires_version and target.version != request.expected_version:
         raise ApplicationError("revision_conflict", "The resource changed. Refresh before applying this edit.",
-                               current_version=current["version"], version_channel=command.version_channel)
-    if command.name == "engines.update_metadata.v1":
-        connection.execute("UPDATE engines SET name = %s, author = %s WHERE id = %s", (payload.name, payload.author, row["id"]))
-        output = {"name": payload.name, "author": payload.author}
-    elif command.name == "competitions.rename.v1":
-        connection.execute("UPDATE tournaments SET name = %s WHERE id = %s", (payload.name, row["id"]))
-        output = {"name": payload.name}
-    else:
-        connection.execute(
-            """INSERT INTO control_worker_settings(worker_id, draining, changed_by) VALUES (%s, %s, %s)
-               ON CONFLICT(worker_id) DO UPDATE SET draining = EXCLUDED.draining,
-               changed_by = EXCLUDED.changed_by, changed_at = clock_timestamp()""",
-            (row["id"], payload.draining, principal.actor),
-        )
-        output = {"draining": payload.draining, "active_games": "continue"}
-    updated = connection.execute(
-        f"SELECT {command.version_channel} AS version FROM application_objects WHERE id = %s", (row["object_id"],)
-    ).fetchone()
+                               current_version=target.version, version_channel=command.version_channel)
+    outcome = command.handle(CommandContext(connection, principal, target, request), payload)
+    output = command.output_model.model_validate(outcome.output).model_dump(mode="json")
     receipt_id = str(uuid.uuid4())
-    result = {"receipt_id": receipt_id, "status": "completed", "command": command.name,
-              "object_id": str(row["object_id"]), "legacy_id": row["id"],
-              "version_channel": command.version_channel, "basis_version": request.expected_version,
-              "version": updated["version"], "output": output}
+    result = CommandReceipt(receipt_id=receipt_id, status="completed", command=command.name, object_id=outcome.object_id,
+                            legacy_id=outcome.legacy_id, version_channel=command.version_channel,
+                            basis_version=request.expected_version, version=outcome.version, output=output).model_dump(mode="json")
     connection.execute(
         """INSERT INTO application_command_receipts(id, actor, idempotency_key, command, request_hash, object_id, result)
            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)""",
-        (receipt_id, principal.actor, request.idempotency_key, command.name, fingerprint, row["object_id"], json.dumps(result)),
+        (receipt_id, principal.actor, request.idempotency_key, command.name, fingerprint, outcome.object_id, json.dumps(result)),
     )
+    event = {key: result[key] for key in ("receipt_id", "command", "object_id", "status", "version_channel", "version")}
     connection.execute(
         "INSERT INTO application_outbox(object_id, receipt_id, kind, payload) VALUES (%s, %s, %s, %s::jsonb)",
-        (row["object_id"], receipt_id, "command.completed", json.dumps(result)),
+        (outcome.object_id, receipt_id, "command.completed", json.dumps(event)),
     )
-    return result
+    return command.project(connection, principal, result)
 
 
 def execute_compatibility(connection, principal: Principal, command_name: str, target: str, fields: dict, key: str) -> dict:
-    command = COMMANDS[command_name]
+    command = get_command(command_name)
     principal = current_principal(connection, principal)
     principal.require(command.scope)
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (json.dumps([principal.actor, key]),))
-    row = resolve_target(connection, command, target, lock=True)
-    prior = connection.execute(
-        "SELECT result FROM application_command_receipts WHERE actor = %s AND idempotency_key = %s",
-        (principal.actor, key),
-    ).fetchone()
-    if prior is None:
-        version = connection.execute(
-            f"SELECT {command.version_channel} AS version FROM application_objects WHERE id = %s FOR UPDATE",
-            (row["object_id"],),
-        ).fetchone()["version"]
-    else:
-        version = prior["result"]["basis_version"]
-    return execute_command(connection, principal, CommandRequest(
-        command=command_name, target=target, expected_version=version, idempotency_key=key, input=fields,
-    ))
+    resolved = command.resolve(connection, principal, target, lock=True)
+    prior = connection.execute("SELECT result FROM application_command_receipts WHERE actor = %s AND idempotency_key = %s", (principal.actor, key)).fetchone()
+    version = resolved.version if prior is None else prior["result"]["basis_version"]
+    return execute_command(connection, principal, CommandRequest(command=command_name, target=target,
+                           expected_version=version, idempotency_key=key, input=fields))

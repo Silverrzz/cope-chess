@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     application_parser = subparsers.add_parser("application", help="inspect and execute explicit application commands")
-    application_parser.add_argument("action", choices=("catalog", "describe", "execute"))
+    application_parser.add_argument("action", choices=("catalog", "describe", "execute", "query", "query-catalog"))
     application_parser.add_argument("--database-url", dest="db_path", default=_default_database_url())
     application_parser.add_argument("--token-file", type=Path, required=True)
     application_parser.add_argument("--request", type=Path)
@@ -755,15 +755,24 @@ def _application_command(args) -> int:
     import json
     from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
     from cope.application.commands import current_principal, describe_target
-    from cope.control.operations import authenticate
+    from cope.application.contracts import QueryRequest
+    from cope.application.queries import execute_query, list_queries
+    from cope.infrastructure.postgres.credentials import authenticate_bearer
     from cope.db import connect_database
     from cope.infrastructure.postgres.application import run_application
 
     connection = connect_database(args.db_path)
     try:
-        identity = authenticate(connection, args.token_file.read_text(encoding="utf-8").strip())
+        identity = authenticate_bearer(connection, args.token_file.read_text(encoding="utf-8").strip())
         if args.action == "catalog":
             result = run_application(connection, identity, lambda raw, actor: list_commands(current_principal(raw, actor)))
+        elif args.action == "query-catalog":
+            result = run_application(connection, identity, lambda raw, actor: list_queries(current_principal(raw, actor)))
+        elif args.action == "query":
+            if args.request is None:
+                raise ValueError("query requires --request containing the complete JSON query")
+            request = QueryRequest.model_validate_json(args.request.read_text(encoding="utf-8"))
+            result = run_application(connection, identity, execute_query, request)
         elif args.action == "describe":
             if not args.command or not args.target:
                 raise ValueError("describe requires --command and --target")

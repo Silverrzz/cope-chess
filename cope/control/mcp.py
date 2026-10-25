@@ -15,10 +15,13 @@ from cope.db import connect_database, get_git_host
 from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
 from cope.application.commands import CommandReceipt, current_principal, describe_target
 from cope.infrastructure.postgres.application import run_application
+from cope.infrastructure.postgres.credentials import authenticate_bearer
+from cope.application.contracts import QueryRequest, QueryResult
+from cope.application.queries import execute_query, list_queries
 
 from .api import IntakeOperationRequest, OperationRequest, context_payload, submit_intake
 from .intake import Preset, save_preset
-from .operations import authenticate, change_operation, create_operation, get_operation, list_operations
+from .operations import change_operation, create_operation, get_operation, list_operations
 
 
 def install_mcp(app):
@@ -59,6 +62,15 @@ def install_mcp(app):
     async def cope_application_execute(request: CommandRequest, ctx: Context) -> CommandReceipt:
         result = await asyncio.to_thread(application_invoke, ctx, execute_command, request)
         return CommandReceipt.model_validate(result)
+
+    @server.tool(annotations=read, description="List explicit read-only application queries permitted by the current credential.")
+    async def cope_application_queries(ctx: Context) -> list:
+        return await asyncio.to_thread(application_invoke, ctx, lambda raw, actor: list_queries(current_principal(raw, actor)))
+
+    @server.tool(annotations=read, description="Read a bounded, currently authorized application projection without creating an operation or job.")
+    async def cope_application_query(request: QueryRequest, ctx: Context) -> QueryResult:
+        result = await asyncio.to_thread(application_invoke, ctx, execute_query, request)
+        return QueryResult.model_validate(result)
 
     def invoke(ctx, handler, *args, **kwargs):
         request = ctx.request_context.request
@@ -196,12 +208,12 @@ def install_mcp(app):
                 try:
                     if scheme.lower() != "bearer" or not token:
                         raise PermissionError("A control bearer token is required")
-                    return authenticate(connection, token)
+                    return authenticate_bearer(connection, token)
                 finally:
                     connection.close()
             try:
                 scope["cope.control.principal"] = await asyncio.to_thread(identify)
-            except PermissionError as error:
+            except (PermissionError, ApplicationError) as error:
                 await JSONResponse({"detail": str(error)}, status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return
             await self.endpoint(scope, receive, send)

@@ -64,6 +64,10 @@ def mint_token(connection, principal: Principal, label: str, scopes: list[str], 
     known = {item.scope for item in catalog().values()} | {
         "operations:read", "operations:write", "intake:write", "presets:write", "*",
     }
+    from cope.application.commands import COMMANDS
+    from cope.application.queries import QUERIES
+
+    known |= {item.scope for item in COMMANDS.values()} | {item.scope for item in QUERIES.values() if item.scope}
     if not scopes or set(scopes) - known:
         raise ValueError("Choose valid, nonempty control scopes")
     token = "cope_ctl_" + secrets.token_urlsafe(40)

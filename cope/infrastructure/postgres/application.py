@@ -7,7 +7,7 @@ from cope.application.identity import Principal
 
 
 def run_application(connection, identity, handler, *args, **kwargs):
-    principal = Principal(identity.actor, tuple(identity.scopes), identity.token_id)
+    principal = identity if isinstance(identity, Principal) else Principal(identity.actor, tuple(identity.scopes), identity.token_id)
     try:
         result = handler(connection.native_connection(), principal, *args, **kwargs)
         connection.commit()
