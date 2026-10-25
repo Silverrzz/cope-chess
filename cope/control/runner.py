@@ -241,7 +241,14 @@ def run_control_runner(database_url: str, poll_interval: float = 2):
                 finally:
                     connection.close()
                 last_heartbeat = monotonic()
-            if run_once(database_url):
+            from cope.infrastructure.postgres.events import run_event_cycle
+
+            delivered = 0
+            try:
+                delivered = run_event_cycle(database_url)
+            except Exception:
+                LOG.exception("durable event cycle failed")
+            if run_once(database_url) or delivered:
                 continue
         except Exception:
             LOG.exception("control runner cycle failed")
