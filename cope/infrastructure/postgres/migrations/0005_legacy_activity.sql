@@ -72,6 +72,9 @@ FOR EACH ROW EXECUTE FUNCTION application_observed_activity('legacy.tool_job','t
 CREATE TRIGGER zz_benchmark_activity AFTER INSERT OR UPDATE ON benchmark_jobs
 FOR EACH ROW EXECUTE FUNCTION application_observed_activity('legacy.benchmark_job','engine_name,engine_version','status');
 
+CREATE INDEX application_objects_activity_order ON application_objects(type_key,created_at DESC,id DESC);
+CREATE INDEX application_outbox_object_delivery ON application_outbox(object_id,delivered_position);
+
 UPDATE control_operations SET object_id=NULL;
 UPDATE tool_jobs SET object_id=NULL;
 UPDATE benchmark_jobs SET object_id=NULL;
@@ -82,5 +85,3 @@ ALTER TABLE tool_jobs ALTER COLUMN object_id SET NOT NULL;
 ALTER TABLE benchmark_jobs ALTER COLUMN object_id SET NOT NULL;
 SET CONSTRAINTS control_operations_application_object_fk,tool_jobs_application_object_fk,benchmark_jobs_application_object_fk DEFERRED;
 
-CREATE INDEX application_objects_activity_order ON application_objects(type_key,created_at DESC,id DESC);
-CREATE INDEX application_outbox_object_delivery ON application_outbox(object_id,delivered_position);
