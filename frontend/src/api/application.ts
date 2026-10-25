@@ -1,5 +1,5 @@
 import { api } from '@/api/client'
-import type { applicationCommandContracts, ApplicationCommand, ApplicationInputs, ApplicationOutputs, ApplicationQuery, ApplicationQueryInputs } from '@/types/application-inputs'
+import type { applicationCommandContracts, ApplicationCommand, ApplicationInputs, ApplicationOutputs, ApplicationQuery, ApplicationQueryInputs, ApplicationQueryOutputs } from '@/types/application-inputs'
 
 export type { ApplicationCommand, ApplicationInputs } from '@/types/application-inputs'
 
@@ -38,7 +38,7 @@ export function executeCommand<C extends ApplicationCommand>(request: Applicatio
   return api.post('/api/admin/control/application/commands', { body: request })
 }
 
-export async function applicationQuery<T, Q extends ApplicationQuery = ApplicationQuery>(query: Q, input: ApplicationQueryInputs[Q], target?: string): Promise<T> {
-  const response = await api.post<{ query: Q; data: T }>('/api/admin/control/application/queries', { body: { query, input, ...(target ? { target } : {}) } })
+export async function applicationQuery<T = never, Q extends ApplicationQuery = ApplicationQuery>(query: Q, input: ApplicationQueryInputs[Q], target?: string, signal?: AbortSignal): Promise<[T] extends [never] ? ApplicationQueryOutputs[Q] : T> {
+  const response = await api.post<{ query: Q; data: [T] extends [never] ? ApplicationQueryOutputs[Q] : T }>('/api/admin/control/application/queries', { body: { query, input, ...(target ? { target } : {}) }, signal })
   return response.data
 }

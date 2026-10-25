@@ -56,6 +56,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
     label: "Operations",
     items: [
       { label: "Workers", to: "/admin/workers", icon: "server" },
+      { label: "Activity", to: "/admin/activity", icon: "gauge" },
       { label: "Cope Control", to: "/admin/control", icon: "wrench" },
       { label: "Forms", to: "/admin/forms", icon: "message-square", adminOnly: true },
       { label: "Response inbox", to: "/admin/form-responses", icon: "message-square" },

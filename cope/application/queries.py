@@ -10,9 +10,10 @@ from .identity import Principal, current_principal
 def query_catalog() -> dict:
     from cope.domains.forms.queries import queries as form_queries
     from .delivery_queries import queries as delivery_queries
+    from cope.domains.activity.queries import queries as activity_queries
 
     result = {}
-    for provider in (form_queries(),delivery_queries()):
+    for provider in (form_queries(),delivery_queries(),activity_queries()):
         for query in provider:
             if query.name in result:
                 raise RuntimeError(f"Duplicate application query: {query.name}")

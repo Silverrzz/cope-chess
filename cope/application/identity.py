@@ -23,7 +23,7 @@ def browser_principal(role: str) -> Principal:
     if role == "admin":
         return Principal("browser:admin", ("*",))
     if role == "manager":
-        return Principal("browser:manager", ("operations:read", "engines:write", "tournaments:write",
+        return Principal("browser:manager", ("operations:read", "activity:read", "engines:write", "tournaments:write",
                                               "forms:submit", "forms:amend", "forms:responses:read"))
     raise ApplicationError("authentication_required", "A current authenticated session is required.", 401)
 

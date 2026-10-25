@@ -977,7 +977,7 @@ def dataset_order_expression(item: CloneDataset) -> str:
 
 
 def sanitized_export_row(dataset: str, row: dict[str, Any], selection: set[str]) -> dict[str, Any]:
-    if dataset in {"engines", "tournaments", "workers"}:
+    if dataset in {"engines", "tournaments", "workers", "tool_jobs", "benchmark_jobs"}:
         row.pop("object_id", None)
         row.pop("object_type", None)
     if dataset == "git_hosts":
@@ -1567,7 +1567,7 @@ def import_clone_dataset(
 
 
 def imported_row(dataset: str, row: dict[str, Any], selected: set[str]) -> dict[str, Any]:
-    if dataset in {"engines", "tournaments", "workers"}:
+    if dataset in {"engines", "tournaments", "workers", "tool_jobs", "benchmark_jobs"}:
         row.pop("object_id", None)
         row.pop("object_type", None)
     terminal_at = terminal_timestamp(row)

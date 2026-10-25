@@ -104,6 +104,7 @@ const router = createRouter({
       component: AdminLayout,
       meta: { requiresAdmin: true },
       children: [
+        { path: "activity", name: "admin-activity", component: () => import("@/pages/admin/ActivityPage.vue"), meta: { title: "Activity" } },
         { path: "forms", name: "admin-forms", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Forms" } },
         { path: "forms/:id", name: "admin-form-editor", component: () => import("@/pages/admin/FormEditorPage.vue"), props: true, meta: { title: "Form editor" } },
         { path: "form-responses", name: "admin-form-responses", component: () => import("@/pages/admin/FormResponsesPage.vue"), meta: { title: "Response inbox" } },
