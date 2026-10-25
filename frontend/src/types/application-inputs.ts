@@ -61,6 +61,7 @@ export interface ApplicationOutputs {
 }
 
 export interface ApplicationQueryInputs {
+  'events.status.v1': Record<string, never>
   'forms.bindings.v1': Record<string, never>
   'forms.datetime_options.v1': { local_date: string; local_time: string; timezone: string }
   'forms.definition.check.v1': { document: Record<string, unknown> }

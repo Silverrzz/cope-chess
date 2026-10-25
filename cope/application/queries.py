@@ -9,12 +9,14 @@ from .identity import Principal, current_principal
 
 def query_catalog() -> dict:
     from cope.domains.forms.queries import queries as form_queries
+    from .delivery_queries import queries as delivery_queries
 
     result = {}
-    for query in form_queries():
-        if query.name in result:
-            raise RuntimeError(f"Duplicate application query: {query.name}")
-        result[query.name] = query
+    for provider in (form_queries(),delivery_queries()):
+        for query in provider:
+            if query.name in result:
+                raise RuntimeError(f"Duplicate application query: {query.name}")
+            result[query.name] = query
     return result
 
 

@@ -38,7 +38,8 @@ def consume_events(connection, consumer: EventConsumer, limit: int = 100) -> int
     checkpoint = connection.execute("SELECT * FROM application_consumer_checkpoints WHERE consumer=%s AND retry_at<=clock_timestamp() FOR UPDATE SKIP LOCKED",(consumer.key,)).fetchone()
     if checkpoint is None:
         return 0
-    if checkpoint["incarnation"] != delivery["incarnation"] or checkpoint["applied_position"] < delivery["retained_after"]:
+    tail = connection.execute("SELECT COALESCE(max(position),0) AS position FROM application_event_log").fetchone()["position"]
+    if checkpoint["incarnation"] != delivery["incarnation"] or checkpoint["applied_position"] < delivery["retained_after"] or checkpoint["applied_position"]>tail:
         raise ConsumerRecoveryRequired(f"Durable consumer {consumer.key} requires an explicit rebuild or recovery decision")
     events = connection.execute(
         """SELECT log.position,log.schema_version,source.id AS event_id,source.object_id,source.kind,source.payload,source.created_at
