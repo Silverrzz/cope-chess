@@ -14,6 +14,7 @@ const session = useSessionStore()
 const items = ref<ActivityItem[]>([])
 const page = ref<ActivityPage | null>(null)
 const selected = ref<ActivityItem | null>(null)
+const removed = ref<ApplicationQueryOutputs['objects.removal.v1'] | null>(null)
 const sources = ref<ApplicationQueryOutputs['activity.sources.v1']['items']>([])
 const delivery = ref<ApplicationQueryOutputs['events.status.v1'] | null>(null)
 const kind = ref<'' | 'operation' | 'job'>('')
@@ -39,7 +40,7 @@ function message(cause: unknown): string { return cause instanceof Error ? cause
 async function detail(id: string): Promise<void> {
   const current = ++detailGeneration
   detailController?.abort(); detailController = new AbortController()
-  detailLoading.value = true; detailError.value = ''
+  detailLoading.value = true; detailError.value = ''; removed.value = null
   try {
     const result = await applicationQuery('activity.detail.v1',{},id,detailController.signal)
     if (active && current === detailGeneration) selected.value = result
@@ -47,7 +48,15 @@ async function detail(id: string): Promise<void> {
     if (!active || current !== detailGeneration || cause instanceof DOMException && cause.name === 'AbortError') return
     detailError.value = message(cause)
     if (cause instanceof ApiError && [401,403].includes(cause.status)) { selected.value = null; items.value = []; page.value = null }
-    else if (cause instanceof ApiError && cause.status === 404) { selected.value = null; items.value = items.value.filter((item) => item.id !== id); page.value = null }
+    else if (cause instanceof ApiError && cause.status === 404) {
+      selected.value = null; items.value = items.value.filter((item) => item.id !== id); page.value = null
+      if (session.user?.role === 'admin') {
+        try {
+          const record = await applicationQuery('objects.removal.v1',{},id,detailController.signal)
+          if (active && current === detailGeneration) { removed.value = record; detailError.value = '' }
+        } catch { if (active && current === detailGeneration) removed.value = null }
+      }
+    }
   } finally { if (active && current === detailGeneration) detailLoading.value = false }
 }
 async function load(more = false): Promise<void> {
@@ -64,7 +73,7 @@ async function load(more = false): Promise<void> {
   } catch (cause) {
     if (!active || current !== generation || cause instanceof DOMException && cause.name === 'AbortError') return
     error.value = message(cause)
-    if (cause instanceof ApiError && [401,403].includes(cause.status)) { items.value = []; page.value = null; selected.value = null }
+    if (cause instanceof ApiError && [401,403].includes(cause.status)) { items.value = []; page.value = null; selected.value = null; removed.value = null }
   } finally { if (active && current === generation) loading.value = false }
 }
 async function inspectDelivery(): Promise<void> {
@@ -73,7 +82,7 @@ async function inspectDelivery(): Promise<void> {
   catch (cause) { if (active) { deliveryError.value = message(cause); if (cause instanceof ApiError && [401,403].includes(cause.status)) delivery.value = null } }
   finally { if (active) deliveryLoading.value = false }
 }
-watch([kind,source,state],() => { selected.value = null; ++detailGeneration; detailController?.abort(); detailLoading.value = false; detailError.value = ''; void load() })
+watch([kind,source,state],() => { selected.value = null; removed.value = null; ++detailGeneration; detailController?.abort(); detailLoading.value = false; detailError.value = ''; void load() })
 onMounted(async () => {
   try { const catalogue = await applicationQuery('activity.sources.v1',{}); if (active) sources.value = catalogue.items }
   catch (cause) { if (active) error.value = message(cause) }
@@ -89,7 +98,7 @@ onBeforeUnmount(() => { active = false; ++generation; ++detailGeneration; contro
     <div class="filters"><label>Resource<select v-model="kind" class="input"><option value="">All resources</option><option value="operation">Operations</option><option value="job">Jobs</option></select></label><label>Source<select v-model="source" class="input"><option value="">All available sources</option><option v-for="item in sources" :key="item.key" :value="item.key">{{ item.label }}</option></select></label><label>Status category<select v-model="state" class="input"><option value="">All states</option><option v-for="item in states" :key="item" :value="item">{{ label(item) }}</option></select></label></div>
     <p v-if="error" class="error" role="alert">{{ error }}</p><p class="count" role="status">{{ countLabel }} matching records · ordered by first observation · membership reflects current access and state{{ loading ? ' · refreshing…' : '' }}</p>
     <div class="activity-workspace"><section class="activity-list" :aria-busy="loading"><p v-if="!loading && !items.length">No activity is available for these filters.</p><ul><li v-for="item in items" :key="item.id" :class="{ selected: selected?.id === item.id }"><button type="button" class="activity-select" @click="detail(item.id)"><span class="item-heading"><strong>{{ item.title }}</strong><span class="state">{{ label(item.source_state) }}</span></span><span>{{ label(item.kind) }} · {{ item.execution_owner }}</span><small>Reported creation: {{ time(item.source_created_at) }}</small></button></li></ul><BaseButton v-if="page?.next_cursor" :disabled="loading" @click="load(true)">Load more</BaseButton></section>
-    <aside class="activity-detail" :aria-busy="detailLoading"><p v-if="detailError" class="error" role="alert">{{ detailError }}</p><template v-if="selected"><h2>{{ selected.title }}</h2><dl><dt>Reported state</dt><dd>{{ label(selected.source_state) }}</dd><dt>Shared status category</dt><dd>{{ label(selected.state) }}</dd><dt>Execution authority</dt><dd>{{ selected.execution_owner }}</dd><dt>Ownership</dt><dd>Observed legacy work</dd><dt>Cleanup evidence</dt><dd>Not recorded by this adapter</dd><dt>Result acceptance</dt><dd>Inspect the owning workflow’s history</dd><dt>Original reference</dt><dd>{{ selected.source }} · {{ selected.source_id }}</dd><dt v-if="selected.owner_actor">Requesting actor</dt><dd v-if="selected.owner_actor">{{ selected.owner_actor }}</dd><dt>First observed</dt><dd>{{ time(selected.observed_at) }}</dd></dl><BaseButton :to="selected.inspect_url">Open owning control panel</BaseButton><BaseButton variant="ghost" :disabled="detailLoading" @click="detail(selected.id)">Refresh detail</BaseButton></template><p v-else>Select a run to inspect its owner and reported state.</p></aside></div>
+    <aside class="activity-detail" :aria-busy="detailLoading"><p v-if="detailError" class="error" role="alert">{{ detailError }}</p><template v-if="selected"><h2>{{ selected.title }}</h2><dl><dt>Reported state</dt><dd>{{ label(selected.source_state) }}</dd><dt>Shared status category</dt><dd>{{ label(selected.state) }}</dd><dt>Execution authority</dt><dd>{{ selected.execution_owner }}</dd><dt>Ownership</dt><dd>Observed legacy work</dd><dt>Cleanup evidence</dt><dd>Not recorded by this adapter</dd><dt>Result acceptance</dt><dd>Inspect the owning workflow’s history</dd><dt>Original reference</dt><dd>{{ selected.source }} · {{ selected.source_id }}</dd><dt v-if="selected.owner_actor">Requesting actor</dt><dd v-if="selected.owner_actor">{{ selected.owner_actor }}</dd><dt>First observed</dt><dd>{{ time(selected.observed_at) }}</dd></dl><BaseButton :to="selected.inspect_url">Open owning control panel</BaseButton><BaseButton variant="ghost" :disabled="detailLoading" @click="detail(selected.id)">Refresh detail</BaseButton></template><section v-else-if="removed"><h2>Resource removed</h2><p>The owning legacy workflow removed this record. Its identity remains reserved.</p><dl><dt>Original reference</dt><dd>{{ removed.source }} � {{ removed.source_id }}</dd><dt>Removal observation</dt><dd>{{ time(removed.observed_at) }}</dd><dt>Evidence</dt><dd>{{ removed.reason === 'source_deleted' ? 'Deletion recorded in the source transaction' : 'Source record was already absent at migration' }}</dd><dt>Cleanup evidence</dt><dd>Not recorded by the legacy adapter</dd><dt>Restoration</dt><dd>This legacy record has no supported restore action</dd></dl></section><p v-else>Select a run to inspect its owner and reported state.</p></aside></div>
     <details v-if="session.user?.role === 'admin'" class="delivery"><summary>Durable event delivery</summary><p>Delivery progress tracks committed changes. Each consumer records its own applied checkpoint and recovery state.</p><BaseButton size="small" :disabled="deliveryLoading" @click="inspectDelivery">Refresh delivery status</BaseButton><p v-if="deliveryError" class="error" role="alert">{{ deliveryError }}</p><template v-if="delivery"><dl><dt>Undelivered source events</dt><dd>{{ delivery.pending_source.count }}{{ delivery.pending_source.more ? '+' : '' }}</dd><dt>Delivery position</dt><dd>{{ delivery.last_delivery_position }}</dd><dt>Latest delivery</dt><dd>{{ time(delivery.last_delivered_at) }}</dd></dl><ul class="consumer-list"><li v-for="consumer in delivery.consumers" :key="consumer.key"><strong>{{ consumer.key }}</strong><span>{{ label(consumer.state) }} · {{ consumer.pending.count }}{{ consumer.pending.more ? '+' : '' }} unapplied events</span><small v-if="consumer.error">{{ consumer.error }} · {{ consumer.failure_count }} failed cycles{{ consumer.retry_at ? ` · retry after ${time(consumer.retry_at)}` : '' }}</small></li></ul><p v-if="delivery.consumers_truncated">Showing the first 100 consumers.</p></template></details>
   </div>
 </template>

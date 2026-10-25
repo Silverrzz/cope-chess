@@ -77,6 +77,7 @@ export interface ApplicationQueryInputs {
   'forms.public.v1': { "slug": string }
   'forms.responses.detail.v1': Record<string, never>
   'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
+  'objects.removal.v1': Record<string, never>
 }
 
 export interface ApplicationQueryOutputs {
@@ -96,6 +97,7 @@ export interface ApplicationQueryOutputs {
   'forms.public.v1': Record<string, unknown>
   'forms.responses.detail.v1': Record<string, unknown>
   'forms.responses.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
+  'objects.removal.v1': { "id": string; "type_key": string; "source": string; "source_id": string; "reason": "source_deleted" | "source_missing"; "observed_at": string; "state_version": number; "cleanup_state": "not_recorded"; "restore_supported": false }
 }
 
 export type ApplicationQuery = keyof ApplicationQueryInputs

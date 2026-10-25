@@ -136,6 +136,8 @@ DATASETS = (
 
 
 DATASET_BY_KEY = {item.key: item for item in DATASETS}
+OBJECT_IDENTITY_NAMESPACES = {"engines":"legacy.engine","tournaments":"legacy.tournament","workers":"legacy.worker",
+                              "tool_jobs":"legacy.tool_job","benchmark_jobs":"legacy.benchmark_job"}
 
 
 PRESETS = {
@@ -977,7 +979,7 @@ def dataset_order_expression(item: CloneDataset) -> str:
 
 
 def sanitized_export_row(dataset: str, row: dict[str, Any], selection: set[str]) -> dict[str, Any]:
-    if dataset in {"engines", "tournaments", "workers", "tool_jobs", "benchmark_jobs"}:
+    if dataset in OBJECT_IDENTITY_NAMESPACES:
         row.pop("object_id", None)
         row.pop("object_type", None)
     if dataset == "git_hosts":
@@ -1567,7 +1569,7 @@ def import_clone_dataset(
 
 
 def imported_row(dataset: str, row: dict[str, Any], selected: set[str]) -> dict[str, Any]:
-    if dataset in {"engines", "tournaments", "workers", "tool_jobs", "benchmark_jobs"}:
+    if dataset in OBJECT_IDENTITY_NAMESPACES:
         row.pop("object_id", None)
         row.pop("object_type", None)
     terminal_at = terminal_timestamp(row)
@@ -1651,6 +1653,16 @@ def insert_clone_batch(connection, table: str, rows: list[dict[str, Any]]) -> in
         raise ValueError(f"Inconsistent columns in clone dataset {table}")
     if not re.fullmatch(r"[a-z_][a-z0-9_]*", table) or any(re.fullmatch(r"[a-z_][a-z0-9_]*", column) is None for column in columns):
         raise ValueError("Invalid clone dataset identifiers")
+    namespace = OBJECT_IDENTITY_NAMESPACES.get(table)
+    if namespace is not None:
+        reserved = connection.execute(
+            f"""SELECT identity.alias FROM application_object_aliases identity
+                WHERE identity.namespace=? AND identity.alias=ANY(?::text[])
+                  AND NOT EXISTS (SELECT 1 FROM {table} current WHERE current.id::text=identity.alias)
+                LIMIT 1""",(namespace,[str(row.get("id")) for row in rows]),
+        ).fetchone()
+        if reserved is not None:
+            raise CloneConflict(f"Destination {table} identity {reserved['alias']} is retained for a removed resource; a clone cannot reassign it.")
     placeholders = ", ".join("?" for _ in columns)
     cursor = connection.executemany(
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",
