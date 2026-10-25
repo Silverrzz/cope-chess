@@ -18,6 +18,7 @@ from .definition import FormDefinition, FormField, compile_definition
 class ResponseContext:
     resolve_reference: Callable[[FormField, str], str] | None = None
     resolve_attachment: Callable[[FormField, str], str] | None = None
+    resolve_scoped_attachment: Callable[[FormField, str, tuple], str] | None = None
 
 
 class FieldValueError(ValueError):
@@ -26,7 +27,7 @@ class FieldValueError(ValueError):
         self.code = code
 
 
-def decode_scalar(field: FormField, value: Any, context: ResponseContext) -> Any:
+def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: tuple = ()) -> Any:
     def invalid(code: str, message: str):
         raise FieldValueError(code, message)
 
@@ -87,7 +88,7 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext) -> Any
                 invalid("decimal_required", "Enter a supported decimal number.")
         if field.minimum is not None and number < field.minimum or field.maximum is not None and number > field.maximum:
             invalid("number_range", "The number is outside the permitted range.")
-        return value if field.kind == "integer" else format(number, "f")
+        return (value if abs(value) <= 2**53 - 1 else str(value)) if field.kind == "integer" else format(number, "f")
     if field.kind in {"date", "time", "datetime"}:
         if type(value) is not str or len(value) > 100:
             invalid("invalid_date_time", "Enter a date or time in the declared format.")
@@ -97,10 +98,10 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext) -> Any
                     invalid("invalid_date", "Enter a date as YYYY-MM-DD.")
                 return date.fromisoformat(value).isoformat()
             if field.kind == "time":
-                if re.fullmatch(r"[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})?", value) is None:
+                if re.fullmatch(r"[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?", value) is None:
                     invalid("invalid_time", "Enter a time with hours and minutes.")
                 return time.fromisoformat(value).isoformat()
-            if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})", value) is None:
+            if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?(?:Z|[+-][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)", value) is None:
                 invalid("timezone_required", "Include an ISO date, time and selected UTC offset.")
             parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -112,7 +113,7 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext) -> Any
             return parsed.isoformat()
         except FieldValueError:
             raise
-        except ValueError:
+        except (ValueError, OverflowError):
             invalid("invalid_date_time", "Enter a valid date and time.")
     if field.kind in {"choice", "multiple_choice"}:
         permitted = {choice.id for choice in field.choices}
@@ -133,6 +134,9 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext) -> Any
         except (ValueError, AttributeError):
             invalid("invalid_reference", "Choose a permitted resource.")
         resolver = context.resolve_attachment if field.kind == "attachment" else context.resolve_reference
+        if field.kind == "attachment" and context.resolve_scoped_attachment is not None:
+            def resolver(selected, resource):
+                return context.resolve_scoped_attachment(selected, resource, path)
         if resolver is None:
             invalid("reference_not_permitted", "This resource cannot be used in this response.")
         try:
@@ -185,7 +189,7 @@ def validate_response(definition: FormDefinition, values: dict, context: Respons
             value = submitted[field.id]
             if field.kind != "group" or value is None:
                 try:
-                    result[field.id] = decode_scalar(field, value, context)
+                    result[field.id] = decode_scalar(field, value, context, path)
                 except FieldValueError as error:
                     fail(path, error.code, str(error))
                 continue

@@ -12,7 +12,7 @@ class ApplicationBodyLimit:
         self.timeout = timeout
 
     async def __call__(self, scope, receive, send):
-        paths = ("/api/forms", "/api/control/application", "/api/admin/control/application")
+        paths = ("/api/forms", "/api/artifacts/commands", "/api/control/application", "/api/admin/control/application")
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"} or not scope["path"].startswith(paths):
             return await self.app(scope, receive, send)
         content_type = next((value for key, value in scope.get("headers", ()) if key.lower() == b"content-type"), b"")

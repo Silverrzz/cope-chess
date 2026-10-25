@@ -51,6 +51,15 @@ BINDINGS = {FEEDBACK.key: FEEDBACK}
 
 def compile_binding(definition: FormDefinition) -> FormBinding:
     compile_definition(definition)
+    from cope.domains.artifacts.policy import MEDIA_POLICIES
+
+    def validate_attachment_policies(fields):
+        for field in fields:
+            if field.kind == "attachment" and any(media not in MEDIA_POLICIES for media in field.accepted_content_types):
+                raise ApplicationError("attachment_policy_unavailable", "This installation supports download-only opaque files and validated UTF-8 text attachments.",422)
+            validate_attachment_policies(field.fields)
+
+    validate_attachment_policies(definition.fields)
     binding = BINDINGS.get(definition.binding)
     if binding is None:
         raise ApplicationError("binding_unavailable", "This form binding has no installed implementation.", 422)

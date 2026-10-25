@@ -786,7 +786,7 @@ def create_app(
             return response
 
         response = await call_next(request)
-        if path.startswith(("/api/control", "/api/admin/control", "/api/forms")) or path == "/mcp":
+        if path.startswith(("/api/control", "/api/admin/control", "/api/forms", "/api/artifacts")) or path == "/mcp":
             response.headers["Cache-Control"] = "no-store"
         if (
             protected
@@ -1169,6 +1169,9 @@ def create_app(
     from cope.adapters.http.forms import register_form_routes
 
     register_form_routes(app)
+    from cope.adapters.http.artifacts import register_artifact_routes
+
+    register_artifact_routes(app)
     from cope.adapters.http.body_limits import ApplicationBodyLimit
 
     app.add_middleware(ApplicationBodyLimit)

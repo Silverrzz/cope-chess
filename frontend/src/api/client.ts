@@ -40,6 +40,19 @@ export class ApiError extends Error {
 }
 
 function detailFieldErrors(detail: unknown): ApiFieldError[] | undefined {
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const value = detail as { details?: { fields?: unknown } };
+    if (Array.isArray(value.details?.fields)) {
+      return value.details.fields.flatMap<ApiFieldError>((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const field = entry as { path?: unknown; code?: unknown; message?: unknown };
+        if (typeof field.message !== "string") return [];
+        return [{ field: Array.isArray(field.path) ? field.path.map(String).join(".") || "form" : "form", message: field.message,
+          ...(typeof field.code === "string" ? { code: field.code } : {}) }];
+      });
+    }
+    return undefined;
+  }
   if (!Array.isArray(detail)) return undefined;
   const errors = detail.flatMap<ApiFieldError>((item) => {
     if (typeof item === "string") return [{ field: "form", message: item }];

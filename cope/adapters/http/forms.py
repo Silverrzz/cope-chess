@@ -78,6 +78,12 @@ def form_principal(request: Request, connection=Depends(database)):
 def register_form_routes(app):
     router = APIRouter()
 
+    @router.get("/datetime-options")
+    def datetime_options(local_date: str, local_time: str, timezone: str,
+                         identity=Depends(form_principal), connection=Depends(database)):
+        return application_result(connection, identity, execute_query, QueryRequest(query="forms.datetime_options.v1",
+                                  input={"local_date": local_date, "local_time": local_time, "timezone": timezone}))
+
     @router.get("/responses")
     def responses(limit: int = QueryParameter(default=30, ge=1, le=100), cursor: str | None = None,
                   form_id: str | None = None, identity=Depends(form_principal), connection=Depends(database)):

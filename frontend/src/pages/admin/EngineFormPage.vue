@@ -65,6 +65,7 @@ async function saveIdentity(): Promise<void> {
         }
       }
       const receipt = await executeCommand(metadataRequest.value)
+      if (receipt.legacy_id === null) throw new Error('The engine receipt has no legacy identifier.')
       response = { id: receipt.legacy_id, message: 'Engine updated.' }
     } else if (id.value) {
       response = await api.put(`/api/admin/engines/${id.value}`, { body })

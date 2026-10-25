@@ -198,7 +198,8 @@ def authenticate_claim(connection, token: str) -> Principal:
     return Principal(f"form-claim:{row['id']}", ("forms:submit", "forms:amend", "forms:responses:read"), str(row["id"]), "form_claim", str(row["form_id"]))
 
 
-def validate_answers(connection, principal, form: dict, release: dict, answers: dict) -> tuple[dict, dict, dict]:
+def validate_answers(connection, principal, form: dict, release: dict, answers: dict, *, attachment_subject: str | None = None,
+                     attachments: list | None = None, response_id: str | None = None) -> tuple[dict, dict, dict]:
     definition = definition_from_json(release["definition"])
     if release["policy_revision"] != compile_binding(definition).policy_revision:
         raise ApplicationError("binding_policy_changed", "This release needs a new approved binding policy.")
@@ -211,7 +212,15 @@ def validate_answers(connection, principal, form: dict, release: dict, answers: 
             raise LookupError()
         return str(row["id"])
 
-    canonical = validate_response(definition, answers, ResponseContext(resolve_reference=resolve_reference))
+    def resolve_attachment(field, artifact_id, path):
+        from cope.domains.artifacts.retention import resolve_attachment as resolve
+
+        selected, retention = resolve(connection,principal,form,release,attachment_subject,field,artifact_id,path,response_id=response_id)
+        if attachments is not None:
+            attachments.append(retention)
+        return selected
+
+    canonical = validate_response(definition, answers, ResponseContext(resolve_reference=resolve_reference, resolve_scoped_attachment=resolve_attachment))
     proposal = proposal_inputs(definition, canonical).model_dump(mode="json")
     subject = review_subject(definition, canonical, form_id=str(form["id"]), release_id=str(release["id"]), owner_actor=form["owner_actor"])
     return canonical, proposal, subject
@@ -240,11 +249,43 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
     latest = next((review for review in reviews if review["response_revision"] == response["current_revision"] and review["subject_digest"] == revision["subject_digest"]), None)
     state = "withdrawn" if response["withdrawn_at"] else latest["decision"] if latest else "awaiting_review"
     actor = "submitter" if state == "changes_requested" else "reviewer" if state == "awaiting_review" else None
+    release = pinned_release(connection, str(form["id"]), str(response["release_id"]), accepting=False)
+    definition = FormDefinition.model_validate(release["definition"])
+    can_review = False
+    if "*" in principal.scopes or "forms:review" in principal.scopes:
+        try:
+            form_permission(connection, principal, form, "review")
+            binding = compile_binding(definition)
+            can_review = bool(response["withdrawn_at"] is None and binding.policy_revision == revision["subject"]["policy_revision"]
+                              and form["owner_actor"] == revision["subject"]["owner_actor"])
+        except ApplicationError:
+            pass
     return {"id": str(response["id"]), "form_id": str(form["id"]), "slug": form["slug"], "release_id": str(response["release_id"]),
             "revision": response["current_revision"], "state_version": object_version(connection, response_id, "state_version", lock=False),
             "state": state, "next_actor": actor, "answers": revision["answers"], "subject_digest": revision["subject_digest"],
+            "definition": public_definition(definition), "can_amend": bool(release["eligible"] and definition.allow_amendments
+                and ("*" in principal.scopes or "forms:amend" in principal.scopes)
+                and response["owner_actor"] == principal.actor and response["withdrawn_at"] is None), "can_review": can_review,
             "reviews": [{**dict(review), "id": str(review["id"]), "created_at": review["created_at"].isoformat()} for review in reviews],
+            "can_withdraw": bool(response["owner_actor"] == principal.actor and response["withdrawn_at"] is None
+                                 and ("*" in principal.scopes or "forms:amend" in principal.scopes)),
+            "review_context": {"binding": revision["subject"]["binding"], "policy_revision": revision["subject"]["policy_revision"],
+                               "proposal": revision["proposal"]} if can_review else None,
+            "attachment_subject": str(response["attachment_subject"]) if response["owner_actor"] == principal.actor else None,
+            "attachment_policy": attachment_policy(),
             "created_at": response["created_at"].isoformat()}
+
+
+def public_definition(definition: FormDefinition) -> dict:
+    keys = {"schema_version", "title", "description", "fields", "audience", "allow_amendments", "max_payload_bytes", "max_rows"}
+    return {key: value for key, value in definition.model_dump(mode="json").items() if key in keys}
+
+
+def attachment_policy() -> dict:
+    import os
+    from cope.domains.artifacts.policy import MEDIA_POLICIES
+
+    return {"max_file_bytes": int(os.environ.get("COPE_ARTIFACT_UPLOAD_MAX_BYTES","10485760")),"media_types":list(MEDIA_POLICIES)}
 
 
 def public_form_view(connection, slug: str, principal: Principal | None = None) -> dict:
@@ -263,6 +304,5 @@ def public_form_view(connection, slug: str, principal: Principal | None = None) 
         principal.require("forms:submit")
         if definition.audience == "invited":
             form_permission(connection, principal, form, "read")
-    public_keys = {"schema_version", "title", "description", "fields", "audience", "allow_amendments", "max_payload_bytes", "max_rows"}
     return {"id": str(form["id"]), "slug": form["slug"], "release_id": str(release["id"]), "release_number": release["number"],
-            "definition": {key: value for key, value in definition.model_dump(mode="json").items() if key in public_keys}}
+            "definition": public_definition(definition), "attachment_policy": attachment_policy()}

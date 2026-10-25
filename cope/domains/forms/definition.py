@@ -87,6 +87,10 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
                 fail(path, "invalid_number_bound", "Numeric bounds must be finite.")
             elif field.minimum is not None and field.maximum is not None and field.minimum > field.maximum:
                 fail(path, "invalid_number_bounds", "The minimum cannot exceed the maximum.")
+            if field.kind not in {"integer", "decimal"} and (field.minimum is not None or field.maximum is not None):
+                fail(path, "unexpected_number_bounds", "Numeric bounds apply only to number fields.")
+            if field.accepted_content_types and field.kind != "attachment":
+                fail(path, "unexpected_attachment_policy", "Content-type restrictions apply only to attachment fields.")
             if field.required and field.nullable:
                 fail(path, "required_nullable", "A required field cannot accept an explicit clear.")
             if field.kind in {"choice", "multiple_choice"}:

@@ -55,6 +55,7 @@ class ArchiveOutput(Input):
 class SubmitResponse(Input):
     release_id: str
     answers: dict
+    attachment_subject: str | None = None
 
 
 class AmendResponse(Input):
@@ -233,12 +234,18 @@ def submit_response(context: CommandContext, payload: SubmitResponse) -> Outcome
         raise ApplicationError("authentication_required", "This release requires an authenticated response.", 403)
     if definition.audience == "invited":
         form_permission(context.connection, context.principal, form, "read")
-    canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, payload.answers)
+    attachment_subject = identity(payload.attachment_subject) if payload.attachment_subject else str(uuid.uuid4())
+    attachments = []
+    canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, payload.answers,
+                                                   attachment_subject=attachment_subject,attachments=attachments)
     take_rate(context.connection, "response:" + context.target.object_id, context.principal.actor, definition.submissions_per_hour)
     response_id = new_object(context.connection, "form_response")
-    context.connection.execute("INSERT INTO form_responses(id, form_id, release_id, owner_actor) VALUES (%s, %s, %s, %s)",
-                               (response_id, context.target.object_id, release["id"], context.principal.actor))
+    context.connection.execute("INSERT INTO form_responses(id, form_id, release_id, owner_actor, attachment_subject) VALUES (%s, %s, %s, %s, %s)",
+                               (response_id, context.target.object_id, release["id"], context.principal.actor, attachment_subject))
     insert_response_revision(context.connection, response_id, 1, context.principal, canonical, proposal, subject)
+    from cope.domains.artifacts.retention import retain_attachments
+
+    retain_attachments(context.connection,response_id,1,attachments)
     return Outcome(response_id, 1, {"response_id": response_id, "form_id": context.target.object_id, "revision": 1})
 
 
@@ -260,11 +267,16 @@ def amend_response(context: CommandContext, payload: AmendResponse) -> Outcome:
                                          (context.target.object_id, context.target.version)).fetchone()["answers"]
     values = {key: value for key, value in previous.items() if key not in payload.clear}
     values.update(payload.set)
-    canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, values)
+    attachments = []
+    canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, values,
+                                                   attachment_subject=str(response["attachment_subject"]),attachments=attachments,response_id=context.target.object_id)
     revision = context.target.version
     if canonical != previous:
         revision += 1
         insert_response_revision(context.connection, context.target.object_id, revision, context.principal, canonical, proposal, subject)
+        from cope.domains.artifacts.retention import retain_attachments
+
+        retain_attachments(context.connection,context.target.object_id,revision,attachments)
         context.connection.execute("UPDATE form_responses SET current_revision = %s WHERE id = %s", (revision, context.target.object_id))
         context.connection.execute("UPDATE application_objects SET content_revision = %s WHERE id = %s", (revision, context.target.object_id))
     return Outcome(context.target.object_id, revision, {"response_id": context.target.object_id, "form_id": str(form["id"]), "revision": revision})

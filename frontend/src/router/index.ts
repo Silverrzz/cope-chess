@@ -9,6 +9,14 @@ const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
+      path: "/forms",
+      component: PublicLayout,
+      children: [
+        { path: "responses/:id", name: "form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Private response" } },
+        { path: ":slug", name: "public-form", component: () => import("@/pages/public/PublicFormPage.vue"), props: true, meta: { title: "Form" } },
+      ],
+    },
+    {
       path: "/",
       component: PublicLayout,
       meta: { requiresPlatformAccess: true },
@@ -96,6 +104,10 @@ const router = createRouter({
       component: AdminLayout,
       meta: { requiresAdmin: true },
       children: [
+        { path: "forms", name: "admin-forms", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Forms" } },
+        { path: "forms/:id", name: "admin-form-editor", component: () => import("@/pages/admin/FormEditorPage.vue"), props: true, meta: { title: "Form editor" } },
+        { path: "form-responses", name: "admin-form-responses", component: () => import("@/pages/admin/FormResponsesPage.vue"), meta: { title: "Response inbox" } },
+        { path: "form-responses/:id", name: "admin-form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Review response" } },
         {
           path: "",
           name: "admin-dashboard",

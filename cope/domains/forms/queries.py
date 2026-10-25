@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import Field
@@ -12,6 +12,8 @@ from cope.application.contracts import Input, Query
 from cope.application.errors import ApplicationError
 
 from .application import describe_copy
+from .bindings import BINDINGS, compile_binding
+from .definition import FormDefinition
 from .storage import form_permission, get_form, identity, public_form_view, resolve_copy, response_view
 
 
@@ -26,7 +28,7 @@ class PublicInput(Input):
 class PageInput(Input):
     limit: int = Field(default=30, strict=True, ge=1, le=100)
     cursor: str | None = Field(default=None, max_length=4096)
-    form_id: str | None = None
+    form_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class DataOutput(Input):
@@ -38,6 +40,70 @@ class PageOutput(Input):
     total: int
     next_cursor: str | None
     basis: dict
+
+
+class DateTimeInput(Input):
+    local_date: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+    local_time: str = Field(pattern=r"^[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?$")
+    timezone: str = Field(min_length=1, max_length=100)
+
+
+class DateTimeChoice(Input):
+    value: str
+    label: str
+    utc: str
+
+
+class DateTimeOutput(Input):
+    timezone: str
+    options: list[DateTimeChoice]
+
+
+class BindingArgumentOutput(Input):
+    name: str
+    label: str
+    kinds: list[str]
+    required: bool
+
+
+class BindingOutput(Input):
+    key: str
+    label: str
+    policy_revision: str
+    permits_anonymous: bool
+    arguments: list[BindingArgumentOutput]
+
+
+class BindingsOutput(Input):
+    items: list[BindingOutput]
+
+
+class CheckDefinitionInput(Input):
+    document: dict
+
+
+class CheckDefinitionOutput(Input):
+    definition: dict
+
+
+def bindings_catalogue(connection, principal, target, payload: Empty) -> dict:
+    return {"items": [{"key": binding.key, "label": binding.key.rsplit(".", 1)[0].replace("_", " ").title(),
+                       "policy_revision": binding.policy_revision, "permits_anonymous": binding.permits_anonymous,
+                       "arguments": [{"name": argument.name, "label": argument.name.replace("_", " ").title(),
+                                      "kinds": list(argument.kinds), "required": argument.required} for argument in binding.arguments]}
+                      for binding in BINDINGS.values()]}
+
+
+def check_definition(connection, principal, target, payload: CheckDefinitionInput) -> dict:
+    from pydantic import ValidationError
+
+    try:
+        definition = FormDefinition.model_validate(payload.document)
+    except ValidationError as exc:
+        raise ApplicationError("invalid_form_definition", "Resolve the highlighted form settings.", 422,
+                               fields=[{"path": list(error["loc"]), "code": error["type"], "message": error["msg"]} for error in exc.errors()]) from exc
+    compile_binding(definition)
+    return {"definition": definition.model_dump(mode="json")}
 
 
 def page_basis(connection, principal, payload: PageInput, namespace: str) -> tuple[datetime, tuple | None, str]:
@@ -95,7 +161,7 @@ def list_responses(connection, principal, target, payload: PageInput) -> dict:
     parent = "" if payload.form_id is None else "AND r.form_id = %s"
     where = "" if after is None else "WHERE (created_at, id) < (%s, %s::uuid)"
     parameters = [cut, principal.actor, "*" in principal.scopes, principal.actor, principal.actor]
-    if payload.form_id:
+    if payload.form_id is not None:
         parameters.append(identity(payload.form_id))
     if after:
         parameters.extend(after)
@@ -151,12 +217,37 @@ def response_detail(connection, principal, target, payload: Empty) -> dict:
     return response_view(connection, principal, target)
 
 
+def datetime_options(connection, principal, target, payload: DateTimeInput) -> dict:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        local = datetime.fromisoformat(payload.local_date + "T" + payload.local_time)
+        zone = ZoneInfo(payload.timezone)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ApplicationError("invalid_local_time", "Choose a valid local date, time and timezone.", 422) from exc
+    options = {}
+    for fold in (0, 1):
+        aware = local.replace(tzinfo=zone, fold=fold)
+        utc = aware.astimezone(UTC)
+        if utc.astimezone(zone).replace(tzinfo=None) != local:
+            continue
+        seconds = int(aware.utcoffset().total_seconds())
+        hours, rest = divmod(abs(seconds), 3600)
+        minutes, seconds_part = divmod(rest, 60)
+        offset = ("+" if seconds >= 0 else "-") + f"{hours:02d}:{minutes:02d}" + (f":{seconds_part:02d}" if seconds_part else "")
+        options[aware.isoformat()] = {"value": aware.isoformat(), "utc": utc.isoformat(), "label": f"{payload.local_time} (UTC{offset})"}
+    return {"timezone": payload.timezone, "options": sorted(options.values(), key=lambda option: option["utc"])}
+
+
 def queries() -> tuple[Query, ...]:
     return (
+        Query("forms.bindings.v1", "forms:write", Empty, BindingsOutput, bindings_catalogue),
+        Query("forms.definition.check.v1", "forms:write", CheckDefinitionInput, CheckDefinitionOutput, check_definition),
         Query("forms.list.v1", "forms:read", PageInput, PageOutput, list_forms),
         Query("forms.responses.list.v1", "forms:responses:read", PageInput, PageOutput, list_responses),
         Query("forms.detail.v1", "forms:write", Empty, DataOutput, form_detail, True),
         Query("forms.drafts.detail.v1", "forms:write", Empty, DataOutput, draft_detail, True),
         Query("forms.responses.detail.v1", "forms:responses:read", Empty, DataOutput, response_detail, True),
         Query("forms.public.v1", None, PublicInput, DataOutput, public_detail),
+        Query("forms.datetime_options.v1", None, DateTimeInput, DateTimeOutput, datetime_options),
     )

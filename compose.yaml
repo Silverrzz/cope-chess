@@ -21,6 +21,10 @@ x-cope-service: &cope-service
     COPE_BENCHMARK_PREPARATION_TIMEOUT_S: ${COPE_BENCHMARK_PREPARATION_TIMEOUT_S:-1800}
     COPE_ENGINE_ARTIFACT_DIR: /var/lib/cope/engine-artifacts
     COPE_ENGINE_ARTIFACT_MAX_BYTES: ${COPE_ENGINE_ARTIFACT_MAX_BYTES:-1073741824}
+    COPE_ARTIFACT_DIR: /var/lib/cope/artifacts
+    COPE_ARTIFACT_UPLOAD_MAX_BYTES: ${COPE_ARTIFACT_UPLOAD_MAX_BYTES:-10485760}
+    COPE_ARTIFACT_ACTOR_MAX_BYTES: ${COPE_ARTIFACT_ACTOR_MAX_BYTES:-104857600}
+    COPE_ARTIFACT_TOTAL_MAX_BYTES: ${COPE_ARTIFACT_TOTAL_MAX_BYTES:-1073741824}
     COPE_CLONE_TRANSFER_DIR: /var/lib/cope/clone-transfer
     COPE_CLONE_ALLOW_PRIVATE_ORIGINS: ${COPE_CLONE_ALLOW_PRIVATE_ORIGINS:-0}
     COPE_CLONE_EXPORT_TTL_HOURS: ${COPE_CLONE_EXPORT_TTL_HOURS:-72}
@@ -117,6 +121,7 @@ services:
       - engine-dockerfiles:/app/data/engines
       - engine-artifacts:/var/lib/cope/engine-artifacts
       - clone-transfer:/var/lib/cope/clone-transfer
+      - artifacts:/var/lib/cope/artifacts
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8701/health/ready', timeout=3)"]
       interval: 15s
@@ -287,6 +292,7 @@ secrets:
     file: ${COPE_HOST_SOURCE_DIR:-.}/secrets/db_password
 
 volumes:
+  artifacts:
   postgres-data:
   caddy-data:
   caddy-config:
