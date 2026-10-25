@@ -787,7 +787,8 @@ def create_app(
 
         response = await call_next(request)
         if path.startswith(("/api/control", "/api/admin/control", "/api/forms", "/api/artifacts")) or path == "/mcp":
-            response.headers["Cache-Control"] = "no-store"
+            if "no-store" not in response.headers.get("Cache-Control", "").lower():
+                response.headers["Cache-Control"] = "no-store"
         if (
             protected
             and not admin_api
