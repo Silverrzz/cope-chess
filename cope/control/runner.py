@@ -225,31 +225,31 @@ def run_once(database_url: str) -> bool:
 
 def run_control_runner(database_url: str, poll_interval: float = 2):
     from cope.web.app import create_app
+    from cope.infrastructure.postgres.events import run_event_delivery
 
     create_app(database_url, worker_server_url=os.environ.get("COPE_WORKER_SERVER_URL"), benchmarker_server_url=os.environ.get("COPE_BENCHMARKER_SERVER_URL"))
     wake = threading.Event()
+    delivery = threading.Thread(target=run_event_delivery,args=(database_url,wake),name="application-events",daemon=True)
+    delivery.start()
     last_heartbeat = 0.0
-    while True:
-        try:
-            from time import monotonic
-
-            if monotonic() - last_heartbeat >= 15:
-                connection = connect_database(database_url)
-                try:
-                    touch_service_heartbeat(connection, "control-runner", app_version())
-                    connection.commit()
-                finally:
-                    connection.close()
-                last_heartbeat = monotonic()
-            from cope.infrastructure.postgres.events import run_event_cycle
-
-            delivered = 0
+    try:
+        while True:
             try:
-                delivered = run_event_cycle(database_url)
+                from time import monotonic
+
+                if monotonic() - last_heartbeat >= 15:
+                    connection = connect_database(database_url)
+                    try:
+                        touch_service_heartbeat(connection, "control-runner", app_version())
+                        connection.commit()
+                    finally:
+                        connection.close()
+                    last_heartbeat = monotonic()
+                if run_once(database_url):
+                    continue
             except Exception:
-                LOG.exception("durable event cycle failed")
-            if run_once(database_url) or delivered:
-                continue
-        except Exception:
-            LOG.exception("control runner cycle failed")
-        wake.wait(max(0.2, poll_interval))
+                LOG.exception("control runner cycle failed")
+            wake.wait(max(0.2, poll_interval))
+    finally:
+        wake.set()
+        delivery.join(timeout=5)

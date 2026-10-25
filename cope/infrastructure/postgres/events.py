@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from cope.application.event_consumers import EventConsumer,consumer_catalog
 from cope.db import connect_database
+
+
+LOG = logging.getLogger("cope.events")
 
 
 class ConsumerRecoveryRequired(RuntimeError):
@@ -82,9 +87,20 @@ def run_event_cycle(database_url: str) -> int:
                     (consumer.key,code),
                 )
                 connection.commit()
+                LOG.warning("durable consumer %s deferred: %s",consumer.key,code)
         return total
     except Exception:
         connection.rollback()
         raise
     finally:
         connection.close()
+
+
+def run_event_delivery(database_url: str, stop, poll_interval: float = 0.5) -> None:
+    while not stop.is_set():
+        count = 0
+        try:
+            count = run_event_cycle(database_url)
+        except Exception:
+            LOG.exception("durable event cycle failed")
+        stop.wait(0.05 if count else max(0.2,poll_interval))
