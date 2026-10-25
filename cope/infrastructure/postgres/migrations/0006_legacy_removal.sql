@@ -31,6 +31,22 @@ FOR EACH ROW EXECUTE FUNCTION application_immutable_fact();
 CREATE TRIGGER application_alias_immutable BEFORE UPDATE OR DELETE ON application_object_aliases
 FOR EACH ROW EXECUTE FUNCTION application_immutable_fact();
 
+CREATE OR REPLACE FUNCTION application_bind_object() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='UPDATE' AND OLD.object_id IS NOT NULL THEN
+        IF NEW.object_id IS DISTINCT FROM OLD.object_id OR NEW.id IS DISTINCT FROM OLD.id THEN
+            RAISE EXCEPTION 'Resource and Object identity are immutable';
+        END IF;
+    ELSE
+        IF NEW.object_id IS NOT NULL THEN
+            RAISE EXCEPTION 'Object identity is assigned by the owning resource';
+        END IF;
+        NEW.object_id := gen_random_uuid();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION application_observed_removal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     INSERT INTO application_object_removals(object_id,source_namespace,source_alias,reason)
