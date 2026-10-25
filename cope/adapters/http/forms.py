@@ -13,6 +13,7 @@ from cope.application.identity import browser_principal
 from cope.control.api import application_result, database
 from cope.domains.forms.storage import issue_claim
 from cope.infrastructure.postgres.credentials import authenticate_bearer
+from cope.db import get_platform_settings
 
 
 TRUSTED_PROXIES = tuple(ipaddress.ip_network(value.strip()) for value in os.environ.get(
@@ -62,7 +63,10 @@ def form_principal(request: Request, connection=Depends(database)):
         if scheme.lower() != "bearer" or not token:
             raise HTTPException(401, "A valid bearer credential is required")
         try:
-            return authenticate_bearer(connection, token)
+            identity = authenticate_bearer(connection, token)
+            if identity.credential_kind == "form_claim" and get_platform_settings(connection).privatise_platform:
+                raise HTTPException(401, "Sign in to access forms on this private platform")
+            return identity
         except ApplicationError as error:
             raise HTTPException(error.status, error.payload()) from error
     role = admin_session_role(request)
@@ -72,6 +76,8 @@ def form_principal(request: Request, connection=Depends(database)):
             if not token or not csrf_token_valid(request, token, request.headers.get("x-csrf-token", "")):
                 raise HTTPException(403, "CSRF validation failed")
         return browser_principal(role)
+    if get_platform_settings(connection).privatise_platform:
+        raise HTTPException(401, "Sign in to access forms on this private platform")
     return Principal("public", ())
 
 

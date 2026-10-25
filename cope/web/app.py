@@ -1234,8 +1234,6 @@ def _is_spa_request(request: Request) -> bool:
 
 def _is_platform_access_request(request: Request) -> bool:
     path = request.url.path.rstrip("/") or "/"
-    if path == "/forms" or path.startswith("/forms/"):
-        return False
     if path == "/admin/login" or path.startswith("/admin/"):
         return False
     if _is_spa_request(request):
