@@ -575,15 +575,15 @@ class WorkerDrain(Input):
 
 @action("workers.set_drain", "Drain or resume a worker without interrupting active games", "workers:write", WorkerDrain)
 def set_worker_drain(context, payload):
-    row = context.connection.execute("SELECT id FROM workers WHERE id = ?", (payload.worker_id,)).fetchone()
-    if row is None:
-        raise ValueError("Worker does not exist")
-    context.connection.execute(
-        """INSERT INTO control_worker_settings(worker_id, draining, changed_by) VALUES (?, ?, ?)
-           ON CONFLICT(worker_id) DO UPDATE SET draining = EXCLUDED.draining, changed_by = EXCLUDED.changed_by, changed_at = clock_timestamp()""",
-        (payload.worker_id, payload.draining, context.actor),
+    from cope.application.commands import execute_compatibility
+    from .operations import validate_grant
+
+    identity = validate_grant(context.connection, context.operation)
+    result = execute_compatibility(
+        context.connection.native_connection(), identity, "agents.set_drain.v1", str(payload.worker_id),
+        {"draining": payload.draining}, f"legacy:{context.operation['id']}:{context.step_key}",
     )
-    return {"worker_id": payload.worker_id, "draining": payload.draining, "active_games": "continue"}
+    return {"worker_id": payload.worker_id, **result["output"]}
 
 
 class RemovePlans(Input):

@@ -7,6 +7,10 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import Field
 
+from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
+from cope.application.commands import current_principal, describe_target
+from cope.infrastructure.postgres.application import run_application
+
 from cope.db import connect_database, list_engine_records, list_git_hosts, list_rating_lists, list_opening_suites
 from cope.variants import VARIANTS
 
@@ -45,6 +49,8 @@ def principal(request: Request, connection=Depends(database)):
         if role == "admin":
             return Principal("browser:admin", ("*",))
         if role == "manager":
+            if "/application/" in request.url.path:
+                return Principal("browser:manager", ("operations:read", "engines:write", "tournaments:write"))
             return Principal("browser:manager", ("operations:read",))
     raise HTTPException(401, "A control bearer token is required", headers={"WWW-Authenticate": "Bearer"})
 
@@ -63,6 +69,13 @@ def perform(connection, handler, *args, **kwargs):
     except ValueError as error:
         connection.rollback()
         raise HTTPException(409, str(error)) from error
+
+
+def application_result(connection, identity, handler, *args):
+    try:
+        return run_application(connection, identity, handler, *args)
+    except ApplicationError as error:
+        raise HTTPException(error.status, error.payload()) from error
 
 
 class OperationRequest(Input):
@@ -172,6 +185,18 @@ def register_control_routes(app):
     @router.get("/context")
     def context(identity=Depends(principal), connection=Depends(database)):
         return perform(connection, context_payload, identity)
+
+    @router.get("/application/commands")
+    def application_commands(identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection, identity, lambda raw, actor: list_commands(current_principal(raw, actor)))
+
+    @router.get("/application/targets/{command_name}/{target}")
+    def application_target(command_name: str, target: str, identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection, identity, describe_target, command_name, target)
+
+    @router.post("/application/commands")
+    def application_command(payload: CommandRequest, identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection, identity, execute_command, payload)
 
     @router.get("/repository")
     def repository(identity=Depends(principal), connection=Depends(database)):

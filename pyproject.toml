@@ -42,6 +42,7 @@ include = ["cope*"]
 [tool.setuptools.package-data]
 "cope" = ["VERSION", "BUILD_VERSION"]
 "cope.db" = ["schema.sql", "control.sql"]
+"cope.infrastructure.postgres.migrations" = ["*.sql"]
 "cope.web" = [
     "frontend_dist/*",
     "frontend_dist/assets/*",

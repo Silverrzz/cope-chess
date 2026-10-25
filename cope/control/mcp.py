@@ -12,6 +12,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from cope.db import connect_database, get_git_host
+from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
+from cope.application.commands import CommandReceipt, current_principal, describe_target
+from cope.infrastructure.postgres.application import run_application
 
 from .api import IntakeOperationRequest, OperationRequest, context_payload, submit_intake
 from .intake import Preset, save_preset
@@ -30,6 +33,32 @@ def install_mcp(app):
     )
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
+
+    def application_invoke(ctx, handler, *args):
+        from mcp.server.fastmcp.exceptions import ToolError
+        import json
+
+        identity = ctx.request_context.request.scope["cope.control.principal"]
+        connection = connect_database(app.state.db_path)
+        try:
+            return run_application(connection, identity, handler, *args)
+        except ApplicationError as error:
+            raise ToolError(json.dumps(error.payload())) from error
+        finally:
+            connection.close()
+
+    @server.tool(annotations=read, description="List explicitly registered application commands permitted by the current credential.")
+    async def cope_application_commands(ctx: Context) -> list:
+        return await asyncio.to_thread(application_invoke, ctx, lambda raw, actor: list_commands(current_principal(raw, actor)))
+
+    @server.tool(annotations=read, description="Resolve an application command target and read its relevant edit version.")
+    async def cope_application_target(command: str, target: str, ctx: Context) -> dict:
+        return await asyncio.to_thread(application_invoke, ctx, describe_target, command, target)
+
+    @server.tool(annotations=write, description="Execute an explicit application command. Preserve the complete request and idempotency key when retrying an uncertain response. A completed drain receipt leaves active games running.")
+    async def cope_application_execute(request: CommandRequest, ctx: Context) -> CommandReceipt:
+        result = await asyncio.to_thread(application_invoke, ctx, execute_command, request)
+        return CommandReceipt.model_validate(result)
 
     def invoke(ctx, handler, *args, **kwargs):
         request = ctx.request_context.request

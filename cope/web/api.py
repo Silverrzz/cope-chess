@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import chess
+from cope.application import ApplicationError, Principal as ApplicationPrincipal
+from cope.application.commands import execute_compatibility
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -2899,9 +2901,18 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _require_tournament(connection, tournament_id)
-        update_tournament_name(connection, tournament_id, payload.name)
-        connection.commit()
+        role = web_app._admin_session_role(request)
+        internal = request.scope.get("cope.control.internal")
+        identity = internal["principal"] if internal else ApplicationPrincipal(f"browser:{role}", ("tournaments:write",))
+        try:
+            execute_compatibility(
+                connection.native_connection(), identity, "competitions.rename.v1", str(tournament_id),
+                {"name": payload.name}, request.headers.get("idempotency-key") or str(uuid.uuid4()),
+            )
+            connection.commit()
+        except ApplicationError as error:
+            connection.rollback()
+            raise HTTPException(error.status, error.payload()) from error
         _publish_admin_change(web_app, request)
         return _json({"id": tournament_id, "message": "Tournament renamed."})
 

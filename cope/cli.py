@@ -40,6 +40,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m cope")
     subparsers = parser.add_subparsers(dest="role", required=True)
 
+    application_parser = subparsers.add_parser("application", help="inspect and execute explicit application commands")
+    application_parser.add_argument("action", choices=("catalog", "describe", "execute"))
+    application_parser.add_argument("--database-url", dest="db_path", default=_default_database_url())
+    application_parser.add_argument("--token-file", type=Path, required=True)
+    application_parser.add_argument("--request", type=Path)
+    application_parser.add_argument("--command")
+    application_parser.add_argument("--target")
+
     init_db_parser = subparsers.add_parser("init-db", help="initialize the PostgreSQL database")
     init_db_parser.add_argument(
         "--database-url",
@@ -61,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     backup_parser.add_argument("--output", type=Path)
     backup_parser.add_argument("--keep", type=_positive_int, default=7)
+    reconcile_parser = db_subparsers.add_parser("reconcile")
+    reconcile_parser.add_argument("--database-url", dest="db_path", default=_default_database_url())
+    reconcile_parser.add_argument("--events", action="store_true")
+    reconcile_parser.add_argument("--recipes", action="store_true")
     restore_parser = db_subparsers.add_parser("restore")
     restore_parser.add_argument("source", type=Path)
     restore_parser.add_argument(
@@ -460,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "doctor":
         return _doctor()
 
+    if args.role == "application":
+        return _application_command(args)
+
     if args.role == "db":
         return _database_command(args)
 
@@ -736,6 +751,40 @@ def _default_database_url() -> str:
     return os.environ.get("COPE_DATABASE_URL", "postgresql://cope@127.0.0.1:5432/cope")
 
 
+def _application_command(args) -> int:
+    import json
+    from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
+    from cope.application.commands import current_principal, describe_target
+    from cope.control.operations import authenticate
+    from cope.db import connect_database
+    from cope.infrastructure.postgres.application import run_application
+
+    connection = connect_database(args.db_path)
+    try:
+        identity = authenticate(connection, args.token_file.read_text(encoding="utf-8").strip())
+        if args.action == "catalog":
+            result = run_application(connection, identity, lambda raw, actor: list_commands(current_principal(raw, actor)))
+        elif args.action == "describe":
+            if not args.command or not args.target:
+                raise ValueError("describe requires --command and --target")
+            result = run_application(connection, identity, describe_target, args.command, args.target)
+        else:
+            if args.request is None:
+                raise ValueError("execute requires --request containing the complete JSON command")
+            request = CommandRequest.model_validate_json(args.request.read_text(encoding="utf-8"))
+            result = run_application(connection, identity, execute_command, request)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except ApplicationError as error:
+        print(json.dumps(error.payload()), file=sys.stderr)
+        return 1
+    except (PermissionError, ValueError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    finally:
+        connection.close()
+
+
 def _database_command(args) -> int:
     from .db import (
         SCHEMA_VERSION,
@@ -745,6 +794,24 @@ def _database_command(args) -> int:
     )
 
     database_url = args.db_path
+    if args.db_command == "reconcile":
+        from .db.connection import sync_engine_dockerfiles
+        from .db.events import reconcile_all_engine_relay_events
+
+        if not args.events and not args.recipes:
+            raise SystemExit("Choose --events and/or --recipes for explicit data reconciliation")
+        connection = connect_database(database_url)
+        try:
+            if args.events:
+                reconcile_all_engine_relay_events(connection)
+            if args.recipes:
+                print(f"recipe rows synchronized={sync_engine_dockerfiles(connection)}")
+            connection.commit()
+        finally:
+            connection.close()
+        print("requested data reconciliation completed")
+        return 0
+
     if args.db_command == "migrate":
         try:
             initialize_database(database_url)
@@ -756,18 +823,20 @@ def _database_command(args) -> int:
         return 0
 
     if args.db_command == "check":
+        from cope.infrastructure.postgres.migrate import migration_status
+
         connection = connect_database(database_url)
         try:
             result = connection.execute("SELECT 1 AS ready").fetchone()
             version = database_schema_version(connection)
+            application = migration_status(connection.native_connection())
         finally:
             connection.close()
         ready = bool(result and result["ready"] == 1)
-        print(f"database ready={ready} schema={version}/{SCHEMA_VERSION}")
-        return 0 if ready and version == SCHEMA_VERSION else 1
+        print(f"database ready={ready} schema={version}/{SCHEMA_VERSION} application={application}")
+        return 0 if ready and version == SCHEMA_VERSION and application["ready"] else 1
 
     if args.db_command == "backup":
-        initialize_database(database_url)
         output = args.output or Path("backups") / (
             "cope-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + ".dump"
         )

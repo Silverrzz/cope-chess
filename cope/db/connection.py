@@ -203,6 +203,9 @@ class DatabaseConnection:
             raise sqlite3.DatabaseError(str(exc)) from exc
         return DatabaseCursor(self, cursor)
 
+    def native_connection(self):
+        return self._connection()
+
     def executemany(self, sql: str, parameters: Iterable[Iterable[Any]]) -> DatabaseCursor:
         translated = _translate_sql(sql)
         try:
@@ -287,11 +290,20 @@ def initialize_database(database_url: str | Path | None = None) -> None:
 
 
 def initialize_connection(connection: DatabaseConnection) -> None:
-    schema = resources.files("cope.db").joinpath("schema.sql").read_text(encoding="utf-8")
+    from cope.infrastructure.postgres.migrate import apply_migrations
+
+    raw = connection.native_connection()
     try:
-        connection._connection().execute(schema)
-        control_schema = resources.files("cope.db").joinpath("control.sql").read_text(encoding="utf-8")
-        connection._connection().execute(control_schema)
+        raw.execute("SELECT pg_advisory_xact_lock(684392719405)")
+        adopted = raw.execute("SELECT to_regclass('application_migrations') AS relation").fetchone()
+        if adopted["relation"] is None:
+            schema = resources.files("cope.db").joinpath("schema.sql").read_text(encoding="utf-8")
+            raw.execute(schema)
+            control_schema = resources.files("cope.db").joinpath("control.sql").read_text(encoding="utf-8")
+            raw.execute(control_schema)
+        if database_schema_version(connection) != SCHEMA_VERSION:
+            raise RuntimeError("The legacy database baseline is not compatible with this release")
+        apply_migrations(raw)
     except psycopg.Error as exc:
         raise sqlite3.DatabaseError(str(exc)) from exc
     connection.execute(
@@ -302,10 +314,6 @@ def initialize_connection(connection: DatabaseConnection) -> None:
         """,
         (secrets.token_urlsafe(48), datetime.now(UTC).isoformat()),
     )
-    from .events import reconcile_all_engine_relay_events
-
-    reconcile_all_engine_relay_events(connection)
-    sync_engine_dockerfiles(connection)
 
 
 def sync_engine_dockerfiles(connection: DatabaseConnection) -> int:

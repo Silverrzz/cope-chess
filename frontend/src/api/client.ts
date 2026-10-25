@@ -84,6 +84,10 @@ function appendQuery(path: string, query?: QueryParams): string {
 
 function errorMessage(status: number, payload: ApiErrorPayload | null): string {
   if (typeof payload?.detail === "string") return payload.detail;
+  if (payload?.detail && typeof payload.detail === "object" && !Array.isArray(payload.detail)) {
+    const detail = payload.detail as { message?: unknown };
+    if (typeof detail.message === "string") return detail.message;
+  }
   if (Array.isArray(payload?.detail)) {
     const messages = detailFieldErrors(payload.detail)?.map((error) => error.message) ?? [];
     if (messages.length) return [...new Set(messages)].join(" ");

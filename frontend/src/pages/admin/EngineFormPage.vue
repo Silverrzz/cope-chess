@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
+import { describeTarget, executeCommand, type ApplicationRequest } from '@/api/application'
 import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
@@ -20,6 +21,9 @@ const error = ref('')
 const form = reactive({ name: '', author: '', active: true })
 const versions = ref<Engine[]>([])
 const gameCounts = ref<Record<string, number>>({})
+const contentVersion = ref(0)
+const originalActive = ref(true)
+const metadataRequest = ref<ApplicationRequest<'engines.update_metadata.v1'> | null>(null)
 
 async function load(): Promise<void> {
   if (!id.value) return
@@ -27,6 +31,12 @@ async function load(): Promise<void> {
   try {
     const response = await api.get<{ engine: EngineFamily; versions: Engine[]; game_counts: Record<string, number> }>(`/api/admin/engines/${id.value}`)
     Object.assign(form, response.engine)
+    const target = await describeTarget('engines.update_metadata.v1', id.value)
+    form.name = target.input.name
+    form.author = target.input.author
+    contentVersion.value = target.version
+    originalActive.value = response.engine.active
+    metadataRequest.value = null
     versions.value = response.versions
     gameCounts.value = response.game_counts
   } catch (cause) {
@@ -45,9 +55,22 @@ async function saveIdentity(): Promise<void> {
   error.value = ''
   try {
     const body = { name: form.name.trim(), author: form.author.trim(), active: form.active }
-    const response = id.value
-      ? await api.put<{ id: number; message: string }>(`/api/admin/engines/${id.value}`, { body })
-      : await api.post<{ id: number; message: string }>('/api/admin/engines', { body })
+    let response: { id: number; message: string }
+    if (id.value && body.active === originalActive.value) {
+      const input = { name: body.name, author: body.author }
+      if (!metadataRequest.value || JSON.stringify(metadataRequest.value.input) !== JSON.stringify(input)) {
+        metadataRequest.value = {
+          command: 'engines.update_metadata.v1', target: String(id.value), expected_version: contentVersion.value,
+          idempotency_key: crypto.randomUUID(), input,
+        }
+      }
+      const receipt = await executeCommand(metadataRequest.value)
+      response = { id: receipt.legacy_id, message: 'Engine updated.' }
+    } else if (id.value) {
+      response = await api.put(`/api/admin/engines/${id.value}`, { body })
+    } else {
+      response = await api.post('/api/admin/engines', { body })
+    }
     toast.success(response.message)
     if (!id.value) await router.replace(`/admin/engines/${response.id}`)
     else await load()
