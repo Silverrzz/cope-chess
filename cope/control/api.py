@@ -35,9 +35,9 @@ def database(request: Request):
 
 
 def principal(request: Request, connection=Depends(database)):
-    from cope.web.app import _admin_session_role, _request_is_secure_or_local
+    from cope.adapters.http.authentication import admin_session_role, request_is_secure_or_local
 
-    if not _request_is_secure_or_local(request):
+    if not request_is_secure_or_local(request):
         raise HTTPException(403, "Control access requires HTTPS")
     supplied = request.headers.get("authorization", "")
     if supplied:
@@ -49,7 +49,7 @@ def principal(request: Request, connection=Depends(database)):
         except ApplicationError as error:
             raise HTTPException(401, str(error), headers={"WWW-Authenticate": "Bearer"}) from error
     if request.url.path.startswith("/api/admin/control"):
-        role = _admin_session_role(request)
+        role = admin_session_role(request)
         if role == "admin":
             return Principal("browser:admin", ("*",))
         if role == "manager":

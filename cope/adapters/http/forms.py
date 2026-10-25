@@ -50,9 +50,9 @@ def require_origin(request: Request) -> None:
 
 
 def form_principal(request: Request, connection=Depends(database)):
-    from cope.web.app import _admin_session_role, _admin_token, _csrf_token_valid, _manager_token, _request_is_secure_or_local
+    from cope.adapters.http.authentication import admin_session_role, admin_token, csrf_token_valid, manager_token, request_is_secure_or_local
 
-    if not _request_is_secure_or_local(request):
+    if not request_is_secure_or_local(request):
         raise HTTPException(403, "Forms require HTTPS")
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         require_origin(request)
@@ -65,11 +65,11 @@ def form_principal(request: Request, connection=Depends(database)):
             return authenticate_bearer(connection, token)
         except ApplicationError as error:
             raise HTTPException(error.status, error.payload()) from error
-    role = _admin_session_role(request)
+    role = admin_session_role(request)
     if role:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            token = _admin_token(request) if role == "admin" else _manager_token(request)
-            if not token or not _csrf_token_valid(request, token, request.headers.get("x-csrf-token", "")):
+            token = admin_token(request) if role == "admin" else manager_token(request)
+            if not token or not csrf_token_valid(request, token, request.headers.get("x-csrf-token", "")):
                 raise HTTPException(403, "CSRF validation failed")
         return browser_principal(role)
     return Principal("public", ())
