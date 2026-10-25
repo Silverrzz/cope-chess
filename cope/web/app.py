@@ -1234,6 +1234,8 @@ def _is_spa_request(request: Request) -> bool:
 
 def _is_platform_access_request(request: Request) -> bool:
     path = request.url.path.rstrip("/") or "/"
+    if path == "/forms" or path.startswith("/forms/"):
+        return False
     if path == "/admin/login" or path.startswith("/admin/"):
         return False
     if _is_spa_request(request):
@@ -1536,7 +1538,7 @@ def _is_large_upload_request(request: Request) -> bool:
     if request.method not in {"POST", "PUT"}:
         return False
     path = request.url.path
-    return bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or bool(
+    return bool(re.fullmatch(r"/api/artifacts/uploads/[0-9a-f-]{36}/bytes", path)) or bool(re.fullmatch(r"/api/benchmarker/engine-artifacts/[0-9a-f]{64}", path)) or bool(
         re.fullmatch(r"/api/admin/engine-versions/\d+/artifact", path)
     ) or path in {"/admin/openings", "/api/admin/openings"} or bool(
         re.fullmatch(r"/(?:api/)?admin/openings/\d+", path)

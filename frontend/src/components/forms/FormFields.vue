@@ -10,10 +10,11 @@ const props = withDefaults(defineProps<{
   errors?: FormErrors
   path?: string[]
   disabled?: boolean
+  maxUploadBytes?: number
   upload?: ((file: File, field: FormField, path: string[]) => Promise<string>) | undefined
   references?: ((field: FormField, search: string) => Promise<FormChoice[]>) | undefined
   download?: ((artifactId: string) => Promise<void>) | undefined
-}>(), { errors: () => ({}), path: () => [], disabled: false })
+}>(), { errors: () => ({}), path: () => [], disabled: false, maxUploadBytes: 10485760 })
 const emit = defineEmits<{ 'update:modelValue': [value: FormAnswers] }>()
 const prefix = useId()
 const container = ref<HTMLElement | null>(null)
@@ -128,7 +129,7 @@ async function findReferences(field: FormField, search: string): Promise<void> {
           <legend>{{ field.label }}<span v-if="field.required" class="required"> · required</span></legend>
           <div v-for="(row, index) in rows(field)" :key="String(row._row_id ?? index)" :data-row-id="String(row._row_id)" class="form-row">
             <div class="form-row__heading"><strong>Row {{ index + 1 }}</strong><div class="form-row__actions"><BaseButton type="button" class="button button--ghost button--small" :disabled="index === 0" :aria-label="`Move row ${index + 1} up`" @click="moveRow(field, index, -1)" variant="ghost" size="small">↑</BaseButton><BaseButton type="button" class="button button--ghost button--small" :disabled="index === rows(field).length - 1" :aria-label="`Move row ${index + 1} down`" @click="moveRow(field, index, 1)" variant="ghost" size="small">↓</BaseButton><BaseButton type="button" class="button button--ghost button--small" :aria-label="`Remove row ${index + 1} from ${field.label}`" @click="removeRow(field, index)" variant="ghost" size="small">Remove</BaseButton></div></div>
-            <FormFields :fields="field.fields ?? []" :model-value="row" :path="[...path, field.id, String(row._row_id)]" :errors="props.errors" :disabled="disabled" :upload="upload" :references="references" :download="download" @update:model-value="updateRow(field, index, $event)" />
+            <FormFields :fields="field.fields ?? []" :model-value="row" :path="[...path, field.id, String(row._row_id)]" :errors="props.errors" :disabled="disabled" :upload="upload" :max-upload-bytes="maxUploadBytes" :references="references" :download="download" @update:model-value="updateRow(field, index, $event)" />
           </div>
           <BaseButton type="button" class="button button--ghost button--small" :data-add-group="field.id" :disabled="rows(field).length >= (field.max_items ?? 20)" @click="addRow(field)" variant="ghost" size="small">Add row</BaseButton>
         </fieldset>
@@ -143,6 +144,7 @@ async function findReferences(field: FormField, search: string): Promise<void> {
           <select v-else-if="field.kind === 'choice'" :id="elementId(field)" class="input" :value="display(field)" :required="field.required" :disabled="disabled" :aria-invalid="!!errors(field).length || undefined" :aria-describedby="descriptions(field)" @change="update(field, ($event.target as HTMLSelectElement).value)"><option value="">Choose an option</option><option v-for="choice in field.choices ?? []" :key="choice.id" :value="choice.id">{{ choice.label }}</option></select>
           <FormDateTime v-else-if="field.kind === 'datetime'" :id="elementId(field)" :model-value="modelValue[field.id]" :timezone="field.timezone" :disabled="disabled" :invalid="!!errors(field).length" @update:model-value="update(field, $event)" />
           <template v-else-if="field.kind === 'attachment'">
+            <small>Maximum {{ (Math.min(field.max_bytes ?? 10485760, maxUploadBytes) / 1048576).toLocaleString(undefined, { maximumFractionDigits: 2 }) }} MiB · private download only</small>
             <input :id="elementId(field)" type="file" :accept="field.accepted_content_types?.join(',')" :disabled="disabled || !upload || !!transfers[key(field)]" :aria-describedby="descriptions(field)" @change="uploadFile(field, $event)">
             <small v-if="transfers[key(field)]" role="status">Uploading {{ transfers[key(field)] }}…</small><div v-else-if="modelValue[field.id]" class="attachment-receipt"><span>Attachment received</span><BaseButton v-if="download" type="button" variant="ghost" size="small" @click="downloadFile(field)">Download attachment</BaseButton><BaseButton type="button" class="button button--ghost button--small" :disabled="disabled" @click="update(field, undefined)" variant="ghost" size="small">Remove</BaseButton></div><small v-else-if="!upload">Attachment selection is unavailable here.</small>
           </template>
