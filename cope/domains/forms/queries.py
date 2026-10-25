@@ -240,6 +240,8 @@ def datetime_options(connection, principal, target, payload: DateTimeInput) -> d
 
 
 def queries() -> tuple[Query, ...]:
+    from .permissions import queries as permission_queries
+
     return (
         Query("forms.bindings.v1", "forms:write", Empty, BindingsOutput, bindings_catalogue),
         Query("forms.definition.check.v1", "forms:write", CheckDefinitionInput, CheckDefinitionOutput, check_definition),
@@ -250,4 +252,4 @@ def queries() -> tuple[Query, ...]:
         Query("forms.responses.detail.v1", "forms:responses:read", Empty, DataOutput, response_detail, True),
         Query("forms.public.v1", None, PublicInput, DataOutput, public_detail),
         Query("forms.datetime_options.v1", None, DateTimeInput, DateTimeOutput, datetime_options),
-    )
+    ) + permission_queries()

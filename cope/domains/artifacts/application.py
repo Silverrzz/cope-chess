@@ -81,11 +81,17 @@ def form_attachment_field(connection, principal, form, release_id: str, path: li
         form_permission(connection, principal, form, "read")
     fields = definition.fields
     selected = None
-    for position, identity_value in enumerate(path):
+    position = 0
+    while position < len(path):
+        identity_value = path[position]
         selected = next((field for field in fields if field.id == identity_value), None)
         if selected is None or position < len(path) - 1 and selected.kind != "group":
             raise ApplicationError("attachment_not_permitted", "Select an attachment field from this form release.", 422)
+        if position < len(path)-1:
+            identity(path[position+1])
+            position += 1
         fields = selected.fields
+        position += 1
     if selected is None or selected.kind != "attachment":
         raise ApplicationError("attachment_not_permitted", "Select an attachment field from this form release.", 422)
     return selected

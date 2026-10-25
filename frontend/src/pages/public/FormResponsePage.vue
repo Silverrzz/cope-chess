@@ -8,7 +8,7 @@ import { createFormUploader, downloadAttachment } from '@/api/form-uploads'
 import FormFields from '@/components/forms/FormFields.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
 import { useSessionStore } from '@/stores/session'
-import { canonicalAnswers, initialAnswers, type FormAnswers, type FormErrors, type FormResponse } from '@/types/forms'
+import { canonicalAnswers, initialAnswers, type FormAnswers, type FormErrors, type FormField, type FormResponse } from '@/types/forms'
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
@@ -27,14 +27,19 @@ const errorSummary = ref<HTMLElement | null>(null)
 const fields = ref<InstanceType<typeof FormFields> | null>(null)
 const decision = ref<'accepted' | 'declined' | 'changes_requested'>('changes_requested')
 const reason = ref('')
+const uploading = ref(0)
 const dirty = computed(() => JSON.stringify(answers.value) !== saved.value && !!response.value)
-const busy = computed(() => mutation.busy.value || reviewMutation.busy.value)
+const busy = computed(() => mutation.busy.value || reviewMutation.busy.value || uploading.value > 0)
 const uncertain = computed(() => mutation.uncertain.value || reviewMutation.uncertain.value)
 const labels: Record<string, string> = { awaiting_review: 'Awaiting review', accepted: 'Accepted', declined: 'Declined', changes_requested: 'Changes requested', withdrawn: 'Withdrawn' }
-const upload = createFormUploader(() => {
+const uploader = createFormUploader(() => {
   if (!response.value?.attachment_subject) throw new Error('Only the submitter can upload amendments for this response.')
   return { form_id: response.value.form_id, release_id: response.value.release_id, subject: response.value.attachment_subject, response_id: props.id, max_bytes: response.value.attachment_policy.max_file_bytes }
 }, async () => {}, () => claimHeaders(claim.value?.token))
+async function upload(file: File, field: FormField, path: string[]): Promise<string> {
+  uploading.value += 1
+  try { return await uploader(file,field,path) } finally { uploading.value -= 1 }
+}
 async function downloadFile(id: string): Promise<void> { await downloadAttachment(id, claimHeaders(claim.value?.token)) }
 
 async function failure(cause: unknown): Promise<void> {
@@ -54,7 +59,7 @@ async function load(preserve = false): Promise<void> {
   finally { loading.value = false }
 }
 async function amend(): Promise<void> {
-  if (!response.value) return
+  if (!response.value || uploading.value) return
   error.value = ''; errors.value = {}; message.value = ''
   const snapshot = canonicalAnswers(response.value.definition.fields, answers.value)
   const clear = Object.keys(response.value.answers).filter((key) => !(key in snapshot))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
@@ -34,6 +34,20 @@ class FormBinding:
     arguments: tuple[BindingArgument, ...]
     proposal_model: type[BaseModel]
     permits_anonymous: bool
+    check_mapping: Callable[[FormDefinition], list[dict]]
+
+
+def feedback_mapping(definition: FormDefinition) -> list[dict]:
+    fields = {field.id:field for field in definition.fields}
+    reply_id,contact_id = definition.mapping.get("reply"),definition.mapping.get("contact")
+    if reply_id is None and contact_id is None:
+        return []
+    reply,contact = fields.get(reply_id),fields.get(contact_id)
+    if reply is None or contact is None:
+        return [{"path":["mapping","contact"],"code":"reply_contact_mapping","message":"A reply preference needs a contact question, and a contact mapping needs a reply preference."}]
+    if reply.when is not None or not contact.required or contact.nullable or contact.when is None or contact.when.field != reply.id or contact.when.equals is not True:
+        return [{"path":["mapping","contact"],"code":"reply_contact_condition","message":"Show and require the contact question only when the unconditional reply checkbox is checked."}]
+    return []
 
 
 FEEDBACK = FormBinding(
@@ -44,6 +58,7 @@ FEEDBACK = FormBinding(
                BindingArgument("attachment", ("attachment",))),
     proposal_model=FeedbackProposal,
     permits_anonymous=True,
+    check_mapping=feedback_mapping,
 )
 
 BINDINGS = {FEEDBACK.key: FEEDBACK}
@@ -79,6 +94,7 @@ def compile_binding(definition: FormDefinition) -> FormBinding:
     for argument in binding.arguments:
         if argument.required and argument.name not in definition.mapping:
             errors.append({"path": ["mapping", argument.name], "code": "missing_mapping", "message": "Map this required binding input."})
+    errors.extend(binding.check_mapping(definition))
     if errors:
         raise ApplicationError("invalid_binding_mapping", "Resolve the form binding mappings before publication.", 422, fields=errors)
     return binding

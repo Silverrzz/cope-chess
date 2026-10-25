@@ -14,7 +14,6 @@ export function createFormUploader(context: () => UploadContext, authorize: () =
     const bytes = await file.arrayBuffer()
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
     const mediaType = file.type === 'text/plain' ? 'text/plain' : 'application/octet-stream'
-    const fieldPath = path.filter((part) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(part))
     const key = JSON.stringify([current.form_id, current.release_id, current.subject, path])
     const signature = JSON.stringify([digest, file.name, file.size, mediaType])
     let request = pending.get(key)
@@ -30,7 +29,7 @@ export function createFormUploader(context: () => UploadContext, authorize: () =
       try {
         const receipt = await api.post<CommandReceipt<'artifacts.begin_upload.v1'>>('/api/artifacts/commands', { headers: headers(), body: {
           command: 'artifacts.begin_upload.v1', target: current.form_id, idempotency_key: request.beginKey,
-          input: { release_id: current.release_id, subject: current.subject, field_path: fieldPath, filename: file.name, size: file.size, digest, media_type: mediaType, ...(current.response_id ? { response_id: current.response_id } : {}) },
+          input: { release_id: current.release_id, subject: current.subject, field_path: path, filename: file.name, size: file.size, digest, media_type: mediaType, ...(current.response_id ? { response_id: current.response_id } : {}) },
         } })
         request.upload_id = receipt.output.upload_id
       } catch (error) {

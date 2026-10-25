@@ -21,8 +21,7 @@ def resolve_attachment(connection, principal, form: dict, release: dict, subject
            WHERE d.artifact_id=%s AND d.revision=1 AND d.owner_actor=%s AND u.state='stored'
            ORDER BY r.id LIMIT 1 FOR SHARE OF d,u,r""",(identity(artifact_id),principal.actor),
     ).fetchone()
-    definition_path = [part for part in path if not _row_identity(str(part))]
-    if row is None or str(row["form_id"]) != str(form["id"]) or str(row["release_id"]) != str(release["id"]) or str(row["subject"]) != identity(subject) or row["field_path"] != definition_path:
+    if row is None or str(row["form_id"]) != str(form["id"]) or str(row["release_id"]) != str(release["id"]) or str(row["subject"]) != identity(subject) or row["field_path"] != list(path):
         raise ApplicationError("attachment_not_permitted", "Choose a completed attachment uploaded for this response and field.",403)
     retained = False
     if response_id:
@@ -32,16 +31,6 @@ def resolve_attachment(connection, principal, form: dict, release: dict, subject
     return str(row["artifact_id"]), {"artifact_id":str(row["artifact_id"]),"descriptor_revision":1,"field_path":list(path)}
 
 
-def _row_identity(part: str) -> bool:
-    import uuid
-
-    try:
-        uuid.UUID(part)
-        return True
-    except ValueError:
-        return False
-
-
 def retain_attachments(connection, response_id: str, revision: int, attachments: list[dict]) -> None:
     for attachment in attachments:
         connection.execute(
@@ -49,6 +38,20 @@ def retain_attachments(connection, response_id: str, revision: int, attachments:
                VALUES (%s,%s,%s,%s,%s::jsonb,'form_response_evidence') ON CONFLICT DO NOTHING""",
             (attachment["artifact_id"],attachment["descriptor_revision"],response_id,revision,json.dumps(attachment["field_path"])),
         )
+
+
+def verify_retained(connection, response_id: str, revision: int) -> None:
+    from .policy import MEDIA_POLICIES
+
+    roots = connection.execute(
+        """SELECT d.blob_id,d.media_type,d.validation_policy FROM artifact_retention_roots root
+           JOIN artifact_descriptors d ON d.artifact_id=root.artifact_id AND d.revision=root.descriptor_revision
+           WHERE root.consumer_response=%s AND root.consumer_revision=%s FOR SHARE OF d""",(response_id,revision),
+    ).fetchall()
+    for root in roots:
+        ready = connection.execute("SELECT id FROM artifact_replicas WHERE blob_id=%s AND state='ready' ORDER BY id LIMIT 1 FOR SHARE",(root["blob_id"],)).fetchone()
+        if ready is None or root["validation_policy"] != MEDIA_POLICIES.get(root["media_type"]):
+            raise ApplicationError("artifact_not_ready","Retained response evidence needs storage or validation repair before review.",409)
 
 
 def authorized_download(connection, principal, artifact_id: str) -> dict:

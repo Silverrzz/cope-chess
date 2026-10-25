@@ -6,6 +6,7 @@ import { applicationQuery, describeTarget } from '@/api/application'
 import { ApiError } from '@/api/client'
 import FormDefinitionEditor, { type BindingDescription } from '@/components/forms/FormDefinitionEditor.vue'
 import FormFields from '@/components/forms/FormFields.vue'
+import FormAccessEditor from '@/components/forms/FormAccessEditor.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
 import { initialAnswers, type FormAnswers, type FormDefinition, type FormDetail, type FormErrors, type FormWorkingCopy } from '@/types/forms'
 
@@ -140,6 +141,7 @@ onBeforeRouteLeave(() => !(dirty.value || mutation.uncertain.value) || window.co
         <section v-if="preview" class="preview"><p class="eyebrow">Preview · answers stay in this editor</p><h2>{{ document.title }}</h2><p class="intro">{{ document.description }}</p><FormFields v-model="previewAnswers" :fields="document.fields" :disabled="blocked" /></section><FormDefinitionEditor v-else v-model="document" :bindings="bindings" :errors="errors" :disabled="blocked" />
       </template>
       <section class="releases"><h2>Published releases</h2><p v-if="!form.releases.length">No release has been published.</p><ul><li v-for="release in form.releases" :key="release.id"><strong>Release {{ release.number }} · {{ release.definition.title }}</strong><span>{{ release.accepting && (!release.valid_until || Date.parse(release.valid_until) > Date.now()) && !form.closed ? 'Accepting submissions' : 'Closed to submissions' }}{{ release.valid_until ? ` · until ${new Date(release.valid_until).toLocaleString()}` : '' }}</span></li></ul></section>
+      <FormAccessEditor :form-id="form.id" :disabled="blocked" @changed="refreshForm" />
     </template>
   </div>
 </template>

@@ -258,6 +258,8 @@ def amend_response(context: CommandContext, payload: AmendResponse) -> Outcome:
     definition = definition_from_json(release["definition"])
     if not definition.allow_amendments:
         raise ApplicationError("amendments_closed", "This form does not accept response amendments.")
+    if definition.audience == "invited":
+        form_permission(context.connection,context.principal,form,"read")
     if len(set(payload.clear)) != len(payload.clear) or set(payload.clear).intersection(payload.set):
         raise ApplicationError("invalid_patch", "Each field can be set or cleared once.", 422)
     fields = {field.id for field in definition.fields}
@@ -283,6 +285,8 @@ def amend_response(context: CommandContext, payload: AmendResponse) -> Outcome:
 
 
 def review_response(context: CommandContext, payload: ReviewResponse) -> Outcome:
+    from cope.domains.artifacts.retention import verify_retained
+
     response = context.target.data
     if response["withdrawn_at"]:
         raise ApplicationError("response_withdrawn", "A withdrawn response cannot be admitted.")
@@ -299,6 +303,7 @@ def review_response(context: CommandContext, payload: ReviewResponse) -> Outcome
     binding = compile_binding(definition)
     if binding.policy_revision != row["subject"]["policy_revision"] or form["owner_actor"] != row["subject"]["owner_actor"]:
         raise ApplicationError("review_policy_changed", "The response needs a new review subject under current ownership and policy.")
+    verify_retained(context.connection,context.target.object_id,context.target.version)
     review_id = str(uuid.uuid4())
     context.connection.execute(
         """INSERT INTO form_reviews(id, response_id, response_revision, subject_digest, policy_revision, decision, reason, actor)
@@ -365,6 +370,8 @@ def no_target(*args, **kwargs):
 
 
 def commands() -> tuple[Command, ...]:
+    from .permissions import commands as permission_commands
+
     return (
         Command("forms.create.v1", "form", "forms:write", None, CreateForm, DraftOutput,
                 no_target, create_form, no_target, project_form, False, False),
@@ -386,4 +393,4 @@ def commands() -> tuple[Command, ...]:
                 response_resolver("review"), review_response, describe_response, project_response),
         Command("forms.withdraw.v1", "form_response", "forms:amend", "state_version", WithdrawResponse, WithdrawOutput,
                 response_resolver("read", "state_version", owner_only=True), withdraw_response, describe_response, project_response),
-    )
+    ) + permission_commands()

@@ -251,6 +251,12 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
     actor = "submitter" if state == "changes_requested" else "reviewer" if state == "awaiting_review" else None
     release = pinned_release(connection, str(form["id"]), str(response["release_id"]), accepting=False)
     definition = FormDefinition.model_validate(release["definition"])
+    audience_allowed = not (definition.audience != "public" and principal.credential_kind == "form_claim")
+    if definition.audience == "invited":
+        try:
+            form_permission(connection,principal,form,"read")
+        except ApplicationError:
+            audience_allowed = False
     can_review = False
     if "*" in principal.scopes or "forms:review" in principal.scopes:
         try:
@@ -263,7 +269,7 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
     return {"id": str(response["id"]), "form_id": str(form["id"]), "slug": form["slug"], "release_id": str(response["release_id"]),
             "revision": response["current_revision"], "state_version": object_version(connection, response_id, "state_version", lock=False),
             "state": state, "next_actor": actor, "answers": revision["answers"], "subject_digest": revision["subject_digest"],
-            "definition": public_definition(definition), "can_amend": bool(release["eligible"] and definition.allow_amendments
+            "definition": public_definition(definition), "can_amend": bool(audience_allowed and release["eligible"] and definition.allow_amendments
                 and ("*" in principal.scopes or "forms:amend" in principal.scopes)
                 and response["owner_actor"] == principal.actor and response["withdrawn_at"] is None), "can_review": can_review,
             "reviews": [{**dict(review), "id": str(review["id"]), "created_at": review["created_at"].isoformat()} for review in reviews],
