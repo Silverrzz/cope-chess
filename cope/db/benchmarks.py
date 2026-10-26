@@ -704,7 +704,7 @@ def record_manual_benchmark(
               engine_version, build_hash, hardware_key, status, attempt,
               scheduled_at, started_at, finished_at, error, output
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 1, ?, ?, ?, '', '')
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', 1, ?, ?, ?, '', '') RETURNING id
             """,
             (
                 secrets.token_urlsafe(24), engine.engine_id, engine.model_dump_json(),
@@ -712,7 +712,7 @@ def record_manual_benchmark(
                 now, now, now,
             ),
         )
-        job_id = int(cursor.lastrowid)
+        job_id = int(cursor.fetchone()['id'])
     else:
         job_id = int(row["id"])
         connection.execute(

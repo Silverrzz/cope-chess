@@ -82,7 +82,7 @@ def create_tool_job(
           job_key, tool_name, status, input, required_threads, required_hash_mb,
           total_items, completed_items, progress_total,
           attempt, error, created_at
-        ) VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, ?, 0, '', ?)
+        ) VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, ?, 0, '', ?) RETURNING id
         """,
         (
             secrets.token_urlsafe(24),
@@ -95,7 +95,7 @@ def create_tool_job(
             now,
         ),
     )
-    job_id = cursor.lastrowid
+    job_id = int(cursor.fetchone()['id'])
     connection.executemany(
         """
         INSERT INTO tool_job_items (job_id, engine_version_id, position, status)
