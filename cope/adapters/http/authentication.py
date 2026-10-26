@@ -112,11 +112,15 @@ def signed_value(token: str, nonce: str, *, issued_at: int | None = None) -> str
 
 
 def signed_value_nonce(token: str, value: str) -> str | None:
+    if len(value)>1024:
+        return None
     parts = value.split(".")
     if len(parts) != 3:
         return None
     timestamp_text, nonce, supplied = parts
     if not timestamp_text or not nonce or not supplied:
+        return None
+    if len(supplied)!=64 or any(char not in '0123456789abcdef' for char in supplied):
         return None
     try:
         issued_at = int(timestamp_text)
