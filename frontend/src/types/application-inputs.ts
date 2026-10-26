@@ -107,6 +107,11 @@ export interface ApplicationViewInputs {
   'legacy.activity.list.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
 }
 
+export const applicationViewContracts = {
+  'legacy.activity.detail.v1': { requiresTarget: true },
+  'legacy.activity.list.v1': { requiresTarget: false },
+} as const
+
 export interface ApplicationViewOutputs {
   'legacy.activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
   'legacy.activity.list.v1': { "items": Array<ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem>; "count": ApplicationSchema_view_output_legacy_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_view_output_legacy_activity_list_v1_ActivityBasis }

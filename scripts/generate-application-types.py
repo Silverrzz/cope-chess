@@ -94,7 +94,10 @@ def main() -> int:
     lines.extend(["}", "", "export type ApplicationQuery = keyof ApplicationQueryInputs", "", "export interface ApplicationViewInputs {"])
     for name,view in sorted(VIEWS.items()):
         lines.append(f"  '{name}': {model_type(view.input_model,name,'view_input')}")
-    lines.extend(["}", "", "export interface ApplicationViewOutputs {"])
+    lines.extend(["}", "", "export const applicationViewContracts = {"])
+    for name,view in sorted(VIEWS.items()):
+        lines.append(f"  '{name}': {{ requiresTarget: {str(view.requires_target).lower()} }},")
+    lines.extend(["} as const", "", "export interface ApplicationViewOutputs {"])
     for name,view in sorted(VIEWS.items()):
         lines.append(f"  '{name}': {model_type(view.output_model,name,'view_output')}")
     lines.extend(["}", "", "export type ApplicationView = keyof ApplicationViewInputs", "", "export type ApplicationViewSnapshot = "+model_type(ViewSnapshot,'snapshot','view_transport'),
