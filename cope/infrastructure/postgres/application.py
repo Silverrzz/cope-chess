@@ -3,7 +3,7 @@ from __future__ import annotations
 import psycopg
 
 from cope.application.errors import ApplicationError
-from cope.application.identity import Principal
+from cope.application.identity import Principal,current_principal
 
 
 def run_coherent_application(connection, identity, handler, *args):
@@ -22,7 +22,9 @@ def run_coherent_application(connection, identity, handler, *args):
 def run_application(connection, identity, handler, *args, **kwargs):
     principal = identity if isinstance(identity, Principal) else Principal(identity.actor, tuple(identity.scopes), identity.token_id)
     try:
-        result = handler(connection.native_connection(), principal, *args, **kwargs)
+        raw = connection.native_connection()
+        principal = current_principal(raw,principal)
+        result = handler(raw, principal, *args, **kwargs)
         connection.commit()
         return result
     except psycopg.errors.UniqueViolation as exc:

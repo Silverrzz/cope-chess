@@ -108,6 +108,7 @@ def _prepare(connection, principal, request: ViewRequest):
         raise ApplicationError("delivery_unavailable","Durable replay requires an operator recovery decision.",503)
     key = hashlib.sha256(row["secret"].encode()).digest()
     basis = [view.key,1,principal.actor,sorted(principal.scopes),principal.credential_kind,principal.resource_scope,
+             principal.browser.session_id if principal.browser else None,
              request.target,payload.model_dump(mode="json")]
     context = hmac.new(key,json.dumps(basis,sort_keys=True,separators=(",",":"),allow_nan=False).encode(),hashlib.sha256).hexdigest()
     return view,principal,payload,row,Fernet(base64.urlsafe_b64encode(key)),context

@@ -624,7 +624,8 @@ def create_app(
     app.state.worker_server_url = worker_server_url
     app.state.benchmarker_server_url = benchmarker_server_url
     app.state.event_token = event_token or default_web_event_token()
-    app.state.admin_token = admin_token or default_admin_token()
+    app.state.configured_admin_token = admin_token or default_admin_token()
+    app.state.admin_token = app.state.configured_admin_token
     app.state.manager_token = None
     app.state.access_tokens_loaded = False
     app.state.stream_hub = StreamHub()

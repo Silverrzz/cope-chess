@@ -17,8 +17,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import chess
+import psycopg
 from cope.application import ApplicationError, Principal as ApplicationPrincipal
 from cope.application.commands import execute_compatibility
+from cope.application.identity import bootstrap_authority_lock,bootstrap_secret,current_principal,revoke_browser_credential
+from cope.adapters.http.browser_identity import cookie_browser_principal,request_browser_principal
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -245,6 +248,20 @@ from cope.runner.scheduler import (
     start_tournament,
 )
 from cope.tournament.estimates import TournamentEstimator
+
+
+def _current_bootstrap_admin(request, connection, *, exclusive=False):
+    try:
+        principal = request_browser_principal(request)
+        raw = connection.native_connection()
+        bootstrap_authority_lock(raw,exclusive=exclusive)
+        identity = current_principal(raw,principal)
+        identity.require('*')
+        return raw
+    except ApplicationError as error:
+        raise HTTPException(error.status,error.payload()) from error
+    except (psycopg.errors.LockNotAvailable,psycopg.errors.DeadlockDetected,psycopg.errors.SerializationFailure) as error:
+        raise HTTPException(409,{'code':'concurrent_change','message':'Credential authority changed. Refresh before retrying.'}) from error
 
 
 LOG = logging.getLogger("cope.web.api")
@@ -1223,6 +1240,13 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=401, detail="Invalid admin token.")
 
         nonce = secrets.token_urlsafe(32)
+        cookie = web_app._signed_value(token,nonce)
+        try:
+            current_principal(connection.native_connection(),cookie_browser_principal(role,token,cookie))
+            connection.commit()
+        except ApplicationError as error:
+            connection.rollback()
+            raise HTTPException(error.status,error.payload()) from error
         response = _json(
             {
                 "authenticated": True,
@@ -1239,7 +1263,7 @@ def register_api_routes(app: FastAPI) -> None:
         )
         response.set_cookie(
             "cope_admin_session",
-            web_app._signed_value(token, nonce),
+            cookie,
             httponly=True,
             secure=web_app._request_is_secure(request),
             samesite="lax",
@@ -1249,7 +1273,26 @@ def register_api_routes(app: FastAPI) -> None:
         return response
 
     @app.delete("/api/session")
-    def delete_session():
+    def delete_session(request: Request,connection: sqlite3.Connection=Depends(web_app._database)):
+        from cope.adapters.http.forms import require_origin
+
+        require_origin(request)
+        role = web_app._admin_session_role(request)
+        principal = None
+        if role is not None:
+            secret = web_app._admin_token(request) if role=='admin' else web_app._manager_token(request)
+            if not web_app._request_is_secure_or_local(request) or not web_app._csrf_token_valid(request,secret,request.headers.get('x-csrf-token','')):
+                raise HTTPException(403,'CSRF validation failed')
+            principal = request_browser_principal(request)
+        try:
+            revoke_browser_credential(connection.native_connection(),request.cookies.get('cope_admin_session',''),principal)
+            connection.commit()
+        except ApplicationError as error:
+            connection.rollback()
+            raise HTTPException(error.status,error.payload()) from error
+        except (psycopg.errors.LockNotAvailable,psycopg.errors.DeadlockDetected,psycopg.errors.SerializationFailure) as error:
+            connection.rollback()
+            raise HTTPException(409,{'code':'concurrent_change','message':'The session could not be revoked. Retry signing out.'}) from error
         response = _json({"authenticated": False, "message": "Signed out."})
         response.delete_cookie("cope_admin_session")
         response.headers["Cache-Control"] = "no-store"
@@ -3374,10 +3417,9 @@ def register_api_routes(app: FastAPI) -> None:
         )
 
     @app.get("/api/admin/settings/access-tokens/{role}")
-    def access_token(role: Literal["admin", "manager"], request: Request):
-        if web_app._admin_session_role(request) != "admin":
-            raise HTTPException(status_code=403, detail="The admin token is required.")
-        token = web_app._admin_token(request) if role == "admin" else web_app._manager_token(request)
+    def access_token(role: Literal["admin", "manager"], request: Request,connection: sqlite3.Connection=Depends(web_app._database)):
+        raw = _current_bootstrap_admin(request,connection)
+        token = bootstrap_secret(raw,role,configured_admin=request.app.state.configured_admin_token)
         if not token:
             raise HTTPException(status_code=503, detail=f"The {role} token is not configured.")
         response = _json({"token": token})
@@ -3390,8 +3432,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        if web_app._admin_session_role(request) != "admin":
-            raise HTTPException(status_code=403, detail="The admin token is required.")
+        _current_bootstrap_admin(request,connection,exclusive=True)
         token = secrets.token_urlsafe(48)
         connection.execute(
             """

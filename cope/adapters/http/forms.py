@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query as QueryParameter, 
 from cope.application import ApplicationError, CommandRequest, Principal, execute_command
 from cope.application.contracts import QueryRequest
 from cope.application.queries import execute_query
-from cope.application.identity import browser_principal
+from cope.adapters.http.browser_identity import request_browser_principal
 from cope.control.api import application_result, database
 from cope.domains.forms.storage import issue_claim
 from cope.infrastructure.postgres.credentials import authenticate_bearer
@@ -77,7 +77,10 @@ def form_principal(request: Request, connection=Depends(database)):
             token = admin_token(request) if role == "admin" else manager_token(request)
             if not token or not csrf_token_valid(request, token, request.headers.get("x-csrf-token", "")):
                 raise HTTPException(403, "CSRF validation failed")
-        return browser_principal(role)
+        try:
+            return request_browser_principal(request)
+        except ApplicationError as error:
+            raise HTTPException(error.status,error.payload()) from error
     if get_platform_settings(connection).privatise_platform:
         raise HTTPException(401, "Sign in to access forms on this private platform")
     return Principal("public", ())

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import ipaddress
 import sqlite3
-import time
 from datetime import UTC, datetime
 
 from fastapi import Request
+import psycopg
 
+from cope.application.errors import ApplicationError
+from cope.application.identity import bootstrap_authority_lock,bootstrap_token_digest
 from cope.db import connect_database
 from cope.network import LOCAL_EVENT_PUBLISHERS
 
@@ -17,52 +20,67 @@ ADMIN_SESSION_MAX_AGE_SECONDS = 43_200
 
 def admin_token(request: Request) -> str | None:
     load_access_tokens(request)
-    return getattr(request.app.state, "admin_token", None) or None
+    return request.scope['cope.bootstrap.credentials']['admin']
 
 
 def manager_token(request: Request) -> str | None:
     load_access_tokens(request)
-    return getattr(request.app.state, "manager_token", None) or None
+    return request.scope['cope.bootstrap.credentials']['manager']
 
 
 def load_access_tokens(request: Request) -> None:
-    now = time.monotonic()
-    if getattr(request.app.state, "access_tokens_loaded", False) and now - getattr(request.app.state, "access_tokens_loaded_at", 0.0) < 1.0:
+    if 'cope.bootstrap.credentials' in request.scope:
         return
     connection = connect_database(request.app.state.db_path)
+    credentials = {'admin':None,'manager':None,'session_role':None}
     try:
-        rows = connection.execute(
-            "SELECT role, token FROM admin_access_tokens"
-        ).fetchall()
-    except sqlite3.Error:
-        return
+        for exclusive in (False,True):
+            raw = connection.native_connection()
+            bootstrap_authority_lock(raw,exclusive=exclusive)
+            tokens = {row['role']:row['token'] or None for row in raw.execute('SELECT role,token FROM admin_access_tokens FOR SHARE').fetchall()}
+            credentials = {'admin':tokens.get('admin',request.app.state.configured_admin_token),'manager':tokens.get('manager'),'session_role':None}
+            roots = {row['role']:row for row in raw.execute('SELECT role,generation,token_digest FROM application_bootstrap_roles FOR SHARE').fetchall()}
+            changed = [role for role in ('admin','manager') if roots[role]['token_digest']!=(bootstrap_token_digest(credentials[role]) if credentials[role] else None)]
+            if changed and not exclusive:
+                connection.rollback()
+                continue
+            for role in changed:
+                raw.execute('UPDATE application_bootstrap_roles SET generation=generation+1,token_digest=%s WHERE role=%s',
+                            (bootstrap_token_digest(credentials[role]) if credentials[role] else None,role))
+                roots[role]=raw.execute('SELECT generation,token_digest FROM application_bootstrap_roles WHERE role=%s',(role,)).fetchone()
+            value = request.cookies.get('cope_admin_session','')
+            if value and len(value)<=1024:
+                for role in ('admin','manager'):
+                    secret = credentials[role]
+                    if secret and signed_value_nonce(secret,value) is not None:
+                        session = raw.execute('SELECT role,role_generation,revoked_at FROM application_browser_sessions WHERE session_hash=%s FOR SHARE',
+                                              (hashlib.sha256(value.encode()).hexdigest(),)).fetchone()
+                        if session is None or session['revoked_at'] is None and session['role']==role and session['role_generation']==roots[role]['generation']:
+                            credentials['session_role']=role
+                        break
+            connection.commit()
+            break
+    except (sqlite3.Error,psycopg.Error,ApplicationError):
+        connection.rollback()
+        credentials = {'admin':None,'manager':None,'session_role':None}
     finally:
         connection.close()
-    for row in rows:
-        if row["role"] == "admin" and row["token"]:
-            request.app.state.admin_token = str(row["token"])
-        elif row["role"] == "manager" and row["token"]:
-            request.app.state.manager_token = str(row["token"])
-    request.app.state.access_tokens_loaded = True
-    request.app.state.access_tokens_loaded_at = now
+    request.scope['cope.bootstrap.credentials']=credentials
 
 
 def admin_session_role(request: Request) -> str | None:
     internal = request.scope.get("cope.control.internal")
     if internal is not None:
         return "admin" if "*" in internal["principal"].scopes else "manager"
-    admin_secret = admin_token(request)
-    if admin_secret and admin_session_valid(request, admin_secret):
-        return "admin"
-    manager_secret = manager_token(request)
-    if manager_secret and admin_session_valid(request, manager_secret):
-        return "manager"
-    return None
+    load_access_tokens(request)
+    return request.scope['cope.bootstrap.credentials']['session_role']
 
 
 def admin_session_valid(request: Request, token: str) -> bool:
     value = request.cookies.get("cope_admin_session", "")
     if not value:
+        return False
+    if admin_session_role(request) is None:
         return False
     nonce = signed_value_nonce(token, value)
     return nonce is not None

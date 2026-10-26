@@ -13,7 +13,7 @@ from cope.infrastructure.postgres.application import run_application,run_coheren
 from cope.infrastructure.postgres.credentials import authenticate_bearer
 from cope.application.contracts import QueryRequest
 from cope.application.queries import execute_query, list_queries
-from cope.application.identity import browser_principal
+from cope.adapters.http.browser_identity import request_browser_principal
 from cope.application.views import ViewRequest,ViewBatchRequest,execute_snapshot,execute_batch,list_views
 
 from cope.db import connect_database, list_engine_records, list_git_hosts, list_rating_lists, list_opening_suites
@@ -51,11 +51,14 @@ def principal(request: Request, connection=Depends(database)):
             raise HTTPException(401, str(error), headers={"WWW-Authenticate": "Bearer"}) from error
     if request.url.path.startswith("/api/admin/control"):
         role = admin_session_role(request)
+        if role and '/application/' in request.url.path:
+            try:
+                return request_browser_principal(request)
+            except ApplicationError as error:
+                raise HTTPException(error.status,error.payload()) from error
         if role == "admin":
             return Principal("browser:admin", ("*",))
         if role == "manager":
-            if "/application/" in request.url.path:
-                return browser_principal("manager")
             return Principal("browser:manager", ("operations:read",))
     raise HTTPException(401, "A control bearer token is required", headers={"WWW-Authenticate": "Bearer"})
 
