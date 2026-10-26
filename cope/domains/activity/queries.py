@@ -43,12 +43,12 @@ class ActivityItem(Input):
     source_state: str
     owner_actor: str | None
     execution_owner: str
-    execution_route: Literal['legacy','held']
+    execution_route: Literal['legacy','held','canonical']
     ownership_generation: int
     inspect_url: str
-    ownership_mode: Literal["legacy_observed"]
-    mapping_quality: Literal["status_only"]
-    cleanup_state: Literal["not_recorded"]
+    ownership_mode: Literal["legacy_observed","canonical"]
+    mapping_quality: Literal["status_only","authoritative"]
+    cleanup_state: Literal["not_recorded","not_started"]
     observed_at: str
     source_created_at: str | None
     content_revision: int
@@ -74,7 +74,7 @@ class SourceItem(Input):
     kind: str
     execution_owner: str
     inspect_url: str
-    ownership_mode: Literal["legacy_observed"]
+    ownership_mode: Literal["legacy_observed","canonical"]
 
 
 class SourcesOutput(Input):
@@ -82,7 +82,7 @@ class SourcesOutput(Input):
 
 
 def source_catalogue(connection, principal, target, payload: Empty) -> dict:
-    return {"items":[{"key":source.key,"label":source.label,"kind":source.kind,"execution_owner":source.owner,"inspect_url":source.inspect_url,"ownership_mode":"legacy_observed"}
+    return {"items":[{"key":source.key,"label":source.label,"kind":source.kind,"execution_owner":source.owner,"inspect_url":source.inspect_url,"ownership_mode":"canonical" if source.key.startswith('canonical.') else "legacy_observed"}
                      for source in sources() if source.available(principal)]}
 
 

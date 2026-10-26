@@ -1,7 +1,7 @@
 import { ViewProtocolError } from '@/composables/useCoherentView'
 import type { ApplicationViewOutputs } from '@/types/application-inputs'
 
-type Page = ApplicationViewOutputs['legacy.activity.list.v1']
+type Page = ApplicationViewOutputs['activity.list.v1']
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 function integer(value: unknown, minimum: number): boolean { return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum }
 function instant(value: unknown): boolean { return typeof value === 'string' && value.length < 100 && Number.isFinite(Date.parse(value)) }
@@ -19,8 +19,9 @@ export function decodeActivityPage(value: unknown): Page {
         || !['operation','job'].includes(String(item.kind)) || !states.has(String(item.state))
         || !['source','source_id','title','source_state','execution_owner','inspect_url'].every((field) => typeof item[field] === 'string')
         || !(item.inspect_url as string).startsWith('/admin/') || item.owner_actor !== null && typeof item.owner_actor !== 'string'
-        || item.ownership_mode !== 'legacy_observed' || item.mapping_quality !== 'status_only' || item.cleanup_state !== 'not_recorded'
-        || !['legacy','held'].includes(String(item.execution_route)) || !integer(item.ownership_generation,1)
+        || !(item.ownership_mode === 'legacy_observed' && item.mapping_quality === 'status_only' && item.cleanup_state === 'not_recorded' && ['legacy','held'].includes(String(item.execution_route))
+          || item.ownership_mode === 'canonical' && item.mapping_quality === 'authoritative' && item.cleanup_state === 'not_started' && item.execution_route === 'canonical')
+        || !integer(item.ownership_generation,1)
         || !instant(item.observed_at) || item.source_created_at !== null && !instant(item.source_created_at)
         || !integer(item.content_revision,1) || !integer(item.state_version,1)) return fail()
     ids.add(item.id)

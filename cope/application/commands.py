@@ -16,8 +16,9 @@ def command_catalog() -> dict:
     from cope.domains.forms.application import commands as form_commands
     from cope.domains.artifacts.application import commands as artifact_commands
     from cope.domains.execution.legacy_routes import commands as route_commands
+    from cope.domains.execution.admission import commands as execution_commands
 
-    providers = (legacy_commands(), form_commands(), artifact_commands(),route_commands())
+    providers = (legacy_commands(), form_commands(), artifact_commands(),route_commands(),execution_commands())
     result = {}
     for provider in providers:
         for command in provider:
