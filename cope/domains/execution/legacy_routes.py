@@ -80,7 +80,7 @@ def resolve_route(connection, principal, target, *, lock, kind=None) -> Target:
            JOIN application_objects object ON object.id=ownership.object_id
            JOIN application_object_aliases identity ON identity.object_id=object.id
            WHERE object.id=%s::uuid AND identity.namespace=ANY(%s::text[])
-             AND (%s::text IS NULL OR object.type_key=%s)"""+(' FOR UPDATE OF ownership NOWAIT' if lock else ''),
+             AND (%s::text IS NULL OR object.type_key=%s)"""+(' FOR UPDATE OF ownership NOWAIT' if lock else ' FOR SHARE OF ownership NOWAIT'),
         (resource_id,[source.namespace for source in SOURCES],kind,kind),
     ).fetchone()
     if row is None:
