@@ -35,7 +35,8 @@ function batchEnvelope(value: unknown, view: string, previous: string, context: 
 
 export function useCoherentView<V extends ApplicationView>(decode: (data: unknown) => ApplicationViewOutputs[V]) {
   type Output = ApplicationViewOutputs[V]
-  const empty = (): ViewState<Output> => ({data:null,checkpoint:null,context:null,dirty:true,status:'stopped',error:'',snapshotSerial:0,checkedAt:null})
+  let snapshotSerial = 0
+  const empty = (): ViewState<Output> => ({data:null,checkpoint:null,context:null,dirty:true,status:'stopped',error:'',snapshotSerial,checkedAt:null})
   const state = shallowRef<ViewState<Output>>(empty())
   let configured: ViewRequest<V> | null = null
   let generation = 0
@@ -43,6 +44,7 @@ export function useCoherentView<V extends ApplicationView>(decode: (data: unknow
   let timer: ReturnType<typeof setTimeout> | null = null
   let networkFailures = 0
   let recoveryFailures = 0
+  let catchupBatches = 0
   let disposed = false
 
   function cancel(): number {
@@ -70,11 +72,13 @@ export function useCoherentView<V extends ApplicationView>(decode: (data: unknow
         try { data = decode(result.data) }
         catch (cause) { throw cause instanceof ViewProtocolError ? cause : new ViewProtocolError('The snapshot data does not match the installed view schema.',true) }
         if (disposed || current !== generation) return
-        state.value = {data,checkpoint:result.checkpoint,context:result.context,dirty:false,status:'current',error:'',snapshotSerial:previous.snapshotSerial+1,checkedAt:new Date().toISOString()}
+        state.value = {data,checkpoint:result.checkpoint,context:result.context,dirty:false,status:'current',error:'',snapshotSerial:++snapshotSerial,checkedAt:new Date().toISOString()}
+        catchupBatches = 0
       } else {
         const result = batchEnvelope(await viewBatch(request,previous.checkpoint,flight.signal),request.view,previous.checkpoint,previous.context)
         if (disposed || current !== generation) return
-        const dirty = previous.dirty || result.invalidated
+        catchupBatches = result.has_more ? catchupBatches+1 : 0
+        const dirty = previous.dirty || result.invalidated || catchupBatches >= 10
         state.value = {...previous,checkpoint:result.checkpoint,dirty,status:dirty || result.has_more ? 'synchronizing' : 'current',error:'',checkedAt:new Date().toISOString()}
         delay = dirty ? 250 : result.has_more ? 50 : delay
         recoveryFailures = 0
@@ -103,7 +107,7 @@ export function useCoherentView<V extends ApplicationView>(decode: (data: unknow
   }
   function configure(request: ViewRequest<V> | null): void {
     const current = cancel()
-    networkFailures = 0; recoveryFailures = 0
+    networkFailures = 0; recoveryFailures = 0; catchupBatches = 0
     configured = request ? JSON.parse(JSON.stringify(request)) as ViewRequest<V> : null
     state.value = {...empty(),status:configured ? 'connecting' : 'stopped'}
     if (configured && !disposed) void tick(current)
@@ -111,7 +115,7 @@ export function useCoherentView<V extends ApplicationView>(decode: (data: unknow
   function refresh(): void {
     if (!configured || disposed) return
     const current = cancel()
-    networkFailures = 0; recoveryFailures = 0
+    networkFailures = 0; recoveryFailures = 0; catchupBatches = 0
     state.value = {...state.value,dirty:true,status:state.value.data ? 'synchronizing' : 'connecting',error:''}
     void tick(current)
   }
