@@ -58,7 +58,9 @@ async function detail(id: string): Promise<void> {
     detailError.value = message(cause)
     if (cause instanceof ApiError && [401,403].includes(cause.status)) { selected.value = null; items.value = []; page.value = null; coherent.deny(message(cause)) }
     else if (cause instanceof ApiError && cause.status === 404) {
-      selected.value = null; items.value = items.value.filter((item) => item.id !== id); page.value = null
+      const listed = items.value.some((item) => item.id === id)
+      selected.value = null
+      if (listed) { items.value = items.value.filter((item) => item.id !== id); page.value = null; if (coherentEnabled.value) coherent.refresh(); else void load() }
       if (session.user?.role === 'admin') {
         try {
           const record = await applicationQuery('objects.removal.v1',{},id,detailController.signal)
