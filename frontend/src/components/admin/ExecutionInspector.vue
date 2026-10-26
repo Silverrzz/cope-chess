@@ -5,7 +5,7 @@ import { applicationQuery, executeCommand } from '@/api/application'
 import type { ApplicationQueryOutputs } from '@/types/application-inputs'
 import BaseButton from '@/components/ui/BaseButton.vue'
 
-const props = defineProps<{ id: string; kind: 'operation' | 'job'; version: number }>()
+const props = defineProps<{ id: string; kind: 'operation' | 'job'; version: number; basis: number; context: string | null }>()
 const emit = defineEmits<{ refresh: []; inspect: [id: string]; denied: [message: string] }>()
 type Detail = ApplicationQueryOutputs['execution.operations.detail.v1'] | ApplicationQueryOutputs['execution.jobs.detail.v1']
 const data = ref<Detail | null>(null)
@@ -52,7 +52,10 @@ async function cancel(): Promise<void> {
     if (cause instanceof ApiError && [401,403].includes(cause.status)) { data.value = null; emit('denied',error.value) }
   } finally { if (active) cancelling.value = false }
 }
-watch(() => [props.id,props.kind,props.version] as const,() => { pending = null; void load() },{immediate:true})
+watch(() => [props.id,props.kind,props.version,props.basis,props.context] as const,(next,previous) => {
+  if (!previous || next[0] !== previous[0] || next[1] !== previous[1] || next[2] !== previous[2] || next[4] !== previous[4]) pending = null
+  void load()
+},{immediate:true})
 onBeforeUnmount(() => { active = false; ++generation; controller?.abort(); data.value = null; pending = null })
 </script>
 
