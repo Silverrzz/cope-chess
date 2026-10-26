@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import time
+import threading
 from typing import Literal
 from uuid import UUID,uuid4
 
@@ -61,6 +62,7 @@ def unique_object(pairs):
 class AuthorityStore:
     def __init__(self, path: str|Path):
         self.path = Path(path)
+        self._writer_state = threading.local()
 
     @classmethod
     def configured(cls):
@@ -130,8 +132,18 @@ class AuthorityStore:
         finally:
             os.close(descriptor)
 
+    @contextmanager
     def writer(self):
-        return self._lock('writer.lock',True)
+        owner = (os.getpid(),threading.get_ident())
+        if getattr(self._writer_state,'owner',None)==owner:
+            yield
+            return
+        with self._lock('writer.lock',True):
+            self._writer_state.owner=owner
+            try:
+                yield
+            finally:
+                self._writer_state.owner=None
 
     def exclusive(self):
         return self._lock('authority.lock',True)

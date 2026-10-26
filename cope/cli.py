@@ -889,38 +889,40 @@ def _database_command(args) -> int:
         if not authority_path or not args.recovery_reason or not args.fence_evidence_digest:
             raise SystemExit('Restore requires an external authority directory, recovery reason and fencing evidence digest for an isolated target.')
         store = AuthorityStore(authority_path)
-        connection = connect_database(database_url)
-        try:
-            database = connection.native_connection().execute('SELECT current_database() AS name').fetchone()['name']
-            connection.commit()
-            transition(connection,store,'prepare-restore',database=database,reason=args.recovery_reason,evidence=args.fence_evidence_digest,reader_gid=args.authority_reader_gid)
-            connection.commit()
-        finally:
-            connection.close()
-        subprocess.run(
-            [
-                "pg_restore",
-                "--clean",
-                "--if-exists",
-                "--no-owner",
-                "--single-transaction",
-                "--exit-on-error",
-                "--dbname",
-                database_url,
-                str(source_path),
-            ],
-            check=True,
-            env=_postgres_command_env(),
-        )
-        connection = connect_database(database_url)
-        try:
-            compatible = connection.native_connection().execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='execution_control_state' AND column_name='journal_digest'").fetchone()
-            connection.commit()
-            if compatible:
-                transition(connection,store,'synchronize',database=database)
+        store.initialize_directory(args.authority_reader_gid)
+        with store.writer():
+            connection = connect_database(database_url)
+            try:
+                database = connection.native_connection().execute('SELECT current_database() AS name').fetchone()['name']
                 connection.commit()
-        finally:
-            connection.close()
+                transition(connection,store,'prepare-restore',database=database,reason=args.recovery_reason,evidence=args.fence_evidence_digest)
+                connection.commit()
+            finally:
+                connection.close()
+            subprocess.run(
+                [
+                    "pg_restore",
+                    "--clean",
+                    "--if-exists",
+                    "--no-owner",
+                    "--single-transaction",
+                    "--exit-on-error",
+                    "--dbname",
+                    database_url,
+                    str(source_path),
+                ],
+                check=True,
+                env=_postgres_command_env(),
+            )
+            connection = connect_database(database_url)
+            try:
+                compatible = connection.native_connection().execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='execution_control_state' AND column_name='journal_digest'").fetchone()
+                connection.commit()
+                if compatible:
+                    transition(connection,store,'synchronize',database=database)
+                    connection.commit()
+            finally:
+                connection.close()
         print(f"database restored from {source_path}; canonical execution remains held")
         if not compatible:
             print('Apply compatible migrations, then synchronize the external execution authority before canonical admission.')
