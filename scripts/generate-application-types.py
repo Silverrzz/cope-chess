@@ -54,15 +54,20 @@ def main() -> int:
     sys.path.insert(0, str(ROOT))
     from cope.application.commands import COMMANDS
     from cope.application.queries import QUERIES
+    from cope.application.views import VIEWS,ViewSnapshot,ViewBatch
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     definitions = []
+    prefixes = set()
 
     def model_type(model, name: str, category: str) -> str:
         schema = model.model_json_schema()
         prefix = "ApplicationSchema_"+type_name(category+"_"+name)
+        if prefix in prefixes:
+            raise ValueError("Application schema names collide after TypeScript conversion")
+        prefixes.add(prefix)
         names = [type_name(key) for key in schema.get("$defs",{})]
         if len(names)!=len(set(names)):
             raise ValueError("Application schema definition names collide after TypeScript conversion")
@@ -86,7 +91,14 @@ def main() -> int:
     lines.extend(["}", "", "export interface ApplicationQueryOutputs {"])
     for name,query in sorted(QUERIES.items()):
         lines.append(f"  '{name}': {model_type(query.output_model,name,'query_output')}")
-    lines.extend(["}", "", "export type ApplicationQuery = keyof ApplicationQueryInputs", "",*definitions,""])
+    lines.extend(["}", "", "export type ApplicationQuery = keyof ApplicationQueryInputs", "", "export interface ApplicationViewInputs {"])
+    for name,view in sorted(VIEWS.items()):
+        lines.append(f"  '{name}': {model_type(view.input_model,name,'view_input')}")
+    lines.extend(["}", "", "export interface ApplicationViewOutputs {"])
+    for name,view in sorted(VIEWS.items()):
+        lines.append(f"  '{name}': {model_type(view.output_model,name,'view_output')}")
+    lines.extend(["}", "", "export type ApplicationView = keyof ApplicationViewInputs", "", "export type ApplicationViewSnapshot = "+model_type(ViewSnapshot,'snapshot','view_transport'),
+                  "", "export type ApplicationViewBatch = "+model_type(ViewBatch,'batch','view_transport'), "",*definitions,""])
     content = "\n".join(lines)
     target = ROOT / "frontend/src/types/application-inputs.ts"
     if args.check:

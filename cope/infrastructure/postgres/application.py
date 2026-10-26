@@ -6,6 +6,19 @@ from cope.application.errors import ApplicationError
 from cope.application.identity import Principal
 
 
+def run_coherent_application(connection, identity, handler, *args):
+    raw = connection.native_connection()
+    if raw.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("Coherent application reads require a fresh database transaction")
+    try:
+        raw.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        raw.execute("SET LOCAL statement_timeout='5s'")
+        return run_application(connection,identity,handler,*args)
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def run_application(connection, identity, handler, *args, **kwargs):
     principal = identity if isinstance(identity, Principal) else Principal(identity.actor, tuple(identity.scopes), identity.token_id)
     try:

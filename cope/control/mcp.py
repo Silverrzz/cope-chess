@@ -14,10 +14,11 @@ from starlette.responses import JSONResponse
 from cope.db import connect_database, get_git_host
 from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
 from cope.application.commands import CommandReceipt, current_principal, describe_target
-from cope.infrastructure.postgres.application import run_application
+from cope.infrastructure.postgres.application import run_application,run_coherent_application
 from cope.infrastructure.postgres.credentials import authenticate_bearer
 from cope.application.contracts import QueryRequest, QueryResult
 from cope.application.queries import execute_query, list_queries
+from cope.application.views import ViewRequest,ViewBatchRequest,ViewSnapshot,ViewBatch,execute_snapshot,execute_batch,list_views
 
 from .api import IntakeOperationRequest, OperationRequest, context_payload, submit_intake
 from .intake import Preset, save_preset
@@ -37,14 +38,15 @@ def install_mcp(app):
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=False)
 
-    def application_invoke(ctx, handler, *args):
+    def application_invoke(ctx, handler, *args, coherent=False):
         from mcp.server.fastmcp.exceptions import ToolError
         import json
 
         identity = ctx.request_context.request.scope["cope.control.principal"]
         connection = connect_database(app.state.db_path)
         try:
-            return run_application(connection, identity, handler, *args)
+            execute = run_coherent_application if coherent else run_application
+            return execute(connection, identity, handler, *args)
         except ApplicationError as error:
             raise ToolError(json.dumps(error.payload())) from error
         finally:
@@ -71,6 +73,20 @@ def install_mcp(app):
     async def cope_application_query(request: QueryRequest, ctx: Context) -> QueryResult:
         result = await asyncio.to_thread(application_invoke, ctx, execute_query, request)
         return QueryResult.model_validate(result)
+
+    @server.tool(annotations=read, description="Discover installed coherent views and their current scopes, schemas and invalidation contracts.")
+    async def cope_application_views(ctx: Context) -> list:
+        return await asyncio.to_thread(application_invoke,ctx,list_views)
+
+    @server.tool(annotations=read, description="Acquire a currently authorized authoritative view and its durable replay cut in one coherent database snapshot.")
+    async def cope_application_snapshot(request: ViewRequest, ctx: Context) -> ViewSnapshot:
+        result = await asyncio.to_thread(application_invoke,ctx,execute_snapshot,request,coherent=True)
+        return ViewSnapshot.model_validate(result)
+
+    @server.tool(annotations=read, description="Read bounded durable invalidations from an explicit application-applied checkpoint. Preserve dirty-view refresh obligations before advancing the checkpoint; transport receipt alone is insufficient.")
+    async def cope_application_batch(request: ViewBatchRequest, ctx: Context) -> ViewBatch:
+        result = await asyncio.to_thread(application_invoke,ctx,execute_batch,request,coherent=True)
+        return ViewBatch.model_validate(result)
 
     def invoke(ctx, handler, *args, **kwargs):
         request = ctx.request_context.request

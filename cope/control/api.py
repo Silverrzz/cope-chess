@@ -9,11 +9,12 @@ from pydantic import Field
 
 from cope.application import ApplicationError, CommandRequest, execute_command, list_commands
 from cope.application.commands import current_principal, describe_target
-from cope.infrastructure.postgres.application import run_application
+from cope.infrastructure.postgres.application import run_application,run_coherent_application
 from cope.infrastructure.postgres.credentials import authenticate_bearer
 from cope.application.contracts import QueryRequest
 from cope.application.queries import execute_query, list_queries
 from cope.application.identity import browser_principal
+from cope.application.views import ViewRequest,ViewBatchRequest,execute_snapshot,execute_batch,list_views
 
 from cope.db import connect_database, list_engine_records, list_git_hosts, list_rating_lists, list_opening_suites
 from cope.variants import VARIANTS
@@ -83,6 +84,16 @@ def application_result(connection, identity, handler, *args):
         return run_application(connection, identity, handler, *args)
     except ApplicationError as error:
         raise HTTPException(error.status, error.payload()) from error
+
+
+def coherent_result(database_url, identity, handler, payload):
+    connection = connect_database(database_url)
+    try:
+        return run_coherent_application(connection,identity,handler,payload)
+    except ApplicationError as error:
+        raise HTTPException(error.status,error.payload()) from error
+    finally:
+        connection.close()
 
 
 class OperationRequest(Input):
@@ -212,6 +223,18 @@ def register_control_routes(app):
     @router.post("/application/queries")
     def application_query(payload: QueryRequest, identity=Depends(principal), connection=Depends(database)):
         return application_result(connection, identity, execute_query, payload)
+
+    @router.get("/application/views")
+    def application_views(identity=Depends(principal), connection=Depends(database)):
+        return application_result(connection,identity,list_views)
+
+    @router.post("/application/snapshots")
+    def application_snapshot(payload: ViewRequest, request: Request, identity=Depends(principal)):
+        return coherent_result(request.app.state.db_path,identity,execute_snapshot,payload)
+
+    @router.post("/application/batches")
+    def application_batch(payload: ViewBatchRequest, request: Request, identity=Depends(principal)):
+        return coherent_result(request.app.state.db_path,identity,execute_batch,payload)
 
     @router.get("/repository")
     def repository(identity=Depends(principal), connection=Depends(database)):

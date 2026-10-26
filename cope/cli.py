@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     application_parser = subparsers.add_parser("application", help="inspect and execute explicit application commands")
-    application_parser.add_argument("action", choices=("catalog", "describe", "execute", "query", "query-catalog"))
+    application_parser.add_argument("action", choices=("catalog", "describe", "execute", "query", "query-catalog", "views", "snapshot", "batch"))
     application_parser.add_argument("--database-url", dest="db_path", default=_default_database_url())
     application_parser.add_argument("--token-file", type=Path, required=True)
     application_parser.add_argument("--request", type=Path)
@@ -757,17 +757,27 @@ def _application_command(args) -> int:
     from cope.application.commands import current_principal, describe_target
     from cope.application.contracts import QueryRequest
     from cope.application.queries import execute_query, list_queries
+    from cope.application.views import ViewRequest,ViewBatchRequest,execute_snapshot,execute_batch,list_views
     from cope.infrastructure.postgres.credentials import authenticate_bearer
     from cope.db import connect_database
-    from cope.infrastructure.postgres.application import run_application
+    from cope.infrastructure.postgres.application import run_application,run_coherent_application
 
     connection = connect_database(args.db_path)
     try:
         identity = authenticate_bearer(connection, args.token_file.read_text(encoding="utf-8").strip())
+        connection.commit()
         if args.action == "catalog":
             result = run_application(connection, identity, lambda raw, actor: list_commands(current_principal(raw, actor)))
         elif args.action == "query-catalog":
             result = run_application(connection, identity, lambda raw, actor: list_queries(current_principal(raw, actor)))
+        elif args.action == "views":
+            result = run_application(connection,identity,list_views)
+        elif args.action in {"snapshot","batch"}:
+            if args.request is None:
+                raise ValueError(f"{args.action} requires --request containing the complete JSON view request")
+            model,handler = (ViewRequest,execute_snapshot) if args.action=="snapshot" else (ViewBatchRequest,execute_batch)
+            request = model.model_validate_json(args.request.read_text(encoding="utf-8"))
+            result = run_coherent_application(connection,identity,handler,request)
         elif args.action == "query":
             if args.request is None:
                 raise ValueError("query requires --request containing the complete JSON query")

@@ -102,6 +102,22 @@ export interface ApplicationQueryOutputs {
 
 export type ApplicationQuery = keyof ApplicationQueryInputs
 
+export interface ApplicationViewInputs {
+  'legacy.activity.detail.v1': Record<string, never>
+  'legacy.activity.list.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
+}
+
+export interface ApplicationViewOutputs {
+  'legacy.activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+  'legacy.activity.list.v1': { "items": Array<ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem>; "count": ApplicationSchema_view_output_legacy_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_view_output_legacy_activity_list_v1_ActivityBasis }
+}
+
+export type ApplicationView = keyof ApplicationViewInputs
+
+export type ApplicationViewSnapshot = { "view": string; "context": string; "schema_version": 1; "refresh_mode": "invalidation"; "data": Record<string, unknown>; "checkpoint": string; "expires_at": string }
+
+export type ApplicationViewBatch = { "view": string; "context": string; "schema_version": 1; "previous_checkpoint": string; "checkpoint": string; "invalidated": boolean; "has_more": boolean; "expires_at": string }
+
 export type ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
 export type ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_query_output_activity_legacy_inspect_v1_Count = { "count": number; "more": boolean; "limit"?: number }
@@ -114,3 +130,6 @@ export type ApplicationSchema_query_output_events_status_v1_ConsumerStatus = { "
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput = { "name": string; "label": string; "kinds": Array<string>; "required": boolean }
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingOutput = { "key": string; "label": string; "policy_revision": string; "permits_anonymous": boolean; "arguments": Array<ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput> }
 export type ApplicationSchema_query_output_forms_datetime_options_v1_DateTimeChoice = { "value": string; "label": string; "utc": string }
+export type ApplicationSchema_view_output_legacy_activity_list_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
+export type ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+export type ApplicationSchema_view_output_legacy_activity_list_v1_Count = { "count": number; "more": boolean; "limit"?: number }
