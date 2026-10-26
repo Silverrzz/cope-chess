@@ -85,7 +85,7 @@ async function load(more = false): Promise<void> {
   } catch (cause) {
     if (!active || current !== generation || cause instanceof DOMException && cause.name === 'AbortError') return
     error.value = message(cause)
-    if (cause instanceof ApiError && [401,403].includes(cause.status)) { items.value = []; page.value = null; selected.value = null; removed.value = null }
+    if (cause instanceof ApiError && [401,403].includes(cause.status)) { items.value = []; page.value = null; selected.value = null; removed.value = null; coherent.deny(message(cause)) }
   } finally { if (active && current === generation) manualLoading.value = false }
 }
 async function inspectDelivery(): Promise<void> {
@@ -107,7 +107,7 @@ async function catalogue(): Promise<void> {
   catch (cause) { if (active && current === catalogueGeneration) error.value = message(cause) }
 }
 watch(coherent.state,(next,previous) => {
-  if (!coherentEnabled.value) return
+  if (!coherentEnabled.value && next.status !== 'denied') return
   error.value = next.error
   if (next.snapshotSerial !== previous.snapshotSerial && next.data) {
     ++generation; controller?.abort(); manualLoading.value = false; items.value = next.data.items; page.value = next.data
