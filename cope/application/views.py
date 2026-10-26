@@ -13,6 +13,7 @@ from pydantic import Field,ValidationError
 from .contracts import Input
 from .errors import ApplicationError
 from .identity import current_principal
+from cope.execution.control_authority import control_authority
 
 
 class ViewRequest(Input):
@@ -107,8 +108,11 @@ def _prepare(connection, principal, request: ViewRequest):
     if row is None or row["retained_after"]>row["tail"]:
         raise ApplicationError("delivery_unavailable","Durable replay requires an operator recovery decision.",503)
     key = hashlib.sha256(row["secret"].encode()).digest()
+    with control_authority(connection,allow_held=True,allow_unconfigured=True) as control:
+        incarnation = str(control['control_incarnation']) if control['control_incarnation'] else None
     basis = [view.key,1,principal.actor,sorted(principal.scopes),principal.credential_kind,principal.resource_scope,
              principal.browser.session_id if principal.browser else None,
+             incarnation,
              request.target,payload.model_dump(mode="json")]
     context = hmac.new(key,json.dumps(basis,sort_keys=True,separators=(",",":"),allow_nan=False).encode(),hashlib.sha256).hexdigest()
     return view,principal,payload,row,Fernet(base64.urlsafe_b64encode(key)),context

@@ -39,7 +39,10 @@ def load_access_tokens(request: Request) -> None:
             bootstrap_authority_lock(raw,exclusive=exclusive)
             tokens = {row['role']:row['token'] or None for row in raw.execute('SELECT role,token FROM admin_access_tokens FOR SHARE').fetchall()}
             credentials = {'admin':tokens.get('admin',request.app.state.configured_admin_token),'manager':tokens.get('manager'),'session_role':None}
-            roots = {row['role']:row for row in raw.execute('SELECT role,generation,token_digest FROM application_bootstrap_roles FOR SHARE').fetchall()}
+            roots = {row['role']:row for row in raw.execute('SELECT role,generation,token_digest,sessions_valid_after,recovery_locked FROM application_bootstrap_roles FOR SHARE').fetchall()}
+            for role in ('admin','manager'):
+                if roots[role]['recovery_locked']:
+                    credentials[role]=None
             changed = [role for role in ('admin','manager') if roots[role]['token_digest']!=(bootstrap_token_digest(credentials[role]) if credentials[role] else None)]
             if changed and not exclusive:
                 connection.rollback()
@@ -47,12 +50,14 @@ def load_access_tokens(request: Request) -> None:
             for role in changed:
                 raw.execute('UPDATE application_bootstrap_roles SET generation=generation+1,token_digest=%s WHERE role=%s',
                             (bootstrap_token_digest(credentials[role]) if credentials[role] else None,role))
-                roots[role]=raw.execute('SELECT generation,token_digest FROM application_bootstrap_roles WHERE role=%s',(role,)).fetchone()
+                roots[role]=raw.execute('SELECT generation,token_digest,sessions_valid_after,recovery_locked FROM application_bootstrap_roles WHERE role=%s',(role,)).fetchone()
             value = request.cookies.get('cope_admin_session','')
             if value and len(value)<=1024:
                 for role in ('admin','manager'):
                     secret = credentials[role]
                     if secret and signed_value_nonce(secret,value) is not None:
+                        if int(value.split('.',1)[0])<roots[role]['sessions_valid_after']:
+                            break
                         session = raw.execute('SELECT role,role_generation,revoked_at FROM application_browser_sessions WHERE session_hash=%s FOR SHARE',
                                               (hashlib.sha256(value.encode()).hexdigest(),)).fetchone()
                         if session is None or session['revoked_at'] is None and session['role']==role and session['role_generation']==roots[role]['generation']:

@@ -7,6 +7,7 @@ from pydantic import Field
 
 from cope.application.contracts import Input,Query
 from cope.application.errors import ApplicationError
+from cope.execution.control_authority import authority_status
 
 from .admission import may_inspect,resolve_operation,resource_id
 from .specifications import ArtifactVerificationSpec,PreparationMandate,preparation_binding_matches,specification_digest
@@ -17,7 +18,7 @@ class Empty(Input):
 
 
 class BlockReason(Input):
-    code: Literal['control_plane_unavailable']
+    code: Literal['control_plane_unavailable','execution_recovery_review_required']
     message: str
 
 
@@ -53,6 +54,9 @@ class JobDetail(JobSummary):
     created_at: str
     not_after: str
     input: JobInputView | None
+    admitted_incarnation: UUID | None
+    current_incarnation: UUID | None
+    recovery_review_required: bool
     authority_mode: Literal['on_behalf_of_caller'] = 'on_behalf_of_caller'
     completion_policy: Literal['finish_admitted_pure_work'] = 'finish_admitted_pure_work'
 
@@ -82,14 +86,34 @@ class RuntimePage(Input):
     truncated: bool
 
 
+class ControlStatus(Input):
+    status: Literal['unconfigured','unavailable','mismatch','recovery_incomplete','held']
+    configured: bool
+    database_incarnation: UUID | None
+    external_incarnation: UUID | None
+    generation: int
+    recovery_hold: bool
+    credential_reset_pending: bool
+    bootstrap_admin_locked: bool
+    bootstrap_manager_locked: bool
+    held_work: int
+    held_work_more: bool
+    journal_digest: str | None
+    new_dispatch: Literal['disabled']
+
+
 def summary(row):
+    reason = row['block_reason'] if row['status']=='blocked' else None
+    if reason is not None and row['current_incarnation'] is not None and row['admitted_incarnation']!=row['current_incarnation']:
+        reason = {'code':'execution_recovery_review_required','message':'This preparation predates the current control authority and needs a new decision.'}
     return {'id':row['id'],'workload':row['workload'],'status':row['status'],'state_version':row['state_version'],
-            'readiness':row['block_reason'] if row['status']=='blocked' else None}
+            'readiness':reason}
 
 
 def operation_detail(connection, principal, target, payload):
     operation = resolve_operation(connection,principal,target)
-    rows = connection.execute('''SELECT job.*,object.state_version FROM execution_jobs job JOIN application_objects object ON object.id=job.id
+    rows = connection.execute('''SELECT job.*,object.state_version,control.control_incarnation AS current_incarnation FROM execution_jobs job JOIN application_objects object ON object.id=job.id
+        JOIN execution_control_state control ON control.singleton
         JOIN execution_operation_jobs link ON link.job_id=job.id WHERE link.operation_id=%s ORDER BY job.id LIMIT 17''',(operation.object_id,)).fetchall()
     if len(rows)>16:
         raise ApplicationError('operation_projection_unavailable','This operation needs a compatible bounded work-graph inspector.',503)
@@ -111,7 +135,8 @@ def checked_specification(row):
 
 
 def job_detail(connection, principal, target, payload):
-    row = connection.execute('''SELECT job.*,object.state_version,visible.operation_id FROM execution_jobs job
+    row = connection.execute('''SELECT job.*,object.state_version,visible.operation_id,control.control_incarnation AS current_incarnation FROM execution_jobs job
+        JOIN execution_control_state control ON control.singleton
         JOIN application_objects object ON object.id=job.id JOIN LATERAL (
             SELECT operation.id AS operation_id FROM execution_operation_jobs link JOIN execution_operations operation ON operation.id=link.operation_id
             WHERE link.job_id=job.id AND (%s OR operation.actor=%s)
@@ -128,7 +153,9 @@ def job_detail(connection, principal, target, payload):
             'runtime_image':spec.runtime_image,'runtime_source':spec.runtime_source,'specification_digest':row['specification_digest'],
             'cpu_millis':spec.envelope.cpu_millis,'memory_bytes':spec.envelope.memory_bytes,'scratch_bytes':spec.envelope.scratch_bytes,
             'timeout_seconds':spec.envelope.timeout_seconds}
-    return {**summary(row),'kind':'job','operation_id':row['operation_id'],'created_at':row['created_at'].isoformat(),'not_after':row['not_after'].isoformat(),'input':details}
+    return {**summary(row),'kind':'job','operation_id':row['operation_id'],'created_at':row['created_at'].isoformat(),'not_after':row['not_after'].isoformat(),'input':details,
+            'admitted_incarnation':row['admitted_incarnation'],'current_incarnation':row['current_incarnation'],
+            'recovery_review_required':row['status']=='blocked' and row['current_incarnation'] is not None and row['admitted_incarnation']!=row['current_incarnation']}
 
 
 def runtime_list(connection, principal, target, payload):
@@ -141,4 +168,5 @@ def queries():
         Query('execution.operations.detail.v1','operations:read',Empty,OperationDetail,operation_detail,True),
         Query('execution.jobs.detail.v1','operations:read',Empty,JobDetail,job_detail,True),
         Query('execution.runtimes.v1','engines:prepare_artifact',Empty,RuntimePage,runtime_list),
+        Query('execution.control.v1','execution:inspect',Empty,ControlStatus,lambda connection,principal,target,payload:authority_status(connection)),
     )

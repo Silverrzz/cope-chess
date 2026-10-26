@@ -10,6 +10,7 @@ from pydantic import Field,ValidationError
 from cope.application.contracts import Command,Input,Outcome,Target
 from cope.application.errors import ApplicationError
 from cope.application.legacy_resources import ENGINE
+from cope.execution.control_authority import control_authority
 
 from .authority import capture_caller_authority,current_caller_authority
 from .specifications import ArtifactVerificationSpec,LegacyEngineArchive,OperandUse,PreparationMandate,preparation_binding_matches,specification_digest
@@ -103,6 +104,11 @@ def read_archive(connection, engine_id, version_id):
 
 
 def prepare_artifact(context, payload: PrepareArtifact):
+    with control_authority(context.connection,allow_held=True,allow_unconfigured=True) as control:
+        return prepare_artifact_under_control(context,payload,control)
+
+
+def prepare_artifact_under_control(context, payload: PrepareArtifact, control):
     connection,principal = context.connection,context.principal
     caller = capture_caller_authority(connection,principal,'engines:prepare_artifact',completion_policy='finish_admitted_pure_work')
     archive = read_archive(connection,UUID(context.target.object_id),payload.engine_version_id)
@@ -114,8 +120,7 @@ def prepare_artifact(context, payload: PrepareArtifact):
     root = connection.execute("SELECT * FROM execution_admission_roots WHERE key='engine_preparation.v1' FOR UPDATE").fetchone()
     if root is None:
         raise ApplicationError('admission_unavailable','The preparation allocation root is unavailable.',503)
-    control = connection.execute('SELECT recovery_hold,control_incarnation FROM execution_control_state WHERE singleton FOR SHARE').fetchone()
-    if control is None or not control['recovery_hold'] or control['control_incarnation'] is not None:
+    if not control['recovery_hold']:
         raise ApplicationError('execution_activation_incompatible','This release supports admission while execution activation is held.',503)
     count = connection.execute('''SELECT count(*) AS total,count(*) FILTER (WHERE operation.actor=%s) AS actor
         FROM execution_jobs job JOIN execution_operations operation ON operation.id=job.owner_operation
@@ -133,9 +138,9 @@ def prepare_artifact(context, payload: PrepareArtifact):
     connection.execute('''INSERT INTO execution_operations(id,actor,command,admission_root) VALUES (%s,%s,%s,%s)''',
         (operation_id,principal.actor,context.request.command,mandate.allocation_root))
     reason = {'code':'control_plane_unavailable','message':'Execution is waiting for a verified controller and runtime.'}
-    connection.execute('''INSERT INTO execution_jobs(id,owner_operation,runtime_id,admission_root,workload,specification,specification_digest,mandate,not_after,block_reason)
-        VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s::jsonb)''',
-        (job_id,operation_id,payload.runtime_id,mandate.allocation_root,spec.workload,spec.model_dump_json(),digest,mandate.model_dump_json(),mandate.expires_at,json.dumps(reason)))
+    connection.execute('''INSERT INTO execution_jobs(id,owner_operation,runtime_id,admission_root,workload,specification,specification_digest,mandate,not_after,block_reason,admitted_incarnation)
+        VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s::jsonb,%s)''',
+        (job_id,operation_id,payload.runtime_id,mandate.allocation_root,spec.workload,spec.model_dump_json(),digest,mandate.model_dump_json(),mandate.expires_at,json.dumps(reason),control['control_incarnation']))
     connection.execute("INSERT INTO execution_operation_jobs(operation_id,job_id,interest,owner_operation) VALUES (%s,%s,'owning',%s)",(operation_id,job_id,operation_id))
     for source,relation,target in ((operation_id,'operation.job',job_id),(job_id,'job.runtime',payload.runtime_id),(job_id,'job.input_engine',archive.engine_id)):
         connection.execute('INSERT INTO application_object_relations(source_id,relation,target_id) VALUES (%s,%s,%s)',(source,relation,target))

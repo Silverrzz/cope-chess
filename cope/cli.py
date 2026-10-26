@@ -78,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     restore_parser.add_argument(
         "--database-url", dest="db_path", default=_default_database_url()
     )
+    restore_parser.add_argument('--execution-authority-directory',type=Path)
+    restore_parser.add_argument('--authority-reader-gid',type=int,default=10001)
+    restore_parser.add_argument('--recovery-reason')
+    restore_parser.add_argument('--fence-evidence-digest')
 
     events_parser = subparsers.add_parser("events", help="event module operations")
     events_subparsers = events_parser.add_subparsers(dest="events_command", required=True)
@@ -875,15 +879,32 @@ def _database_command(args) -> int:
         return 0
 
     if args.db_command == "restore":
+        from cope.execution.authority_store import AuthorityStore
+        from cope.execution.bootstrap import transition
+
         source_path = args.source.expanduser().resolve()
         if not source_path.is_file():
             raise SystemExit(f"backup does not exist: {source_path}")
+        authority_path = args.execution_authority_directory or os.environ.get('COPE_EXECUTION_AUTHORITY_DIR')
+        if not authority_path or not args.recovery_reason or not args.fence_evidence_digest:
+            raise SystemExit('Restore requires an external authority directory, recovery reason and fencing evidence digest for an isolated target.')
+        store = AuthorityStore(authority_path)
+        connection = connect_database(database_url)
+        try:
+            database = connection.native_connection().execute('SELECT current_database() AS name').fetchone()['name']
+            connection.commit()
+            transition(connection,store,'prepare-restore',database=database,reason=args.recovery_reason,evidence=args.fence_evidence_digest,reader_gid=args.authority_reader_gid)
+            connection.commit()
+        finally:
+            connection.close()
         subprocess.run(
             [
                 "pg_restore",
                 "--clean",
                 "--if-exists",
                 "--no-owner",
+                "--single-transaction",
+                "--exit-on-error",
                 "--dbname",
                 database_url,
                 str(source_path),
@@ -891,7 +912,18 @@ def _database_command(args) -> int:
             check=True,
             env=_postgres_command_env(),
         )
-        print(f"database restored from {source_path}")
+        connection = connect_database(database_url)
+        try:
+            compatible = connection.native_connection().execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='execution_control_state' AND column_name='journal_digest'").fetchone()
+            connection.commit()
+            if compatible:
+                transition(connection,store,'synchronize',database=database)
+                connection.commit()
+        finally:
+            connection.close()
+        print(f"database restored from {source_path}; canonical execution remains held")
+        if not compatible:
+            print('Apply compatible migrations, then synchronize the external execution authority before canonical admission.')
         return 0
 
     raise SystemExit(f"unknown database command: {args.db_command}")

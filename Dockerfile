@@ -59,10 +59,12 @@ CMD ["worker", "--state-file", "/var/lib/cope-worker/worker.json"]
 
 FROM docker-system AS runtime
 ENV COPE_DATABASE_URL=postgresql://cope@db:5432/cope
+ADD --chmod=0644 --checksum=sha256:0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76 https://www.postgresql.org/media/keys/ACCC4CF8.asc /usr/share/keyrings/cope-postgresql.asc
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update \
-    && apt-get install --no-install-recommends -y postgresql-client
+    printf '%s\n' 'deb [signed-by=/usr/share/keyrings/cope-postgresql.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/cope-postgresql.list \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y postgresql-client-17
 ARG COPE_BUILD_VERSION=0.1.0
 ENV COPE_BUILD_VERSION=${COPE_BUILD_VERSION}
 COPY pyproject.toml MANIFEST.in ./

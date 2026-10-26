@@ -35,6 +35,9 @@ def bootstrap_token_digest(token: str) -> str:
 def bootstrap_secret(connection, role: str, *, configured_admin: str | None=None) -> str | None:
     if role not in {'admin','manager'}:
         raise ApplicationError('invalid_credential','This bootstrap role is unavailable.',403)
+    state = connection.execute('SELECT recovery_locked FROM application_bootstrap_roles WHERE role=%s FOR SHARE',(role,)).fetchone()
+    if state is None or state['recovery_locked']:
+        return None
     row = connection.execute('SELECT token FROM admin_access_tokens WHERE role=%s FOR SHARE',(role,)).fetchone()
     if row is not None:
         return row['token'] or None
@@ -51,7 +54,7 @@ def bootstrap_secret(connection, role: str, *, configured_admin: str | None=None
 
 
 def bootstrap_role_state(connection, role: str):
-    row = connection.execute('SELECT generation,token_digest FROM application_bootstrap_roles WHERE role=%s FOR SHARE',(role,)).fetchone()
+    row = connection.execute('SELECT generation,token_digest,sessions_valid_after,recovery_locked FROM application_bootstrap_roles WHERE role=%s FOR SHARE',(role,)).fetchone()
     if row is None:
         raise ApplicationError('credential_unavailable','The bootstrap credential registry is unavailable.',503)
     return row
@@ -129,7 +132,7 @@ def current_principal(connection, principal: Principal) -> Principal:
         now = connection.execute('SELECT extract(epoch FROM clock_timestamp()) AS now').fetchone()['now']
         root = bootstrap_role_state(connection,binding.role)
         secret = connection.execute('SELECT token FROM admin_access_tokens WHERE role=%s FOR SHARE',(binding.role,)).fetchone()
-        if (binding.expires_at<=now or binding.expires_at-43200>now
+        if (root['recovery_locked'] or binding.expires_at<=now or binding.expires_at-43200>now or binding.expires_at-43200<root['sessions_valid_after']
             or secret is not None and (not secret['token'] or not hmac.compare_digest(binding.token_digest,bootstrap_token_digest(secret['token'])))
             or secret is None and binding.role!='admin'
             or root['token_digest']!=binding.token_digest):

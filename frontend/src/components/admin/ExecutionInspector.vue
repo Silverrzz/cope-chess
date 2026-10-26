@@ -72,6 +72,7 @@ onBeforeUnmount(() => { active = false; ++generation; controller?.abort(); data.
       </template>
       <template v-else>
         <p v-if="data.readiness">{{ data.readiness.message }}</p><p v-if="data.status === 'cancelled'">This preparation job was cancelled before any attempt started.</p>
+        <p v-if="data.recovery_review_required">This request predates the current control authority. It needs a new preparation decision after recovery reconciliation.</p>
         <dl><dt>Admission deadline</dt><dd>{{ time(data.not_after) }}</dd><dt>Authority</dt><dd>Bound to the initiating credential; new dispatch checks current permission</dd><dt>Revocation policy</dt><dd>Already admitted pure work may finish; no further dispatch after revocation</dd></dl>
         <template v-if="data.input"><h3>Admitted inputs and bounds</h3><dl><dt>Engine version</dt><dd>{{ data.input.engine_version_id }}</dd><dt>Build</dt><dd>{{ data.input.build_hash }}</dd><dt>Archive</dt><dd>{{ data.input.archive_sha256 }}</dd><dt>Archive size</dt><dd>{{ data.input.archive_bytes.toLocaleString() }} bytes</dd><dt>Runtime image</dt><dd>{{ data.input.runtime_image }}</dd><dt>Profile</dt><dd>{{ data.input.profile }}</dd><dt>CPU ceiling</dt><dd>{{ data.input.cpu_millis / 1000 }} CPU</dd><dt>Memory ceiling</dt><dd>{{ (data.input.memory_bytes / 1048576).toLocaleString() }} MiB</dd><dt>Execution timeout</dt><dd>{{ data.input.timeout_seconds }} seconds</dd></dl></template>
         <p v-else>Input details require current engine preparation permission.</p>
