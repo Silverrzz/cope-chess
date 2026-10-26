@@ -200,6 +200,8 @@ class DatabaseConnection:
         except psycopg.IntegrityError as exc:
             raise sqlite3.IntegrityError(str(exc)) from exc
         except psycopg.Error as exc:
+            if exc.sqlstate=='P7501':
+                raise ValueError('Legacy execution routing changed. Refresh the owning workflow before retrying.') from exc
             raise sqlite3.DatabaseError(str(exc)) from exc
         return DatabaseCursor(self, cursor)
 
@@ -214,6 +216,8 @@ class DatabaseConnection:
         except psycopg.IntegrityError as exc:
             raise sqlite3.IntegrityError(str(exc)) from exc
         except psycopg.Error as exc:
+            if exc.sqlstate=='P7501':
+                raise ValueError('Legacy execution routing changed. Refresh the owning workflow before retrying.') from exc
             raise sqlite3.DatabaseError(str(exc)) from exc
         return DatabaseCursor(self, cursor)
 
@@ -226,6 +230,8 @@ class DatabaseConnection:
         except psycopg.IntegrityError as exc:
             raise sqlite3.IntegrityError(str(exc)) from exc
         except psycopg.Error as exc:
+            if exc.sqlstate=='P7501':
+                raise ValueError('Legacy execution routing changed. Refresh the owning workflow before retrying.') from exc
             raise sqlite3.DatabaseError(str(exc)) from exc
 
     def commit(self) -> None:

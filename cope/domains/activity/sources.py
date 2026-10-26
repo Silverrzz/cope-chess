@@ -30,10 +30,12 @@ class ActivitySource:
              source.id::text AS source_id,left({self.title_expression},300) AS title,
              {self.state_expression} AS state,source.status::text AS source_state,
              {self.actor_expression} AS owner_actor,%s::text AS execution_owner,%s::text AS inspect_url,
+             CASE WHEN routing.held THEN 'held' ELSE 'legacy' END AS execution_route,routing.generation AS ownership_generation,
              'legacy_observed'::text AS ownership_mode,'status_only'::text AS mapping_quality,
              'not_recorded'::text AS cleanup_state,object.created_at AS observed_at,
              left(({self.created_expression})::text,100) AS source_created_at,object.content_revision,object.state_version
              FROM {self.table} source JOIN application_objects object ON object.id=source.object_id
+             JOIN execution_ownership routing ON routing.object_id=object.id
              WHERE ({where}) AND object.created_at<=%s"""
         return statement,parameters
 

@@ -43,6 +43,8 @@ class ActivityItem(Input):
     source_state: str
     owner_actor: str | None
     execution_owner: str
+    execution_route: Literal['legacy','held']
+    ownership_generation: int
     inspect_url: str
     ownership_mode: Literal["legacy_observed"]
     mapping_quality: Literal["status_only"]

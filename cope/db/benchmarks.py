@@ -378,6 +378,7 @@ def claim_benchmark_job(
         FROM benchmark_jobs
         WHERE hardware_key = ?
           AND status = 'queued'
+          AND EXISTS (SELECT 1 FROM execution_ownership ownership WHERE ownership.object_id=benchmark_jobs.object_id AND ownership.backend='legacy' AND NOT ownership.held)
         ORDER BY scheduled_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1

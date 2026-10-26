@@ -83,6 +83,7 @@ def _claim(connection, owner):
     row = connection.execute(
         """SELECT operation.* FROM control_operations operation
            WHERE operation.status IN ('pending', 'running', 'waiting')
+             AND EXISTS (SELECT 1 FROM execution_ownership ownership WHERE ownership.object_id=operation.object_id AND ownership.backend='legacy' AND NOT ownership.held)
              AND NOT operation.cancel_requested
              AND (operation.lease_until IS NULL OR operation.lease_until < clock_timestamp())
              AND EXISTS (SELECT 1 FROM control_steps step WHERE step.operation_id = operation.id

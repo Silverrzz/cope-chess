@@ -16,6 +16,8 @@ export interface ApplicationInputs {
   'forms.review.v1': { "state_version": number; "subject_digest": string; "decision": "accepted" | "declined" | "changes_requested"; "reason"?: string }
   'forms.submit.v1': { "release_id": string; "answers": Record<string, unknown>; "attachment_subject"?: string | null }
   'forms.withdraw.v1': Record<string, never>
+  'jobs.legacy_hold.v1': { "held": boolean; "reason": string }
+  'operations.legacy_hold.v1': { "held": boolean; "reason": string }
 }
 
 export type ApplicationCommand = keyof ApplicationInputs
@@ -38,6 +40,8 @@ export const applicationCommandContracts = {
   'forms.review.v1': { requiresTarget: true, requiresVersion: true },
   'forms.submit.v1': { requiresTarget: true, requiresVersion: false },
   'forms.withdraw.v1': { requiresTarget: true, requiresVersion: true },
+  'jobs.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
+  'operations.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
 } as const
 
 export interface ApplicationOutputs {
@@ -58,6 +62,8 @@ export interface ApplicationOutputs {
   'forms.review.v1': { "response_id": string; "review_id": string; "revision": number; "decision": string }
   'forms.submit.v1': { "response_id": string; "form_id": string; "revision": number }
   'forms.withdraw.v1': { "response_id": string; "withdrawn": boolean }
+  'jobs.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
+  'operations.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
 }
 
 export interface ApplicationQueryInputs {
@@ -67,6 +73,7 @@ export interface ApplicationQueryInputs {
   'activity.list.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
   'activity.sources.v1': Record<string, never>
   'events.status.v1': Record<string, never>
+  'execution.legacy_route.v1': { "limit"?: number; "before_generation"?: number | null }
   'forms.bindings.v1': Record<string, never>
   'forms.datetime_options.v1': { "local_date": string; "local_time": string; "timezone": string }
   'forms.definition.check.v1': { "document": Record<string, unknown> }
@@ -81,12 +88,13 @@ export interface ApplicationQueryInputs {
 }
 
 export interface ApplicationQueryOutputs {
-  'activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
-  'activity.legacy.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+  'activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+  'activity.legacy.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
   'activity.legacy.inspect.v1': { "items": Array<ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_legacy_inspect_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityBasis }
   'activity.list.v1': { "items": Array<ApplicationSchema_query_output_activity_list_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_list_v1_ActivityBasis }
   'activity.sources.v1': { "items": Array<ApplicationSchema_query_output_activity_sources_v1_SourceItem> }
   'events.status.v1': { "incarnation": string; "schema_version": number; "retained_after": string; "last_delivery_position": string; "last_delivered_at": string | null; "pending_source": ApplicationSchema_query_output_events_status_v1_BoundedCount; "consumers": Array<ApplicationSchema_query_output_events_status_v1_ConsumerStatus>; "consumers_truncated": boolean; "basis"?: "single_statement_inspector" }
+  'execution.legacy_route.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false; "history": Array<ApplicationSchema_query_output_execution_legacy_route_v1_RouteHistory>; "next_generation": number | null }
   'forms.bindings.v1': { "items": Array<ApplicationSchema_query_output_forms_bindings_v1_BindingOutput> }
   'forms.datetime_options.v1': { "timezone": string; "options": Array<ApplicationSchema_query_output_forms_datetime_options_v1_DateTimeChoice> }
   'forms.definition.check.v1': { "definition": Record<string, unknown> }
@@ -113,7 +121,7 @@ export const applicationViewContracts = {
 } as const
 
 export interface ApplicationViewOutputs {
-  'legacy.activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+  'legacy.activity.detail.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
   'legacy.activity.list.v1': { "items": Array<ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem>; "count": ApplicationSchema_view_output_legacy_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_view_output_legacy_activity_list_v1_ActivityBasis }
 }
 
@@ -124,17 +132,18 @@ export type ApplicationViewSnapshot = { "view": string; "context": string; "sche
 export type ApplicationViewBatch = { "view": string; "context": string; "schema_version": 1; "previous_checkpoint": string; "checkpoint": string; "invalidated": boolean; "has_more": boolean; "expires_at": string }
 
 export type ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
-export type ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+export type ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_query_output_activity_legacy_inspect_v1_Count = { "count": number; "more": boolean; "limit"?: number }
 export type ApplicationSchema_query_output_activity_list_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
-export type ApplicationSchema_query_output_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+export type ApplicationSchema_query_output_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_query_output_activity_list_v1_Count = { "count": number; "more": boolean; "limit"?: number }
 export type ApplicationSchema_query_output_activity_sources_v1_SourceItem = { "key": string; "label": string; "kind": string; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed" }
 export type ApplicationSchema_query_output_events_status_v1_BoundedCount = { "count": number; "more": boolean; "limit"?: number }
 export type ApplicationSchema_query_output_events_status_v1_ConsumerStatus = { "key": string; "registered": boolean; "state": "current" | "pending" | "backoff" | "recovery_required" | "unavailable" | "not_started"; "applied_position": string; "pending": ApplicationSchema_query_output_events_status_v1_BoundedCount; "failure_count": number; "error": string | null; "retry_at": string | null; "updated_at": string | null }
+export type ApplicationSchema_query_output_execution_legacy_route_v1_RouteHistory = { "generation": number; "backend": string; "held": boolean; "changed_by": string; "reason": string; "changed_at": string }
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput = { "name": string; "label": string; "kinds": Array<string>; "required": boolean }
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingOutput = { "key": string; "label": string; "policy_revision": string; "permits_anonymous": boolean; "arguments": Array<ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput> }
 export type ApplicationSchema_query_output_forms_datetime_options_v1_DateTimeChoice = { "value": string; "label": string; "utc": string }
 export type ApplicationSchema_view_output_legacy_activity_list_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
-export type ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
+export type ApplicationSchema_view_output_legacy_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed"; "mapping_quality": "status_only"; "cleanup_state": "not_recorded"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_view_output_legacy_activity_list_v1_Count = { "count": number; "more": boolean; "limit"?: number }

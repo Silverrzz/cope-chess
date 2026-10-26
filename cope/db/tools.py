@@ -184,6 +184,7 @@ def claim_tool_job(
         """
         SELECT job.id FROM tool_jobs job
         WHERE job.status = 'queued'
+          AND EXISTS (SELECT 1 FROM execution_ownership ownership WHERE ownership.object_id=job.object_id AND ownership.backend='legacy' AND NOT ownership.held)
           AND job.required_threads <= ?
           AND job.required_hash_mb <= ?
           AND NOT EXISTS (

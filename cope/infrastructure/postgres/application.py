@@ -31,6 +31,11 @@ def run_application(connection, identity, handler, *args, **kwargs):
     except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure) as exc:
         connection.rollback()
         raise ApplicationError("concurrent_change", "Concurrent work prevented this edit. Retry the same request.") from exc
+    except psycopg.Error as exc:
+        connection.rollback()
+        if exc.sqlstate=='P7501':
+            raise ApplicationError('execution_ownership_changed','Legacy execution routing changed. Refresh the owning workflow before retrying.',409) from exc
+        raise
     except Exception:
         connection.rollback()
         raise
