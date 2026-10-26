@@ -21,12 +21,14 @@ class LegacyWork:
 SOURCES = (
     LegacyWork('legacy.control_operation','control_operations','operation',
                "source.status IN ('planned','pending') AND source.lease_owner IS NULL AND source.lease_until IS NULL AND NOT source.cancel_requested "
-               "AND NOT EXISTS (SELECT 1 FROM control_steps step WHERE step.operation_id=source.id AND (step.attempts<>0 OR step.status<>'pending' OR step.started_at IS NOT NULL OR step.finished_at IS NOT NULL))"),
+               "AND NOT EXISTS (SELECT 1 FROM control_steps step WHERE step.operation_id=source.id AND (step.attempts<>0 OR step.status<>'pending' OR step.started_at IS NOT NULL OR step.finished_at IS NOT NULL OR step.result IS NOT NULL))"),
     LegacyWork('legacy.tool_job','tool_jobs','job',
                "source.status='queued' AND source.attempt=0 AND source.worker_id IS NULL AND source.started_at IS NULL AND source.finished_at IS NULL "
-               "AND NOT EXISTS (SELECT 1 FROM tool_job_items item WHERE item.job_id=source.id AND (item.status<>'pending' OR item.started_at IS NOT NULL OR item.finished_at IS NOT NULL))"),
+               "AND NOT EXISTS (SELECT 1 FROM tool_job_items item WHERE item.job_id=source.id AND (item.status<>'pending' OR item.started_at IS NOT NULL OR item.finished_at IS NOT NULL)) "
+               "AND NOT EXISTS (SELECT 1 FROM puzzle_suite_runs run JOIN puzzle_suite_engine_results result ON result.run_id=run.id WHERE run.job_id=source.id)"),
     LegacyWork('legacy.benchmark_job','benchmark_jobs','job',
-               "source.status='queued' AND source.attempt=0 AND source.benchmarker_id IS NULL AND source.started_at IS NULL AND source.finished_at IS NULL"),
+               "source.status='queued' AND source.attempt=0 AND source.benchmarker_id IS NULL AND source.started_at IS NULL AND source.finished_at IS NULL "
+               "AND NOT EXISTS (SELECT 1 FROM engine_benchmarks result WHERE result.job_id=source.id)"),
 )
 
 
