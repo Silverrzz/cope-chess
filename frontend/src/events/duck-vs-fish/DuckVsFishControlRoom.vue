@@ -51,7 +51,7 @@ async function save(action: "visibility" | "schedule" | "unschedule"): Promise<v
 
 <template>
   <section class="panel pond-controls">
-    <header><div><h2>Duck vs Fish</h2><p>Duck Chess · 20 games · 64 threads per engine · {{ controlLabel }} · {{ payload.opening_book }}</p></div><button class="button button--secondary" :disabled="busy" @click="save('visibility')">{{ detail.event.published_at ? 'Unpublish event' : 'Publish event' }}</button></header>
+    <header><div><h2>Duck vs Fish</h2><p>Duck Chess · {{ payload.odds_steps?.length ? 'Odds ladder · first draw or loss ends the event' : '20 games' }} · {{ payload.tournament?.config?.engine_threads ?? 64 }} threads per engine · {{ controlLabel }} · {{ payload.opening_book }}</p></div><button class="button button--secondary" :disabled="busy" @click="save('visibility')">{{ detail.event.published_at ? 'Unpublish event' : 'Publish event' }}</button></header>
     <p v-if="error" role="alert">{{ error }}</p>
     <template v-if="payload.tournament">
       <p>Match #{{ payload.tournament.id }} · {{ payload.tournament.status }} · {{ detail.event.scheduled_start_at ? new Date(detail.event.scheduled_start_at).toLocaleString() : 'Start date TBD' }}</p>

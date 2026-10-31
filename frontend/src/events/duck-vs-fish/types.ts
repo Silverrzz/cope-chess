@@ -14,4 +14,5 @@ export interface PondPayload {
   tournament: TournamentRecord | null;
   games: GameRecord[];
   opening_book: string;
+  odds_steps?: string[];
 }

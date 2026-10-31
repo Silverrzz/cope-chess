@@ -1865,6 +1865,12 @@ def _finish_tournament_if_complete(
         set_tournament_status(connection, current.id, "aborted")
         return False
 
+    if all_terminal:
+        from cope.events.duck_vs_fish import advance_odds
+
+        if advance_odds(connection, current.id):
+            return False
+
     if current.config.format in {"round_robin", "gauntlet"}:
         if not all_terminal:
             return False

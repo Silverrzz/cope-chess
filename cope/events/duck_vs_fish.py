@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 from typing import Any
 
+import chess
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from cope.core.models import (
     AdjudicationConfig,
     IncrementTimeControl,
+    OpeningLine,
     RoundRobinFormatOptions,
     TournamentConfig,
     TournamentFormat,
@@ -21,6 +23,8 @@ from cope.core.models import (
 from cope.db import (
     create_event,
     create_event_cast_member,
+    create_game,
+    create_opening_suite,
     create_tournament,
     get_event,
     get_event_by_slug,
@@ -28,9 +32,11 @@ from cope.db import (
     list_engine_records,
     list_games,
     list_opening_suites,
+    list_suite_openings,
+    lock_tournament,
+    replace_suite_openings,
     set_event_published,
     set_event_status,
-    suite_opening_count,
     update_tournament,
 )
 from cope.db.events import EventRecord, utc_now
@@ -40,6 +46,118 @@ from .registry import EventModule, register_event_module
 
 
 MODULE_KEY = "duck-vs-fish"
+ODDS_SUITE = "Duck vs Fish start-position odds v1"
+ODDS_STEPS = (
+    ("Even material", ()),
+    ("Pawn odds", ("f2",)),
+    ("Two-pawn odds", ("f2", "c2")),
+    ("Knight odds", ("b1",)),
+    ("Rook odds", ("a1",)),
+    ("Two-bishop odds", ("c1", "f1")),
+    ("Queen odds", ("d1",)),
+    ("Queen and two-pawn odds", ("d1", "f2", "c2")),
+    ("Queen and rook odds", ("d1", "a1")),
+    ("Queen and two-rook odds", ("d1", "a1", "h1")),
+    ("Queen, two-rook and knight odds", ("d1", "a1", "h1", "b1")),
+    ("Queen, two-rook and two-knight odds", ("d1", "a1", "h1", "b1", "g1")),
+    ("King, bishop and eight pawns", ("d1", "a1", "h1", "b1", "g1", "c1")),
+    ("King and eight pawns", ("d1", "a1", "h1", "b1", "g1", "c1", "f1")),
+    *((f"King and {8 - count} {'pawn' if count == 7 else 'pawns'}" if count < 8 else "Lone king",
+       ("d1", "a1", "h1", "b1", "g1", "c1", "f1", *tuple(f"{file}2" for file in "fcbgdeah"[:count])))
+      for count in range(1, 9)),
+)
+
+
+def odds_openings() -> list[OpeningLine]:
+    openings = []
+    for index, (label, squares) in enumerate(ODDS_STEPS):
+        board = chess.Board()
+        for square in squares:
+            target = chess.parse_square(square)
+            board.remove_piece_at(chess.square_mirror(target) if index % 2 else target)
+        board.castling_rights = board.clean_castling_rights()
+        fen = board.fen()
+        openings.append(OpeningLine(name=label, start_fen=fen, fen=fen))
+    return openings
+
+
+def _odds_suite(connection: sqlite3.Connection) -> int:
+    suite = next((item for item in list_opening_suites(connection) if item.name == ODDS_SUITE and item.variant == "duck"), None)
+    expected = odds_openings()
+    if suite is not None:
+        actual = list_suite_openings(connection, suite.id)
+        if [(item.name, item.start_fen, item.moves, item.fen) for item in actual] != [(item.name, item.start_fen, item.moves, item.fen) for item in expected]:
+            raise ValueError("The Duck vs Fish odds suite has been modified.")
+        return suite.id
+    suite_id = create_opening_suite(connection, name=ODDS_SUITE, variant="duck")
+    replace_suite_openings(connection, suite_id, expected)
+    return suite_id
+
+
+def odds_event(connection: sqlite3.Connection, tournament_id: int) -> EventRecord | None:
+    row = connection.execute(
+        "SELECT id FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' = ? AND config::jsonb->>'odds_version' = '1'",
+        (str(tournament_id),),
+    ).fetchone()
+    return get_event(connection, int(row["id"])) if row is not None else None
+
+
+def advance_odds(connection: sqlite3.Connection, tournament_id: int) -> int | None:
+    tournament = lock_tournament(connection, tournament_id)
+    if tournament is None or odds_event(connection, tournament_id) is None:
+        return None
+    if tournament.status not in {"draft", "scheduled", "running"}:
+        return 0
+    games = list_games(connection, tournament_id)
+    if any(game.status != "finished" for game in games):
+        return 0
+    wakwak, fish = tournament.config.participants
+    if any(game.result != ("1-0" if game.white_engine_id == wakwak else "0-1") for game in games):
+        return 0
+    if len(games) >= len(ODDS_STEPS):
+        return 0
+    openings = list_suite_openings(connection, tournament.config.opening_suite_id)
+    if len(openings) != len(ODDS_STEPS):
+        raise ValueError("Duck vs Fish odds positions are missing.")
+    number = len(games) + 1
+    white, black = (wakwak, fish) if number % 2 else (fish, wakwak)
+    create_game(connection, tournament_id=tournament_id, round=number, pair_index=1,
+                white_engine_id=white, black_engine_id=black, game_number=number,
+                opening_id=openings[number - 1].id)
+    return 1
+
+
+def _copy(label: str, threads: int) -> tuple[str, str]:
+    return (
+        f"wakwak vs Fairy-Stockfish Duck NNUE. Start-position odds ladder, {threads} threads per engine, {label}.",
+        f"Unrated Duck Chess at {label}. Colours alternate every game, with wakwak White first. Start with normal material, then increase Fairy-Stockfish's material odds until wakwak has only its king. Every game starts from the initial position with the stated wakwak pieces removed; no book moves. One game at a time. The first wakwak draw or loss ends the event. No evaluation adjudication or tiebreak games.",
+    )
+
+
+def configure_odds(connection: sqlite3.Connection, event_id: int) -> None:
+    connection.execute("SELECT id FROM events WHERE id = ? FOR UPDATE", (event_id,)).fetchone()
+    event = get_event(connection, event_id)
+    if event is None or event.handler_key != MODULE_KEY:
+        raise ValueError("Duck vs Fish event not found.")
+    tournament = lock_tournament(connection, event.config["tournament_id"])
+    if tournament is None or tournament.status not in {"draft", "scheduled"} or tournament.started_at is not None:
+        raise ValueError("Only an unstarted Duck vs Fish match can change to odds.")
+    games = connection.execute("SELECT status FROM games WHERE tournament_id = ? FOR UPDATE", (tournament.id,)).fetchall()
+    if any(game["status"] != "pending" for game in games):
+        raise ValueError("Existing played or assigned games must be preserved.")
+    if event.config.get("odds_version") == 1:
+        return
+    suite_id = _odds_suite(connection)
+    config = tournament.config.model_copy(update={"opening_suite_id": suite_id, "format_options": RoundRobinFormatOptions(cycles=1), "concurrency": 1, "rated": False})
+    connection.execute("DELETE FROM games WHERE tournament_id = ?", (tournament.id,))
+    update_tournament(connection, tournament.id, name=tournament.name, config=config)
+    control = config.time_control
+    summary, rules = _copy(f"{control.initial_ms / 60_000:g}m + {control.increment_ms / 1000:g}s", config.engine_threads)
+    connection.execute(
+        "UPDATE events SET config = ?, summary = ?, rules = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+        (json.dumps({**event.config, "match": config.model_dump(mode="json"), "opening_book": "Start position", "odds_version": 1}), summary, rules, utc_now(), event_id),
+    )
+    advance_odds(connection, tournament.id)
 
 
 def reset_match(connection: sqlite3.Connection, event_id: int) -> int:
@@ -70,19 +188,15 @@ def _provision(connection: sqlite3.Connection) -> int:
         if not candidates:
             raise ValueError(f"Register an active {name} Duck Chess engine before creating this event.")
         participants.append(max(candidates, key=lambda engine: (engine.created_at, engine.id)))
-    suite = next((suite for suite in list_opening_suites(connection) if suite.name == "Lichess UHO (Duck)" and suite.variant == "duck"), None)
-    if suite is None:
-        raise ValueError("Import the Lichess UHO (Duck) opening suite before creating this event.")
-    if suite_opening_count(connection, suite.id) < 10:
-        raise ValueError("Duck vs Fish requires at least ten Lichess UHO (Duck) openings.")
+    suite_id = _odds_suite(connection)
     match = TournamentConfig(
         variant="duck",
         format=TournamentFormat.ROUND_ROBIN,
-        format_options=RoundRobinFormatOptions(cycles=10),
+        format_options=RoundRobinFormatOptions(cycles=1),
         participants=[engine.id for engine in participants],
         time_control=IncrementTimeControl(initial_ms=180_000, increment_ms=1_800),
         concurrency=1,
-        opening_suite_id=suite.id,
+        opening_suite_id=suite_id,
         adjudication=AdjudicationConfig(),
         rated=False,
         engine_threads=64,
@@ -95,13 +209,13 @@ def _provision(connection: sqlite3.Connection) -> int:
         handler_key=MODULE_KEY,
         title="Duck vs Fish",
         subtitle="",
-        summary="wakwak vs Fairy-Stockfish Duck NNUE. Duck Blitz, 20 games, 64 threads per engine, 3m + 1.8s.",
+        summary=_copy("3m + 1.8s", 64)[0],
         description="",
-        rules="20 unrated Duck Chess games at 3m + 1.8s in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
+        rules=_copy("3m + 1.8s", 64)[1],
         status="announced",
         featured=True,
         theme={"primary": "#edc653", "accent": "#b8d8a5", "background": "#080f13", "surface": "#142b24", "text": "#eff3e9"},
-        config={"module": MODULE_KEY, "match": match.model_dump(mode="json"), "opening_book": suite.name},
+        config={"module": MODULE_KEY, "match": match.model_dump(mode="json"), "opening_book": "Start position", "odds_version": 1},
     )
     for position, (engine, label, color) in enumerate(zip(participants, ("wakwak", "Fairy-Stockfish"), ("#edc653", "#a9d8d4"), strict=True)):
         create_event_cast_member(
@@ -122,6 +236,7 @@ def _payload(connection: sqlite3.Connection, event: EventRecord) -> dict[str, An
         "tournament": tournament,
         "games": list_games(connection, tournament.id) if tournament is not None else (),
         "opening_book": event.config.get("opening_book", "Lichess UHO (Duck)"),
+        "odds_steps": [label for label, _ in ODDS_STEPS] if event.config.get("odds_version") == 1 else [],
     }
 
 
@@ -162,8 +277,8 @@ def _register_api(app: FastAPI) -> None:
             "UPDATE events SET config = ?, summary = ?, rules = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
             (
                 json.dumps({**event.config, "match": config.model_dump(mode="json")}),
-                f"wakwak vs Fairy-Stockfish Duck NNUE. Duck Blitz, 20 games, {config.engine_threads} threads per engine, {label}.",
-                f"20 unrated Duck Chess games at {label} in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
+                _copy(label, config.engine_threads)[0] if event.config.get("odds_version") == 1 else f"wakwak vs Fairy-Stockfish Duck NNUE. Duck Blitz, 20 games, {config.engine_threads} threads per engine, {label}.",
+                _copy(label, config.engine_threads)[1] if event.config.get("odds_version") == 1 else f"20 unrated Duck Chess games at {label} in 10 colour-swapped Lichess UHO opening pairs. One game at a time. No evaluation adjudication or tiebreak games.",
                 utc_now(), event_id,
             ),
         )
