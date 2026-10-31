@@ -1435,6 +1435,15 @@ def update_tournament(
     """Update a tournament's name, config, and participant list."""
     validate_tournament_variant(connection, config)
     previous = get_tournament(connection, tournament_id)
+    odds = connection.execute(
+        "SELECT id FROM events WHERE handler_key = 'duck-vs-fish' AND config::jsonb->>'tournament_id' = ? AND config::jsonb->>'odds_version' = '1'",
+        (str(tournament_id),),
+    ).fetchone()
+    if odds is not None and previous is not None:
+        if config.participants != previous.config.participants or config.opening_suite_id != previous.config.opening_suite_id:
+            raise ValueError("Duck vs Fish odds participants and starting positions cannot change")
+        if config.variant != "duck" or config.format != "round_robin" or config.concurrency != 1 or config.rated:
+            raise ValueError("Duck vs Fish odds require sequential unrated Duck Chess")
     if previous is not None and (previous.config.variant, previous.config.rules_revision) != (config.variant, config.rules_revision):
         if previous.status != "draft" or connection.execute("SELECT 1 FROM games WHERE tournament_id = ? LIMIT 1", (tournament_id,)).fetchone() is not None:
             raise ValueError("The variant cannot change after a tournament has been scheduled or has games")

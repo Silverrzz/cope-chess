@@ -222,7 +222,12 @@ def materialize_tournament_schedule(
     created_games = 0
 
     if not existing_games and not existing_matches:
-        if tournament.config.format == TournamentFormat.ROUND_ROBIN:
+        from cope.events.duck_vs_fish import advance_odds
+
+        odds_created = advance_odds(connection, tournament.id)
+        if odds_created is not None:
+            created_games = odds_created
+        elif tournament.config.format == TournamentFormat.ROUND_ROBIN:
             created_games = generate_round_robin_games(connection, tournament)
         elif tournament.config.format == TournamentFormat.SWISS:
             created_games = generate_swiss_round(connection, tournament, 1)

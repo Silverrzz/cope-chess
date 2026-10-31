@@ -39,6 +39,7 @@ const messages = computed(() => [...props.detail.chat_messages, ...localMessages
 const viewerGame = computed(() => viewer.value?.viewer_game ?? games.value.find(game => String(game.id) === selected.value) ?? games.value.find(game => ["assigned", "live"].includes(game.status)) ?? games.value[0] ?? null);
 const moves = computed(() => viewer.value?.viewer_moves ?? []);
 const opening = computed(() => viewer.value?.opening ?? { name: "Start position", fen: "startpos" });
+const oddsLabel = computed(() => payload.value.odds_steps?.[(viewerGame.value?.game_number ?? 1) - 1] ?? "");
 const activeSide = computed(() => viewer.value?.clock_state?.running ? viewer.value.clock_state.active_side : null);
 const activeTab = computed(() => ["games", "settings"].includes(String(route.query.tab)) ? String(route.query.tab) : "standings");
 const completed = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
@@ -136,7 +137,9 @@ async function loadViewer(gameId?: string): Promise<void> {
     viewer.value = response;
     if (followLatest) selectedPly.value = response.viewer_moves.length;
     const updates = [...response.games, ...response.active_games];
-    games.value = games.value.map(game => updates.find(update => String(update.id) === String(game.id)) ?? game);
+    const merged = new Map(games.value.map(game => [String(game.id), game]));
+    for (const game of updates) merged.set(String(game.id), game);
+    games.value = [...merged.values()].sort((left, right) => (left.game_number ?? 1) - (right.game_number ?? 1));
     error.value = "";
   } catch (cause) {
     if (request === currentRequest && (cause as Error).name !== "AbortError") error.value = "The board could not be loaded.";
@@ -152,7 +155,7 @@ async function loadViewer(gameId?: string): Promise<void> {
     <header ref="headingElement" class="tournament-heading">
       <div class="tournament-heading__title">
         <div class="title-line"><h1>{{ detail.event.title }}</h1><span class="relay-status">{{ gameLabel }}</span><span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ (detail.spectator_count ?? 0).toLocaleString() }}</span></div>
-        <p>Duck Chess<template v-if="viewerGame"> / Game {{ viewerGame.game_number ?? games.findIndex(game => game.id === viewerGame?.id) + 1 }}</template></p>
+        <p>Duck Chess<template v-if="viewerGame"> / Game {{ viewerGame.game_number ?? games.findIndex(game => game.id === viewerGame?.id) + 1 }}</template><template v-if="oddsLabel"> / {{ oddsLabel }}</template></p>
       </div>
       <div class="tournament-heading__controls"><button v-if="selected && ['live', 'intermission'].includes(detail.event.status)" type="button" class="event-page-link" @click="selected = null; loadViewer()">Follow live <AppIcon name="arrow-right" :size="14" /></button><RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink></div>
     </header>
@@ -186,7 +189,7 @@ async function loadViewer(gameId?: string): Promise<void> {
       </section>
       <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
         <header><h2 id="settings-title">Settings</h2></header>
-        <dl class="settings-list"><div><dt>Variant</dt><dd>Duck Chess</dd></div><div><dt>Time control</dt><dd>{{ controlLabel }}</dd></div><div><dt>Threads per engine</dt><dd>64</dd></div><div><dt>Hash per engine</dt><dd>4096 MiB</dd></div><div><dt>Games</dt><dd>20 · 10 colour-swapped pairs</dd></div><div><dt>Opening book</dt><dd>{{ payload.opening_book }}</dd></div><div><dt>Rated</dt><dd>No</dd></div><div><dt>Start</dt><dd>{{ timing }}</dd></div></dl>
+        <dl class="settings-list"><div><dt>Variant</dt><dd>Duck Chess</dd></div><div><dt>Time control</dt><dd>{{ controlLabel }}</dd></div><div><dt>Threads per engine</dt><dd>{{ payload.tournament?.config?.engine_threads ?? 64 }}</dd></div><div><dt>Hash per engine</dt><dd>{{ payload.tournament?.config?.engine_hash_mb ?? 4096 }} MiB</dd></div><div><dt>Games</dt><dd>{{ payload.odds_steps?.length ? `Up to ${payload.odds_steps.length} · ends on wakwak’s first draw or loss` : '20 · 10 colour-swapped pairs' }}</dd></div><div><dt>Starting positions</dt><dd>{{ payload.opening_book }}</dd></div><div v-if="payload.odds_steps?.length"><dt>Odds ladder</dt><dd>{{ payload.odds_steps.join(' → ') }}</dd></div><div><dt>Rated</dt><dd>No</dd></div><div><dt>Start</dt><dd>{{ timing }}</dd></div></dl>
       </section>
     </section>
   </section>
