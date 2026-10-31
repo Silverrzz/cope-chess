@@ -135,6 +135,10 @@ def _lock_live_roster_tournament(
     tournament = lock_tournament(connection, tournament_id)
     if tournament is None:
         raise ValueError("tournament does not exist")
+    from cope.events.duck_vs_fish import odds_event
+
+    if odds_event(connection, tournament_id) is not None:
+        raise ValueError("Duck vs Fish odds participants cannot change")
     if tournament.status not in {"running", "paused"}:
         raise ValueError("participants can only be changed while the tournament is running or paused")
     if tournament.config.format not in {
