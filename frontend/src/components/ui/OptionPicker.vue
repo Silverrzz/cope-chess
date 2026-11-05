@@ -41,7 +41,7 @@ const searchInput = ref<HTMLInputElement | null>(null)
 const open = ref(false)
 const query = ref('')
 const activeGroupValue = ref<string | number | null>(null)
-const position = reactive({ top: '0px', left: '0px', width: '18rem' })
+const position = reactive({ top: '0px', left: '0px', width: '18rem', maxHeight: '24rem' })
 
 function sameValue(left: string | number | null | undefined, right: string | number | null | undefined): boolean {
   return String(left ?? '') === String(right ?? '')
@@ -119,6 +119,7 @@ function updatePosition(): void {
   const estimatedHeight = Math.min(384, menu.value?.offsetHeight || 340)
   const below = window.innerHeight - rect.bottom - 8
   const top = below >= estimatedHeight || below >= rect.top ? rect.bottom + 6 : Math.max(8, rect.top - estimatedHeight - 6)
+  position.maxHeight = `${Math.max(80, Math.min(384, window.innerHeight - top - 8))}px`
   position.top = `${Math.round(top)}px`
   position.left = `${Math.round(Math.min(Math.max(8, rect.left), window.innerWidth - width - 8))}px`
   position.width = `${Math.round(width)}px`
@@ -287,7 +288,7 @@ onBeforeUnmount(() => {
 .option-picker__selection strong, .option-picker__placeholder { font-size: .76rem; font-weight: 650; }
 .option-picker__selection small { color: var(--color-text-muted); font-size: .63rem; margin-top: .05rem; }
 .option-picker__placeholder { color: var(--color-text-muted); }
-.option-picker__menu { background: var(--color-surface-raised); border: 1px solid var(--color-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); display: grid; max-height: min(24rem, calc(100vh - 1rem)); overflow: hidden; position: fixed; z-index: 1400; }
+.option-picker__menu { background: var(--color-surface-raised); border: 1px solid var(--color-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); display: grid; grid-template-rows: minmax(0, 1fr); max-height: min(24rem, calc(100vh - 1rem)); overflow: hidden; position: fixed; z-index: 1400; }
 .option-picker__menu--split { grid-template-columns: minmax(0, 1.1fr) minmax(13rem, .9fr); }
 .option-picker__primary, .option-picker__secondary { display: flex; min-height: 0; flex-direction: column; }
 .option-picker__secondary { border-inline-start: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-surface-sunken) 34%, var(--color-surface-raised)); }
@@ -297,7 +298,7 @@ onBeforeUnmount(() => {
 .option-picker__search { align-items: center; border-block-end: 1px solid var(--color-border); color: var(--color-text-muted); display: flex; gap: .5rem; padding: .62rem .7rem; }
 .option-picker__search input { background: transparent; border: 0; color: var(--color-text); font: inherit; font-size: .74rem; min-width: 0; outline: 0; width: 100%; }
 .option-picker__search input::placeholder { color: var(--color-text-faint); }
-.option-picker__list { min-height: 0; overflow: auto; padding: .35rem; }
+.option-picker__list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .35rem; }
 .option-picker__option { align-items: center; background: transparent; border: 0; border-radius: var(--radius-sm); color: var(--color-text); cursor: pointer; display: flex; gap: .6rem; justify-content: space-between; min-height: 2.8rem; padding: .55rem .6rem; text-align: left; width: 100%; }
 .option-picker__option:hover:not(:disabled), .option-picker__option:focus-visible, .option-picker__option--active { background: var(--color-surface-hover); outline: 0; }
 .option-picker__option--active { box-shadow: inset 3px 0 var(--color-accent); }

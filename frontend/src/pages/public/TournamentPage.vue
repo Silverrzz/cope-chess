@@ -4,6 +4,9 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError, api } from '@/api/client'
 import { useViewerPresence } from '@/composables/useViewerPresence'
+import EvaluationGraph from '@/components/chess/EvaluationGraph.vue'
+import KibitzerBar from '@/components/chess/KibitzerBar.vue'
+import { useViewerSettings } from '@/composables/useViewerSettings'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
 import { applyUci, buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
@@ -103,6 +106,9 @@ const data = ref<TournamentDetailResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const selectedPly = ref(0)
+const orientation = ref<'white' | 'black'>('white')
+const { kibitzerEnabled } = useViewerSettings()
+const supportsKibitzer = computed(() => !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
 const streamState = ref<StreamState>('closed')
 const rememberedFollowedEngineId = ref(readFollowedEngineId())
@@ -207,6 +213,17 @@ const settingsRows = computed(() => (data.value?.settings || []).map((row) => Ar
   ? { label: String(row[0]), value: String(row[1]) }
   : { label: String(row.label), value: String(row.value) }))
 const orderedMessages = computed(() => normalizeMessages(data.value?.chat_messages || []))
+const graphStartPly = computed(() => {
+  const fields = opening.value.fen === 'startpos' ? [] : opening.value.fen.split(/\s+/)
+  return Math.max(0, (Number(fields[5] || 1) - 1) * 2 + (fields[1] === 'b' ? 1 : 0))
+})
+const graphTeams = computed(() => [{ members: (['white', 'black'] as const).map((side, index) => ({
+  id: index, engine_id: index, name: engineName(data.value?.engines, viewerGame.value?.[`${side}_engine_id`] ?? 0),
+  color: side === 'white' ? 'var(--color-info)' : 'var(--color-warning)',
+})) }])
+const graphSearches = computed(() => moves.value.map((move, index) => ({
+  ply: graphStartPly.value + index + 1, engine_id: moveSide(index) === 'white' ? 0 : 1, side: moveSide(index), analysis: move,
+})))
 const whiteAnalysis = computed(() => analysisForSide('white'))
 const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
@@ -372,9 +389,15 @@ async function fitArenaToViewport(): Promise<void> {
   const viewerChrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height)
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
   const maximumBoardSize = 42 * rootFontSize
+  const arenaWidth = arena.clientWidth
+  const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
+  const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.75 * rootFontSize + gap : 0
+  const widthLimit = window.innerWidth > 1152
+    ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
+    : arenaWidth - barWidth
   const fittedBoardSize = (chromeHeight: number) => Math.max(
     0,
-    Math.min(maximumBoardSize, Math.floor(availableHeight - chromeHeight)),
+    Math.min(maximumBoardSize, Math.max(180, widthLimit), Math.floor(availableHeight - chromeHeight)),
   )
 
   const viewportPosition = currentViewportPosition()
@@ -1203,37 +1226,25 @@ function forgetManualFollowPauseGame(): void {
 
       <TournamentCrossTable v-if="viewerMode === 'cross'" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
 
-      <section v-else-if="viewerGame" ref="arenaElement" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
+            v-for="side in (['black', 'white']) as ('white' | 'black')[]"
+            :key="side"
             :variant="data.tournament.config?.variant"
-            side="black"
-            :name="engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)"
-            :engine-id="viewerGame.black_engine_id"
-            :clock="blackClock"
-            :analysis="blackAnalysis"
+            :side="side"
+            :name="engineName(data.engines, viewerGame[`${side}_engine_id`], viewerGame[`${side}_name`])"
+            :engine-id="viewerGame[`${side}_engine_id`]"
+            :clock="side === 'white' ? whiteClock : blackClock"
+            :analysis="side === 'white' ? whiteAnalysis : blackAnalysis"
             :position-fen="currentPositionFen"
-            :active="!isPreparing && activeSide === 'black'"
+            :active="!isPreparing && activeSide === side"
             :loading="isPreparing"
           />
-          <EnginePanel
-            :variant="data.tournament.config?.variant"
-            side="white"
-            :name="engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)"
-            :engine-id="viewerGame.white_engine_id"
-            :clock="whiteClock"
-            :analysis="whiteAnalysis"
-            :position-fen="currentPositionFen"
-            :active="!isPreparing && activeSide === 'white'"
-            :loading="isPreparing"
-          />
-          <dl class="game-facts">
-            <div><dt>Round</dt><dd>{{ viewerGame.round ?? '-' }}</dd></div>
-            <div><dt>Status</dt><dd>{{ statusLabel(viewerGame.status) }}</dd></div>
-            <div><dt>Result</dt><dd>{{ resultLabel(viewerGame.result) }}</dd></div>
-            <div><dt>Termination</dt><dd>{{ viewerGame.termination ? statusLabel(viewerGame.termination) : '-' }}</dd></div>
-          </dl>
+          <EvaluationGraph class="game-evaluation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
         </div>
+
+        <KibitzerBar v-if="kibitzerEnabled && supportsKibitzer" :fen="currentPositionFen" :orientation="orientation" :chess960="data.tournament.config?.variant === 'dfrc'" :paused="isPreparing" />
 
         <div ref="boardColumnElement" class="board-column">
           <ChessViewer
@@ -1245,6 +1256,7 @@ function forgetManualFollowPauseGame(): void {
             :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
             @update:model-value="selectedPly = $event"
             @position="currentPositionFen = $event.fen"
+            @orientation="orientation = $event"
           />
         </div>
 
@@ -1600,7 +1612,7 @@ function forgetManualFollowPauseGame(): void {
 
 .arena {
   display: grid;
-  grid-template-columns: minmax(25rem, 29rem) var(--arena-board-size) minmax(28rem, 1fr);
+  grid-template-columns: minmax(22rem, 26rem) var(--arena-board-size) minmax(28rem, 1fr);
   gap: clamp(0.7rem, 1.5vw, 1.2rem);
   align-items: start;
   height: var(--arena-content-height);
@@ -1615,10 +1627,18 @@ function forgetManualFollowPauseGame(): void {
 }
 
 .engine-column {
-  grid-template-rows: repeat(2, minmax(0, 1fr)) auto auto;
+  grid-template-rows: repeat(2, minmax(0, 1fr)) minmax(9rem, .7fr);
   height: var(--arena-content-height);
 }
 
+ .arena--kibitzer { grid-template-columns: minmax(22rem, 26rem) 1.75rem var(--arena-board-size) minmax(28rem, 1fr); }
+.game-evaluation { min-height: 9rem; }
+.engine-column :deep(.engine-panel) { min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: .4rem; padding: .65rem; }
+.engine-column :deep(.evaluation strong) { font-size: 2rem; }
+.engine-column :deep(.engine-panel__body) { grid-template-columns: minmax(0, 1fr) 5.5rem; gap: .6rem; overflow: hidden; }
+.engine-column :deep(.engine-panel__details) { grid-template-rows: auto minmax(0, 1fr); gap: .4rem; }
+.engine-column :deep(.pv-preview .chess-viewer) { width: min(100%, 5rem); }
+@media (max-width: 72rem) { .engine-column :deep(.engine-panel) { min-height: 13rem; } }
 .board-column {
   width: var(--arena-board-size);
   min-width: 0;
@@ -1788,17 +1808,33 @@ function forgetManualFollowPauseGame(): void {
   .tournament-heading__pickers { flex: 0 0 auto; }
   .arena { grid-template-columns: 1fr; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
-  .engine-column .game-facts { grid-column: 1 / -1; }
+  .engine-column .game-evaluation { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
   .activity-column { grid-column: 1; grid-row: 3; }
 }
 
 @media (max-width: 40rem) {
   .engine-column { grid-template-columns: 1fr; }
-  .engine-column .game-facts { grid-column: 1; }
+  .engine-column .game-evaluation { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
   .empty-arena { grid-template-columns: 1fr; height: auto; }
   .empty-chat { height: min(36rem, calc(100dvh - 8rem)); }
   .settings-list { grid-template-columns: 1fr; }
+}
+</style>
+
+<style scoped>
+@media (max-width: 105rem) {
+  .arena--kibitzer { grid-template-columns: minmax(19rem, 24rem) 1.75rem var(--arena-board-size); }
+  .arena--kibitzer .activity-column { grid-column: 1 / -1; grid-row: 2; }
+  .arena--kibitzer .board-column { grid-column: 3; grid-row: 1; }
+  .arena--kibitzer .kibitzer-bar { grid-column: 2; grid-row: 1; }
+}
+@media (max-width: 72rem) {
+  .arena--kibitzer { grid-template-columns: 1.75rem minmax(0, 1fr); height: auto; }
+  .arena--kibitzer .board-column { grid-column: 2; grid-row: 1; }
+  .arena--kibitzer .kibitzer-bar { grid-column: 1; grid-row: 1; }
+  .arena--kibitzer .engine-column { grid-column: 1 / -1; grid-row: 2; height: auto; }
+  .arena--kibitzer .activity-column { grid-column: 1 / -1; grid-row: 3; }
 }
 </style>

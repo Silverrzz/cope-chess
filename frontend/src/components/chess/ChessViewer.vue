@@ -22,6 +22,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [ply: number]
+  orientation: [value: Color]
   position: [value: { ply: number; fen: string }]
 }>()
 
@@ -55,6 +56,7 @@ function selectPly(value: number): void {
 
 function flipBoard(): void {
   orientation.value = orientation.value === 'white' ? 'black' : 'white'
+  emit('orientation', orientation.value)
 }
 
 async function copy(value: string, label: string): Promise<void> {
@@ -82,7 +84,7 @@ function fallbackCopy(value: string): void {
 </script>
 
 <template>
-  <div class="viewer-shell">
+  <div class="viewer-shell" :data-orientation="orientation">
     <ChessBoard
       :variant="variant"
       :fen="opening.fen"
@@ -232,4 +234,10 @@ function fallbackCopy(value: string): void {
     grid-row: 1;
   }
 }
+</style>
+
+<style>
+.arena:has(> .board-column .viewer-shell[data-orientation="black"]) > .engine-column > :nth-child(1) { order: 2; }
+.arena:has(> .board-column .viewer-shell[data-orientation="black"]) > .engine-column > :nth-child(2) { order: 1; }
+.arena:has(> .board-column .viewer-shell[data-orientation="black"]) > .engine-column > :nth-child(n+3) { order: 3; }
 </style>

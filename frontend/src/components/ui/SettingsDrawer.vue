@@ -9,23 +9,33 @@ import BaseButton from "./BaseButton.vue";
 
 const { theme, boardPresets, previewBoardTheme, revertBoardTheme, setBoardTheme } = useBoardTheme();
 const { resolvedTheme, setTheme } = useTheme();
-const { confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled } = useViewerSettings();
+const { evaluationPerspective, kibitzerEnabled, setEvaluationPerspective, setKibitzerEnabled, confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled } = useViewerSettings();
 
 const open = ref(false);
+let originalDarkMode = resolvedTheme.value === "dark";
 const panel = ref<HTMLElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
 const draftConfettiEnabled = ref(confettiEnabled.value);
 const draftEventMusicEnabled = ref(eventMusicEnabled.value);
+const draftPerspective = ref(evaluationPerspective.value);
+const draftKibitzer = ref(kibitzerEnabled.value);
 const draftDarkMode = ref(resolvedTheme.value === "dark");
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
+  draftPerspective.value = evaluationPerspective.value;
+  draftKibitzer.value = kibitzerEnabled.value;
   draft.value = { ...theme.value };
   draftConfettiEnabled.value = confettiEnabled.value;
   draftEventMusicEnabled.value = eventMusicEnabled.value;
-  draftDarkMode.value = resolvedTheme.value === "dark";
+  originalDarkMode = resolvedTheme.value === "dark";
+  draftDarkMode.value = originalDarkMode;
   await nextTick();
   panel.value?.focus();
+});
+
+watch(draftDarkMode, (dark) => {
+  if (open.value) setTheme(dark ? "dark" : "light");
 });
 
 watch(draft, (next) => {
@@ -33,6 +43,8 @@ watch(draft, (next) => {
 }, { deep: true });
 
 function save(): void {
+  setEvaluationPerspective(draftPerspective.value);
+  setKibitzerEnabled(draftKibitzer.value);
   setBoardTheme(draft.value);
   setConfettiEnabled(draftConfettiEnabled.value);
   setEventMusicEnabled(draftEventMusicEnabled.value);
@@ -41,6 +53,7 @@ function save(): void {
 }
 
 function cancel(): void {
+  setTheme(originalDarkMode ? "dark" : "light");
   revertBoardTheme();
   open.value = false;
 }
@@ -51,7 +64,7 @@ function toggle(): void {
 }
 
 onBeforeUnmount(() => {
-  if (open.value) revertBoardTheme();
+  if (open.value) { revertBoardTheme(); setTheme(originalDarkMode ? "dark" : "light"); }
 });
 
 function isActive(preset: BoardTheme): boolean {
@@ -67,6 +80,8 @@ function reset(): void {
   draftConfettiEnabled.value = true;
   draftEventMusicEnabled.value = false;
   draftDarkMode.value = true;
+  draftPerspective.value = "white";
+  draftKibitzer.value = true;
 }
 
 </script>
@@ -110,6 +125,10 @@ function reset(): void {
           <input v-model="draftDarkMode" type="checkbox" />
           <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
         </label>
+
+        <h3>Analysis</h3>
+        <label class="colour-field"><span>Engine evaluations</span><select v-model="draftPerspective"><option value="white">White side</option><option value="side-to-move">Side to move</option></select></label>
+        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Reckless kibitzer</strong><small>Show a local Reckless dev evaluation bar beside the board.</small></span></label>
 
         <h3>Board colours</h3>
         <div class="preset-grid">

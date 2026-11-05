@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS engine_versions (
   UNIQUE (engine_id, version)
 );
 
+ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS source_date TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS git_host_id BIGINT REFERENCES git_hosts(id) ON DELETE SET NULL;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_url TEXT;
 ALTER TABLE engine_versions ADD COLUMN IF NOT EXISTS repository_full_name TEXT;
