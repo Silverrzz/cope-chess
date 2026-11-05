@@ -115,6 +115,10 @@ def execute_command(connection, principal: Principal, request: CommandRequest) -
 
 
 def execute_compatibility(connection, principal: Principal, command_name: str, target: str, fields: dict, key: str) -> dict:
+    from cope.control.operations import Principal as ControlPrincipal
+
+    if isinstance(principal, ControlPrincipal):
+        principal = Principal(principal.actor, principal.scopes, principal.token_id)
     command = get_command(command_name)
     principal = current_principal(connection, principal)
     principal.require(command.scope)
