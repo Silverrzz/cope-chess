@@ -15,6 +15,7 @@ import { bestVersionRatings } from '@/utils/ratings'
 interface RatingListRecord {
   id: Identifier
   name: string
+  anchor_engine_id?: Identifier | null
 }
 
 interface RatingRecord {
@@ -153,7 +154,7 @@ function selectRatingList(event: Event): void {
                 <th class="rank-column">Rank</th>
                 <th>Engine</th>
                 <th>Rating</th>
-                <th>95% error</th>
+                <th title="Approximate 95% margin from paired-opening score variance, relative to the list anchor">95% error</th>
                 <th>Opponent delta</th>
                 <th>Games</th>
                 <th>Updated</th>
@@ -166,7 +167,8 @@ function selectRatingList(event: Event): void {
                 <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small></RouterLink></td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
                 <td class="error-column" data-label="95% error">
-                  <span v-if="row.error_margin !== null && row.error_margin !== undefined" class="error-estimate" :title="`Approximate 95% interval: ${ratingLabel((row.elo ?? 0) - row.error_margin)} to ${ratingLabel((row.elo ?? 0) + row.error_margin)}`">
+                  <span v-if="String(engineId(row.engine)) === String(data.rating_list?.anchor_engine_id)" title="Fixed reference for this rating list">Anchor</span>
+                  <span v-else-if="row.error_margin !== null && row.error_margin !== undefined" class="error-estimate" :title="`Approximate 95% paired-opening interval: ${ratingLabel((row.elo ?? 0) - row.error_margin)} to ${ratingLabel((row.elo ?? 0) + row.error_margin)}`">
                     <strong>±{{ ratingLabel(row.error_margin) }}</strong>
                   </span>
                   <span v-else>-</span>

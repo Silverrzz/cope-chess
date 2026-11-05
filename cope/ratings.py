@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from math import log, sqrt
+from math import log
 from typing import Iterable
+
+from cope.rating_bounds import paired_error_margins
 
 from cope.db.repo import (
     RunnerCommandRecord,
@@ -219,6 +221,7 @@ def recalculate_ratings(
     ratings: dict[int, dict[int, float]] = {}
     games_played: dict[int, dict[int, int]] = {}
     rating_metrics: dict[int, dict[int, dict[str, float]]] = {}
+    rating_errors: dict[int, dict[int, float | None]] = {}
     for rating_list_id in selected:
         anchor_engine_id, anchor_elo = anchors[rating_list_id]
         category_games = games_by_list[rating_list_id]
@@ -229,6 +232,9 @@ def recalculate_ratings(
         )
         ratings[rating_list_id] = category_ratings
         games_played[rating_list_id] = category_counts
+        rating_errors[rating_list_id] = paired_error_margins(
+            tuple(game for _, game, _ in category_games), category_ratings, anchor_engine_id,
+        )
         rated_engine_ids = category_ratings.keys()
         category_metrics: dict[int, dict[str, float]] = {}
         history_rows = []
@@ -244,20 +250,18 @@ def recalculate_ratings(
             white_expected = expected_score(white_rating, black_rating)
             white_metrics = category_metrics.setdefault(
                 game.white_engine_id,
-                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0, "information": 0.0},
+                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0},
             )
             white_metrics["count"] += 1.0
             white_metrics["opponent_total"] += black_rating
             white_metrics["delta_total"] += black_rating - white_rating
-            white_metrics["information"] += white_expected * (1.0 - white_expected)
             black_metrics = category_metrics.setdefault(
                 game.black_engine_id,
-                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0, "information": 0.0},
+                {"count": 0.0, "opponent_total": 0.0, "delta_total": 0.0},
             )
             black_metrics["count"] += 1.0
             black_metrics["opponent_total"] += white_rating
             black_metrics["delta_total"] += white_rating - black_rating
-            black_metrics["information"] += white_expected * (1.0 - white_expected)
             history_rows.append(
                 _history_row(
                     engine_id=game.white_engine_id,
@@ -296,18 +300,13 @@ def recalculate_ratings(
         for engine_id, elo in category_ratings.items():
             metrics = rating_metrics[rating_list_id].get(engine_id)
             count = metrics["count"] if metrics is not None else 0.0
-            information = metrics["information"] if metrics is not None else 0.0
             rating_rows.append(
                 (
                     engine_id,
                     rating_list_id,
                     elo,
                     games_played[rating_list_id][engine_id],
-                    (
-                        round(1.96 / ELO_LOGISTIC_FACTOR / sqrt(information), 6)
-                        if information > 0
-                        else None
-                    ),
+                    rating_errors[rating_list_id].get(engine_id),
                     (
                         round(metrics["opponent_total"] / count, 6)
                         if metrics is not None and count > 0
