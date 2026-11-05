@@ -379,11 +379,9 @@ async function fitArenaToViewport(): Promise<void> {
   const board = viewer?.querySelector<HTMLElement>('.board-mount')
   if (!viewer || !board) return
 
-  const visualViewport = window.visualViewport
-  const viewportBottom = visualViewport
-    ? visualViewport.offsetTop + visualViewport.height
-    : window.innerHeight
-  const availableHeight = Math.floor(viewportBottom - arena.getBoundingClientRect().top - 8)
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+  const arenaDocumentTop = arena.getBoundingClientRect().top + window.scrollY
+  const availableHeight = Math.floor(viewportHeight - arenaDocumentTop - 8)
   if (availableHeight <= 0) return
 
   const viewerChrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height)

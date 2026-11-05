@@ -365,9 +365,9 @@ async function fitArenaToViewport(): Promise<void> {
   const progression = boardColumn.querySelector<HTMLElement>(".puzzle-progression");
   if (!board || !progression) return;
 
-  const viewport = window.visualViewport;
-  const viewportBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
-  const availableHeight = Math.floor(viewportBottom - arena.getBoundingClientRect().top - 8);
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const arenaDocumentTop = arena.getBoundingClientRect().top + window.scrollY;
+  const availableHeight = Math.floor(viewportHeight - arenaDocumentTop - 8);
   if (availableHeight <= 0) return;
 
   const progressionStyle = getComputedStyle(progression);

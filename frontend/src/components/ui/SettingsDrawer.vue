@@ -6,6 +6,7 @@ import { useTheme } from "@/composables/useTheme";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import AppIcon from "./AppIcon.vue";
 import BaseButton from "./BaseButton.vue";
+import OptionPicker from "./OptionPicker.vue";
 
 const { theme, boardPresets, previewBoardTheme, revertBoardTheme, setBoardTheme } = useBoardTheme();
 const { resolvedTheme, setTheme } = useTheme();
@@ -13,6 +14,7 @@ const { evaluationPerspective, kibitzerEnabled, setEvaluationPerspective, setKib
 
 const open = ref(false);
 let originalDarkMode = resolvedTheme.value === "dark";
+let originalPerspective = evaluationPerspective.value;
 const panel = ref<HTMLElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
 const draftConfettiEnabled = ref(confettiEnabled.value);
@@ -23,7 +25,8 @@ const draftDarkMode = ref(resolvedTheme.value === "dark");
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
-  draftPerspective.value = evaluationPerspective.value;
+  originalPerspective = evaluationPerspective.value;
+  draftPerspective.value = originalPerspective;
   draftKibitzer.value = kibitzerEnabled.value;
   draft.value = { ...theme.value };
   draftConfettiEnabled.value = confettiEnabled.value;
@@ -32,6 +35,10 @@ watch(open, async (isOpen) => {
   draftDarkMode.value = originalDarkMode;
   await nextTick();
   panel.value?.focus();
+});
+
+watch(draftPerspective, (perspective) => {
+  if (open.value) evaluationPerspective.value = perspective;
 });
 
 watch(draftDarkMode, (dark) => {
@@ -53,6 +60,7 @@ function save(): void {
 }
 
 function cancel(): void {
+  evaluationPerspective.value = originalPerspective;
   setTheme(originalDarkMode ? "dark" : "light");
   revertBoardTheme();
   open.value = false;
@@ -64,7 +72,7 @@ function toggle(): void {
 }
 
 onBeforeUnmount(() => {
-  if (open.value) { revertBoardTheme(); setTheme(originalDarkMode ? "dark" : "light"); }
+  if (open.value) { evaluationPerspective.value = originalPerspective; revertBoardTheme(); setTheme(originalDarkMode ? "dark" : "light"); }
 });
 
 function isActive(preset: BoardTheme): boolean {
@@ -126,11 +134,7 @@ function reset(): void {
           <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
         </label>
 
-        <h3>Analysis</h3>
-        <label class="colour-field"><span>Engine evaluations</span><select v-model="draftPerspective"><option value="white">White side</option><option value="side-to-move">Side to move</option></select></label>
-        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Reckless kibitzer</strong><small>Show a local Reckless dev evaluation bar beside the board.</small></span></label>
-
-        <h3>Board colours</h3>
+        <h4 class="settings-subheading">Board colours</h4>
         <div class="preset-grid">
           <button
             v-for="(preset, name) in boardPresets"
@@ -159,6 +163,13 @@ function reset(): void {
           <input type="color" :value="draft.dark" @input="update('dark', $event)" />
           <code>{{ draft.dark }}</code>
         </label>
+
+        <h3>Analysis</h3>
+        <div class="perspective-setting">
+          <span>Engine evaluations</span>
+          <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
+        </div>
+        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Reckless kibitzer</strong><small>Show a local Reckless dev evaluation bar beside the board.</small></span></label>
 
         <h3>Celebrations</h3>
         <label class="setting-toggle">
@@ -329,6 +340,10 @@ function reset(): void {
   display: grid;
   gap: var(--space-1);
 }
+
+.settings-subheading { margin: 0; color: var(--color-text-secondary); font-size: .8125rem; }
+.perspective-setting { display: grid; gap: var(--space-2); min-width: 0; }
+.perspective-setting > span { color: var(--color-text-secondary); font-size: .8125rem; font-weight: 640; }
 
 .setting-toggle strong { font-size: 0.8125rem; }
 .setting-toggle small { color: var(--color-text-muted); font-size: 0.75rem; line-height: 1.4; }

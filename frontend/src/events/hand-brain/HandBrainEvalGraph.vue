@@ -20,9 +20,9 @@ const end = computed(() => Math.max(props.startPly + props.totalPlies, props.sta
 const right = computed(() => size.value.width - 12)
 const bottom = computed(() => size.value.height - 24)
 const x = (ply: number) => 38 + (ply - props.startPly) / Math.max(1, end.value - props.startPly) * (right.value - 38)
-const value = (s: HandBrainSearch) => (s.analysis.eval_mate != null ? Math.sign(s.analysis.eval_mate) * 1200 : Number(s.analysis.eval_cp ?? 0)) * (s.side === 'white' ? 1 : -1)
+const value = (s: HandBrainSearch) => Number(s.analysis.eval_cp ?? 0) * (s.side === 'white' ? 1 : -1)
 const scale = computed(() => {
-  const values = props.searches.filter(s => !hidden.value.includes(s.engine_id) && (s.analysis.eval_cp != null || s.analysis.eval_mate != null)).map(value).filter(Number.isFinite)
+  const values = props.searches.filter(s => !hidden.value.includes(s.engine_id) && (s.analysis.eval_mate == null && s.analysis.eval_cp != null)).map(value).filter(Number.isFinite)
   const min = values.length ? Math.min(...values) : -50
   const max = values.length ? Math.max(...values) : 50
   const span = Math.max(50, max - min)
@@ -37,11 +37,14 @@ const scale = computed(() => {
   return { low, high, ticks }
 })
 const y = (cp: number) => 12 + (scale.value.high - cp) / (scale.value.high - scale.value.low) * (bottom.value - 12)
+const sampleY = (s: HandBrainSearch) => s.analysis.eval_mate != null
+  ? ((s.analysis.eval_mate > 0 ? 1 : -1) * (s.side === 'white' ? 1 : -1) > 0 ? 12 : bottom.value)
+  : y(value(s))
 const series = computed(() => props.teams.flatMap(team => team.members).map((member, index) => {
   const samples = props.searches.filter(s => s.engine_id === member.engine_id && (s.analysis.eval_cp != null || s.analysis.eval_mate != null)).sort((a,b) => a.ply-b.ply)
   const latest = [...samples].reverse().find(s => s.ply <= (hover.value ?? end.value))
   const cp = latest ? value(latest) : null
-  return { ...member, samples, color: colors[index % colors.length], path: samples.map((s,i) => `${i ? 'L' : 'M'}${x(s.ply).toFixed(2)},${y(value(s)).toFixed(2)}`).join(' '), label: cp === null ? '' : latest?.analysis.eval_mate != null ? `#${latest.analysis.eval_mate * (latest.side === 'white' ? 1 : -1)}` : `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(2)}` }
+  return { ...member, samples, color: colors[index % colors.length], path: samples.map((s,i) => `${i ? 'L' : 'M'}${x(s.ply).toFixed(2)},${sampleY(s).toFixed(2)}`).join(' '), label: cp === null ? '' : latest?.analysis.eval_mate != null ? `#${latest.analysis.eval_mate * (latest.side === 'white' ? 1 : -1)}` : `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(2)}` }
 }))
 function pointer(event: MouseEvent) {
   const bounds = (event.currentTarget as SVGElement).getBoundingClientRect()
