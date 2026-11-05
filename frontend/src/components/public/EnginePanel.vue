@@ -53,7 +53,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 </script>
 
 <template>
-  <article :style="{ '--engine-color': side === 'white' ? 'var(--color-info)' : 'var(--color-warning)' }" class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
+  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
     <div v-if="loading" class="engine-panel__loading">
       <strong>
         <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
@@ -130,7 +130,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   overflow: hidden;
   padding: var(--space-md, 1rem);
   border: 1px solid var(--color-border, #d5dbe1);
-  border-inline-start: 4px solid var(--engine-color);
+  border-inline-start: 4px solid var(--side-color);
   border-radius: var(--radius-md, 0.5rem);
   background: var(--color-surface-raised, var(--color-surface, #fff));
 }
@@ -150,7 +150,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
 .engine-panel--active {
   border-color: var(--color-border-strong, #99a8bb);
-  border-inline-start-color: var(--engine-color);
+  border-inline-start-color: var(--side-color);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--side-color) 22%, var(--color-border-strong, #99a8bb));
 }
 

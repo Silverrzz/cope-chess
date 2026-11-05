@@ -219,7 +219,7 @@ const graphStartPly = computed(() => {
 })
 const graphTeams = computed(() => [{ members: (['white', 'black'] as const).map((side, index) => ({
   id: index, engine_id: index, name: engineName(data.value?.engines, viewerGame.value?.[`${side}_engine_id`] ?? 0),
-  color: side === 'white' ? 'var(--color-info)' : 'var(--color-warning)',
+  color: side === 'white' ? '#fff' : '#000',
 })) }])
 const graphSearches = computed(() => moves.value.map((move, index) => ({
   ply: graphStartPly.value + index + 1, engine_id: moveSide(index) === 'white' ? 0 : 1, side: moveSide(index), analysis: move,
@@ -375,7 +375,7 @@ async function fitArenaToViewport(): Promise<void> {
   const boardColumn = boardColumnElement.value
   if (!arena || !boardColumn) return
 
-  const viewer = boardColumn.firstElementChild as HTMLElement | null
+  const viewer = boardColumn.querySelector<HTMLElement>('.viewer-shell')
   const board = viewer?.querySelector<HTMLElement>('.board-mount')
   if (!viewer || !board) return
 
@@ -391,7 +391,7 @@ async function fitArenaToViewport(): Promise<void> {
   const maximumBoardSize = 42 * rootFontSize
   const arenaWidth = arena.clientWidth
   const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
-  const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.75 * rootFontSize + gap : 0
+  const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
   const widthLimit = window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
@@ -1244,9 +1244,8 @@ function forgetManualFollowPauseGame(): void {
           <EvaluationGraph class="game-evaluation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
         </div>
 
-        <KibitzerBar v-if="kibitzerEnabled && supportsKibitzer" :fen="currentPositionFen" :orientation="orientation" :chess960="data.tournament.config?.variant === 'dfrc'" :paused="isPreparing" />
-
-        <div ref="boardColumnElement" class="board-column">
+        <div ref="boardColumnElement" class="board-column" :class="{ 'board-column--kibitzer': kibitzerEnabled && supportsKibitzer }">
+          <KibitzerBar v-if="kibitzerEnabled && supportsKibitzer" :fen="currentPositionFen" :orientation="orientation" :chess960="data.tournament.config?.variant === 'dfrc'" :paused="isPreparing" />
           <ChessViewer
             :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
@@ -1631,7 +1630,7 @@ function forgetManualFollowPauseGame(): void {
   height: var(--arena-content-height);
 }
 
- .arena--kibitzer { grid-template-columns: minmax(22rem, 26rem) 1.75rem var(--arena-board-size) minmax(28rem, 1fr); }
+ .arena--kibitzer { grid-template-columns: minmax(22rem, 26rem) calc(var(--arena-board-size) + 1.1rem) minmax(28rem, 1fr); }
 .game-evaluation { min-height: 9rem; }
 .engine-column :deep(.engine-panel) { min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: .4rem; padding: .65rem; }
 .engine-column :deep(.evaluation strong) { font-size: 2rem; }
@@ -1824,17 +1823,17 @@ function forgetManualFollowPauseGame(): void {
 </style>
 
 <style scoped>
+.board-column--kibitzer { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr); gap: 0; width: min(100%, calc(var(--arena-board-size) + 1.1rem)); align-items: start; }
+.board-column--kibitzer :deep(.board-mount) { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
 @media (max-width: 105rem) {
-  .arena--kibitzer { grid-template-columns: minmax(19rem, 24rem) 1.75rem var(--arena-board-size); }
+  .arena--kibitzer { grid-template-columns: minmax(19rem, 24rem) calc(var(--arena-board-size) + 1.1rem); }
   .arena--kibitzer .activity-column { grid-column: 1 / -1; grid-row: 2; }
-  .arena--kibitzer .board-column { grid-column: 3; grid-row: 1; }
-  .arena--kibitzer .kibitzer-bar { grid-column: 2; grid-row: 1; }
+  .arena--kibitzer .board-column { grid-column: 2; grid-row: 1; }
 }
 @media (max-width: 72rem) {
-  .arena--kibitzer { grid-template-columns: 1.75rem minmax(0, 1fr); height: auto; }
-  .arena--kibitzer .board-column { grid-column: 2; grid-row: 1; }
-  .arena--kibitzer .kibitzer-bar { grid-column: 1; grid-row: 1; }
-  .arena--kibitzer .engine-column { grid-column: 1 / -1; grid-row: 2; height: auto; }
-  .arena--kibitzer .activity-column { grid-column: 1 / -1; grid-row: 3; }
+  .arena--kibitzer { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .arena--kibitzer .board-column { grid-column: 1; grid-row: 1; }
+  .arena--kibitzer .engine-column { grid-column: 1; grid-row: 2; height: auto; }
+  .arena--kibitzer .activity-column { grid-column: 1; grid-row: 3; }
 }
 </style>

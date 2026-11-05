@@ -53,9 +53,9 @@ onBeforeUnmount(() => { stop(); document.removeEventListener('visibilitychange',
   </div>
 </template>
 <style scoped>
-.kibitzer-bar { position: relative; width: 1.75rem; height: var(--arena-board-size); max-height: 100%; min-height: 10rem; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: .3rem; background: #20242b; box-sizing: border-box; }
+.kibitzer-bar { position: relative; width: 1.1rem; height: var(--arena-board-size); max-height: 100%; min-height: 10rem; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: .3rem 0 0 .3rem; background: #20242b; box-sizing: border-box; }
 .kibitzer-bar__white { position: absolute; bottom: 0; width: 100%; background: #f2f2ee; transition: height .35s ease; }
 .flipped .kibitzer-bar__white { bottom: auto; top: 0; }
-.kibitzer-bar strong { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); padding: .25rem 0; color: #fff; background: #343a43; font-size: .62rem; text-align: center; font-variant-numeric: tabular-nums; }
+.kibitzer-bar strong { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); padding: .25rem 0; color: #fff; background: #343a43; font-size: .6rem; writing-mode: vertical-rl; text-align: center; font-variant-numeric: tabular-nums; }
 .unavailable { opacity: .6; }
 </style>
