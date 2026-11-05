@@ -1,3 +1,21 @@
+x-cope-admin-token: &cope-admin-token
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/admin_token
+  target: /run/secrets/cope_admin_token
+  read_only: true
+
+x-cope-event-token: &cope-event-token
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/event_token
+  target: /run/secrets/cope_event_token
+  read_only: true
+
+x-cope-db-password: &cope-db-password
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/db_password
+  target: /run/secrets/cope_db_password
+  read_only: true
+
 x-cope-service: &cope-service
   build:
     context: .
@@ -34,11 +52,10 @@ x-cope-service: &cope-service
     COPE_CLONE_ROW_MAX_BYTES: ${COPE_CLONE_ROW_MAX_BYTES:-16777216}
     COPE_CLONE_SOURCE_WAIT_TIMEOUT_S: ${COPE_CLONE_SOURCE_WAIT_TIMEOUT_S:-3600}
     COPE_CLONE_IMPORT_TTL_HOURS: ${COPE_CLONE_IMPORT_TTL_HOURS:-72}
-  secrets:
-    - cope_admin_token
-    - cope_event_token
-    - cope_db_password
   volumes:
+    - *cope-admin-token
+    - *cope-event-token
+    - *cope-db-password
     - engine-dockerfiles:/app/data/engines
   logging:
     driver: json-file
@@ -118,6 +135,9 @@ services:
       migrate:
         condition: service_completed_successfully
     volumes:
+      - *cope-admin-token
+      - *cope-event-token
+      - *cope-db-password
       - engine-dockerfiles:/app/data/engines
       - engine-artifacts:/var/lib/cope/engine-artifacts
       - clone-transfer:/var/lib/cope/clone-transfer
@@ -195,6 +215,9 @@ services:
       web:
         condition: service_healthy
     volumes:
+      - *cope-admin-token
+      - *cope-event-token
+      - *cope-db-password
       - engine-dockerfiles:/app/data/engines
       - engine-artifacts:/var/lib/cope/engine-artifacts
       - clone-transfer:/var/lib/cope/clone-transfer
@@ -218,6 +241,9 @@ services:
       COPE_UPDATE_COMPOSE_FILES: ${COPE_UPDATE_COMPOSE_FILES:-}
       COPE_COMPOSE_PROJECT: ${COPE_COMPOSE_PROJECT:?Set COPE_COMPOSE_PROJECT}
     volumes:
+      - *cope-admin-token
+      - *cope-event-token
+      - *cope-db-password
       - ${COPE_HOST_SOURCE_DIR:-.}:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
       - engine-dockerfiles:/app/data/engines
@@ -278,6 +304,9 @@ services:
     working_dir: /backups
     command: ["db", "backup", "--keep", "7"]
     volumes:
+      - *cope-admin-token
+      - *cope-event-token
+      - *cope-db-password
       - ./backups:/backups
     depends_on:
       db:

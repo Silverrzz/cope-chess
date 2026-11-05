@@ -30,7 +30,7 @@ const competitors = computed(() => props.detail.cast.filter(member => member.par
 </script>
 
 <template>
-  <HandBrainAnnouncement v-if="announcementOnly" :detail="detail" :clock-offset-ms="clockOffsetMs" :view="view" />
+  <HandBrainAnnouncement v-if="announcementOnly" :detail="detail" :clock-offset-ms="clockOffsetMs" />
   <HandBrainArena v-else-if="view === 'arena' && !completed" :detail="detail" :clock-offset-ms="clockOffsetMs" />
   <div v-else class="hb-page">
     <section class="hb-stage" :class="{ 'hb-stage--complete': completed }" aria-labelledby="hb-title">
