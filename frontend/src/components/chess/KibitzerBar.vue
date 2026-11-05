@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-const props = defineProps<{ fen: string; orientation: 'white' | 'black'; chess960?: boolean; paused?: boolean }>()
+import type { KibitzerEvaluation } from './kibitzer'
+const props = defineProps<{ gameId: string; ply: number; fen: string; orientation: 'white' | 'black'; chess960?: boolean; paused?: boolean }>()
+const emit = defineEmits<{ evaluation: [sample: KibitzerEvaluation] }>()
+type SearchJob = { id: number; gameId: string; ply: number; fen: string; chess960: boolean }
 const score = ref<{ kind: 'cp' | 'mate'; value: number; depth: number; side: number } | null>(null)
 const status = ref('Loading Stockfish Lite')
 const visible = ref(!document.hidden)
@@ -10,7 +13,8 @@ let ready = false
 let searching = false
 let searchId = 0
 let searchSide = 1
-let pending: { id: number; fen: string; chess960: boolean } | undefined
+let pending: SearchJob | undefined
+let searchJob: SearchJob | undefined
 let timer: number | undefined
 const whiteScore = computed(() => score.value ? score.value.value * score.value.side : 0)
 const whitePercent = computed(() => score.value?.kind === 'mate' ? ((score.value.value > 0 ? 1 : -1) * score.value.side > 0 ? 100 : 0) : 100 / (1 + Math.exp(-whiteScore.value / 240)))
@@ -33,6 +37,7 @@ function startSearch() {
   if (!worker || !ready || searching || !pending) return
   const job = pending
   pending = undefined
+  searchJob = job
   searchId = job.id
   searchSide = job.fen.split(/\s+/)[1] === 'b' ? -1 : 1
   searching = true
@@ -57,6 +62,7 @@ function createWorker() {
       const match = /score (cp|mate) (-?\d+)/.exec(data)
       if (match) {
         score.value = { kind: match[1] as 'cp' | 'mate', value: Number(match[2]), depth: Number(/depth (\d+)/.exec(data)?.[1] || 0), side: searchSide }
+        if (searchJob) emit('evaluation', { gameId: searchJob.gameId, ply: searchJob.ply, fen: searchJob.fen, kind: score.value.kind, value: score.value.value, depth: score.value.depth, side: searchSide === 1 ? 'white' : 'black' })
         status.value = 'Analyzing'
       }
     }
@@ -70,7 +76,7 @@ function analyze() {
   if (!visible.value || props.paused) { stop(); status.value = 'Paused'; return }
   status.value = 'Loading Stockfish Lite'
   timer = window.setTimeout(() => {
-    pending = { id: current, fen: props.fen === 'startpos' ? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' : props.fen, chess960: props.chess960 ?? false }
+    pending = { id: current, gameId: props.gameId, ply: props.ply, fen: props.fen === 'startpos' ? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' : props.fen, chess960: props.chess960 ?? false }
     if (!worker) createWorker()
     if (searching) worker?.postMessage('stop')
     else startSearch()
@@ -78,7 +84,7 @@ function analyze() {
 }
 function visibility() { visible.value = !document.hidden }
 document.addEventListener('visibilitychange', visibility)
-watch(() => [props.fen, props.paused, visible.value], analyze, { immediate: true })
+watch(() => [props.gameId, props.ply, props.fen, props.paused, visible.value], analyze, { immediate: true })
 onBeforeUnmount(() => { stop(); document.removeEventListener('visibilitychange', visibility) })
 </script>
 <template>

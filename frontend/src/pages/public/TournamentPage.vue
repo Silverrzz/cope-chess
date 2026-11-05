@@ -6,6 +6,7 @@ import { ApiError, api } from '@/api/client'
 import { useViewerPresence } from '@/composables/useViewerPresence'
 import EvaluationGraph from '@/components/chess/EvaluationGraph.vue'
 import KibitzerBar from '@/components/chess/KibitzerBar.vue'
+import type { KibitzerEvaluation } from '@/components/chess/kibitzer'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
@@ -110,6 +111,8 @@ const orientation = ref<'white' | 'black'>('white')
 const { kibitzerEnabled } = useViewerSettings()
 const supportsKibitzer = computed(() => !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
+const currentPositionPly = ref(0)
+const kibitzerHistory = ref<Record<string, Record<number, KibitzerEvaluation>>>({})
 const streamState = ref<StreamState>('closed')
 const rememberedFollowedEngineId = ref(readFollowedEngineId())
 const initialRouteGameId = queryValue(route.query.game_id)
@@ -224,6 +227,17 @@ const graphTeams = computed(() => [{ members: (['white', 'black'] as const).map(
 const graphSearches = computed(() => moves.value.map((move, index) => ({
   ply: graphStartPly.value + index + 1, engine_id: moveSide(index) === 'white' ? 0 : 1, side: moveSide(index), analysis: move,
 })))
+const kibitzerSamples = computed(() => Object.values(kibitzerHistory.value[String(viewerGame.value?.id)] ?? {}).map(sample => ({
+  ply: graphStartPly.value + sample.ply, engine_id: 2, side: sample.side,
+  analysis: { eval_cp: sample.kind === 'cp' ? sample.value : null, eval_mate: sample.kind === 'mate' ? sample.value : null },
+})))
+function recordKibitzer(sample: KibitzerEvaluation) {
+  if (!kibitzerEnabled.value || sample.gameId !== String(viewerGame.value?.id) || sample.ply < 0 || sample.ply > moves.value.length) return
+  const history = kibitzerHistory.value[sample.gameId] ??= {}
+  const previous = history[sample.ply]
+  if (previous?.fen === sample.fen && previous.depth > sample.depth) return
+  history[sample.ply] = sample
+}
 const whiteAnalysis = computed(() => analysisForSide('white'))
 const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
@@ -1239,11 +1253,11 @@ function forgetManualFollowPauseGame(): void {
             :active="!isPreparing && activeSide === side"
             :loading="isPreparing"
           />
-          <EvaluationGraph class="game-evaluation" :orientation="orientation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
+          <EvaluationGraph :kibitzer="kibitzerEnabled && supportsKibitzer ? kibitzerSamples : []" class="game-evaluation" :orientation="orientation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
         </div>
 
         <div ref="boardColumnElement" class="board-column" :class="{ 'board-column--kibitzer': kibitzerEnabled && supportsKibitzer }">
-          <KibitzerBar v-if="kibitzerEnabled && supportsKibitzer" :fen="currentPositionFen" :orientation="orientation" :chess960="data.tournament.config?.variant === 'dfrc'" :paused="isPreparing" />
+          <KibitzerBar :game-id="String(viewerGame.id)" :ply="currentPositionPly" @evaluation="recordKibitzer" v-if="kibitzerEnabled && supportsKibitzer" :fen="currentPositionFen" :orientation="orientation" :chess960="data.tournament.config?.variant === 'dfrc'" :paused="isPreparing" />
           <ChessViewer
             :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
@@ -1252,7 +1266,7 @@ function forgetManualFollowPauseGame(): void {
             :arrows="isPreparing ? [] : suggestedMoves"
             :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
             @update:model-value="selectedPly = $event"
-            @position="currentPositionFen = $event.fen"
+            @position="currentPositionFen = $event.fen; currentPositionPly = $event.ply"
             @orientation="orientation = $event"
           />
         </div>
