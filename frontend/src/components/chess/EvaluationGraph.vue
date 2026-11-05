@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
-import { useViewerSettings } from '@/composables/useViewerSettings'
 import type { EngineAnalysis } from '@/components/public/types'
 interface Sample { ply: number; engine_id: number; side: 'white' | 'black'; analysis: EngineAnalysis }
 interface Team { members: { id: number; engine_id: number | null; name: string; color?: string }[] }
-const { evaluationPerspective } = useViewerSettings()
-const props = defineProps<{ searches: Sample[]; teams: Team[]; selectedPly: number; startPly: number; totalPlies: number }>()
+const props = defineProps<{ orientation: 'white' | 'black'; searches: Sample[]; teams: Team[]; selectedPly: number; startPly: number; totalPlies: number }>()
 const emit = defineEmits<{ seek: [ply: number] }>()
 const colors = ['#fff', '#000']
 const hover = ref<number | null>(null)
@@ -23,7 +21,7 @@ const end = computed(() => Math.max(props.startPly + props.totalPlies, props.sta
 const right = computed(() => size.value.width - 6)
 const bottom = computed(() => size.value.height - 6)
 const x = (ply: number) => 6 + (ply - props.startPly) / Math.max(1, end.value - props.startPly) * (right.value - 6)
-const direction = (s: Sample) => evaluationPerspective.value === 'side-to-move' || s.side === 'white' ? 1 : -1
+const direction = (s: Sample) => s.side === props.orientation ? 1 : -1
 const value = (s: Sample) => Number(s.analysis.eval_cp ?? 0) * direction(s)
 const scale = computed(() => {
   const values = props.searches.filter(s => (s.analysis.eval_mate == null && s.analysis.eval_cp != null)).map(value).filter(Number.isFinite)

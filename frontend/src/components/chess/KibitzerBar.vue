@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { useViewerSettings } from '@/composables/useViewerSettings'
 const props = defineProps<{ fen: string; orientation: 'white' | 'black'; chess960?: boolean; paused?: boolean }>()
-const { evaluationPerspective } = useViewerSettings()
-const score = ref<{ kind: 'cp' | 'mate'; value: number; depth: number } | null>(null)
+const score = ref<{ kind: 'cp' | 'mate'; value: number; depth: number; side: number } | null>(null)
 const status = ref('Loading Stockfish Lite')
 const visible = ref(!document.hidden)
 let worker: Worker | undefined
@@ -11,14 +9,15 @@ let id = 0
 let ready = false
 let searching = false
 let searchId = 0
+let searchSide = 1
 let pending: { id: number; fen: string; chess960: boolean } | undefined
 let timer: number | undefined
-const side = computed(() => props.fen.split(/\s+/)[1] === 'b' ? -1 : 1)
-const whiteScore = computed(() => score.value ? score.value.value * side.value : 0)
-const whitePercent = computed(() => score.value?.kind === 'mate' ? ((score.value.value > 0 ? 1 : -1) * side.value > 0 ? 100 : 0) : 100 / (1 + Math.exp(-whiteScore.value / 240)))
+const whiteScore = computed(() => score.value ? score.value.value * score.value.side : 0)
+const whitePercent = computed(() => score.value?.kind === 'mate' ? ((score.value.value > 0 ? 1 : -1) * score.value.side > 0 ? 100 : 0) : 100 / (1 + Math.exp(-whiteScore.value / 240)))
+const bottomPercent = computed(() => props.orientation === 'white' ? whitePercent.value : 100 - whitePercent.value)
 const displayed = computed(() => {
   if (!score.value) return '…'
-  const n = evaluationPerspective.value === 'white' ? whiteScore.value : score.value.value
+  const n = whiteScore.value * (props.orientation === 'white' ? 1 : -1)
   return score.value.kind === 'mate' ? `#${n}` : `${n >= 0 ? '+' : ''}${(n / 100).toFixed(1)}`
 })
 const title = computed(() => `Stockfish 19 Lite · ${score.value ? `${displayed.value} · depth ${score.value.depth}` : status.value}`)
@@ -35,6 +34,7 @@ function startSearch() {
   const job = pending
   pending = undefined
   searchId = job.id
+  searchSide = job.fen.split(/\s+/)[1] === 'b' ? -1 : 1
   searching = true
   worker.postMessage(`setoption name UCI_Chess960 value ${job.chess960}`)
   worker.postMessage(`position fen ${job.fen}`)
@@ -56,7 +56,7 @@ function createWorker() {
     } else if (searchId === id) {
       const match = /score (cp|mate) (-?\d+)/.exec(data)
       if (match) {
-        score.value = { kind: match[1] as 'cp' | 'mate', value: Number(match[2]), depth: Number(/depth (\d+)/.exec(data)?.[1] || 0) }
+        score.value = { kind: match[1] as 'cp' | 'mate', value: Number(match[2]), depth: Number(/depth (\d+)/.exec(data)?.[1] || 0), side: searchSide }
         status.value = 'Analyzing'
       }
     }
@@ -66,7 +66,6 @@ function createWorker() {
 }
 function analyze() {
   window.clearTimeout(timer)
-  score.value = null
   const current = ++id
   if (!visible.value || props.paused) { stop(); status.value = 'Paused'; return }
   status.value = 'Loading Stockfish Lite'
@@ -83,7 +82,7 @@ watch(() => [props.fen, props.paused, visible.value], analyze, { immediate: true
 onBeforeUnmount(() => { stop(); document.removeEventListener('visibilitychange', visibility) })
 </script>
 <template>
-  <div class="kibitzer-bar" :title="title" role="meter" aria-label="Stockfish Lite evaluation, White advantage" :aria-valuenow="Math.round(whitePercent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="score ? title : status" :class="{ flipped: orientation === 'black', unavailable: !score }">
+  <div class="kibitzer-bar" :title="title" role="meter" :aria-label="`Stockfish Lite evaluation, ${orientation} advantage`" :aria-valuenow="Math.round(bottomPercent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="score ? title : status" :class="{ flipped: orientation === 'black', unavailable: !score }">
     <div class="kibitzer-bar__white" :style="{ height: `${whitePercent}%` }" />
     <strong>{{ displayed }}</strong>
   </div>

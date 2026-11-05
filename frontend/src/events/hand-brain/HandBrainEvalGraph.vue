@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import type { HandBrainSearch, HandBrainTeam } from './types'
-const props = defineProps<{ searches: HandBrainSearch[]; teams: HandBrainTeam[]; selectedPly: number; startPly: number; totalPlies: number }>()
+const props = defineProps<{ orientation: 'white' | 'black'; searches: HandBrainSearch[]; teams: HandBrainTeam[]; selectedPly: number; startPly: number; totalPlies: number }>()
 const emit = defineEmits<{ seek: [ply: number] }>()
 const colors = ['var(--color-info)', 'var(--color-warning)', 'var(--color-success)', 'var(--color-danger)']
 const hidden = ref<number[]>([])
@@ -20,7 +20,8 @@ const end = computed(() => Math.max(props.startPly + props.totalPlies, props.sta
 const right = computed(() => size.value.width - 12)
 const bottom = computed(() => size.value.height - 24)
 const x = (ply: number) => 38 + (ply - props.startPly) / Math.max(1, end.value - props.startPly) * (right.value - 38)
-const value = (s: HandBrainSearch) => Number(s.analysis.eval_cp ?? 0) * (s.side === 'white' ? 1 : -1)
+const direction = (s: HandBrainSearch) => s.side === props.orientation ? 1 : -1
+const value = (s: HandBrainSearch) => Number(s.analysis.eval_cp ?? 0) * direction(s)
 const scale = computed(() => {
   const values = props.searches.filter(s => !hidden.value.includes(s.engine_id) && (s.analysis.eval_mate == null && s.analysis.eval_cp != null)).map(value).filter(Number.isFinite)
   const min = values.length ? Math.min(...values) : -50
@@ -38,13 +39,13 @@ const scale = computed(() => {
 })
 const y = (cp: number) => 12 + (scale.value.high - cp) / (scale.value.high - scale.value.low) * (bottom.value - 12)
 const sampleY = (s: HandBrainSearch) => s.analysis.eval_mate != null
-  ? ((s.analysis.eval_mate > 0 ? 1 : -1) * (s.side === 'white' ? 1 : -1) > 0 ? 12 : bottom.value)
+  ? ((s.analysis.eval_mate > 0 ? 1 : -1) * direction(s) > 0 ? 12 : bottom.value)
   : y(value(s))
 const series = computed(() => props.teams.flatMap(team => team.members).map((member, index) => {
   const samples = props.searches.filter(s => s.engine_id === member.engine_id && (s.analysis.eval_cp != null || s.analysis.eval_mate != null)).sort((a,b) => a.ply-b.ply)
   const latest = [...samples].reverse().find(s => s.ply <= (hover.value ?? end.value))
   const cp = latest ? value(latest) : null
-  return { ...member, samples, color: colors[index % colors.length], path: samples.map((s,i) => `${i ? 'L' : 'M'}${x(s.ply).toFixed(2)},${sampleY(s).toFixed(2)}`).join(' '), label: cp === null ? '' : latest?.analysis.eval_mate != null ? `#${latest.analysis.eval_mate * (latest.side === 'white' ? 1 : -1)}` : `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(2)}` }
+  return { ...member, samples, color: colors[index % colors.length], path: samples.map((s,i) => `${i ? 'L' : 'M'}${x(s.ply).toFixed(2)},${sampleY(s).toFixed(2)}`).join(' '), label: cp === null ? '' : latest?.analysis.eval_mate != null ? `#${latest.analysis.eval_mate * direction(latest)}` : `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(2)}` }
 }))
 function pointer(event: MouseEvent) {
   const bounds = (event.currentTarget as SVGElement).getBoundingClientRect()
@@ -54,7 +55,7 @@ function toggle(id: number | null) { if (id === null) return; hidden.value = hid
 </script>
 <template>
   <section class="eval-panel" aria-label="Four-engine evaluation graph">
-    <header><h2>Evaluation</h2><span>White / pawns</span></header>
+    <header><h2>Evaluation</h2><span>{{ orientation === 'white' ? 'White' : 'Black' }} / pawns</span></header>
     <svg ref="chart" :viewBox="`0 0 ${size.width} ${size.height}`" preserveAspectRatio="none" class="eval-chart" role="img" aria-label="Evaluation history for both brains and both hands; click to replay a position" @mousemove="pointer" @mouseleave="hover = null" @click="emit('seek', Math.max(0, Math.min(totalPlies, (hover ?? end) - startPly)))">
       <defs><linearGradient id="hb-eval-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--color-accent)" stop-opacity=".045" /><stop offset="1" stop-color="var(--color-accent)" stop-opacity="0" /></linearGradient></defs>
       <rect x="38" y="12" :width="right - 38" :height="bottom - 12" rx="5" fill="url(#hb-eval-fill)" />

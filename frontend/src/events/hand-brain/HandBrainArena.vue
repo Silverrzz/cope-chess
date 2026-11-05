@@ -25,6 +25,7 @@ const analyses = ref<Record<string, HandBrainAnalysis>>({})
 const clock = ref<HandBrainClock>({})
 const now = ref(Date.now())
 const selectedPly = ref(0)
+const orientation = ref<'white' | 'black'>('white')
 const connected = ref(false)
 const error = ref('')
 const tab = ref('standings')
@@ -216,10 +217,10 @@ onBeforeUnmount(() => {
         <HandBrainTeamCard :team="whiteTeam" side="White" :swapped="swapped" :analyses="replayAnalyses" :clocks="engineClocks" :active-engine="clock.active_engine_id" :running="liveThinking" :clock-offset-ms="clockOffsetMs" :fen="currentFen" />
       </div>
       <div ref="boardColumnElement" class="board-column">
-        <ChessViewer v-model="selectedPly" :opening="opening" :moves="moves" :arrows="arrows" :rings="rings" label="Hand and brain game" />
+        <ChessViewer v-model="selectedPly" :opening="opening" :moves="moves" :arrows="arrows" :rings="rings" label="Hand and brain game" @orientation="orientation = $event" />
       </div>
       <aside class="activity-column" aria-label="Game activity">
-        <HandBrainEvalGraph :searches="searches" :teams="teams" :selected-ply="selectedPly" :start-ply="startPly" :total-plies="moves.length" @seek="selectedPly = $event" />
+        <HandBrainEvalGraph :orientation="orientation" :searches="searches" :teams="teams" :selected-ply="selectedPly" :start-ply="startPly" :total-plies="moves.length" @seek="selectedPly = $event" />
         <div class="activity-logs"><MoveList class="arena-moves" v-model="selectedPly" :moves="moves.map(m => m.san || m.uci)" :uci-moves="moves.map(m => m.uci)" :fen="opening.fen" :book-plies="moves.filter(m => m.is_book).length" /><ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" /></div>
       </aside>
     </section>

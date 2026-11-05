@@ -1239,7 +1239,7 @@ function forgetManualFollowPauseGame(): void {
             :active="!isPreparing && activeSide === side"
             :loading="isPreparing"
           />
-          <EvaluationGraph class="game-evaluation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
+          <EvaluationGraph class="game-evaluation" :orientation="orientation" :searches="graphSearches" :teams="graphTeams" :selected-ply="selectedPly" :start-ply="graphStartPly" :total-plies="moves.length" @seek="selectedPly = $event" />
         </div>
 
         <div ref="boardColumnElement" class="board-column" :class="{ 'board-column--kibitzer': kibitzerEnabled && supportsKibitzer }">
