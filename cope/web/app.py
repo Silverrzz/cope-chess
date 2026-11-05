@@ -573,6 +573,7 @@ class StreamHub:
                 "running": bool(event.data.get("running")),
                 "observed_at": event.sent_at,
                 "sent_at": event.sent_at,
+                **{key: event.data[key] for key in ("active_engine_id", "phase", "brain_move", "engine_clocks_ms") if key in event.data},
             }
 
 
@@ -810,7 +811,7 @@ def create_app(
         ):
             _publish_admin_post_streams(request)
         if path.startswith(("/assets/", "/audio/")):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if 200 <= response.status_code < 400 else "no-store"
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("X-Frame-Options", "DENY")

@@ -757,8 +757,8 @@ def set_event_stage_status(
         """
         UPDATE event_stages
         SET status = ?,
-            started_at = CASE WHEN ? IS NULL THEN started_at ELSE COALESCE(started_at, ?) END,
-            finished_at = CASE WHEN ? IS NULL THEN finished_at ELSE COALESCE(finished_at, ?) END
+            started_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN started_at ELSE COALESCE(started_at, ?) END,
+            finished_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN finished_at ELSE COALESCE(finished_at, ?) END
         WHERE id = ?
         """,
         (status, started_at, started_at, finished_at, finished_at, stage_id),
@@ -1049,8 +1049,8 @@ def update_event_contest_state(
         """
         UPDATE event_contests
         SET status = ?, result = ?, state = ?,
-            started_at = CASE WHEN ? IS NULL THEN started_at ELSE COALESCE(started_at, ?) END,
-            finished_at = CASE WHEN ? IS NULL THEN finished_at ELSE COALESCE(finished_at, ?) END
+            started_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN started_at ELSE COALESCE(started_at, ?) END,
+            finished_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN finished_at ELSE COALESCE(finished_at, ?) END
         WHERE id = ?
         """,
         (

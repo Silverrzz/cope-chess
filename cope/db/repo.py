@@ -269,6 +269,7 @@ class EngineVersionRecord:
     worker_local_count: int
     engine_active: bool
     created_at: str
+    source_date: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,6 +661,9 @@ def create_engine_version(
     uci_options: dict[str, Any] | None = None,
     active: bool = True,
 ) -> int:
+    from cope.engine_dates import source_commit_date
+    host = get_git_host(connection, git_host_id) if git_host_id is not None else None
+    source_date = source_commit_date(host, repository_full_name, source_ref) if distribution == "managed" else None
     build_hash = (
         hashlib.sha256(f"worker-local:{worker_local_key}".encode("utf-8")).hexdigest()
         if distribution == "worker_local"
@@ -669,8 +673,8 @@ def create_engine_version(
         """INSERT INTO engine_versions
            (engine_id, version, git_host_id, repository_url, repository_full_name,
             source_ref, source_kind, dockerfile_path, dockerfile, build_hash,
-            distribution, worker_local_key, uci_options, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            distribution, worker_local_key, uci_options, active, created_at, source_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             engine_id,
             version,
@@ -687,6 +691,7 @@ def create_engine_version(
             _json_dump(uci_options or {}),
             int(active),
             utc_now(),
+            source_date,
         ),
     )
     return int(cursor.lastrowid)
@@ -1002,7 +1007,7 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
                FROM engine_versions version
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
-               ORDER BY engine.name, version.created_at DESC, version.id DESC"""
+               ORDER BY engine.name, COALESCE(version.source_date, version.created_at) DESC, version.created_at DESC, version.id DESC"""
         )
     )
 
@@ -1031,7 +1036,7 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
                WHERE version.engine_id = ?
-               ORDER BY version.created_at DESC, version.id DESC""",
+               ORDER BY COALESCE(version.source_date, version.created_at) DESC, version.created_at DESC, version.id DESC""",
             (engine_id,),
         )
     )
@@ -5163,6 +5168,7 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         worker_local_count=int(row["worker_local_count"]),
         engine_active=engine_active,
         created_at=row["created_at"],
+        source_date=row["source_date"],
     )
 
 

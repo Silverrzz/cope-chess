@@ -121,6 +121,8 @@ export interface EngineRecord {
   created_at?: string | null
   uci_options?: Record<string, unknown>
   active?: boolean
+  source_date?: string | null
+
 }
 
 export interface GameSummary {

@@ -1,0 +1,42 @@
+services:
+  migrate:
+    image: cope-chess-dev:local
+  web:
+    environment:
+      COPE_EXECUTION_AUTHORITY_DIR: /run/cope-execution-authority
+    volumes:
+      - /root/cope-rework-dev-authority:/run/cope-execution-authority:ro
+    image: cope-chess-dev:local
+    ports:
+      - "172.18.0.1:18701:8701"
+  scheduler:
+    image: cope-chess-dev:local
+  worker-server:
+    image: cope-chess-dev:local
+    ports:
+      - "172.18.0.1:18702:8702"
+  clone-runner:
+    image: cope-chess-dev:local
+  updater:
+    image: cope-chess-dev:local
+    entrypoint: ["python", "-m", "cope"]
+    environment:
+      COPE_UPDATE_IMAGE_NAME: cope-chess-dev:local
+      COPE_UPDATE_COMPOSE_FILES: /workspace/compose.yaml:/workspace/compose.dev.yaml
+    volumes:
+      - ${COPE_HOST_SOURCE_DIR:-.}/deploy/dev_updater.py:/app/cope/updater.py:ro
+  benchmark-server:
+    image: cope-chess-dev:local
+    ports:
+      - "172.18.0.1:18703:8703"
+  caddy:
+    profiles: ["disabled"]
+  backup:
+    image: cope-chess-dev:local
+
+  control-runner:
+    environment:
+      COPE_EXECUTION_AUTHORITY_DIR: /run/cope-execution-authority
+    volumes:
+      - /root/cope-rework-dev-authority:/run/cope-execution-authority:ro
+    image: cope-chess-dev:local

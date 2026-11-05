@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { ApiError, api } from "@/api/client";
@@ -23,6 +23,13 @@ const connected = ref(false);
 const serverClockOffsetMs = ref(0);
 let controller: AbortController | null = null;
 let stream: EventSource | null = null;
+let refreshTimer: number | undefined;
+
+watch([() => props.arena, () => data.value?.event.status], ([arena, status]) => {
+  if (arena && status === "completed" && data.value?.event.slug === props.slug) {
+    void router.replace({ name: "event", params: { slug: props.slug } });
+  }
+});
 
 const customComponent = computed(() => data.value?.handler.current ? publicEventComponent(data.value.handler.key) : null);
 const immersiveCustom = computed(() => !!data.value && publicEventPresentation(data.value.handler.key) === "immersive");
@@ -45,10 +52,14 @@ const ungroupedSessions = computed(() => data.value?.sessions.filter((session) =
 onMounted(async () => {
   await load();
   if (data.value) connect();
+  refreshTimer = window.setInterval(() => {
+    if (props.arena) void load(true);
+  }, 15000);
 });
 onBeforeUnmount(() => {
   controller?.abort();
   stream?.close();
+  window.clearInterval(refreshTimer);
 });
 
 async function load(silent = false): Promise<void> {
@@ -81,7 +92,7 @@ function connect(): void {
   if (typeof EventSource === "undefined") return;
   stream?.close();
   stream = new EventSource(viewerStreamUrl(`/events/${encodeURIComponent(props.slug)}/stream`));
-  stream.onopen = () => { connected.value = true; void syncViewerIdentity(); };
+  stream.onopen = () => { connected.value = true; void syncViewerIdentity(); void load(true); };
   stream.onerror = () => { connected.value = false; };
   stream.addEventListener("event.changed", () => { void load(true); });
   stream.addEventListener("event.snapshot", updateSpectators);

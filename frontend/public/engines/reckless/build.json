@@ -1,0 +1,19 @@
+{
+  "name": "Reckless",
+  "version": "0.10.0-dev",
+  "commit": "aec5cb2e80ce6709f78ef8816c93b00b9440afa2",
+  "repository": "https://github.com/codedeliveryservice/Reckless",
+  "license": "AGPL-3.0-only",
+  "source": "/engines/reckless/reckless-source.tar.gz",
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "wasm_bindgen": "0.2.123",
+  "rustflags": "-C target-feature=+simd128",
+  "commands": [
+    "cargo build --lib --release --target wasm32-unknown-unknown --no-default-features",
+    "wasm-bindgen target/wasm32-unknown-unknown/release/reckless.wasm --target web --out-dir output --no-typescript"
+  ],
+  "wasm_sha256": "3e1799af9f0eefbd5198b77633463cbea71e3d39eb9689456115747607a600ac",
+  "network_sha256": {
+    "v60-7f587dfb.nnue": "7f587dfb1fe5d74d53909328afa6fd51650c8c7f45907602db7fbb1e52948c61"
+  }
+}

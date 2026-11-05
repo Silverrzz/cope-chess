@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
 import { isTurn, type Variant } from '@/components/chess/chess'
@@ -29,11 +30,12 @@ const props = withDefaults(defineProps<{
   loading: false,
 })
 
+const { evaluationPerspective } = useViewerSettings()
 const title = computed(() => props.name || (props.side === 'white' ? 'White' : 'Black'))
 const info = computed(() => props.analysis?.info || props.analysis?.pv || 'No analysis recorded')
 const evaluation = computed(() => {
   const value = props.analysis?.eval
-  if (value === null || value === undefined || props.side === 'white') return value ?? '-'
+  if (value === null || value === undefined || props.side === 'white' || evaluationPerspective.value === 'side-to-move') return value ?? '-'
   if (typeof value === 'number') return -value
   const match = value.match(/^(≤|≥)?(#?)([+-]?)(\d+(?:\.\d+)?)$/)
   if (!match) return value

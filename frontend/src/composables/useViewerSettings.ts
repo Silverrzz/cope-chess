@@ -22,7 +22,21 @@ function readEventMusicEnabled(): boolean {
 const confettiEnabled = ref(readConfettiEnabled());
 const eventMusicEnabled = ref(readEventMusicEnabled());
 
+function stored(key: string, fallback: string): string {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+const evaluationPerspective = ref<'white' | 'side-to-move'>(stored('cope-eval-perspective', 'white') === 'side-to-move' ? 'side-to-move' : 'white');
+const kibitzerEnabled = ref(stored('cope-kibitzer-enabled', 'true') !== 'false');
+
 export function useViewerSettings() {
+  function setEvaluationPerspective(value: 'white' | 'side-to-move'): void {
+    evaluationPerspective.value = value;
+    try { localStorage.setItem('cope-eval-perspective', value); } catch {}
+  }
+  function setKibitzerEnabled(value: boolean): void {
+    kibitzerEnabled.value = value;
+    try { localStorage.setItem('cope-kibitzer-enabled', String(value)); } catch {}
+  }
   function setConfettiEnabled(enabled: boolean): void {
     confettiEnabled.value = enabled;
     try {
@@ -42,5 +56,5 @@ export function useViewerSettings() {
     }
   }
 
-  return { confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled };
+  return { evaluationPerspective, kibitzerEnabled, setEvaluationPerspective, setKibitzerEnabled, confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled };
 }

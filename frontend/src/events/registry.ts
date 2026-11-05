@@ -1,3 +1,4 @@
+import HandBrainControlRoom from "./hand-brain/HandBrainControlRoom.vue";
 import type { Component } from "vue";
 import DuckVsFishArchiveHero from "./duck-vs-fish/DuckVsFishArchiveHero.vue";
 import DuckVsFishBroadcast from "./duck-vs-fish/DuckVsFishBroadcast.vue";
@@ -71,3 +72,7 @@ registerEventComponents("duck-vs-fish", {
   archive: DuckVsFishArchiveHero,
   admin: DuckVsFishControlRoom,
 });
+
+import HandBrainHero from "./hand-brain/HandBrainHero.vue";
+import HandBrainPage from "./hand-brain/HandBrainPage.vue";
+registerEventComponents("engine-hand-brain", { public: HandBrainPage, publicPresentation: "immersive", archive: HandBrainHero, admin: HandBrainControlRoom });

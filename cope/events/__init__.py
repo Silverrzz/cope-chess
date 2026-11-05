@@ -20,3 +20,5 @@ __all__ = [
     "register_event_api_routes",
     "register_event_module",
 ]
+
+from . import engine_hand_brain as _engine_hand_brain

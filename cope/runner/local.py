@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import sqlite3
@@ -79,6 +80,7 @@ from .scheduler import TournamentPreparation, advance_tournament, prepare_schedu
 from .commands import process_pending_runner_commands
 from cope.db.repo import compact_game_assignment_progress
 from .events import (
+    publish_stream_event,
     publish_clock_sync,
     publish_engine_info,
     publish_game_move,
@@ -172,6 +174,12 @@ def run_tournament_matches(
     for result in prepared:
         if result.skipped_reason is None:
             publish_tournament_event(result.tournament_id)
+            fixture = connection.execute(
+                "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
+                (result.tournament_id,),
+            ).fetchone()
+            if fixture is not None:
+                publish_stream_event(f"event.{fixture['event_id']}", "event.changed", {"event_id": fixture["event_id"]})
     if tournaments_finished:
         for tournament in list_tournaments(connection):
             if tournament.status == "finished":
@@ -738,6 +746,54 @@ def run_worker_assignment_game(
         use_latest_info_move_on_timeout=puzzle_gauntlet_puzzle_id is not None,
         search_until_timeout=puzzle_gauntlet_puzzle_id is not None,
     )
+    hand_brain = relay is not None and relay.mode == "hand_brain"
+    if hand_brain:
+        from cope.tournament.hand_brain import HandBrainRunner
+
+        def publish_phase(hb, side, role, engine_id, running, remaining):
+            clocks = {str(key): max(0, _clock_time_ms(clock) or 0) for key, clock in hb.clocks.items()}
+            if remaining is not None:
+                clocks[str(engine_id)] = max(0, remaining)
+            brain_move = hb.brain_move.uci() if hb.brain_move is not None else None
+            for metadata in relay_engine_data.values():
+                metadata["brain_move"] = brain_move
+            publish_clock_sync(tournament.id, {
+                "tournament_id": tournament.id, "game_id": game_record.id,
+                "active_side": side, "active_engine_id": engine_id, "phase": role,
+                "brain_move": brain_move, "engine_clocks_ms": clocks, "running": running,
+                "clocks_ms": _live_clock_payload(game, side, remaining),
+            })
+            if not running:
+                engine = engine_instances[engine_id]
+                result = engine.get_last_search_result()
+                if result is not None:
+                    root_fen = board.fen()
+                    info = {key: value for key, value in asdict(result).items() if key not in {"bestmove"}}
+                    connection.execute(
+                        "INSERT INTO hand_brain_searches (game_id, ply, engine_id, role, side, root_fen, bestmove, analysis, clocks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (game_id, ply, engine_id) DO UPDATE SET role = EXCLUDED.role, side = EXCLUDED.side, root_fen = EXCLUDED.root_fen, bestmove = EXCLUDED.bestmove, analysis = EXCLUDED.analysis, clocks = EXCLUDED.clocks",
+                        (game_record.id, board.ply(), engine_id, role, side, root_fen, result.bestmove.uci(), json.dumps(info), json.dumps(clocks)),
+                    )
+                    connection.commit()
+                    live_reporter.publish_final_engine_info(side, engine, result, root_fen)
+
+        runner = HandBrainRunner(
+            game,
+            relay,
+            engine_instances,
+            runtime_time_control,
+            on_phase=publish_phase,
+            lag_compensation_ms=0,
+            searchmoves_first_ids=(
+                engine_id
+                for engine_id, spec in assignment.engines.items()
+                if spec.name == "PZChessBot"
+            ),
+        )
+        if checkpoint is not None:
+            clocks = checkpoint.state.get("engine_clocks")
+            if not isinstance(clocks, dict):
+                raise RuntimeError("hand and brain checkpoint is missing its four engine clocks")
+            runner.restore(clocks)
     progress(
         "startup",
         "runtime_create",
@@ -930,7 +986,7 @@ def run_worker_assignment_game(
             break
         side_to_move = board.turn
         side_label = "White" if side_to_move == chess.WHITE else "Black"
-        if relay is not None:
+        if relay is not None and not hand_brain:
             color = ColorSlot.WHITE if side_to_move == chess.WHITE else ColorSlot.BLACK
             team = relay.teams[color]
             member = _relay_member_for_moves(
@@ -961,6 +1017,9 @@ def run_worker_assignment_game(
                 kibitzer.stop_search(wait=True)
         if move is None:
             break
+        if hand_brain:
+            engine = runner.last_engine
+            clock = game.white_tm if side_to_move == chess.WHITE else game.black_tm
         search = engine.get_last_search_result()
         if search is not None and search.info_line is not None:
             live_reporter.publish_final_engine_info(
@@ -1042,6 +1101,7 @@ def run_worker_assignment_game(
                 "rules_revision": tournament.config.rules_revision,
                 "ply": board.ply(),
                 "fen": board.fen(),
+                **({"engine_clocks": runner.snapshot()} if hand_brain else {}),
                 "white_clock": game.white_tm.snapshot(),
                 "black_clock": game.black_tm.snapshot(),
             },
@@ -1139,6 +1199,9 @@ def run_worker_assignment_game(
         len(moves),
     )
     publish_tournament_event(tournament.id)
+    if hand_brain:
+        from cope.runner.events import publish_stream_event
+        publish_stream_event(f"event.{relay.event_id}", "event.changed", {"event_id": relay.event_id})
     return True
 
 
@@ -1201,6 +1264,7 @@ def _relay_engine_data(relay) -> dict[int, dict[str, Any]]:
             "relay_position": index,
             "relay_threads": member.threads,
             "relay_hash_mb": member.hash_mb,
+            **({"role": "hand" if index == int(not relay.role_swap) else "brain"} if relay.mode == "hand_brain" else {}),
         }
         for team in relay.teams.values()
         for index, member in enumerate(team.members)
@@ -1267,6 +1331,7 @@ class _LiveGameReporter:
             ),
             force=True,
             root_fen=root_fen,
+            submitted_move=result.bestmove.uci(),
         )
 
     def publish_clock_sync(
@@ -1296,17 +1361,25 @@ class _LiveGameReporter:
         *,
         force: bool = False,
         root_fen: str | None = None,
+        submitted_move: str | None = None,
     ) -> None:
         now = time.monotonic()
-        if not force and now - self._last_engine_info_at[side] < ENGINE_INFO_PUBLISH_INTERVAL_S:
+        throttle_key = str(engine.get_name()) if self._relay_engine_data.get(int(engine.get_name()), {}).get("role") else side
+        if not force and now - self._last_engine_info_at.get(throttle_key, 0.0) < ENGINE_INFO_PUBLISH_INTERVAL_S:
             return
-        self._last_engine_info_at[side] = now
+        self._last_engine_info_at[throttle_key] = now
         engine_data = _live_engine_data(info)
         engine_id = int(engine.get_name())
         engine_data["engine_id"] = engine_id
         engine_data.update(self._relay_engine_data.get(engine_id, {}))
         root_fen = root_fen or self._game.state.get_board().fen()
         engine_data["root_fen"] = root_fen
+        if submitted_move is not None and engine_data.get("role"):
+            engine_data.update({
+                "submitted_move": submitted_move,
+                "submission_id": f"{self._game_id}:{engine_id}:{root_fen}",
+                "submitted_at": datetime.now(UTC).isoformat(),
+            })
         variant = getattr(self._game.state.get_board(), "variant", "dfrc" if self._game.state.get_board().chess960 else "standard")
         engine_data["variant"] = variant
         engine_data["pv_san"] = pv_to_san(info.pv, root_fen, variant=variant) or "not recorded"
@@ -1828,6 +1901,11 @@ def _finish_tournament_if_complete(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> bool:
+    from cope.events.engine_hand_brain import advance_hand_brain
+
+    hand_brain = advance_hand_brain(connection, tournament)
+    if hand_brain is not None:
+        return hand_brain.complete
     if tournament.config.format in {"round_robin", "gauntlet"}:
         counts = connection.execute(
             """
@@ -2102,7 +2180,7 @@ def _build_pgn(
         white_name = white_team.name
         black_name = black_team.name
         extra_headers = {
-            "EventType": "Engine Relay",
+            "EventType": "Hand & Brain" if relay.mode == "hand_brain" else "Engine Relay",
             "WhiteRelay": ", ".join(str(member.engine_id) for member in white_team.members),
             "BlackRelay": ", ".join(str(member.engine_id) for member in black_team.members),
         }

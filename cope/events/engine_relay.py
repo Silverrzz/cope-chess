@@ -362,6 +362,8 @@ def relay_assignment_for_game(
             ColorSlot.WHITE: _team_assignment(connection, fixture.event_id, white_team),
             ColorSlot.BLACK: _team_assignment(connection, fixture.event_id, black_team),
         },
+        mode="hand_brain" if get_event(connection, fixture.event_id).handler_key == "engine-hand-brain" else "relay",
+        role_swap=(game.game_number - 1) // 2 == 1,
         kibitzer=None if fixture.kibitzer_engine_id is None else EngineRelayKibitzer(
             engine_id=fixture.kibitzer_engine_id,
             threads=fixture.kibitzer_threads or 1,

@@ -42,6 +42,7 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   label?: string
   arrows?: BoardArrow[]
+  rings?: string[]
   lastMove?: string
 }>(), {
   fen: 'startpos',
@@ -53,6 +54,7 @@ const props = withDefaults(defineProps<{
   compact: false,
   label: 'Chess game viewer',
   arrows: () => [],
+  rings: () => [],
   lastMove: '',
 })
 
@@ -110,6 +112,7 @@ watch([
   () => props.coordinates,
   () => props.compact,
   () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}:${arrow.outlineColor || ''}:${arrow.label || ''}`).join('|'),
+  () => props.rings.join('|'),
 ], renderBoard)
 
 onMounted(() => {
@@ -191,6 +194,7 @@ function renderBoard(): void {
     },
   ]))
   const autoShapes = [
+    ...props.rings.filter(square => /^[a-h][1-8]$/.test(square)).map(square => ({ orig: square as Key, brush: 'brainRing' })),
     ...outlinedShapes,
     ...arrows.flatMap((arrow) => {
       const brush = arrow.fillColor
@@ -206,7 +210,7 @@ function renderBoard(): void {
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
     animation: { enabled: !props.compact, duration: 150 },
-    drawable: { autoShapes, brushes: { ...arrowBrushes, ...fillBrushes, ...outlineBrushes } },
+    drawable: { autoShapes, brushes: { ...arrowBrushes, brainRing: { key: 'brain-ring', color: arrowBrushes.yellow.color, opacity: .8, lineWidth: 5 }, ...fillBrushes, ...outlineBrushes } },
   }
   const pieces: PiecesDiff = new Map([...ground.state.pieces.keys()].map((key) => [key, undefined]))
   for (const [key, piece] of readGroundFen(currentFen.value.replaceAll('*', '1'))) pieces.set(key, piece)

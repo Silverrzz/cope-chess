@@ -324,6 +324,8 @@ class EngineRelayAssignment(StrictModel):
     fixture_id: int = Field(gt=0)
     teams: dict[ColorSlot, EngineRelayTeam]
     kibitzer: EngineRelayKibitzer | None = None
+    mode: Literal["relay", "hand_brain"] = Field(default="relay", exclude=True)
+    role_swap: bool = Field(default=False, exclude=True)
 
     @field_validator("teams")
     @classmethod
@@ -344,6 +346,12 @@ class EngineRelayAssignment(StrictModel):
 
     @model_validator(mode="after")
     def validate_kibitzer(self) -> EngineRelayAssignment:
+        if self.mode == "hand_brain" and (
+            self.kibitzer is not None or any(len(team.members) != 2 for team in self.teams.values())
+        ):
+            raise ValueError("hand and brain requires two engines per team and no kibitzer")
+        if self.mode == "hand_brain" and any(member.threads != 1 for team in self.teams.values() for member in team.members):
+            raise ValueError("hand and brain engines must use one thread")
         engine_ids = {
             member.engine_id
             for team in self.teams.values()

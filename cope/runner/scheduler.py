@@ -154,8 +154,13 @@ def _lock_live_roster_tournament(
 def prepare_scheduled_tournaments(
     connection: sqlite3.Connection,
 ) -> tuple[TournamentPreparation, ...]:
+    from cope.events.engine_hand_brain import start_scheduled_hand_brain_events
+
     prepared: list[TournamentPreparation] = []
     now = datetime.now(UTC).isoformat(timespec="seconds")
+    for tournament_id in start_scheduled_hand_brain_events(connection, now):
+        tournament = get_tournament(connection, tournament_id)
+        prepared.append(TournamentPreparation(tournament.id, tournament.name, 1))
     for tournament in list_due_scheduled_tournaments(connection, now):
         prepared.append(prepare_tournament(connection, tournament))
     return tuple(prepared)
@@ -252,6 +257,11 @@ def advance_tournament(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> TournamentAdvance:
+    from cope.events.engine_hand_brain import advance_hand_brain
+
+    hand_brain = advance_hand_brain(connection, tournament)
+    if hand_brain is not None:
+        return hand_brain
     games = list_games(connection, tournament.id)
     if tournament.config.format in {TournamentFormat.ROUND_ROBIN, TournamentFormat.GAUNTLET}:
         return TournamentAdvance(complete=bool(games) and all(game.status == "finished" for game in games))

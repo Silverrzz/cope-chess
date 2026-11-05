@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useViewerSettings } from '@/composables/useViewerSettings'
+const { evaluationPerspective } = useViewerSettings()
 import { clockLabel, engineName, gameHref, statusLabel } from './format'
 import type { CrossTableGame } from './types'
 import CrossTableBoard from './CrossTableBoard.vue'
@@ -23,7 +25,7 @@ function clock(game: CrossTableGame, side: 'white' | 'black'): string {
 function evaluation(game: CrossTableGame, side: 'white' | 'black'): string {
   const score = game.evaluations?.[side]
   if (!score) return '-'
-  const factor = side === 'white' ? 1 : -1
+  const factor = evaluationPerspective.value === 'side-to-move' || side === 'white' ? 1 : -1
   const bound = factor === 1
     ? score.score_bound
     : score.score_bound === 'lowerbound'
