@@ -14,8 +14,15 @@ COPY <<'EOF' /tmp/cope-bench.c
 #include <unistd.h>
 #include <sys/wait.h>
 int main(int argc, char **argv) {
+    char native[4096];
+    ssize_t length = readlink("/proc/self/exe", native, sizeof(native) - 32);
+    if (length < 0) return 127;
+    native[length] = 0;
+    char *slash = strrchr(native, '/');
+    if (!slash) return 127;
+    strcpy(slash + 1, "engine-native");
     if (argc != 2 || strcmp(argv[1], "bench")) {
-        execv("/opt/cope/engine-native", argv);
+        execv(native, argv);
         return 127;
     }
     int p[2];
@@ -25,7 +32,7 @@ int main(int argc, char **argv) {
     if (!child) {
         close(p[0]);
         dup2(p[1], 1); dup2(p[1], 2); close(p[1]);
-        execl("/opt/cope/engine-native", "engine-native", "bench", NULL);
+        execl(native, "engine-native", "bench", NULL);
         _exit(127);
     }
     close(p[1]);
