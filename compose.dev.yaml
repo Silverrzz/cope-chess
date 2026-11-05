@@ -1,42 +1,102 @@
+x-dev-admin-token: &dev-admin-token
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/admin_token
+  target: /run/secrets/cope_admin_token
+  read_only: true
+
+x-dev-event-token: &dev-event-token
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/event_token
+  target: /run/secrets/cope_event_token
+  read_only: true
+
+x-dev-db-password: &dev-db-password
+  type: bind
+  source: ${COPE_HOST_SOURCE_DIR:-.}/secrets/db_password
+  target: /run/secrets/cope_db_password
+  read_only: true
+
 services:
   migrate:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
   web:
+    secrets: !reset []
     environment:
       COPE_EXECUTION_AUTHORITY_DIR: /run/cope-execution-authority
     volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
       - /root/cope-rework-dev-authority:/run/cope-execution-authority:ro
     image: cope-chess-dev:local
     ports:
       - "172.18.0.1:18701:8701"
   scheduler:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
   worker-server:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
     ports:
       - "172.18.0.1:18702:8702"
   clone-runner:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
   updater:
+    secrets: !reset []
     image: cope-chess-dev:local
     entrypoint: ["python", "-m", "cope"]
     environment:
       COPE_UPDATE_IMAGE_NAME: cope-chess-dev:local
       COPE_UPDATE_COMPOSE_FILES: /workspace/compose.yaml:/workspace/compose.dev.yaml
     volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
       - ${COPE_HOST_SOURCE_DIR:-.}/deploy/dev_updater.py:/app/cope/updater.py:ro
   benchmark-server:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
     ports:
       - "172.18.0.1:18703:8703"
   caddy:
     profiles: ["disabled"]
   backup:
+    secrets: !reset []
+    volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
     image: cope-chess-dev:local
 
   control-runner:
+    secrets: !reset []
     environment:
       COPE_EXECUTION_AUTHORITY_DIR: /run/cope-execution-authority
     volumes:
+      - *dev-admin-token
+      - *dev-event-token
+      - *dev-db-password
       - /root/cope-rework-dev-authority:/run/cope-execution-authority:ro
     image: cope-chess-dev:local
