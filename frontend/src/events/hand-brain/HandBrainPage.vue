@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventDetailResponse } from "@/types/events";
 import HandBrainArt from "./HandBrainArt.vue";
+import HandBrainAnnouncement from "./HandBrainAnnouncement.vue";
 import HandBrainArena from "./HandBrainArena.vue";
 import HandBrainResults from "./HandBrainResults.vue";
 import type { HandBrainPayload } from "./types";
@@ -14,6 +15,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer); })
 const event = computed(() => props.detail.event);
 const completed = computed(() => event.value.status === "completed");
 const payload = computed(() => props.detail.custom as HandBrainPayload);
+const announcementOnly = computed(() => !payload.value?.teams?.length && ["draft", "announced", "scheduled", "postponed"].includes(event.value.status));
 const final = computed(() => payload.value.matches.find(match => match.key === "F"));
 const winner = computed(() => payload.value.teams.find(team => team.id === final.value?.winner_team_id));
 const remaining = computed(() => Math.max(0, Date.parse(event.value.scheduled_start_at ?? "") - now.value - props.clockOffsetMs));
@@ -28,7 +30,8 @@ const competitors = computed(() => props.detail.cast.filter(member => member.par
 </script>
 
 <template>
-  <HandBrainArena v-if="view === 'arena' && !completed" :detail="detail" :clock-offset-ms="clockOffsetMs" />
+  <HandBrainAnnouncement v-if="announcementOnly" :detail="detail" :clock-offset-ms="clockOffsetMs" :view="view" />
+  <HandBrainArena v-else-if="view === 'arena' && !completed" :detail="detail" :clock-offset-ms="clockOffsetMs" />
   <div v-else class="hb-page">
     <section class="hb-stage" :class="{ 'hb-stage--complete': completed }" aria-labelledby="hb-title">
       <div class="hb-content">

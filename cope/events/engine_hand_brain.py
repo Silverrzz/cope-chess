@@ -674,13 +674,7 @@ def _provision(connection):
         status="scheduled",
         featured=True,
         scheduled_start_at="2026-11-07T17:00:00+00:00",
-        theme={
-            "primary": "#b9133e",
-            "accent": "#ff7293",
-            "background": "#13080e",
-            "surface": "#29101b",
-            "text": "#ffe9e9",
-        },
+        theme={"primary": "#b9133e", "accent": "#ff7293", "background": "#13080e", "surface": "#29101b", "text": "#ffe9e9"},
         config={"module": "engine-hand-brain", "announcement_only": True},
     )
     set_event_published(connection, event_id, True)
