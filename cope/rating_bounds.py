@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 from math import log, sqrt
 
 
-SCORE_VARIANCE_PSEUDOCOUNT = 0.5
+EMPTY_SCORE_COUNT = 0.001
 
 def paired_error_margins(games, ratings: dict[int, float], anchor_engine_id: int | None) -> dict[int, float | None]:
     import numpy as np
@@ -64,10 +64,10 @@ def paired_error_margins(games, ratings: dict[int, float], anchor_engine_id: int
         if count == 1:
             variance = length * expected * (1.0 - expected)
         else:
-            total = count + SCORE_VARIANCE_PSEUDOCOUNT * len(counts)
-            mean = sum((index / 2) * (frequency + SCORE_VARIANCE_PSEUDOCOUNT) for index, frequency in enumerate(counts)) / total
-            variance = sum((index / 2 - mean) ** 2 * (frequency + SCORE_VARIANCE_PSEUDOCOUNT) for index, frequency in enumerate(counts)) / total
-            variance *= count / (count - 1)
+            observed = [frequency if frequency else EMPTY_SCORE_COUNT for frequency in counts]
+            total = sum(observed)
+            mean = sum((index / 2) * frequency for index, frequency in enumerate(observed)) / total
+            variance = sum((index / 2 - mean) ** 2 * frequency for index, frequency in enumerate(observed)) / total
         weight = count * variance
         noise[first, first] += weight
         noise[second, second] += weight
