@@ -4,41 +4,77 @@ import { useViewerSettings } from '@/composables/useViewerSettings'
 const props = defineProps<{ fen: string; orientation: 'white' | 'black'; chess960?: boolean; paused?: boolean }>()
 const { evaluationPerspective } = useViewerSettings()
 const score = ref<{ kind: 'cp' | 'mate'; value: number; depth: number } | null>(null)
-const status = ref('Loading Reckless')
+const status = ref('Loading Stockfish Lite')
 const visible = ref(!document.hidden)
 let worker: Worker | undefined
 let id = 0
+let ready = false
+let searching = false
+let searchId = 0
+let pending: { id: number; fen: string; chess960: boolean } | undefined
 let timer: number | undefined
 const side = computed(() => props.fen.split(/\s+/)[1] === 'b' ? -1 : 1)
 const whiteScore = computed(() => score.value ? score.value.value * side.value : 0)
-const whitePercent = computed(() => score.value?.kind === 'mate' ? (whiteScore.value > 0 ? 100 : 0) : 100 / (1 + Math.exp(-whiteScore.value / 240)))
+const whitePercent = computed(() => score.value?.kind === 'mate' ? ((score.value.value > 0 ? 1 : -1) * side.value > 0 ? 100 : 0) : 100 / (1 + Math.exp(-whiteScore.value / 240)))
 const displayed = computed(() => {
   if (!score.value) return '…'
   const n = evaluationPerspective.value === 'white' ? whiteScore.value : score.value.value
   return score.value.kind === 'mate' ? `#${n}` : `${n >= 0 ? '+' : ''}${(n / 100).toFixed(1)}`
 })
-const title = computed(() => `Reckless dev aec5cb2 · ${score.value ? `${displayed.value} · depth ${score.value.depth}` : status.value}`)
+const title = computed(() => `Stockfish 19 Lite · ${score.value ? `${displayed.value} · depth ${score.value.depth}` : status.value}`)
 function stop() {
   window.clearTimeout(timer)
   worker?.terminate()
   worker = undefined
+  ready = false
+  searching = false
+  pending = undefined
+}
+function startSearch() {
+  if (!worker || !ready || searching || !pending) return
+  const job = pending
+  pending = undefined
+  searchId = job.id
+  searching = true
+  worker.postMessage(`setoption name UCI_Chess960 value ${job.chess960}`)
+  worker.postMessage(`position fen ${job.fen}`)
+  worker.postMessage('go movetime 1500')
+}
+function createWorker() {
+  worker = new Worker('/assets/engines/stockfish-19.0.1-lite/stockfish-19-lite-single.js', { name: 'cope-kibitzer' })
+  worker.onmessage = ({ data }) => {
+    if (typeof data !== 'string') return
+    if (data === 'uciok') {
+      worker?.postMessage('setoption name Hash value 16')
+      worker?.postMessage('isready')
+    } else if (data === 'readyok') {
+      ready = true
+      startSearch()
+    } else if (data.startsWith('bestmove ')) {
+      searching = false
+      if (pending) startSearch()
+    } else if (searchId === id) {
+      const match = /score (cp|mate) (-?\d+)/.exec(data)
+      if (match) {
+        score.value = { kind: match[1] as 'cp' | 'mate', value: Number(match[2]), depth: Number(/depth (\d+)/.exec(data)?.[1] || 0) }
+        status.value = 'Analyzing'
+      }
+    }
+  }
+  worker.onerror = () => { status.value = 'Analysis unavailable'; stop() }
+  worker.postMessage('uci')
 }
 function analyze() {
   window.clearTimeout(timer)
   score.value = null
   const current = ++id
   if (!visible.value || props.paused) { stop(); status.value = 'Paused'; return }
-  status.value = 'Loading Reckless'
+  status.value = 'Loading Stockfish Lite'
   timer = window.setTimeout(() => {
-    if (!worker) worker = new Worker('/engines/reckless/kibitzer-worker.js', { type: 'module', name: 'cope-reckless' })
-    worker.onmessage = ({ data }) => {
-      if (data.id !== id) return
-      if (data.error) { status.value = 'Analysis unavailable'; stop(); return }
-      score.value = data
-      status.value = 'Analyzing'
-    }
-    worker.onerror = () => { status.value = 'Analysis unavailable'; stop() }
-    worker.postMessage({ id: current, fen: props.fen === 'startpos' ? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' : props.fen })
+    pending = { id: current, fen: props.fen === 'startpos' ? 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' : props.fen, chess960: props.chess960 ?? false }
+    if (!worker) createWorker()
+    if (searching) worker?.postMessage('stop')
+    else startSearch()
   }, 180)
 }
 function visibility() { visible.value = !document.hidden }
@@ -47,7 +83,7 @@ watch(() => [props.fen, props.paused, visible.value], analyze, { immediate: true
 onBeforeUnmount(() => { stop(); document.removeEventListener('visibilitychange', visibility) })
 </script>
 <template>
-  <div class="kibitzer-bar" :title="title" role="meter" aria-label="Reckless evaluation, White advantage" :aria-valuenow="Math.round(whitePercent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="score ? title : status" :class="{ flipped: orientation === 'black', unavailable: !score }">
+  <div class="kibitzer-bar" :title="title" role="meter" aria-label="Stockfish Lite evaluation, White advantage" :aria-valuenow="Math.round(whitePercent)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="score ? title : status" :class="{ flipped: orientation === 'black', unavailable: !score }">
     <div class="kibitzer-bar__white" :style="{ height: `${whitePercent}%` }" />
     <strong>{{ displayed }}</strong>
   </div>

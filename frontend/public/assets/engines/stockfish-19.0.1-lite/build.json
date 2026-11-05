@@ -1,0 +1,30 @@
+{
+  "name": "Stockfish Lite",
+  "version": "19.0.1",
+  "commit": "0d5dd7944f88c817c07a26bc4fb1905d5f9c46d6",
+  "repository": "https://github.com/nmrugg/stockfish.js",
+  "release": "https://github.com/nmrugg/stockfish.js/releases/tag/v19.0.1",
+  "license": "GPL-3.0",
+  "source": "stockfish-source.tar.gz",
+  "network": "nn-61e7af4bb97d.nnue",
+  "threads": 1,
+  "files": {
+    "LICENSE": {
+      "bytes": 35821,
+      "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b"
+    },
+    "stockfish-19-lite-single.js": {
+      "bytes": 28230,
+      "sha256": "ccb130d7ff29408531c47d859a49f91d59d4f482d05a53eb1a3231a4f624c91a"
+    },
+    "stockfish-19-lite-single.wasm": {
+      "bytes": 1845971,
+      "sha256": "ee4f115bdb2d32cadf96cada104a05b5ec257d7ad6f57582190b49bc71f096de"
+    },
+    "stockfish-source.tar.gz": {
+      "bytes": 1402778,
+      "sha256": "d335e3e3ef9ea44a421b2d46b6a86185dc6d0c9b89b21309d8f840de56763842"
+    }
+  },
+  "network_sha256": "61e7af4bb97d51eeeb25d322916f86513b5cd3a827ce189c98c6e31946f99e5b"
+}

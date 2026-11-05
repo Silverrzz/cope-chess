@@ -169,7 +169,7 @@ function reset(): void {
           <span>Engine evaluations</span>
           <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
         </div>
-        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Reckless kibitzer</strong><small>Show a local Reckless dev evaluation bar beside the board.</small></span></label>
+        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span></label>
 
         <h3>Celebrations</h3>
         <label class="setting-toggle">
