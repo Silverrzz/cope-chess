@@ -2,19 +2,29 @@ from __future__ import annotations
 
 import ipaddress
 import os
+from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query as QueryParameter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Query as QueryParameter
+from pydantic import Field
+from starlette.responses import JSONResponse
 
-from cope.application import ApplicationError, CommandRequest, Principal, execute_command
-from cope.application.contracts import QueryRequest
-from cope.application.queries import execute_query
 from cope.adapters.http.browser_identity import request_browser_principal
+from cope.application import (
+    ApplicationError,
+    CommandRequest,
+    Principal,
+    execute_command,
+)
+from cope.application.contracts import Input, QueryRequest
+from cope.application.queries import execute_query
 from cope.control.api import application_result, database
-from cope.domains.forms.storage import issue_claim
-from cope.infrastructure.postgres.credentials import authenticate_bearer
 from cope.db import get_platform_settings
-
+from cope.domains.forms.guest import issue_challenge, redeem_challenge
+from cope.domains.forms.resources import game_embed, rating_embed, resource_choices
+from cope.infrastructure.postgres.application import run_application
+from cope.infrastructure.postgres.credentials import authenticate_bearer
 
 TRUSTED_PROXIES = tuple(ipaddress.ip_network(value.strip()) for value in os.environ.get(
     "COPE_FORMS_TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128").split(",") if value.strip())
@@ -51,7 +61,13 @@ def require_origin(request: Request) -> None:
 
 
 def form_principal(request: Request, connection=Depends(database)):
-    from cope.adapters.http.authentication import admin_session_role, admin_token, csrf_token_valid, manager_token, request_is_secure_or_local
+    from cope.adapters.http.authentication import (
+        admin_session_role,
+        admin_token,
+        csrf_token_valid,
+        manager_token,
+        request_is_secure_or_local,
+    )
 
     if not request_is_secure_or_local(request):
         raise HTTPException(403, "Forms require HTTPS")
@@ -86,8 +102,45 @@ def form_principal(request: Request, connection=Depends(database)):
     return Principal("public", ())
 
 
+class ChallengeRequest(Input):
+    release_id: str = Field(min_length=36, max_length=36)
+
+
+class ClaimProof(ChallengeRequest):
+    challenge: str = Field(min_length=1, max_length=128)
+    answer: int = Field(strict=True, ge=0, le=4294967295)
+
+
 def register_form_routes(app):
     router = APIRouter()
+
+    @router.get("/resources/search")
+    def search_resources(kind: Literal["tournament", "game", "rating_list"],
+                         q: str = QueryParameter(default="", max_length=100),
+                         tournament: int | None = QueryParameter(default=None, ge=1, le=999999999999999),
+                         identity=Depends(form_principal), connection=Depends(database)):
+        try:
+            return {"items": resource_choices(connection, kind, q, tournament)}
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
+
+    @router.get("/resources/game/{tournament_id}/{game_id}")
+    def embedded_game(tournament_id: int, game_id: int, identity=Depends(form_principal), connection=Depends(database)):
+        try:
+            if not 1 <= tournament_id <= 999999999999999 or not 1 <= game_id <= 999999999999999:
+                raise ApplicationError("invalid_resource", "Choose a valid game.", 422)
+            return game_embed(connection, tournament_id, game_id)
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
+
+    @router.get("/resources/rating-list/{rating_list_id}")
+    def embedded_rating_list(rating_list_id: int, identity=Depends(form_principal), connection=Depends(database)):
+        try:
+            if not 1 <= rating_list_id <= 999999999999999:
+                raise ApplicationError("invalid_resource", "Choose a valid rating list.", 422)
+            return rating_embed(connection, rating_list_id)
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
 
     @router.get("/datetime-options")
     def datetime_options(local_date: str, local_time: str, timezone: str,
@@ -111,12 +164,21 @@ def register_form_routes(app):
             raise HTTPException(422, "This endpoint accepts form submission and amendment commands")
         return application_result(connection, identity, execute_command, payload)
 
-    @router.post("/{slug}/claims")
-    def claim(slug: str, request: Request, identity=Depends(form_principal), connection=Depends(database)):
-        from cope.infrastructure.postgres.application import run_application
-
+    @router.post("/{slug}/challenge")
+    def challenge(slug: str, payload: ChallengeRequest, request: Request, identity=Depends(form_principal), connection=Depends(database)):
         try:
-            return run_application(connection, identity, lambda raw, actor: issue_claim(raw, slug, client_address(request)))
+            result = run_application(connection, identity, lambda raw, actor: issue_challenge(raw, slug, client_address(request), payload.release_id))
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
+
+    @router.post("/{slug}/claims")
+    def claim(slug: str, payload: ClaimProof, request: Request, identity=Depends(form_principal), connection=Depends(database)):
+        try:
+            result = run_application(connection, identity, lambda raw, actor: redeem_challenge(
+                raw, slug, client_address(request), payload.release_id, payload.challenge, payload.answer
+            ))
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ApplicationError as error:
             raise HTTPException(error.status, error.payload()) from error
 

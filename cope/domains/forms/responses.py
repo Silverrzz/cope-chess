@@ -7,16 +7,18 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Callable
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from cope.application.errors import ApplicationError
 
-from .definition import FormDefinition, FormField, compile_definition
+from .definition import CONTENT_KINDS, FormDefinition, FormField, compile_definition, scale_bounds
 
 
 @dataclass(frozen=True)
 class ResponseContext:
     resolve_reference: Callable[[FormField, str], str] | None = None
+    resolve_public_resource: Callable[[FormField, str], str] | None = None
     resolve_attachment: Callable[[FormField, str], str] | None = None
     resolve_scoped_attachment: Callable[[FormField, str, tuple], str] | None = None
 
@@ -35,7 +37,7 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: 
         if field.nullable:
             return None
         invalid("null_not_allowed", "This field cannot be cleared.")
-    if field.kind in {"text", "long_text", "email"}:
+    if field.kind in {"text", "long_text", "email", "url", "phone"}:
         if type(value) is not str:
             invalid("text_required", "Enter a text value.")
         minimum = max(field.min_length, 1 if field.required else 0)
@@ -57,12 +59,33 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: 
             if any(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None for label in labels):
                 invalid("invalid_email", "Enter an email address.")
             return local + "@" + domain
+        if field.kind == "url":
+            try:
+                url = urlsplit(value)
+                valid = (url.scheme in {"https", "http"} and bool(url.hostname)
+                         and url.username is None and url.password is None
+                         and not any(character.isspace() or ord(character) < 32 or character == "\\" for character in value))
+                _ = url.port
+            except ValueError:
+                valid = False
+            if not valid:
+                invalid("invalid_url", "Enter a complete HTTP or HTTPS address.")
+        if field.kind == "phone":
+            if not re.fullmatch(r"\+?[0-9(). -]{5,30}", value) or not 5 <= sum(ch.isdigit() for ch in value) <= 15:
+                invalid("invalid_phone", "Enter a phone number with its area or country code.")
         if field.required and not value.strip():
             invalid("required", "Enter a value for this field.")
         return value
-    if field.kind == "checkbox":
+    if field.kind in {"checkbox", "yes_no", "consent"}:
         if type(value) is not bool:
-            invalid("boolean_required", "Supply a boolean value.")
+            invalid("boolean_required", "Choose yes or no.")
+        if field.kind == "consent" and field.required and not value:
+            invalid("consent_required", "You need to agree before continuing.")
+        return value
+    if field.kind in {"rating", "scale"}:
+        minimum, maximum = scale_bounds(field)
+        if type(value) is not int or not minimum <= value <= maximum:
+            invalid("invalid_scale_value", "Choose an available value on the scale.")
         return value
     if field.kind in {"integer", "decimal"}:
         if field.kind == "integer":
@@ -115,17 +138,34 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: 
             raise
         except (ValueError, OverflowError):
             invalid("invalid_date_time", "Enter a valid date and time.")
-    if field.kind in {"choice", "multiple_choice"}:
+    if field.kind in {"choice", "dropdown", "multiple_choice", "ranking", "matrix"}:
         permitted = {choice.id for choice in field.choices}
-        if field.kind == "choice":
+        if field.kind in {"choice", "dropdown"}:
             if type(value) is not str or value not in permitted:
                 invalid("invalid_choice", "Choose an available option.")
+            return value
+        if field.kind == "matrix":
+            rows = {row.id for row in field.rows}
+            if (type(value) is not dict or set(value) - rows or (field.required and set(value) != rows)
+                    or any(type(item) is not str or item not in permitted for item in value.values())):
+                invalid("invalid_matrix", "Choose an available answer for each required row.")
+            return value
+        if field.kind == "ranking":
+            if type(value) is not list or len(value) != len(permitted) or any(type(item) is not str for item in value) or set(value) != permitted:
+                invalid("invalid_ranking", "Rank each option exactly once.")
             return value
         if type(value) is not list or len(value) > field.max_items or len(value) < max(field.min_items, 1 if field.required else 0):
             invalid("choice_count", "Choose the permitted number of options.")
         if any(type(item) is not str or item not in permitted for item in value) or len(set(value)) != len(value):
             invalid("invalid_choice", "Choose distinct available options.")
         return value
+    if field.kind in {"chess_game", "rating_list"}:
+        if type(value) is not str or context.resolve_public_resource is None:
+            invalid("invalid_resource", "Choose an available Cope resource.")
+        try:
+            return context.resolve_public_resource(field, value)
+        except ApplicationError:
+            invalid("invalid_resource", "Choose an available Cope resource.")
     if field.kind in {"attachment", "reference"}:
         if type(value) is not str:
             invalid("invalid_reference", "Choose a permitted resource.")
@@ -182,6 +222,10 @@ def validate_response(definition: FormDefinition, values: dict, context: Respons
                     if field.id in submitted:
                         fail(path, "inactive_field_supplied", "Remove this inactive answer before submitting.")
                     continue
+            if field.kind in CONTENT_KINDS:
+                if field.id in submitted:
+                    fail(path, "content_answer_supplied", "Content blocks cannot accept answers.")
+                continue
             if field.id not in submitted:
                 if field.required:
                     fail(path, "required", "Answer this required field.")

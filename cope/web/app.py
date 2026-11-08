@@ -602,16 +602,18 @@ def _enqueue_ephemeral_subscribers(
 
 @contextlib.asynccontextmanager
 async def _web_lifespan(app: FastAPI):
-    task = asyncio.create_task(
-        app.state.tournament_estimate_cache.run(app.state.db_path),
-        name="tournament-estimates",
+    from cope.domains.artifacts.cleanup import run_guest_upload_maintenance
+
+    tasks = (
+        asyncio.create_task(app.state.tournament_estimate_cache.run(app.state.db_path), name="tournament-estimates"),
+        asyncio.create_task(run_guest_upload_maintenance(app.state.db_path), name="form-upload-maintenance"),
     )
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def create_app(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import Field
@@ -10,7 +12,7 @@ from cope.application.contracts import Command, CommandContext, Input, Outcome, 
 from cope.application.errors import ApplicationError
 from cope.application.identity import current_principal
 
-from .policy import MEDIA_POLICIES
+from .policy import GUEST_EXTENSIONS, GUEST_MAX_BYTES, MEDIA_POLICIES, media_allowed
 
 
 class BeginUpload(Input):
@@ -22,7 +24,8 @@ class BeginUpload(Input):
     filename: str = Field(min_length=1, max_length=200)
     size: int = Field(strict=True, gt=0)
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    media_type: Literal["text/plain", "application/octet-stream"] = "application/octet-stream"
+    media_type: Literal["text/plain", "application/octet-stream", "image/png", "image/jpeg",
+                        "image/webp", "application/pdf"] = "application/octet-stream"
 
 
 class Empty(Input):
@@ -63,7 +66,13 @@ def form_target(connection, principal, target, *, lock):
 
 
 def form_attachment_field(connection, principal, form, release_id: str, path: list[str], *, response_id: str | None = None):
-    from cope.domains.forms.storage import definition_from_json, form_permission, identity, pinned_release, response_resolver
+    from cope.domains.forms.storage import (
+        definition_from_json,
+        form_permission,
+        identity,
+        pinned_release,
+        response_resolver,
+    )
 
     if response_id:
         response = response_resolver("read", owner_only=True)(connection, principal, response_id, lock=True).data
@@ -108,12 +117,23 @@ def begin_upload(context: CommandContext, payload: BeginUpload) -> Outcome:
         if subject != str(response["attachment_subject"]):
             raise ApplicationError("attachment_not_permitted", "The attachment subject does not match this response.", 403)
     maximum = min(field.max_bytes, int(os.environ.get("COPE_ARTIFACT_UPLOAD_MAX_BYTES", "10485760")))
+    guest = context.principal.credential_kind == "form_claim"
+    if guest:
+        maximum = min(maximum, GUEST_MAX_BYTES)
     if payload.size > maximum:
         raise ApplicationError("quota_exceeded", "This attachment exceeds the field or installation byte limit.", 413, max_bytes=maximum)
-    if field.accepted_content_types and payload.media_type not in field.accepted_content_types:
+    if not media_allowed(field.accepted_content_types, payload.media_type, guest=guest):
         raise ApplicationError("validation_failed", "Choose a file type allowed by this attachment field.", 422)
-    if any(character in payload.filename for character in "/\\") or any(ord(character) < 32 for character in payload.filename):
+    if any(character in payload.filename for character in "/\\") or any(unicodedata.category(character).startswith("C") for character in payload.filename):
         raise ApplicationError("invalid_filename", "Use a plain attachment filename without path components.", 422)
+    if guest:
+        from cope.domains.forms.guest import reserve_guest_upload
+
+        extension = PurePosixPath(payload.filename).suffix.lower()
+        if extension not in GUEST_EXTENSIONS.get(payload.media_type, ()):
+            raise ApplicationError("guest_file_type", "Choose a supported image, PDF, or text file.", 422)
+        reserve_guest_upload(context.connection, context.principal, context.target.object_id, payload.release_id,
+                             payload.size, payload.response_id)
     context.connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('artifact-reservations', 0))")
     reserved = context.connection.execute(
         """SELECT COALESCE(sum(expected_size),0) AS total,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import uuid
 import os
+import uuid
 
 from cope.application.errors import ApplicationError
 from cope.application.identity import current_principal
@@ -9,10 +9,12 @@ from cope.application.identity import current_principal
 from .application import reservation_usage, upload_row, upload_view
 
 
-def prepare_transfer(connection, principal, upload_id: str) -> dict:
+def prepare_transfer(connection, principal, upload_id: str, declared_size: int | None = None) -> dict:
     principal = current_principal(connection, principal)
     principal.require("forms:submit")
     row = upload_row(connection,principal,upload_id,lock=True)
+    if declared_size is not None and declared_size != row["expected_size"]:
+        raise ApplicationError("upload_size_mismatch", "The transfer length does not match the reserved size.", 422)
     if row["state"] not in {"receiving","verifying","stored"}:
         raise ApplicationError("upload_unavailable", "This upload does not accept a byte transfer.",409)
     if row["state"] != "stored" and not row["eligible"]:
@@ -24,6 +26,10 @@ def prepare_transfer(connection, principal, upload_id: str) -> dict:
     if active >= 3:
         raise ApplicationError("transfer_limit", "Wait for another attachment transfer to finish.",429)
     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended('artifact-reservations',0))")
+    if principal.credential_kind == "form_claim":
+        from cope.domains.forms.guest import charge_guest_transfer
+
+        charge_guest_transfer(connection, principal, row["expected_size"])
     extra = row["expected_size"] if connection.execute("SELECT 1 FROM artifact_storage_intents WHERE upload_id=%s AND physical_reserved LIMIT 1",(row["id"],)).fetchone() else 0
     if reservation_usage(connection)+extra > int(os.environ.get("COPE_ARTIFACT_TOTAL_MAX_BYTES","1073741824")):
         raise ApplicationError("quota_exceeded","Storage cannot reserve another transfer attempt until its outstanding intents are reconciled.",409)

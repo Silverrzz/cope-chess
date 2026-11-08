@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from cope.application.errors import ApplicationError
 
+CHOICE_KINDS = frozenset({"choice", "dropdown", "multiple_choice", "ranking", "matrix"})
+CONTENT_KINDS = frozenset({"section", "markdown"})
+NUMBER_KINDS = frozenset({"integer", "decimal", "rating", "scale"})
+
 
 class DefinitionValue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -24,8 +28,10 @@ class Condition(DefinitionValue):
 
 class FormField(DefinitionValue):
     id: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$")
-    kind: Literal["text", "long_text", "email", "integer", "decimal", "date", "time", "datetime",
-                  "choice", "multiple_choice", "checkbox", "group", "attachment", "reference"]
+    kind: Literal["text", "long_text", "email", "url", "phone", "integer", "decimal",
+                  "date", "time", "datetime", "choice", "dropdown", "multiple_choice", "ranking",
+                  "matrix", "checkbox", "yes_no", "consent", "rating", "scale", "group", "attachment",
+                  "reference", "chess_game", "rating_list", "section", "markdown"]
     label: str = Field(min_length=1, max_length=300)
     help: str = Field(default="", max_length=4000)
     required: bool = False
@@ -38,6 +44,8 @@ class FormField(DefinitionValue):
     unit: str = Field(default="", max_length=80)
     timezone: str | None = Field(default=None, max_length=100)
     choices: tuple[Choice, ...] = Field(default=(), max_length=500)
+    rows: tuple[Choice, ...] = Field(default=(), max_length=30)
+    content: str = Field(default="", max_length=16000)
     when: Condition | None = None
     fields: tuple[FormField, ...] = Field(default=(), max_length=100)
     min_items: int = Field(default=0, ge=0, le=100)
@@ -87,17 +95,35 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
                 fail(path, "invalid_number_bound", "Numeric bounds must be finite.")
             elif field.minimum is not None and field.maximum is not None and field.minimum > field.maximum:
                 fail(path, "invalid_number_bounds", "The minimum cannot exceed the maximum.")
-            if field.kind not in {"integer", "decimal"} and (field.minimum is not None or field.maximum is not None):
+            if field.kind not in NUMBER_KINDS and (field.minimum is not None or field.maximum is not None):
                 fail(path, "unexpected_number_bounds", "Numeric bounds apply only to number fields.")
             if field.accepted_content_types and field.kind != "attachment":
                 fail(path, "unexpected_attachment_policy", "Content-type restrictions apply only to attachment fields.")
             if field.required and field.nullable:
                 fail(path, "required_nullable", "A required field cannot accept an explicit clear.")
-            if field.kind in {"choice", "multiple_choice"}:
+            if field.kind in CHOICE_KINDS:
                 if not field.choices or len({choice.id for choice in field.choices}) != len(field.choices):
                     fail(path, "invalid_choices", "Choices need distinct stable identities.")
+                if field.kind in {"ranking", "matrix"} and len(field.choices) > 20:
+                    fail(path, "too_many_choices", "Use at most 20 options for a ranking or grid.")
             elif field.choices:
                 fail(path, "unexpected_choices", "This field does not accept choices.")
+            if field.kind == "matrix":
+                if not field.rows or len({row.id for row in field.rows}) != len(field.rows):
+                    fail(path, "invalid_matrix_rows", "Add distinct rows to this grid.")
+            elif field.rows:
+                fail(path, "unexpected_matrix_rows", "Rows apply only to a grid.")
+            if field.kind in CONTENT_KINDS:
+                if field.required or field.nullable:
+                    fail(path, "content_answer", "Content blocks cannot collect answers.")
+            elif field.content:
+                fail(path, "unexpected_content", "Markdown content applies only to content blocks.")
+            if field.kind in {"rating", "scale"}:
+                minimum, maximum = scale_bounds(field)
+                if not (minimum.is_finite() and maximum.is_finite() and -20 <= minimum < maximum <= 20
+                        and minimum == int(minimum) and maximum == int(maximum)
+                        and maximum - minimum <= (9 if field.kind == "rating" else 20)):
+                    fail(path, "invalid_scale", "Use whole-number endpoints between −20 and 20 within the available scale length.")
             if field.kind == "group":
                 if not field.fields or depth >= 3:
                     fail(path, "invalid_group", "Groups need fields and can nest at most three levels.")
@@ -120,11 +146,11 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
                 continue
             path = (*parent, field.id)
             control = by_id.get(field.when.field)
-            if control is None or control.when is not None or control.kind not in {"checkbox", "choice"}:
+            if control is None or control.when is not None or control.kind not in {"checkbox", "choice", "dropdown", "yes_no", "consent"}:
                 fail(path, "invalid_condition", "Conditions need an unconditional checkbox or choice in this group.")
-            elif control.kind == "checkbox" and type(field.when.equals) is not bool:
+            elif control.kind in {"checkbox", "yes_no", "consent"} and type(field.when.equals) is not bool:
                 fail(path, "condition_type", "Checkbox conditions compare a boolean value.")
-            elif control.kind == "choice" and (type(field.when.equals) is not str or field.when.equals not in {choice.id for choice in control.choices}):
+            elif control.kind in {"choice", "dropdown"} and (type(field.when.equals) is not str or field.when.equals not in {choice.id for choice in control.choices}):
                 fail(path, "condition_choice", "Choose a valid option identity for this condition.")
 
     scope(definition.fields, (), 1)
@@ -135,3 +161,11 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
     if errors:
         raise ApplicationError("invalid_form_definition", "Resolve the form definition errors before publication.", 422, fields=errors)
     return definition
+
+
+def scale_bounds(field: FormField) -> tuple[Decimal, Decimal]:
+    low, high = (1, 5) if field.kind == "rating" else (0, 10)
+    return (
+        Decimal(low) if field.minimum is None else field.minimum,
+        Decimal(high) if field.maximum is None else field.maximum,
+    )

@@ -5,6 +5,8 @@ import json
 from cope.application.errors import ApplicationError
 from cope.application.identity import current_principal
 
+from .policy import media_allowed
+
 
 def resolve_attachment(connection, principal, form: dict, release: dict, subject: str | None, field, artifact_id: str,
                        path: tuple, *, response_id: str | None = None) -> tuple[str, dict]:
@@ -26,7 +28,8 @@ def resolve_attachment(connection, principal, form: dict, release: dict, subject
     retained = False
     if response_id:
         retained = connection.execute("SELECT 1 FROM artifact_retention_roots WHERE artifact_id=%s AND descriptor_revision=1 AND consumer_response=%s LIMIT 1",(row["artifact_id"],identity(response_id))).fetchone() is not None
-    if not row["eligible"] and not retained or row["size"] > field.max_bytes or field.accepted_content_types and row["media_type"] not in field.accepted_content_types:
+    permitted_media = media_allowed(field.accepted_content_types, row["media_type"], guest=principal.credential_kind == "form_claim")
+    if not row["eligible"] and not retained or row["size"] > field.max_bytes or not permitted_media:
         raise ApplicationError("attachment_not_permitted", "This attachment no longer satisfies the current response policy.",403)
     return str(row["artifact_id"]), {"artifact_id":str(row["artifact_id"]),"descriptor_revision":1,"field_path":list(path)}
 

@@ -13,11 +13,13 @@
     "chessground": "^9.2.1",
     "emoji-picker-element": "^1.29.1",
     "emoji-picker-element-data": "^1.8.0",
+    "markdown-it": "^15.0.3",
     "pinia": "^3.0.3",
     "vue": "^3.5.18",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.1",
     "postcss": "^8.5.18",

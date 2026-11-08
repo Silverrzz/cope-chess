@@ -29,7 +29,7 @@ export class ApiError extends Error {
         const field = error.field ?? "form";
         (result[field] ??= []).push(error.message);
         return result;
-      }, {});
+      }, Object.create(null) as Record<string, string[]>);
     }
 
     return Object.entries(errors).reduce<Record<string, string[]>>((result, [field, value]) => {

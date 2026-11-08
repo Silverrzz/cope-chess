@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import FormFieldEditor from './FormFieldEditor.vue'
+import FormMarkdownEditor from './FormMarkdownEditor.vue'
 import { useSessionStore } from '@/stores/session'
 import type { FormDefinition, FormErrors, FormField } from '@/types/forms'
 
@@ -18,7 +19,7 @@ function compatible(kinds: string[]): FormField[] { return props.modelValue.fiel
   <fieldset class="definition-editor" :disabled="disabled">
     <legend class="visually-hidden">Form definition</legend>
     <label>Title<input class="input" :value="modelValue.title" maxlength="300" @input="change({ title: ($event.target as HTMLInputElement).value })"></label>
-    <label>Introduction<textarea class="input" :value="modelValue.description ?? ''" rows="3" maxlength="12000" @input="change({ description: ($event.target as HTMLTextAreaElement).value })" /></label>
+    <FormMarkdownEditor :model-value="modelValue.description" label="Introduction" :max-length="12000" :disabled="disabled" @update:model-value="change({ description: $event })" />
     <div class="settings-grid"><label>Who can respond?<select class="input" :value="modelValue.audience" @change="change({ audience: ($event.target as HTMLSelectElement).value as FormDefinition['audience'] })"><option value="authenticated">Signed-in users</option><option value="public" :disabled="!binding?.permits_anonymous">Anyone with the link</option><option value="invited">Invited users</option></select></label><label>Response purpose<select class="input" :value="modelValue.binding" @change="change({ binding: ($event.target as HTMLSelectElement).value, mapping: {} })"><option v-for="item in bindings" :key="item.key" :value="item.key">{{ item.label }}</option></select></label></div>
     <label class="check"><input type="checkbox" :checked="modelValue.allow_amendments !== false" @change="change({ allow_amendments: ($event.target as HTMLInputElement).checked })">Allow submitters to amend their responses</label>
     <p v-if="session.session?.privatise_platform && modelValue.audience === 'public'">This platform currently requires sign-in. Anonymous responses become available when the platform is public.</p>

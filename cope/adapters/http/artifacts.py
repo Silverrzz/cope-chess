@@ -6,13 +6,18 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
+from starlette.responses import StreamingResponse
 
-from cope.application import ApplicationError, CommandRequest, execute_command
 from cope.adapters.http.forms import form_principal
+from cope.application import ApplicationError, CommandRequest, execute_command
 from cope.control.api import application_result, database
-from cope.domains.artifacts.transfers import confirm_empty_intent, fail_transfer, finish_transfer, prepare_transfer
+from cope.domains.artifacts.transfers import (
+    confirm_empty_intent,
+    fail_transfer,
+    finish_transfer,
+    prepare_transfer,
+)
 from cope.infrastructure.artifact_files import ArtifactWriter, open_replica
 from cope.infrastructure.postgres.application import run_application
 
@@ -31,7 +36,10 @@ def register_artifact_routes(app):
         transfer = None
         writer = None
         try:
-            transfer = run_application(connection,identity,prepare_transfer,upload_id)
+            length = request.headers.get("content-length")
+            if length is not None and (len(length) > 12 or not length.isascii() or not length.isdecimal()):
+                raise ApplicationError("invalid_content_length", "Supply a valid upload length.", 422)
+            transfer = run_application(connection, identity, prepare_transfer, upload_id, int(length) if length is not None else None)
             writer = await run_in_threadpool(ArtifactWriter,transfer["physical_key"],transfer["expected_size"],transfer["expected_digest"],transfer["media_type"])
             async with asyncio.timeout(120):
                 async for chunk in request.stream():

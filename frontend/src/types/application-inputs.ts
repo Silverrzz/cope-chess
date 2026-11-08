@@ -1,7 +1,7 @@
 export interface ApplicationInputs {
   'agents.set_drain.v1': { "draining": boolean }
   'artifacts.abandon_upload.v1': Record<string, never>
-  'artifacts.begin_upload.v1': { "purpose"?: "form_attachment"; "release_id": string; "subject": string; "field_path": Array<string>; "response_id"?: string | null; "filename": string; "size": number; "digest": string; "media_type"?: "text/plain" | "application/octet-stream" }
+  'artifacts.begin_upload.v1': { "purpose"?: "form_attachment"; "release_id": string; "subject": string; "field_path": Array<string>; "response_id"?: string | null; "filename": string; "size": number; "digest": string; "media_type"?: "text/plain" | "application/octet-stream" | "image/png" | "image/jpeg" | "image/webp" | "application/pdf" }
   'artifacts.finalize_upload.v1': Record<string, never>
   'competitions.rename.v1': { "name": string }
   'engines.prepare_artifact.v1': { "engine_version_id": number; "expected_build_hash": string; "expected_archive_sha256": string; "runtime_id": string }
@@ -101,6 +101,7 @@ export interface ApplicationQueryInputs {
   'forms.drafts.detail.v1': Record<string, never>
   'forms.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
   'forms.permissions.v1': Record<string, never>
+  'forms.preview.check.v1': { "document": Record<string, unknown>; "answers": Record<string, unknown> }
   'forms.public.v1': { "slug": string }
   'forms.responses.detail.v1': Record<string, never>
   'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
@@ -128,6 +129,7 @@ export interface ApplicationQueryOutputs {
   'forms.drafts.detail.v1': Record<string, unknown>
   'forms.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'forms.permissions.v1': { "state_version": number; "owner_actor": string; "grants": Array<Record<string, unknown>>; "identities": Array<Record<string, unknown>> }
+  'forms.preview.check.v1': { "valid": boolean }
   'forms.public.v1': Record<string, unknown>
   'forms.responses.detail.v1': Record<string, unknown>
   'forms.responses.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }

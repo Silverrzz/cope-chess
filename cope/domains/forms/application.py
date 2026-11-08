@@ -250,6 +250,10 @@ def submit_response(context: CommandContext, payload: SubmitResponse) -> Outcome
         raise ApplicationError("authentication_required", "This release requires an authenticated response.", 403)
     if definition.audience == "invited":
         form_permission(context.connection, context.principal, form, "read")
+    if context.principal.credential_kind == "form_claim":
+        from .guest import guest_admission
+
+        guest_admission(context.connection, context.principal, str(release["id"]), lock=True)
     attachment_subject = identity(payload.attachment_subject) if payload.attachment_subject else str(uuid.uuid4())
     attachments = []
     canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, payload.answers,

@@ -1,4 +1,18 @@
-export type FormKind = 'text' | 'long_text' | 'email' | 'integer' | 'decimal' | 'date' | 'time' | 'datetime' | 'choice' | 'multiple_choice' | 'checkbox' | 'group' | 'attachment' | 'reference'
+export type FormKind =
+  | 'text' | 'long_text' | 'email' | 'url' | 'phone' | 'integer' | 'decimal'
+  | 'date' | 'time' | 'datetime' | 'choice' | 'dropdown' | 'multiple_choice' | 'ranking'
+  | 'matrix' | 'checkbox' | 'yes_no' | 'consent' | 'rating' | 'scale' | 'group'
+  | 'attachment' | 'reference' | 'chess_game' | 'rating_list' | 'section' | 'markdown'
+
+export const contentKinds: ReadonlySet<FormKind> = new Set(['section', 'markdown'])
+export const booleanKinds: ReadonlySet<FormKind> = new Set(['checkbox', 'yes_no', 'consent'])
+
+export interface AttachmentPolicy {
+  max_file_bytes: number
+  media_types: string[]
+  guest_max_file_bytes?: number
+  guest_extensions?: Record<string, string[]>
+}
 
 export interface FormChoice { id: string; label: string }
 export interface FormField {
@@ -16,6 +30,8 @@ export interface FormField {
   unit?: string
   timezone?: string | null
   choices?: FormChoice[]
+  rows?: FormChoice[]
+  content?: string
   when?: { field: string; equals: string | boolean } | null
   fields?: FormField[]
   min_items?: number
@@ -48,7 +64,7 @@ export interface PublicForm {
   release_id: string
   release_number: number
   definition: FormDefinition
-  attachment_policy: { max_file_bytes: number; media_types: string[] }
+  attachment_policy: AttachmentPolicy
 }
 
 export interface FormResponse {
@@ -67,7 +83,7 @@ export interface FormResponse {
   can_review: boolean
   can_withdraw: boolean
   attachment_subject: string | null
-  attachment_policy: { max_file_bytes: number; media_types: string[] }
+  attachment_policy: AttachmentPolicy
   review_context: { binding: string; policy_revision: string; proposal: Record<string, unknown> } | null
   reviews: { id: string; decision: string; reason: string; response_revision: number; created_at: string }[]
   created_at: string
@@ -110,7 +126,7 @@ export function fieldActive(field: FormField, answers: FormAnswers): boolean {
 export function canonicalAnswers(fields: FormField[], answers: FormAnswers): FormAnswers {
   const result: FormAnswers = {}
   for (const field of fields) {
-    if (!fieldActive(field, answers) || !(field.id in answers)) continue
+    if (contentKinds.has(field.kind) || !fieldActive(field, answers) || !Object.hasOwn(answers, field.id)) continue
     const value = answers[field.id]
     if (field.kind === 'group' && Array.isArray(value)) {
       result[field.id] = value.map((row) => {
@@ -124,6 +140,6 @@ export function canonicalAnswers(fields: FormField[], answers: FormAnswers): For
 
 export function initialAnswers(fields: FormField[], existing: FormAnswers = {}): FormAnswers {
   const result = { ...existing }
-  for (const field of fields) if (field.kind === 'checkbox' && !(field.id in result)) result[field.id] = false
+  for (const field of fields) if (field.kind === 'checkbox' && !Object.hasOwn(result, field.id)) result[field.id] = false
   return result
 }

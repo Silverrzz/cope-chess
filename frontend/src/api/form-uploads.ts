@@ -2,7 +2,7 @@ import { ApiError, api } from './client'
 import type { CommandReceipt } from './application'
 import type { FormField } from '@/types/forms'
 
-export interface UploadContext { form_id: string; release_id: string; subject: string; response_id?: string; max_bytes: number }
+export interface UploadContext { form_id: string; release_id: string; subject: string; response_id?: string; max_bytes: number; guest_extensions?: Record<string, string[]> }
 interface PendingUpload { signature: string; beginKey: string; finalizeKey: string; upload_id?: string; artifact_id?: string }
 
 export function createFormUploader(context: () => UploadContext, authorize: () => Promise<void>, headers: () => HeadersInit | undefined) {
@@ -10,10 +10,22 @@ export function createFormUploader(context: () => UploadContext, authorize: () =
   return async (file: File, field: FormField, path: string[]): Promise<string> => {
     const current = context()
     if (!file.size || file.size > Math.min(current.max_bytes, field.max_bytes ?? 10485760)) throw new Error('Choose a nonempty attachment within the displayed file-size limit.')
+    const extension = file.name.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? ''
+    const knownTypes = ['text/plain', 'image/png', 'image/jpeg', 'image/webp', 'application/pdf']
+    const guestTypes = current.guest_extensions
+    const accepted = field.accepted_content_types ?? []
+    const detected = knownTypes.includes(file.type) ? file.type : 'application/octet-stream'
+    const mediaType = guestTypes
+      ? Object.entries(guestTypes).find(([, extensions]) => extensions.includes(extension))?.[0]
+      : !accepted.length || accepted.includes(detected) ? detected
+        : accepted.includes('application/octet-stream') ? 'application/octet-stream'
+        : detected === 'application/octet-stream' && accepted.includes('text/plain') ? 'text/plain' : undefined
+    if (!mediaType || (accepted.length && !accepted.includes(mediaType) && !(guestTypes && accepted.includes('application/octet-stream')))) {
+      throw new Error('Choose an image, PDF or text file allowed by this question.')
+    }
     await authorize()
     const bytes = await file.arrayBuffer()
     const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
-    const mediaType = file.type === 'text/plain' ? 'text/plain' : 'application/octet-stream'
     const key = JSON.stringify([current.form_id, current.release_id, current.subject, path])
     const signature = JSON.stringify([digest, file.name, file.size, mediaType])
     let request = pending.get(key)

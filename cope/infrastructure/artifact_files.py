@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from cope.application.errors import ApplicationError
-from cope.domains.artifacts.policy import MEDIA_POLICIES
+from cope.domains.artifacts.policy import MEDIA_POLICIES, SIGNATURES
 
 
 def storage_root() -> Path:
@@ -26,12 +26,13 @@ class ArtifactWriter:
         self.expected_digest = expected_digest
         self.media_type = media_type
         self.size = 0
+        self.prefix = bytearray()
         self.digest = hashlib.sha256()
         self.destination = replica_path(key)
         self.destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if shutil.disk_usage(self.destination.parent).free < expected_size + 209715200:
             raise ApplicationError("storage_unavailable", "Storage capacity is below its upload reserve.", 503)
-        self.staging = self.destination.parent / (str(uuid.uuid4()) + ".partial")
+        self.staging = self.destination.with_suffix(".partial")
         self.descriptor = os.open(self.staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         self.decoder = codecs.getincrementaldecoder("utf-8")(errors="strict") if media_type == "text/plain" else None
         self.installed = False
@@ -47,6 +48,8 @@ class ArtifactWriter:
                     raise UnicodeError()
             except UnicodeError as exc:
                 raise ApplicationError("validation_failed", "The attachment does not satisfy the UTF-8 text policy.", 422) from exc
+        if len(self.prefix) < 16:
+            self.prefix.extend(chunk[:16 - len(self.prefix)])
         self.digest.update(chunk)
         view = memoryview(chunk)
         while view:
@@ -63,6 +66,9 @@ class ArtifactWriter:
                 self.decoder.decode(b"", final=True)
             except UnicodeError as exc:
                 raise ApplicationError("validation_failed", "The attachment is incomplete UTF-8 text.", 422) from exc
+        signature = SIGNATURES.get(self.media_type)
+        if signature is not None and not signature(self.prefix):
+            raise ApplicationError("validation_failed", "The file contents do not match the chosen attachment type.", 422)
         return MEDIA_POLICIES[self.media_type]
 
     def install(self) -> str:

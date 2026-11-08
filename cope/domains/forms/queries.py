@@ -7,12 +7,21 @@ from pydantic import Field
 
 from cope.application.contracts import Input, Query
 from cope.application.errors import ApplicationError
-from cope.application.pagination import page_basis as query_page_basis, page_cursor
+from cope.application.pagination import page_basis as query_page_basis
+from cope.application.pagination import page_cursor
 
 from .application import describe_copy
 from .bindings import BINDINGS, compile_binding
 from .definition import FormDefinition
-from .storage import form_permission, get_form, identity, public_form_view, resolve_copy, response_view
+from .storage import (
+    definition_from_json,
+    form_permission,
+    get_form,
+    identity,
+    public_form_view,
+    resolve_copy,
+    response_view,
+)
 
 
 class Empty(Input):
@@ -80,6 +89,15 @@ class CheckDefinitionInput(Input):
     document: dict
 
 
+class PreviewResponseInput(Input):
+    document: dict
+    answers: dict
+
+
+class PreviewResponseOutput(Input):
+    valid: bool
+
+
 class CheckDefinitionOutput(Input):
     definition: dict
 
@@ -102,6 +120,32 @@ def check_definition(connection, principal, target, payload: CheckDefinitionInpu
                                fields=[{"path": list(error["loc"]), "code": error["type"], "message": error["msg"]} for error in exc.errors()]) from exc
     compile_binding(definition)
     return {"definition": definition.model_dump(mode="json")}
+
+
+def check_preview(connection, principal, target, payload: PreviewResponseInput) -> dict:
+    from cope.db.connection import LegacyTransaction
+
+    from .resources import validate_public_resource
+    from .responses import ResponseContext, validate_response
+
+    definition = definition_from_json(payload.document)
+    legacy = LegacyTransaction(connection)
+
+    def internal_reference(field, resource_id):
+        row = connection.execute(
+            "SELECT id FROM application_objects WHERE id = %s AND type_key = %s",
+            (resource_id, field.reference_type),
+        ).fetchone()
+        if row is None:
+            raise LookupError()
+        return str(row["id"])
+
+    validate_response(definition, payload.answers, ResponseContext(
+        resolve_reference=internal_reference,
+        resolve_public_resource=lambda field, value: validate_public_resource(legacy, field.kind, value),
+        resolve_scoped_attachment=lambda field, artifact_id, path: artifact_id,
+    ))
+    return {"valid": True}
 
 
 def page_basis(connection, principal, payload: PageInput, namespace: str) -> tuple[datetime, tuple | None, str]:
@@ -231,6 +275,7 @@ def queries() -> tuple[Query, ...]:
     return (
         Query("forms.bindings.v1", "forms:write", Empty, BindingsOutput, bindings_catalogue),
         Query("forms.definition.check.v1", "forms:write", CheckDefinitionInput, CheckDefinitionOutput, check_definition),
+        Query("forms.preview.check.v1", "forms:write", PreviewResponseInput, PreviewResponseOutput, check_preview),
         Query("forms.list.v1", "forms:read", PageInput, PageOutput, list_forms),
         Query("forms.responses.list.v1", "forms:responses:read", PageInput, PageOutput, list_responses),
         Query("forms.detail.v1", "forms:write", Empty, DataOutput, form_detail, True),

@@ -5,10 +5,10 @@ import { RouterLink, onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { applicationQuery, describeTarget } from '@/api/application'
 import { ApiError } from '@/api/client'
 import FormDefinitionEditor, { type BindingDescription } from '@/components/forms/FormDefinitionEditor.vue'
-import FormFields from '@/components/forms/FormFields.vue'
+import FormExperience from '@/components/forms/FormExperience.vue'
 import FormAccessEditor from '@/components/forms/FormAccessEditor.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
-import { initialAnswers, type FormAnswers, type FormDefinition, type FormDetail, type FormErrors, type FormWorkingCopy } from '@/types/forms'
+import { canonicalAnswers, initialAnswers, type FormAnswers, type FormDefinition, type FormDetail, type FormErrors, type FormWorkingCopy } from '@/types/forms'
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
@@ -20,7 +20,14 @@ const document = ref<FormDefinition>({ title: '', fields: [], audience: 'authent
 const bindings = ref<BindingDescription[]>([])
 const saved = ref('')
 const previewAnswers = ref<FormAnswers>({})
+const previewErrors = ref<FormErrors>({})
+const narrowPreview = ref(false)
+const checkingPreview = ref(false)
+const previewStatus = ref('')
+const previewUpload = async () => crypto.randomUUID()
 const preview = ref(false)
+const liveDefinition = computed(() => form.value?.releases.find(release => release.id === form.value?.published_release)?.definition)
+const previewDefinition = computed(() => copy.value ? document.value : liveDefinition.value)
 const loading = ref(true)
 const checking = ref(false)
 const error = ref('')
@@ -100,6 +107,35 @@ async function check(): Promise<void> {
   catch (cause) { if (snapshot === JSON.stringify(document.value)) failure(cause); else error.value = 'The earlier check found errors. Your newer edits have been kept; check the current content again.' }
   finally { checking.value = false }
 }
+function togglePreview(): void {
+  preview.value = !preview.value
+  if (preview.value && previewDefinition.value) {
+    previewAnswers.value = initialAnswers(previewDefinition.value.fields)
+    previewErrors.value = {}
+    previewStatus.value = ''
+  }
+}
+
+async function validatePreview(): Promise<void> {
+  const definition = previewDefinition.value
+  if (!definition || checkingPreview.value) return
+  checkingPreview.value = true
+  previewErrors.value = {}
+  previewStatus.value = ''
+  try {
+    await applicationQuery('forms.preview.check.v1', {
+      document: JSON.parse(JSON.stringify(definition)),
+      answers: canonicalAnswers(definition.fields, previewAnswers.value),
+    })
+    previewStatus.value = 'These preview answers pass validation.'
+  } catch (cause) {
+    previewErrors.value = cause instanceof ApiError ? cause.fieldErrors : {}
+    previewStatus.value = cause instanceof Error ? cause.message : 'Could not validate the preview answers.'
+  } finally {
+    checkingPreview.value = false
+  }
+}
+
 async function publish(): Promise<void> {
   if (!form.value || !copy.value) return
   clear()
@@ -141,11 +177,28 @@ onBeforeRouteLeave(() => !(dirty.value || mutation.uncertain.value) || window.co
     <div v-if="error" class="notice error" role="alert" tabindex="-1"><strong>{{ error }}</strong><ul v-if="Object.keys(errors).length"><li v-for="(messages, path) in errors" :key="path">{{ path }}: {{ messages.join(' ') }}</li></ul></div><p v-if="message" class="notice" role="status">{{ message }}</p>
     <p v-if="mutation.uncertain.value" class="notice" role="alert">The action’s outcome is unconfirmed. Retry the same action to recover its receipt before editing further.</p>
     <template v-if="form && !loading">
-      <section class="draft-toolbar"><label>Your private draft<select v-model="selectedCopy" class="input" :disabled="blocked" @change="selectCopy"><option value="" disabled>Select a draft</option><option v-for="item in form.copies.filter((item) => !item.archived)" :key="item.id" :value="item.id">Saved revision {{ item.current_revision }} · {{ new Date(item.updated_at).toLocaleString() }}</option></select></label><BaseButton type="button" class="button button--ghost" :disabled="mutation.unavailable('forms.drafts.create.v1')" @click="newCopy" variant="ghost">{{ stale ? 'Reconcile into a new draft' : 'Create another private draft' }}</BaseButton></section>
-      <template v-if="copy"><p v-if="stale" class="notice">This draft began before the latest publication. Your edits are preserved. Create a new draft to reconcile them with the current form before publishing.</p><div class="toolbar"><strong>{{ dirty ? 'Unsaved changes' : `Saved revision ${copy.version}` }}</strong><BaseButton type="button" class="button" :disabled="mutation.unavailable('forms.drafts.save.v1')" @click="save">Save private draft</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="blocked || checking" @click="check" variant="ghost">Check definition</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="blocked" @click="preview = !preview" variant="ghost">{{ preview ? 'Edit questions' : 'Preview form' }}</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="mutation.busy.value || stale" @click="publicationOpen = !publicationOpen" variant="ghost">Publish saved revision</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="mutation.unavailable('forms.drafts.archive.v1')" @click="archive" variant="ghost">Archive draft</BaseButton></div>
+      <section class="draft-toolbar"><label>Your private draft<select v-model="selectedCopy" class="input" :disabled="blocked" @change="selectCopy"><option value="" disabled>Select a draft</option><option v-for="item in form.copies.filter((item) => !item.archived)" :key="item.id" :value="item.id">Saved revision {{ item.current_revision }} · {{ new Date(item.updated_at).toLocaleString() }}</option></select></label><BaseButton type="button" class="button button--ghost" :disabled="mutation.unavailable('forms.drafts.create.v1')" @click="newCopy" variant="ghost">{{ stale ? 'Reconcile into a new draft' : copy ? 'New private draft' : form.published_release ? 'Edit published form' : 'Start editing' }}</BaseButton></section>
+      <template v-if="copy"><p v-if="stale" class="notice">This draft began before the latest publication. Your edits are preserved. Create a new draft to reconcile them with the current form before publishing.</p><div class="toolbar editor-toolbar"><strong>{{ dirty ? 'Unsaved changes' : `Saved revision ${copy.version}` }}</strong><BaseButton type="button" class="button" :disabled="mutation.unavailable('forms.drafts.save.v1')" @click="save">Save private draft</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="blocked || checking" @click="check" variant="ghost">Check definition</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="blocked" @click="togglePreview" variant="ghost">{{ preview ? 'Edit questions' : 'Preview form' }}</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="mutation.busy.value || stale" @click="publicationOpen = !publicationOpen" variant="ghost">Publish saved revision</BaseButton><BaseButton type="button" class="button button--ghost" :disabled="mutation.unavailable('forms.drafts.archive.v1')" @click="archive" variant="ghost">Archive draft</BaseButton></div>
         <section v-if="publicationOpen" class="publication"><h2>Publish “{{ savedTitle }}”</h2><p>This publishes saved draft revision {{ copy.version }}.{{ dirty ? ' Your unsaved edits stay in the editor and will not be included.' : '' }} It opens submissions on the new release.</p><label>Keep previous releases open<select v-model="previousHours" class="input" :disabled="blocked"><option :value="0">Close them immediately</option><option :value="1">For one hour</option><option :value="24">For one day</option><option :value="168">For seven days</option></select></label><BaseButton type="submit" class="button" :disabled="mutation.unavailable('forms.publish.v1')" @click="publish">Publish saved revision {{ copy.version }}</BaseButton></section>
-        <section v-if="preview" class="preview"><p class="eyebrow">Preview · answers stay in this editor</p><h2>{{ document.title }}</h2><p class="intro">{{ document.description }}</p><FormFields v-model="previewAnswers" :fields="document.fields" :disabled="blocked" /></section><FormDefinitionEditor v-else v-model="document" :bindings="bindings" :errors="errors" :disabled="blocked" />
+        <FormDefinitionEditor v-if="!preview" v-model="document" :bindings="bindings" :errors="errors" :disabled="blocked" />
       </template>
+      <BaseButton v-else-if="liveDefinition" type="button" variant="secondary" @click="togglePreview">{{ preview ? 'Close preview' : 'Preview published form' }}</BaseButton>
+      <section v-if="preview && previewDefinition" class="preview">
+          <div class="preview-toolbar">
+            <p>{{ copy ? 'Previewing current edits' : 'Previewing the published form' }}</p>
+            <label><input v-model="narrowPreview" type="checkbox"> Mobile width</label>
+            <BaseButton type="button" variant="ghost" size="small" @click="previewAnswers = initialAnswers(previewDefinition.fields); previewErrors = {}; previewStatus = ''">Reset preview</BaseButton>
+          </div>
+          <div class="preview-surface" :class="{ 'preview-surface--narrow': narrowPreview }">
+            <FormExperience v-model="previewAnswers" :definition="previewDefinition" :errors="previewErrors" :disabled="blocked || checkingPreview" :upload="previewUpload" preview>
+              <template #context><small>Try the form as a respondent. Preview answers stay here.</small></template>
+              <template #footer>
+                <p v-if="previewStatus" class="preview-status" role="status">{{ previewStatus }}</p>
+                <BaseButton type="button" variant="primary" :loading="checkingPreview" @click="validatePreview">Validate preview answers</BaseButton>
+              </template>
+            </FormExperience>
+          </div>
+      </section>
       <section class="releases"><h2>Published releases</h2><p v-if="!form.releases.length">No release has been published.</p><ul><li v-for="release in form.releases" :key="release.id"><strong>Release {{ release.number }} · {{ release.definition.title }}</strong><span>{{ release.accepting && (!release.valid_until || Date.parse(release.valid_until) > Date.now()) && !form.closed ? 'Accepting submissions' : 'Closed to submissions' }}{{ release.valid_until ? ` · until ${new Date(release.valid_until).toLocaleString()}` : '' }}</span></li></ul></section>
       <FormAccessEditor :form-id="form.id" :disabled="blocked" @changed="refreshForm" />
     </template>
@@ -154,4 +207,13 @@ onBeforeRouteLeave(() => !(dirty.value || mutation.uncertain.value) || window.co
 
 <style scoped>
 .form-editor-page{display:grid;gap:1.3rem;max-width:62rem}.form-editor-page h1{font-size:1.8rem}.toolbar{align-items:center;display:flex;flex-wrap:wrap;gap:.6rem}.toolbar>strong{flex:1;font-size:.85rem}.toolbar>span{font-size:.8rem}.draft-toolbar{align-items:end;display:flex;gap:1rem}.draft-toolbar label{display:grid;flex:1;gap:.4rem;font-size:.8rem}.notice,.publication{border:1px solid var(--color-border);border-radius:.6rem;padding:1rem}.notice{font-size:.85rem;margin:0}.error{color:var(--color-danger,#b91c1c)}.publication{display:grid;gap:.75rem}.publication h2,.publication p{margin:0}.publication label{display:grid;font-size:.85rem;gap:.4rem}.publication h2,.releases h2{font-size:1rem}.publication .button{justify-self:start}.preview{border:1px solid var(--color-border);border-radius:.8rem;padding:1.5rem}.intro{white-space:pre-wrap}.releases ul{list-style:none;padding:0}.releases li{border-top:1px solid var(--color-border);display:grid;font-size:.8rem;gap:.35rem;padding:.8rem 0}@media(max-width:42rem){.draft-toolbar{align-items:stretch;flex-direction:column}}
+
+.editor-toolbar { position: sticky; top: .5rem; z-index: 3; padding: .65rem; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface-raised); }
+.preview { display: grid; gap: 1rem; background: var(--color-surface-sunken); }
+.preview-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; font-size: .8rem; }
+.preview-status { margin: 0; font-size: .85rem; }
+.preview-toolbar p { margin: 0; flex: 1; color: var(--color-text-muted); }
+.preview-toolbar label { display: inline-flex; gap: .35rem; align-items: center; }
+.preview-surface { width: min(100%, 48rem); margin-inline: auto; }
+.preview-surface--narrow { width: min(100%, 24rem); }
 </style>

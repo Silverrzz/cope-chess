@@ -93,7 +93,7 @@ def compile_binding(definition: FormDefinition) -> FormBinding:
     def validate_attachment_policies(fields):
         for field in fields:
             if field.kind == "attachment" and any(media not in MEDIA_POLICIES for media in field.accepted_content_types):
-                raise ApplicationError("attachment_policy_unavailable", "This installation supports download-only opaque files and validated UTF-8 text attachments.",422)
+                raise ApplicationError("attachment_policy_unavailable", "Choose a supported attachment type from the form builder.",422)
             validate_attachment_policies(field.fields)
 
     validate_attachment_policies(definition.fields)

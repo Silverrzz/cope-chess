@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
-import secrets
 import uuid
 
 from pydantic import ValidationError
@@ -155,35 +153,17 @@ def pinned_release(connection, form_id: str, release_id: str, *, accepting: bool
     return dict(row)
 
 
-def take_rate(connection, scope: str, subject: str, limit: int) -> None:
-    row = connection.execute(
-        """INSERT INTO form_rate_limits(scope, subject, hour, count)
-           VALUES (%s, %s, date_trunc('hour', clock_timestamp()), 1)
-           ON CONFLICT(scope, subject, hour) DO UPDATE SET count = form_rate_limits.count + 1
-           WHERE form_rate_limits.count < %s RETURNING count""", (scope, subject, limit),
-    ).fetchone()
+def take_rate(connection, scope: str, subject: str, limit: int, *, cost: int = 1) -> None:
+    row = None
+    if 0 < cost <= limit:
+        row = connection.execute(
+            """INSERT INTO form_rate_limits(scope, subject, hour, count)
+               VALUES (%s, %s, date_trunc('hour', clock_timestamp()), %s)
+               ON CONFLICT(scope, subject, hour) DO UPDATE SET count = form_rate_limits.count + EXCLUDED.count
+               WHERE form_rate_limits.count <= %s RETURNING count""", (scope, subject, cost, limit - cost),
+        ).fetchone()
     if row is None:
-        raise ApplicationError("form_rate_limit", "This form's hourly limit has been reached. Try again in the next hour.", 429)
-
-
-def issue_claim(connection, slug: str, remote_address: str) -> dict:
-    form = connection.execute("SELECT * FROM form_definitions WHERE slug = %s FOR SHARE", (slug,)).fetchone()
-    if form is None or form["closed"] or form["published_release"] is None:
-        raise ApplicationError("form_unavailable", "The form is not accepting submissions.", 404)
-    release = pinned_release(connection, str(form["id"]), str(form["published_release"]), accepting=True)
-    definition = definition_from_json(release["definition"])
-    if definition.audience != "public":
-        raise ApplicationError("authentication_required", "This form requires an authenticated invitation or account.", 401)
-    secret_key = connection.execute("SELECT secret FROM form_private_keys WHERE purpose = 'anonymous_rate_key'").fetchone()["secret"]
-    subject = hmac.new(secret_key.encode(), remote_address.encode(), hashlib.sha256).hexdigest()
-    take_rate(connection, "claim:" + str(form["id"]), subject, 10)
-    token = "cope_form_" + secrets.token_urlsafe(40)
-    row = connection.execute(
-        """INSERT INTO form_claims(form_id, token_hash, expires_at)
-           VALUES (%s, %s, clock_timestamp() + interval '30 days') RETURNING id, expires_at""",
-        (form["id"], hashlib.sha256(token.encode()).hexdigest()),
-    ).fetchone()
-    return {"id": str(row["id"]), "form_id": str(form["id"]), "token": token, "expires_at": row["expires_at"].isoformat()}
+        raise ApplicationError("form_rate_limit", "The hourly limit has been reached. Try again in the next hour.", 429)
 
 
 def authenticate_claim(connection, token: str) -> Principal:
@@ -221,7 +201,14 @@ def validate_answers(connection, principal, form: dict, release: dict, answers: 
             attachments.append(retention)
         return selected
 
-    canonical = validate_response(definition, answers, ResponseContext(resolve_reference=resolve_reference, resolve_scoped_attachment=resolve_attachment))
+    from cope.db.connection import LegacyTransaction
+    from .resources import validate_public_resource
+
+    canonical = validate_response(definition, answers, ResponseContext(
+        resolve_reference=resolve_reference,
+        resolve_public_resource=lambda field, value: validate_public_resource(LegacyTransaction(connection), field.kind, value),
+        resolve_scoped_attachment=resolve_attachment,
+    ))
     subject = review_subject(
         binding, definition, canonical,
         form_id=str(form["id"]), release_id=str(release["id"]), owner_actor=form["owner_actor"],
@@ -292,9 +279,14 @@ def public_definition(definition: FormDefinition) -> dict:
 
 def attachment_policy() -> dict:
     import os
-    from cope.domains.artifacts.policy import MEDIA_POLICIES
+    from cope.domains.artifacts.policy import GUEST_EXTENSIONS, GUEST_MAX_BYTES, MEDIA_POLICIES
 
-    return {"max_file_bytes": int(os.environ.get("COPE_ARTIFACT_UPLOAD_MAX_BYTES","10485760")),"media_types":list(MEDIA_POLICIES)}
+    return {
+        "max_file_bytes": int(os.environ.get("COPE_ARTIFACT_UPLOAD_MAX_BYTES", "10485760")),
+        "media_types": list(MEDIA_POLICIES),
+        "guest_max_file_bytes": GUEST_MAX_BYTES,
+        "guest_extensions": {media: sorted(extensions) for media, extensions in GUEST_EXTENSIONS.items()},
+    }
 
 
 def public_form_view(connection, slug: str, principal: Principal | None = None) -> dict:
