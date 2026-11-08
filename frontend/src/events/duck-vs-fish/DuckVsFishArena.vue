@@ -2,14 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api } from "@/api/client";
+import { buildPositions, positionFen } from "@/components/chess/chess";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
 import MoveList from "@/components/chess/MoveList.vue";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import { resultLabel, timeControlLabel } from "@/components/public/format";
-import type { ChatMessage, GameRecord, Identifier, TournamentDetailResponse } from "@/components/public/types";
+import { clockLabel, moveEvaluation, moveNps, resultLabel, timeControlLabel } from "@/components/public/format";
+import type { ChatMessage, EngineAnalysis, GameRecord, Identifier, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
 import EngineCheers from "./EngineCheers.vue";
 import PondScene from "./PondScene.vue";
@@ -36,13 +37,20 @@ const busy = ref(false);
 const error = ref("");
 const localMessages = ref<ChatMessage[]>([]);
 const messages = computed(() => [...props.detail.chat_messages, ...localMessages.value.filter(message => !props.detail.chat_messages.some(existing => existing.id === message.id))]);
-const viewerGame = computed(() => viewer.value?.viewer_game ?? games.value.find(game => String(game.id) === selected.value) ?? games.value.find(game => ["assigned", "live"].includes(game.status)) ?? games.value[0] ?? null);
+const completed = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
+const defaultReplay = computed(() => props.detail.event.status === "completed"
+  ? completed.value.find(game => game.game_number === 1) ?? completed.value[0]
+  : undefined);
+const requestedGameId = computed(() => selected.value ?? (defaultReplay.value ? String(defaultReplay.value.id) : undefined));
+const viewerGame = computed(() => viewer.value?.viewer_game ?? games.value.find(game => String(game.id) === requestedGameId.value) ?? games.value.find(game => ["assigned", "live"].includes(game.status)) ?? games.value[0] ?? null);
 const moves = computed(() => viewer.value?.viewer_moves ?? []);
 const opening = computed(() => viewer.value?.opening ?? { name: "Start position", fen: "startpos" });
+const positions = computed(() => buildPositions(opening.value.fen, moves.value.map(move => move.uci), "duck"));
+const historical = computed(() => viewerGame.value?.status === "finished" || selectedPly.value < moves.value.length);
+const panels = computed(() => ({ white: panelForSide("white"), black: panelForSide("black") }));
 const oddsLabel = computed(() => payload.value.odds_steps?.[(viewerGame.value?.game_number ?? 1) - 1] ?? "");
-const activeSide = computed(() => viewer.value?.clock_state?.running ? viewer.value.clock_state.active_side : null);
+const activeSide = computed(() => !historical.value && viewer.value?.clock_state?.running ? viewer.value.clock_state.active_side : null);
 const activeTab = computed(() => ["games", "settings"].includes(String(route.query.tab)) ? String(route.query.tab) : "standings");
-const completed = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
 const timing = computed(() => props.detail.event.scheduled_start_at ? new Intl.DateTimeFormat(undefined, { dateStyle: "long", timeStyle: "short" }).format(new Date(props.detail.event.scheduled_start_at)) : "Start date TBD");
 const gameLabel = computed(() => viewerGame.value?.result ? resultLabel(viewerGame.value.result) : viewerGame.value?.status === "live" ? "Live" : props.detail.event.status === "completed" ? "Completed" : timing.value);
 const standings = computed(() => roster.value.map(member => ({
@@ -88,6 +96,34 @@ function memberForSide(side: "white" | "black") {
   return roster.value.find(member => String(member.engine_version_id) === String(viewerGame.value?.[`${side}_engine_id`])) ?? roster.value[side === "white" ? 0 : 1];
 }
 
+function panelForSide(side: "white" | "black"): { clock: string; analysis: EngineAnalysis | null } {
+  if (!historical.value) {
+    return { clock: viewer.value?.clocks?.[side] ?? initialClock.value, analysis: viewer.value?.engine_data?.[side] ?? null };
+  }
+  const turn = side === "white" ? "w" : "b";
+  for (let index = Math.min(selectedPly.value, moves.value.length) - 1; index >= 0; index -= 1) {
+    const move = moves.value[index]!;
+    const position = positions.value[index]!;
+    if (move.is_book || position.turn !== turn) continue;
+    return {
+      clock: move.clock_after_ms == null ? initialClock.value : clockLabel(move.clock_after_ms),
+      analysis: {
+        eval: moveEvaluation(move),
+        depth: move.depth ?? null,
+        seldepth: move.seldepth ?? null,
+        nodes: move.nodes ?? null,
+        nps: moveNps(move),
+        hashfull: move.hashfull ?? null,
+        info: move.info_line ?? null,
+        pv: move.pv ?? null,
+        pv_san: move.pv_san ?? null,
+        root_fen: positionFen(position),
+      },
+    };
+  }
+  return { clock: initialClock.value, analysis: null };
+}
+
 function engineName(engineId: Identifier): string {
   return roster.value.find(member => String(member.engine_version_id) === String(engineId))?.display_name ?? "Engine";
 }
@@ -130,7 +166,7 @@ async function loadViewer(gameId?: string): Promise<void> {
   busy.value = true;
   try {
     const response = await api.get<TournamentDetailResponse>(`/api/events/${encodeURIComponent(props.detail.event.slug)}/tournaments/${tournament.id}`, {
-      query: { game_id: selected.value ?? undefined, page_size: 25 }, signal: currentRequest.signal,
+      query: { game_id: requestedGameId.value, page_size: 25 }, signal: currentRequest.signal,
     });
     if (request !== currentRequest) return;
     const followLatest = !viewer.value || String(viewer.value.viewer_game?.id) !== String(response.viewer_game?.id) || selectedPly.value >= viewer.value.viewer_moves.length;
@@ -163,7 +199,7 @@ async function loadViewer(gameId?: string): Promise<void> {
     <section ref="arenaElement" class="arena" aria-label="wakwak versus Fairy-Stockfish">
       <div class="engine-column">
         <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot" :style="{ '--relay-primary': memberForSide(side)?.accent_color ?? '#a9d8d4' }">
-          <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="viewer?.clocks?.[side] ?? initialClock" :analysis="viewer?.engine_data?.[side] ?? null" :position-fen="currentFen" :active="activeSide === side" />
+          <EnginePanel :icon="memberForSide(side)?.id === roster[0]?.id ? wakwak : fairyStockfish" :data-cheer-origin="memberForSide(side)?.id" :side="side" variant="duck" :name="memberForSide(side)?.display_name ?? ''" :engine-id="memberForSide(side)?.engine_version_id ?? null" :clock="panels[side].clock" :analysis="panels[side].analysis" :position-fen="currentFen" :active="activeSide === side" />
         </div>
         <EngineCheers class="arena-cheers" compact :event-id="detail.event.id" :slug="detail.event.slug" :members="roster" />
       </div>
