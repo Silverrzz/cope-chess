@@ -41,7 +41,7 @@ from cope.db import (
 )
 from cope.db.events import EventRecord, utc_now
 
-from .registry import EventModule, register_event_module
+from .registry import EventDeletion, EventModule, register_event_module
 
 
 MODULE_KEY = "puzzle-gauntlet"
@@ -129,8 +129,8 @@ class GauntletCheerPayload(BaseModel):
     side: Literal["left", "right"]
 
 
-def _required_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
-    event = get_event(connection, event_id)
+def _required_event(connection: sqlite3.Connection, event_id: int, *, lock: bool = False) -> EventRecord:
+    event = get_event(connection, event_id, lock=lock)
     if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
         raise HTTPException(status_code=404, detail="Puzzle Gauntlet event not found.")
     return event
@@ -900,7 +900,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -918,7 +918,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -940,7 +940,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -971,7 +971,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -996,7 +996,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -1030,7 +1030,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Puzzles are locked after the gauntlet is armed.")
@@ -1054,7 +1054,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="The field is locked after the gauntlet is armed.")
@@ -1091,7 +1091,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="The field is locked after the gauntlet is armed.")
@@ -1114,7 +1114,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _required_event(connection, event_id)
+        event = _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="Timing is locked after the gauntlet is armed.")
@@ -1151,7 +1151,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _required_event(connection, event_id)
+        event = _required_event(connection, event_id, lock=True)
         if payload.published and event.status == "draft":
             set_event_status(connection, event_id, "scheduled" if event.scheduled_start_at else "announced")
         set_event_published(connection, event_id, payload.published)
@@ -1165,7 +1165,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _required_event(connection, event_id)
+        event = _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is not None:
             raise HTTPException(status_code=409, detail="The gauntlet is already armed.")
@@ -1241,7 +1241,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         config = _config_row(connection, event_id)
         if config["tournament_id"] is None:
             raise HTTPException(status_code=409, detail="The gauntlet has not started.")
@@ -1308,6 +1308,14 @@ def _provision(connection: sqlite3.Connection) -> int:
     return event_id
 
 
+
+def _deletion_resources(connection, event: EventRecord) -> EventDeletion:
+    row = connection.execute(
+        "SELECT opening_suite_id FROM puzzle_gauntlet_events WHERE event_id = ?", (event.id,)
+    ).fetchone()
+    return EventDeletion() if row is None else EventDeletion(True, (int(row["opening_suite_id"]),))
+
+
 register_event_module(
     EventModule(
         key=MODULE_KEY,
@@ -1317,5 +1325,7 @@ register_event_module(
         public_payload=_public_payload,
         admin_payload=_admin_payload,
         register_api=_register_api,
+        reset=reset_puzzle_gauntlet,
+        deletion_resources=_deletion_resources,
     )
 )

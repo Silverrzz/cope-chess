@@ -8,7 +8,7 @@ import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import StatusPill from "@/components/public/StatusPill.vue";
 import { errorMessage } from "@/components/public/format";
-import { publicEventComponent, publicEventPresentation } from "@/events/registry";
+import { eventComponents } from "@/events/registry";
 import type { ChatMessage, ChatSettings } from "@/components/public/types";
 import type { EventCastMember, EventContest, EventDetailResponse, EventSession } from "@/types/events";
 
@@ -32,8 +32,9 @@ watch([() => props.arena, () => data.value?.event.slug, () => data.value?.event.
   }
 });
 
-const customComponent = computed(() => data.value?.handler.current ? publicEventComponent(data.value.handler.key) : null);
-const immersiveCustom = computed(() => !!data.value && publicEventPresentation(data.value.handler.key) === "immersive");
+const components = computed(() => data.value ? eventComponents(data.value.handler) : undefined);
+const customComponent = computed(() => components.value?.public);
+const immersiveCustom = computed(() => components.value?.publicPresentation === "immersive");
 const accent = computed(() => {
   const theme = data.value?.event.theme ?? {};
   const value = theme.accent ?? theme.accent_color;

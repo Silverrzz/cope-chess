@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
 import { api } from "@/api/client";
+import { applicationQuery } from "@/api/application";
 import AdminEmptyState from "@/components/admin/AdminEmptyState.vue";
 import AdminPageHeader from "@/components/admin/AdminPageHeader.vue";
 import InlineFeedback from "@/components/admin/InlineFeedback.vue";
@@ -44,7 +45,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    data.value = await api.get<AdminEventListResponse>("/api/admin/events");
+    data.value = await applicationQuery<AdminEventListResponse>("events.catalogue.v1", {});
   } catch (cause) {
     error.value = errorText(cause);
   } finally {

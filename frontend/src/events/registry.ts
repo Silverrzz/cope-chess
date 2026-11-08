@@ -12,70 +12,56 @@ import PuzzleGauntletArchiveHero from "./puzzle-gauntlet/PuzzleGauntletArchiveHe
 import PuzzleGauntletBroadcast from "./puzzle-gauntlet/PuzzleGauntletBroadcast.vue";
 import PuzzleGauntletControlRoom from "./puzzle-gauntlet/PuzzleGauntletControlRoom.vue";
 
-const publicComponents: Record<string, Component> = {};
-const publicPresentations: Record<string, "embedded" | "immersive"> = {};
-const archiveComponents: Record<string, Component> = {};
-const adminComponents: Record<string, Component> = {};
+import type { EventHandlerState } from "@/types/events";
 
-export function registerEventComponents(
-  handlerKey: string,
-  components: { public?: Component; publicPresentation?: "embedded" | "immersive"; archive?: Component; admin?: Component },
-): void {
-  const key = handlerKey.trim();
-  if (!key) throw new Error("Event handler key is required.");
-  if (components.public) {
-    publicComponents[key] = components.public;
-    publicPresentations[key] = components.publicPresentation ?? "embedded";
-  }
-  if (components.archive) archiveComponents[key] = components.archive;
-  if (components.admin) adminComponents[key] = components.admin;
+interface EventComponents {
+  public?: Component;
+  publicPresentation?: "embedded" | "immersive";
+  archive?: Component;
+  admin?: Component;
 }
 
-export function publicEventComponent(handlerKey: string): Component | null {
-  return publicComponents[handlerKey] ?? null;
+const components = new Map<string, EventComponents>();
+
+function registerEventComponents(handlerKey: string, version: number, views: EventComponents): void {
+  const key = `${handlerKey}@${version}`;
+  if (components.has(key)) throw new Error(`Duplicate event components for ${key}.`);
+  components.set(key, views);
 }
 
-export function publicEventPresentation(handlerKey: string): "embedded" | "immersive" {
-  return publicPresentations[handlerKey] ?? "embedded";
+export function eventComponents(handler: EventHandlerState): EventComponents | undefined {
+  return handler.current ? components.get(`${handler.key}@${handler.required_version}`) : undefined;
 }
 
-export function archiveEventComponent(handlerKey: string): Component | null {
-  return archiveComponents[handlerKey] ?? null;
-}
-
-export function adminEventComponent(handlerKey: string): Component | null {
-  return adminComponents[handlerKey] ?? null;
-}
-
-registerEventComponents("engine-relay", {
+registerEventComponents("engine-relay", 1, {
   public: EngineRelayBroadcast,
   publicPresentation: "immersive",
   archive: EngineRelayArchiveHero,
   admin: EngineRelayControlRoom,
 });
 
-registerEventComponents("engine-relay-finale", {
+registerEventComponents("engine-relay-finale", 1, {
   public: EngineRelayBroadcast,
   publicPresentation: "immersive",
   archive: EngineRelayArchiveHero,
   admin: EngineRelayControlRoom,
 });
 
-registerEventComponents("puzzle-gauntlet", {
+registerEventComponents("puzzle-gauntlet", 1, {
   public: PuzzleGauntletBroadcast,
   publicPresentation: "immersive",
   archive: PuzzleGauntletArchiveHero,
   admin: PuzzleGauntletControlRoom,
 });
 
-registerEventComponents("duck-vs-fish", {
+registerEventComponents("duck-vs-fish", 1, {
   public: DuckVsFishBroadcast,
   publicPresentation: "immersive",
   archive: DuckVsFishArchiveHero,
   admin: DuckVsFishControlRoom,
 });
 
-registerEventComponents("engine-hand-brain", {
+registerEventComponents("engine-hand-brain", 1, {
   public: HandBrainPage,
   publicPresentation: "immersive",
   archive: HandBrainHero,

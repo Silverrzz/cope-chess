@@ -12,7 +12,7 @@ from cope.application.contracts import Target
 from cope.application.errors import ApplicationError
 from cope.application.identity import Principal, current_principal
 
-from .bindings import compile_binding, proposal_inputs, review_subject
+from .bindings import compile_binding, review_subject
 from .definition import FormDefinition
 from .responses import ResponseContext, validate_response
 
@@ -201,7 +201,8 @@ def authenticate_claim(connection, token: str) -> Principal:
 def validate_answers(connection, principal, form: dict, release: dict, answers: dict, *, attachment_subject: str | None = None,
                      attachments: list | None = None, response_id: str | None = None) -> tuple[dict, dict, dict]:
     definition = definition_from_json(release["definition"])
-    if release["policy_revision"] != compile_binding(definition).policy_revision:
+    binding = compile_binding(definition)
+    if release["policy_revision"] != binding.policy_revision:
         raise ApplicationError("binding_policy_changed", "This release needs a new approved binding policy.")
 
     def resolve_reference(field, resource_id):
@@ -221,9 +222,11 @@ def validate_answers(connection, principal, form: dict, release: dict, answers: 
         return selected
 
     canonical = validate_response(definition, answers, ResponseContext(resolve_reference=resolve_reference, resolve_scoped_attachment=resolve_attachment))
-    proposal = proposal_inputs(definition, canonical).model_dump(mode="json")
-    subject = review_subject(definition, canonical, form_id=str(form["id"]), release_id=str(release["id"]), owner_actor=form["owner_actor"])
-    return canonical, proposal, subject
+    subject = review_subject(
+        binding, definition, canonical,
+        form_id=str(form["id"]), release_id=str(release["id"]), owner_actor=form["owner_actor"],
+    )
+    return canonical, subject["subject"]["proposal"], subject
 
 
 def insert_response_revision(connection, response_id: str, revision: int, principal, answers: dict, proposal: dict, subject: dict) -> None:

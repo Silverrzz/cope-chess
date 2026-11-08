@@ -101,6 +101,8 @@ from cope.network import (
     WILDCARD_HOSTS,
     default_worker_port,
 )
+from cope.domains.tools.catalogue import describe_job
+from cope.events.registry import event_arena_is_public as _event_arena_is_public
 from cope.web.forms import form_value
 from cope.web.estimate_cache import TournamentEstimateCache
 from cope.version import app_version
@@ -669,7 +671,7 @@ def create_app(
             try:
                 connection.execute("SELECT 1").fetchone()
                 schema_version = database_schema_version(connection)
-                from cope.web.api import _tournament_form_payload
+                from cope.adapters.http.tournament_config import _tournament_form_payload
 
                 _tournament_form_payload(app, None, connection)
             finally:
@@ -1321,12 +1323,6 @@ def _event_by_slug(app: FastAPI, slug: str) -> EventRecord | None:
 
 def _event_is_public(event: EventRecord) -> bool:
     return event.published_at is not None and event.status != "draft"
-
-
-def _event_arena_is_public(event: EventRecord) -> bool:
-    return event.handler_key != "duck-vs-fish" or bool(
-        event.status in {"live", "intermission", "completed"}
-    )
 
 
 def _admin_request_authenticated(request: Request) -> bool:
@@ -2456,23 +2452,13 @@ def _worker_activity_view(
 def _worker_tool_activity(job) -> dict[str, Any] | None:
     if job is None:
         return None
-    if job.tool_name in {"puzzle_suite_uniqueness", "puzzle_suite_difficulty"}:
-        stage = "Uniqueness filtering" if job.tool_name == "puzzle_suite_uniqueness" else "Difficulty rating"
-        return _activity_view(
-            "busy",
-            "Running tool",
-            job.progress_detail or f"Processed {job.progress_current} of {job.progress_total} searches",
-            f"Puzzle Suite Manager: {stage}",
-            href=f"/admin/tools/puzzle-suite-manager?suite={job.input.get('suite_id', '')}",
-            meta=f"Attempt {job.attempt}",
-        )
-    option_name = str(job.input.get("option_name") or "UCI option")
+    presentation = describe_job(job)
     return _activity_view(
         "busy",
         "Running tool",
-        f"Inspecting {job.completed_items} of {job.total_items} engines",
-        f"Who Has This: {option_name}",
-        href=f"/admin/tools/who-has-this?job={job.id}",
+        presentation.progress,
+        f"{presentation.tool_label}: {presentation.label}",
+        href=presentation.href,
         meta=f"Attempt {job.attempt}",
     )
 

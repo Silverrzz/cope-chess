@@ -15,6 +15,7 @@ const loading = ref(false)
 const error = ref('')
 const label = ref('')
 const slug = ref('')
+const purpose = ref<'response_collection.v1' | 'feedback.v1'>('response_collection.v1')
 async function load(more = false): Promise<void> {
   loading.value = true; error.value = ''
   try {
@@ -27,7 +28,21 @@ async function load(more = false): Promise<void> {
 async function create(): Promise<void> {
   error.value = ''
   try {
-    const receipt = await mutation.execute<'forms.create.v1'>({ command: 'forms.create.v1', input: { slug: slug.value, label: label.value, document: { title: label.value, audience: 'authenticated', binding: 'feedback.v1', mapping: { message: 'message' }, fields: [{ id: 'message', kind: 'long_text', label: 'Message', required: true }] } } })
+    const feedback = purpose.value === 'feedback.v1'
+    const receipt = await mutation.execute<'forms.create.v1'>({
+      command: 'forms.create.v1',
+      input: {
+        slug: slug.value,
+        label: label.value,
+        document: {
+          title: label.value,
+          audience: 'authenticated',
+          binding: purpose.value,
+          mapping: feedback ? { message: 'message' } : {},
+          fields: [{ id: 'message', kind: 'long_text', label: feedback ? 'Message' : 'Response', required: true }],
+        },
+      },
+    })
     await router.push(`/admin/forms/${receipt.output.form_id}?copy=${receipt.output.copy_id}`)
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not create the form.' }
 }
@@ -38,7 +53,7 @@ onMounted(() => load())
   <div class="forms-page">
     <header><p class="eyebrow">Forms</p><h1>Collect and review responses</h1><p>Build private drafts, publish a release and review responses in a private inbox.</p><RouterLink to="/admin/form-responses">Open response inbox</RouterLink></header>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
-    <form class="panel create-form" @submit.prevent="create"><h2>Create a form</h2><fieldset :disabled="mutation.busy.value || mutation.uncertain.value"><label>Internal name<input v-model="label" class="input" required maxlength="300"></label><label>Public link name<input v-model="slug" class="input" required maxlength="100" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="event-feedback"><small>Lowercase words separated by hyphens. This becomes part of the public URL.</small></label></fieldset><BaseButton type="submit" class="button" :disabled="mutation.busy.value">{{ mutation.uncertain.value ? 'Retry creation' : 'Create private draft' }}</BaseButton></form>
+    <form class="panel create-form" @submit.prevent="create"><h2>Create a form</h2><fieldset :disabled="mutation.busy.value || mutation.uncertain.value"><label>Internal name<input v-model="label" class="input" required maxlength="300"></label><label>Public link name<input v-model="slug" class="input" required maxlength="100" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="event-feedback"><small>Lowercase words separated by hyphens. This becomes part of the public URL.</small></label><label>Response purpose<select v-model="purpose" class="input"><option value="response_collection.v1">Collect responses</option><option value="feedback.v1">Feedback</option></select></label></fieldset><BaseButton type="submit" class="button" :disabled="mutation.busy.value">{{ mutation.uncertain.value ? 'Retry creation' : 'Create private draft' }}</BaseButton></form>
     <section class="panel" :aria-busy="loading"><div class="list-heading"><h2>Your forms <small>{{ total }}</small></h2><BaseButton type="button" class="button button--ghost" :disabled="loading" @click="load()" variant="ghost">Refresh</BaseButton></div><p v-if="!loading && !rows.length">No forms are available to you.</p><ul class="form-list"><li v-for="form in rows" :key="form.id"><RouterLink :to="`/admin/forms/${form.id}`">{{ form.label }}</RouterLink><span>{{ form.closed ? 'Closed' : form.published_release ? 'Published' : 'Draft only' }}</span><RouterLink :to="`/admin/form-responses?form=${form.id}`">Responses</RouterLink></li></ul><BaseButton type="submit" v-if="cursor" class="button button--ghost" :disabled="loading" @click="load(true)" variant="ghost">Load more</BaseButton></section>
   </div>
 </template>

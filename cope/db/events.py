@@ -256,8 +256,9 @@ def create_event(
     return int(cursor.lastrowid)
 
 
-def get_event(connection: sqlite3.Connection, event_id: int) -> EventRecord | None:
-    row = connection.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+def get_event(connection: sqlite3.Connection, event_id: int, *, lock: bool = False) -> EventRecord | None:
+    query = "SELECT * FROM events WHERE id = ? FOR UPDATE" if lock else "SELECT * FROM events WHERE id = ?"
+    row = connection.execute(query, (event_id,)).fetchone()
     return None if row is None else _event_from_row(row)
 
 

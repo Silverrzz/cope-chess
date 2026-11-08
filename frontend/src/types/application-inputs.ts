@@ -21,6 +21,8 @@ export interface ApplicationInputs {
   'jobs.legacy_hold.v1': { "held": boolean; "reason": string }
   'operations.cancel.v1': { "reason": string }
   'operations.legacy_hold.v1': { "held": boolean; "reason": string }
+  'tools.cancel_job.v1': Record<string, never>
+  'tools.inspect_options.v1': { "engine_ids": Array<number>; "option_name": string }
 }
 
 export type ApplicationCommand = keyof ApplicationInputs
@@ -48,6 +50,8 @@ export const applicationCommandContracts = {
   'jobs.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
   'operations.cancel.v1': { requiresTarget: true, requiresVersion: true },
   'operations.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
+  'tools.cancel_job.v1': { requiresTarget: true, requiresVersion: true },
+  'tools.inspect_options.v1': { requiresTarget: false, requiresVersion: false },
 } as const
 
 export interface ApplicationOutputs {
@@ -73,6 +77,8 @@ export interface ApplicationOutputs {
   'jobs.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
   'operations.cancel.v1': { "operation_id": string; "status": "cancelled"; "cancelled_jobs": number; "continuing_jobs": number; "cleanup"?: "no_attempt_started" }
   'operations.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
+  'tools.cancel_job.v1': { "job_id": number; "status": string }
+  'tools.inspect_options.v1': { "job_id": number; "status": string }
 }
 
 export interface ApplicationQueryInputs {
@@ -81,6 +87,7 @@ export interface ApplicationQueryInputs {
   'activity.legacy.inspect.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
   'activity.list.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
   'activity.sources.v1': Record<string, never>
+  'events.catalogue.v1': Record<string, never>
   'events.status.v1': Record<string, never>
   'execution.control.v1': Record<string, never>
   'execution.jobs.detail.v1': Record<string, never>
@@ -98,6 +105,7 @@ export interface ApplicationQueryInputs {
   'forms.responses.detail.v1': Record<string, never>
   'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
   'objects.removal.v1': Record<string, never>
+  'tools.catalogue.v1': Record<string, never>
 }
 
 export interface ApplicationQueryOutputs {
@@ -106,6 +114,7 @@ export interface ApplicationQueryOutputs {
   'activity.legacy.inspect.v1': { "items": Array<ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_legacy_inspect_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityBasis }
   'activity.list.v1': { "items": Array<ApplicationSchema_query_output_activity_list_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_list_v1_ActivityBasis }
   'activity.sources.v1': { "items": Array<ApplicationSchema_query_output_activity_sources_v1_SourceItem> }
+  'events.catalogue.v1': { "events": Array<Record<string, unknown>>; "statuses": Array<string>; "registered_modules": Array<Record<string, unknown>> }
   'events.status.v1': { "incarnation": string; "schema_version": number; "retained_after": string; "last_delivery_position": string; "last_delivered_at": string | null; "pending_source": ApplicationSchema_query_output_events_status_v1_BoundedCount; "consumers": Array<ApplicationSchema_query_output_events_status_v1_ConsumerStatus>; "consumers_truncated": boolean; "basis"?: "single_statement_inspector" }
   'execution.control.v1': { "status": "unconfigured" | "unavailable" | "mismatch" | "recovery_incomplete" | "held"; "configured": boolean; "database_incarnation": string | null; "external_incarnation": string | null; "generation": number; "recovery_hold": boolean; "credential_reset_pending": boolean; "bootstrap_admin_locked": boolean; "bootstrap_manager_locked": boolean; "held_work": number; "held_work_more": boolean; "journal_digest": string | null; "new_dispatch": "disabled" }
   'execution.jobs.detail.v1': { "id": string; "workload": string; "status": "blocked" | "cancelled"; "state_version": number; "readiness": ApplicationSchema_query_output_execution_jobs_detail_v1_BlockReason | null; "cleanup"?: "no_attempt_started"; "kind": "job"; "operation_id": string; "created_at": string; "not_after": string; "input": ApplicationSchema_query_output_execution_jobs_detail_v1_JobInputView | null; "admitted_incarnation": string | null; "current_incarnation": string | null; "recovery_review_required": boolean; "authority_mode"?: "on_behalf_of_caller"; "completion_policy"?: "finish_admitted_pure_work" }
@@ -123,6 +132,7 @@ export interface ApplicationQueryOutputs {
   'forms.responses.detail.v1': Record<string, unknown>
   'forms.responses.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'objects.removal.v1': { "id": string; "type_key": string; "source": string; "source_id": string; "reason": "source_deleted" | "source_missing"; "observed_at": string; "state_version": number; "cleanup_state": "not_recorded"; "restore_supported": false }
+  'tools.catalogue.v1': { "tools": Array<ApplicationSchema_query_output_tools_catalogue_v1_ToolDescription>; "recent_jobs": Array<ApplicationSchema_query_output_tools_catalogue_v1_JobSummary>; "connected_workers": number }
 }
 
 export type ApplicationQuery = keyof ApplicationQueryInputs
@@ -169,6 +179,8 @@ export type ApplicationSchema_query_output_execution_runtimes_v1_RuntimeItem = {
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput = { "name": string; "label": string; "kinds": Array<string>; "required": boolean }
 export type ApplicationSchema_query_output_forms_bindings_v1_BindingOutput = { "key": string; "label": string; "policy_revision": string; "permits_anonymous": boolean; "arguments": Array<ApplicationSchema_query_output_forms_bindings_v1_BindingArgumentOutput> }
 export type ApplicationSchema_query_output_forms_datetime_options_v1_DateTimeChoice = { "value": string; "label": string; "utc": string }
+export type ApplicationSchema_query_output_tools_catalogue_v1_JobSummary = { "id": number; "tool_name": string; "label": string; "href": string; "status": string; "completed_items": number; "total_items": number; "created_at": string; "input": Record<string, unknown>; "worker": Record<string, unknown> | null; "required_threads": number; "required_hash_mb": number; "progress_current": number; "progress_total": number; "progress_detail": string; "attempt": number; "error": string; "started_at": string | null; "finished_at": string | null }
+export type ApplicationSchema_query_output_tools_catalogue_v1_ToolDescription = { "name": string; "label": string; "description": string; "href": string; "status": string }
 export type ApplicationSchema_view_output_activity_list_v1_ActivityBasis = { "observed_before": string; "membership": "current_at_request"; "order": "observed_at_desc_id_desc" }
 export type ApplicationSchema_view_output_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held" | "canonical"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed" | "canonical"; "mapping_quality": "status_only" | "authoritative"; "cleanup_state": "not_recorded" | "not_started"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_view_output_activity_list_v1_Count = { "count": number; "more": boolean; "limit"?: number }

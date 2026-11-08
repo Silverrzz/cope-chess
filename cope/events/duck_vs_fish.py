@@ -258,13 +258,9 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = get_event(connection, event_id)
-        if event is None or event.handler_key != MODULE_KEY:
+        event = get_event(connection, event_id, lock=True)
+        if event is None or event.handler_key != MODULE_KEY or event.handler_version != 1:
             raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
-        row = connection.execute("SELECT id FROM events WHERE id = ? FOR UPDATE", (event_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
-        event = get_event(connection, event_id)
         tournament_id = event.config.get("tournament_id")
         tournament_row = connection.execute("SELECT status FROM tournaments WHERE id = ? FOR UPDATE", (tournament_id,)).fetchone()
         if tournament_row is None or tournament_row["status"] != "draft":
@@ -330,8 +326,8 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = get_event(connection, event_id)
-        if event is None or event.handler_key != MODULE_KEY:
+        event = get_event(connection, event_id, lock=True)
+        if event is None or event.handler_key != MODULE_KEY or event.handler_version != 1:
             raise HTTPException(status_code=404, detail="Duck vs Fish event not found.")
         if payload.published and event.status == "draft":
             set_event_status(connection, event_id, "announced")
@@ -351,5 +347,8 @@ register_event_module(
         public_payload=_payload,
         admin_payload=_payload,
         register_api=_register_api,
+        reset=reset_match,
+        public_arena_statuses=frozenset({"live", "intermission", "completed"}),
+        closed_arena_payload=lambda payload: {**payload, "tournament": None, "games": []},
     )
 )

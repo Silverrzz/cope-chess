@@ -604,7 +604,7 @@ def _register_api(app):
         request: Request,
         connection=Depends(web_app._database),
     ):
-        from cope.web.api import _require_viewable_event
+        from cope.adapters.http.events import _require_viewable_event
 
         event = _require_viewable_event(connection, slug, request)
         if event.handler_key != MODULE_KEY:
@@ -636,17 +636,14 @@ def _register_api(app):
         return _json({"accepted": True, "cheer_id": cheer_id}, 202)
 
     def require_event(connection, event_id):
-        event = get_event(connection, event_id)
-        if event is None or event.handler_key != MODULE_KEY:
+        event = get_event(connection, event_id, lock=True)
+        if event is None or event.handler_key != MODULE_KEY or event.handler_version != 1:
             raise HTTPException(404, "Hand and brain event not found")
         return event
 
     @app.post("/api/admin/events/{event_id}/hand-brain/prepare")
     def prepare(event_id: int, request: Request, connection=Depends(web_app._database)):
         require_event(connection, event_id)
-        connection.execute(
-            "SELECT id FROM events WHERE id = ? FOR UPDATE", (event_id,)
-        ).fetchone()
         initialize_bracket(connection, event_id)
         connection.commit()
         _publish_change(request, event_id)
@@ -661,9 +658,6 @@ def _register_api(app):
         connection=Depends(web_app._database),
     ):
         event = require_event(connection, event_id)
-        connection.execute(
-            "SELECT id FROM events WHERE id = ? FOR UPDATE", (event_id,)
-        ).fetchone()
         if any(
             contest.state.get("quads")
             for contest in list_event_contests(connection, event_id)
@@ -715,7 +709,7 @@ def _register_api(app):
     def game_searches(
         slug: str, game_id: int, request: Request, connection=Depends(web_app._database)
     ):
-        from cope.web.api import _require_viewable_event
+        from cope.adapters.http.events import _require_viewable_event
 
         event = _require_viewable_event(connection, slug, request)
         game = get_game(connection, game_id)

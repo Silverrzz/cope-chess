@@ -686,8 +686,8 @@ def _admin_payload(connection: sqlite3.Connection, event: EventRecord) -> dict[s
     return _payload(connection, event, admin=True)
 
 
-def _required_event(connection: sqlite3.Connection, event_id: int) -> EventRecord:
-    event = get_event(connection, event_id)
+def _required_event(connection: sqlite3.Connection, event_id: int, *, lock: bool = False) -> EventRecord:
+    event = get_event(connection, event_id, lock=lock)
     if event is None or event.handler_key not in {MODULE_KEY, FINALE_MODULE_KEY} or event.handler_version != MODULE_VERSION:
         raise HTTPException(status_code=404, detail="Engine relay event not found.")
     return event
@@ -916,7 +916,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         row = connection.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM event_cast_members WHERE event_id = ?",
             (event_id,),
@@ -946,7 +946,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         _required_team(connection, event_id, team_id)
         connection.execute(
             """
@@ -976,7 +976,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         _required_team(connection, event_id, team_id)
         fixture = connection.execute(
             "SELECT 1 FROM engine_relay_fixture_teams WHERE team_id = ? LIMIT 1",
@@ -999,7 +999,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         _required_team(connection, event_id, team_id)
         if _team_locked(connection, team_id):
             raise HTTPException(status_code=409, detail="This roster is locked because one of its fixtures has started.")
@@ -1059,7 +1059,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         current = _required_member(connection, event_id, team_id, member_id)
         if _team_locked(connection, team_id):
             raise HTTPException(status_code=409, detail="This roster is locked because one of its fixtures has started.")
@@ -1093,7 +1093,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         member = _required_member(connection, event_id, team_id, member_id)
         if _team_locked(connection, team_id):
             raise HTTPException(status_code=409, detail="This roster is locked because one of its fixtures has started.")
@@ -1120,7 +1120,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        event = _required_event(connection, event_id)
+        event = _required_event(connection, event_id, lock=True)
         finale = event.handler_key == FINALE_MODULE_KEY
         if finale and len(payload.team_ids) != 2:
             raise HTTPException(status_code=422, detail="A sudden-death finale requires exactly two teams.")
@@ -1251,7 +1251,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         fixture = _required_fixture(connection, event_id, fixture_id)
         tournament = get_tournament(connection, fixture.tournament_id)
         if tournament is not None and tournament.status not in {"draft", "scheduled"}:
@@ -1271,7 +1271,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         fixture = _required_fixture(connection, event_id, fixture_id)
         tournament = get_tournament(connection, fixture.tournament_id)
         if tournament is None:
@@ -1303,7 +1303,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         fixture = _required_fixture(connection, event_id, fixture_id)
         try:
             unschedule_tournament(connection, fixture.tournament_id)
@@ -1321,7 +1321,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         fixture = _required_fixture(connection, event_id, fixture_id)
         try:
             preparation = start_tournament(connection, fixture.tournament_id)
@@ -1345,7 +1345,7 @@ def _register_api(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        _required_event(connection, event_id)
+        _required_event(connection, event_id, lock=True)
         try:
             lifecycle = reconcile_engine_relay_event(connection, event_id)
             if payload.published and lifecycle.status == "draft":

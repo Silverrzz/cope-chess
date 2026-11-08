@@ -85,7 +85,7 @@ class CheckDefinitionOutput(Input):
 
 
 def bindings_catalogue(connection, principal, target, payload: Empty) -> dict:
-    return {"items": [{"key": binding.key, "label": binding.key.rsplit(".", 1)[0].replace("_", " ").title(),
+    return {"items": [{"key": binding.key, "label": binding.label,
                        "policy_revision": binding.policy_revision, "permits_anonymous": binding.permits_anonymous,
                        "arguments": [{"name": argument.name, "label": argument.name.replace("_", " ").title(),
                                       "kinds": list(argument.kinds), "required": argument.required} for argument in binding.arguments]}

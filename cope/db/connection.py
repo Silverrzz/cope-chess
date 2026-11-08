@@ -174,6 +174,18 @@ class DatabaseCursor:
         return iter(self._cursor)
 
 
+class LegacyTransaction:
+    def __init__(self, connection: psycopg.Connection) -> None:
+        self._raw = connection
+
+    def execute(self, sql: str, parameters: Iterable[Any] = ()):
+        return self._raw.execute(_translate_sql(sql), tuple(parameters))
+
+    def executemany(self, sql: str, parameters: Iterable[Iterable[Any]]) -> None:
+        with self._raw.cursor() as cursor:
+            cursor.executemany(_translate_sql(sql), parameters)
+
+
 class DatabaseConnection:
     """Lazy pooled PostgreSQL connection with the repository's small DB-API surface."""
 

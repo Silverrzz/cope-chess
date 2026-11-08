@@ -15,9 +15,14 @@ def query_catalog() -> dict:
     from cope.domains.execution.legacy_routes import queries as route_queries
     from cope.domains.execution.queries import queries as execution_queries
 
+    from cope.domains.tools.application import queries as tool_queries
+    from cope.events.application import queries as event_queries
+
+    providers = (form_queries, delivery_queries, activity_queries, object_queries, route_queries,
+                 execution_queries, tool_queries, event_queries)
     result = {}
-    for provider in (form_queries(),delivery_queries(),activity_queries(),object_queries(),route_queries(),execution_queries()):
-        for query in provider:
+    for provider in providers:
+        for query in provider():
             if query.name in result:
                 raise RuntimeError(f"Duplicate application query: {query.name}")
             result[query.name] = query

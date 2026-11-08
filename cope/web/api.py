@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 import re
 import secrets
@@ -16,29 +15,35 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import chess
 import psycopg
+from cope.adapters.http.environment_clone import register_environment_clone_routes
+from cope.adapters.http.events import _require_viewable_event, register_event_routes
+from cope.adapters.http.puzzle_tools import register_puzzle_tools_routes
+from cope.adapters.http.responses import _json, _publish_admin_change
+from cope.adapters.http.tools import register_tools_routes
+from cope.adapters.http.tournament_config import (
+    TournamentPayload,
+    _engine_is_tournament_ready,
+    _tournament_form_payload,
+    _validate_engine_variant,
+    _validated_tournament_config,
+)
+from cope.adapters.http.tournament_tools import register_tournament_tools_routes
 from cope.application import ApplicationError, Principal as ApplicationPrincipal
 from cope.application.commands import execute_compatibility
 from cope.application.identity import bootstrap_authority_lock,bootstrap_secret,current_principal,revoke_browser_credential
 from cope.adapters.http.browser_identity import cookie_browser_principal,request_browser_principal
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 
-from cope.db.events import list_event_tournament_links
 from cope.chat import announce_tournament_finished
-from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine, TournamentConfig
+from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine
 from cope.environment_clone import (
-    CLONE_PROTOCOL_VERSION,
-    RemoteCloneError,
     authorize_environment_export,
-    cancel_clone_job,
     clone_catalog_payload,
-    clone_job_payload,
-    create_clone_from_source,
     create_environment_export,
     engine_artifact_root,
     environment_export_artifact,
@@ -46,21 +51,13 @@ from cope.environment_clone import (
     environment_export_payload,
     environment_instance_id,
     environment_inventory,
-    list_clone_jobs,
-    normalize_source_url,
-    authenticated_source_opener,
     remove_clone_transfer_tree,
-    remote_json,
-    resume_clone_job,
 )
 from cope.db import (
-    CURRENT_EVENT_STATUSES,
     ChatSettingsRecord,
     CopeBuildSettingsRecord,
     PlatformSettingsRecord,
-    EventRecord,
     append_suite_openings,
-    cancel_tool_job,
     create_deployment_job,
     create_dockerfile_pull_job,
     create_engine,
@@ -70,8 +67,6 @@ from cope.db import (
     create_rating_list,
     create_tournament,
     create_worker,
-    create_tool_job,
-    create_puzzle_suite,
     connect_database,
     count_games,
     create_badge,
@@ -81,16 +76,13 @@ from cope.db import (
     delete_badge,
     delete_engine,
     delete_engine_version,
-    delete_event,
     delete_git_host,
     delete_opening_suite,
     delete_rating_list,
     delete_tournament,
     delete_worker,
     engine_game_filter_options,
-    engine_build_is_benchmarked,
     engine_result_summary,
-    event_resource_counts,
     forget_benchmarker,
     forget_engine_benchmarks,
     forget_failed_benchmark_job,
@@ -102,9 +94,6 @@ from cope.db import (
     get_cope_build_settings,
     get_platform_settings,
     get_engine_record,
-    get_event,
-    get_event_by_slug,
-    get_event_chat_settings,
     get_engine_artifact_by_sha256,
     get_engine_family,
     get_engine_version_record,
@@ -115,10 +104,7 @@ from cope.db import (
     get_tournament,
     get_worker,
     get_worker_by_session_id,
-    get_tool_job,
-    get_puzzle_suite,
     invalidate_game_pair,
-    invalidate_rating_list_engine_games,
     list_deployment_jobs,
     list_deployment_targets,
     list_deployment_targets_for_jobs,
@@ -131,14 +117,6 @@ from cope.db import (
     list_engine_games,
     list_engine_badges,
     list_engine_game_counts,
-    list_event_awards,
-    list_event_cast,
-    list_event_contest_cast,
-    list_event_contests,
-    list_event_sessions,
-    list_event_stages,
-    list_event_updates,
-    list_events,
     list_engine_records,
     list_engine_result_summaries,
     list_engine_benchmark_jobs,
@@ -146,34 +124,23 @@ from cope.db import (
     list_engine_families,
     list_engine_versions,
     list_git_hosts,
-    list_games,
     list_games_page,
     list_games_by_status,
     list_active_games,
     list_opening_suites,
     list_rating_lists,
-    list_rating_list_engine_ids,
     list_rating_rows,
     list_service_heartbeats,
     list_suite_openings,
     list_tournaments,
-    list_tool_job_items,
-    list_tool_jobs,
-    list_puzzle_suite_engine_results,
-    list_puzzle_suite_puzzles,
-    list_puzzle_suite_runs,
-    list_puzzle_suites,
     list_tournament_rating_commits,
     list_uncommitted_finished_tournaments,
-    list_workers,
     mint_benchmarker_token,
     mint_worker_token_for_worker,
     replace_suite_openings,
     replace_badge_engines,
     replay_game,
-    reset_event,
     record_manual_benchmark,
-    prepare_puzzle_suite_run,
     register_engine_artifact,
     reschedule_engine_benchmarks,
     request_tournament_rating_commit,
@@ -183,7 +150,6 @@ from cope.db import (
     schedule_tournament,
     set_tournament_concurrency,
     set_tournament_status,
-    set_puzzle_suite_puzzle_included,
     suite_opening_count,
     update_chat_settings,
     update_cope_build_settings,
@@ -201,10 +167,6 @@ from cope.db import (
     unschedule_tournament,
 )
 from cope.events import (
-    event_extension_payload,
-    event_modules,
-    get_event_module,
-    provision_event_module,
     register_event_api_routes,
 )
 from cope.engine_dockerfiles import (
@@ -231,8 +193,8 @@ from cope.web.engine_sources import (
     search_repositories,
 )
 from cope.web.openings import format_opening, parse_opening_input
-from cope.variants import VARIANTS, VariantId, get_variant
-from cope.db.repo import validate_tournament_variant, set_rating_list_variant
+from cope.variants import VariantId
+from cope.db.repo import set_rating_list_variant
 from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
@@ -653,19 +615,6 @@ def _engine_queues_payload(connection: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-class TournamentPayload(BaseModel):
-    name: str = Field(min_length=1, max_length=160)
-    config: TournamentConfig
-
-    @field_validator("name")
-    @classmethod
-    def strip_name(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("tournament name cannot be blank")
-        return value
-
-
 class TournamentNamePayload(BaseModel):
     name: str = Field(min_length=1, max_length=160)
 
@@ -676,30 +625,6 @@ class TournamentNamePayload(BaseModel):
         if not value:
             raise ValueError("tournament name cannot be blank")
         return value
-
-
-class TournamentCreatorBatchPayload(BaseModel):
-    tournaments: list[TournamentPayload] = Field(min_length=1, max_length=100)
-
-    @model_validator(mode="after")
-    def validate_shared_settings(self) -> TournamentCreatorBatchPayload:
-        shared = self.tournaments[0].config.model_dump(
-            mode="json",
-            exclude={"participants"},
-        )
-        if any(
-            item.config.model_dump(mode="json", exclude={"participants"}) != shared
-            for item in self.tournaments[1:]
-        ):
-            raise ValueError("batch tournaments must share the same settings")
-        return self
-
-
-class GauntletPreviewPayload(BaseModel):
-    rating_list_id: int = Field(gt=0)
-    hero_engine_id: int = Field(gt=0)
-    elo_estimate: float = Field(ge=-10000, le=10000)
-    gauntlet_size: int = Field(ge=2, le=500)
 
 
 class TournamentParticipantPayload(BaseModel):
@@ -971,90 +896,8 @@ class BenchmarkerPayload(BaseModel):
         return value
 
 
-class WhoHasThisPayload(BaseModel):
-    engine_ids: list[int] = Field(min_length=1, max_length=500)
-    option_name: str = Field(min_length=1, max_length=200)
-
-    @field_validator("engine_ids")
-    @classmethod
-    def validate_engine_ids(cls, value: list[int]) -> list[int]:
-        if any(engine_id <= 0 for engine_id in value):
-            raise ValueError("engine ids must be positive")
-        unique = list(dict.fromkeys(value))
-        if len(unique) != len(value):
-            raise ValueError("engine ids must be unique")
-        return unique
-
-    @field_validator("option_name")
-    @classmethod
-    def validate_option_name(cls, value: str) -> str:
-        cleaned = " ".join(value.split())
-        if not cleaned or any(ord(character) < 32 for character in cleaned):
-            raise ValueError("enter a valid UCI option name")
-        return cleaned
-
-
-class PuzzleSuiteCreatePayload(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    puzzles: str = Field(min_length=1, max_length=2_000_000)
-
-    @field_validator("name")
-    @classmethod
-    def normalize_name(cls, value: str) -> str:
-        normalized = " ".join(value.split())
-        if not normalized:
-            raise ValueError("enter a suite name")
-        return normalized
-
-
-class PuzzleSuiteUniquenessPayload(BaseModel):
-    engine_id: int = Field(gt=0)
-    movetime_ms: int = Field(default=30_000, ge=100, le=3_600_000)
-    multipv: int = Field(default=2, ge=2, le=20)
-    threads: int = Field(default=1, gt=0, le=1024)
-    hash_mb: int = Field(default=256, gt=0, le=1_048_576)
-    min_sigmoid_gap: float = Field(default=0.15, gt=0, le=1, allow_inf_nan=False)
-
-
-class PuzzleSuiteDifficultyPayload(BaseModel):
-    engine_ids: list[int] = Field(min_length=1, max_length=100)
-    rating_list_id: int = Field(gt=0)
-    movetime_ms: int = Field(default=30_000, ge=100, le=3_600_000)
-    threads: int = Field(default=1, gt=0, le=1024)
-    hash_mb: int = Field(default=256, gt=0, le=1_048_576)
-
-    @field_validator("engine_ids")
-    @classmethod
-    def validate_engine_ids(cls, value: list[int]) -> list[int]:
-        if any(engine_id <= 0 for engine_id in value):
-            raise ValueError("engine ids must be positive")
-        if len(set(value)) != len(value):
-            raise ValueError("engine ids must be unique")
-        return value
-
-
-class PuzzleSuitePuzzleIncludePayload(BaseModel):
-    included: bool
-
-
-class InvalidateRatingListEnginePayload(BaseModel):
-    engine_id: int = Field(gt=0)
-    rating_list_id: int = Field(gt=0)
-
-
 class EnvironmentExportPayload(BaseModel):
     datasets: list[str] = Field(min_length=1, max_length=100)
-
-
-class EnvironmentClonePayload(BaseModel):
-    source: str = Field(min_length=1, max_length=500)
-    admin_token: str = Field(min_length=1, max_length=1000)
-    datasets: list[str] = Field(min_length=1, max_length=100)
-
-
-class EnvironmentClonePreflightPayload(BaseModel):
-    source: str = Field(min_length=1, max_length=500)
-    admin_token: str = Field(min_length=1, max_length=1000)
 
 
 class WorkerSettingsPayload(BaseModel):
@@ -1575,89 +1418,8 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
-    @app.get("/api/events/current")
-    def current_public_event(connection: sqlite3.Connection = Depends(web_app._database)):
-        event = next(
-            (
-                item
-                for item in list_events(connection, public_only=True)
-                if item.status in CURRENT_EVENT_STATUSES
-            ),
-            None,
-        )
-        return _json({
-            "event": (
-                _event_summary_payload(connection, event, admin=False)
-                if event is not None
-                else None
-            ),
-        })
+    register_event_routes(app)
 
-    @app.get("/api/events")
-    def public_events(connection: sqlite3.Connection = Depends(web_app._database)):
-        events = list_events(connection, public_only=True)
-        current = next(
-            (item for item in events if item.status in CURRENT_EVENT_STATUSES),
-            None,
-        )
-        return _json({
-            "server_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
-            "current": (
-                _event_summary_payload(connection, current, admin=False)
-                if current is not None
-                else None
-            ),
-            "events": [
-                _event_summary_payload(connection, event, admin=False)
-                for event in events
-            ],
-        })
-
-    @app.get("/api/events/{slug}")
-    def public_event(
-        slug: str,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        event = _require_viewable_event(connection, slug, request)
-        payload = _event_detail_payload(connection, event, admin=False)
-        payload["arena_available"] = (
-            web_app._event_arena_is_public(event)
-            or web_app._admin_request_authenticated(request)
-        )
-        if event.handler_key == "duck-vs-fish" and not payload["arena_available"]:
-            payload["custom"] = {**payload["custom"], "tournament": None, "games": []}
-        payload["spectator_count"] = request.app.state.stream_hub.event_spectator_count(
-            event.id
-        )
-        return _json(payload)
-
-    @app.post("/api/events/{slug}/chat")
-    async def public_event_chat(
-        slug: str,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        event = _require_viewable_event(connection, slug, request)
-        form = await read_form(request)
-        settings = get_event_chat_settings(
-            connection,
-            event.id,
-            defaults=get_chat_settings(connection),
-        )
-
-        def create_message():
-            return web_app._create_event_chat_message_from_form(
-                connection,
-                form,
-                event_id=event.id,
-                settings=settings,
-            )
-
-        message = await asyncio.to_thread(create_message)
-        if message is not None:
-            web_app._publish_event_chat_message(request, event.id, message)
-        return _json({"message": message}, status_code=201)
 
     @app.get("/api/events/{slug}/tournaments/{tournament_id}")
     @app.get("/api/tournaments/{tournament_id}")
@@ -2145,179 +1907,6 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_ratings(connection: sqlite3.Connection = Depends(web_app._database)):
         return _json(_admin_ratings_payload(connection))
 
-    @app.get("/api/admin/events")
-    def admin_events(connection: sqlite3.Connection = Depends(web_app._database)):
-        modules = event_modules()
-        return _json(
-            {
-                "events": [
-                    _event_summary_payload(connection, event, admin=True)
-                    for event in list_events(connection)
-                ],
-                "statuses": [
-                    "draft",
-                    "announced",
-                    "scheduled",
-                    "live",
-                    "intermission",
-                    "postponed",
-                    "completed",
-                    "cancelled",
-                ],
-                "registered_modules": [
-                    {
-                        "key": module.key,
-                        "label": module.label,
-                        "version": module.version,
-                    }
-                    for module in modules.values()
-                ],
-            }
-        )
-
-    @app.get("/api/admin/events/{event_id}")
-    def admin_event(
-        event_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        event = get_event(connection, event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="Event not found.")
-        return _json(_event_detail_payload(connection, event, admin=True))
-
-    @app.delete("/api/admin/events/{event_id}")
-    def admin_delete_event(
-        event_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        event = get_event(connection, event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="Event not found.")
-        linked_tournaments = [
-            get_tournament(connection, int(row["tournament_id"]))
-            for row in list_event_tournament_links(connection, event_id=event_id)
-        ]
-        gauntlet = connection.execute(
-            "SELECT opening_suite_id FROM puzzle_gauntlet_events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
-        active = [
-            tournament
-            for tournament in linked_tournaments
-            if tournament is not None and tournament.status in {"running", "paused"}
-        ]
-        if active:
-            raise HTTPException(
-                status_code=409,
-                detail="Abort active event tournaments before deleting this event.",
-            )
-        try:
-            for tournament in linked_tournaments:
-                if tournament is not None and (
-                    tournament.status in {"draft", "scheduled"} or gauntlet is not None
-                ):
-                    delete_tournament(connection, tournament.id)
-            delete_event(connection, event_id)
-            if gauntlet is not None:
-                delete_opening_suite(connection, int(gauntlet["opening_suite_id"]))
-            connection.commit()
-        except (sqlite3.IntegrityError, ValueError) as exc:
-            connection.rollback()
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        request.app.state.stream_hub.link_event_tournaments(event_id, ())
-        _publish_admin_change(web_app, request)
-        return _json({"message": f"{event.title} deleted."})
-
-    @app.post("/api/admin/events/{event_id}/reset")
-    def admin_reset_event(
-        event_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        event = get_event(connection, event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="Event not found.")
-        linked_tournaments = [
-            get_tournament(connection, int(row["tournament_id"]))
-            for row in list_event_tournament_links(connection, event_id=event_id)
-        ]
-        active = [
-            tournament
-            for tournament in linked_tournaments
-            if tournament is not None and tournament.status in {"running", "paused"}
-        ]
-        if active:
-            raise HTTPException(
-                status_code=409,
-                detail="Abort active event tournaments before resetting this event.",
-            )
-        try:
-            for tournament in linked_tournaments:
-                if tournament is not None:
-                    delete_tournament(connection, tournament.id)
-            reset_event(connection, event_id)
-            if event.handler_key == "puzzle-gauntlet":
-                from cope.events.puzzle_gauntlet import reset_puzzle_gauntlet
-
-                reset_puzzle_gauntlet(connection, event_id)
-            elif event.handler_key == "duck-vs-fish":
-                from cope.events.duck_vs_fish import reset_match
-
-                reset_match(connection, event_id)
-            connection.commit()
-        except (sqlite3.IntegrityError, ValueError) as exc:
-            connection.rollback()
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        request.app.state.stream_hub.link_event_tournaments(event_id, ())
-        request.app.state.stream_hub.publish(
-            f"event.{event_id}",
-            "event.changed",
-            {"event_id": event_id},
-            source="web",
-        )
-        _publish_admin_change(web_app, request)
-        return _json({"message": f"{event.title} reset to a new draft."})
-
-    @app.post("/api/admin/event-modules/{module_key}/provision")
-    def admin_provision_event_module(
-        module_key: str,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        module = get_event_module(module_key)
-        if module is None:
-            raise HTTPException(status_code=404, detail="Event module not found.")
-        existing = next(
-            (event for event in list_events(connection) if event.handler_key == module.key),
-            None,
-        )
-        if existing is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{module.label} has already been created.",
-            )
-        try:
-            event = provision_event_module(connection, module.key)
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            connection.rollback()
-            raise HTTPException(
-                status_code=409,
-                detail=f"{module.label} could not be created because its event already exists.",
-            ) from exc
-        except (RuntimeError, ValueError) as exc:
-            connection.rollback()
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "id": event.id,
-                "event": _event_summary_payload(connection, event, admin=True),
-                "message": f"{event.title} created.",
-            },
-            status_code=201,
-        )
 
     @app.post("/api/admin/rating-lists")
     def admin_create_rating_list(
@@ -4536,921 +4125,11 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         return _json({"message": "Opening suite deleted."})
 
-    @app.get("/api/admin/tools")
-    def admin_tools(connection: sqlite3.Connection = Depends(web_app._database)):
-        jobs = list_tool_jobs(connection, limit=12)
-        workers = list_workers(connection)
-        return _json(
-            {
-                "tools": [
-                    {
-                        "name": "who_has_this",
-                        "label": "Who Has This",
-                        "description": "Inspect engine UCI handshakes across any selection of versions.",
-                        "href": "/admin/tools/who-has-this",
-                        "status": "available",
-                    },
-                    {
-                        "name": "puzzle_suite_manager",
-                        "label": "Puzzle Suite Manager",
-                        "description": "Verify unique solutions, measure solve effort, finetune misses, and order puzzle suites by engine-rated difficulty.",
-                        "href": "/admin/tools/puzzle-suite-manager",
-                        "status": "available",
-                    },
-                    {
-                        "name": "invalidate_rating_list_engine",
-                        "label": "Invalidate engine games",
-                        "description": "Uncommit one engine's games from every affected rating list, then invalidate them.",
-                        "href": "/admin/tools/invalidate-engine-games",
-                        "status": "available",
-                    },
-                    {
-                        "name": "tournament_creator",
-                        "label": "Tournament creator",
-                        "description": "Create rating divisions or build a balanced Elo gauntlet as editable tournament drafts.",
-                        "href": "/admin/tools/tournament-creator",
-                        "status": "available",
-                    },
-                    {
-                        "name": "clone_environment",
-                        "label": "Clone environment",
-                        "description": "Pull a dependency-complete, verified selection of data and engine artifacts from another Cope host.",
-                        "href": "/admin/tools/clone-environment",
-                        "status": "available",
-                    },
-                ],
-                "recent_jobs": [
-                    _tool_job_api_payload(connection, job, include_items=False)
-                    for job in jobs
-                ],
-                "connected_workers": sum(
-                    worker.status in {"connected", "ready", "busy"}
-                    for worker in workers
-                ),
-            }
-        )
+    register_tools_routes(app)
+    register_environment_clone_routes(app)
+    register_tournament_tools_routes(app)
+    register_puzzle_tools_routes(app)
 
-    @app.get("/api/admin/tools/environment-clone")
-    def admin_environment_clone(
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        return _json(
-            {
-                **clone_catalog_payload(),
-                "instance_id": environment_instance_id(connection),
-                "inventory": environment_inventory(connection),
-                "recent_jobs": list_clone_jobs(connection),
-            }
-        )
-
-    @app.post("/api/admin/tools/environment-clone/preflight")
-    async def admin_environment_clone_preflight(
-        payload: EnvironmentClonePreflightPayload,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        destination_instance = environment_instance_id(connection)
-
-        def inspect_source():
-            source_url = normalize_source_url(payload.source)
-            opener = authenticated_source_opener(source_url, payload.admin_token)
-            result = remote_json(opener, source_url, "/api/admin/environment-export/capabilities")
-            result.pop("csrf_token", None)
-            result["source_url"] = source_url
-            return result
-
-        try:
-            source = await asyncio.to_thread(inspect_source)
-        except (ValueError, RemoteCloneError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if source.get("instance_id") == destination_instance:
-            raise HTTPException(status_code=409, detail="The source and destination are the same Cope installation.")
-        source["compatible"] = (
-            int(source.get("protocol_version", 0)) == CLONE_PROTOCOL_VERSION
-            and int(source.get("schema_version", 0)) == database_schema_version(connection)
-        )
-        source["destination_inventory"] = environment_inventory(connection)
-        return _json(source)
-
-    @app.post("/api/admin/tools/environment-clone")
-    async def admin_create_environment_clone(payload: EnvironmentClonePayload):
-        def create_job():
-            connection = connect_database(app.state.db_path)
-            try:
-                return create_clone_from_source(
-                    connection,
-                    payload.source,
-                    payload.admin_token,
-                    payload.datasets,
-                )
-            finally:
-                connection.close()
-
-        try:
-            job = await asyncio.to_thread(create_job)
-        except (ValueError, RemoteCloneError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _json({"job": job, "message": "Environment clone queued."}, status_code=201)
-
-    @app.get("/api/admin/tools/environment-clone/jobs/{job_id}")
-    def admin_environment_clone_job(
-        job_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        job = clone_job_payload(connection, job_id, include_events=True)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Environment clone job not found.")
-        return _json({"job": job})
-
-    @app.post("/api/admin/tools/environment-clone/jobs/{job_id}/cancel")
-    def admin_cancel_environment_clone_job(
-        job_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if clone_job_payload(connection, job_id, include_events=False) is None:
-            raise HTTPException(status_code=404, detail="Environment clone job not found.")
-        if not cancel_clone_job(connection, job_id):
-            raise HTTPException(status_code=409, detail="This environment clone is no longer cancellable.")
-        return _json({"message": "Environment clone cancellation requested."})
-
-    @app.post("/api/admin/tools/environment-clone/jobs/{job_id}/resume")
-    def admin_resume_environment_clone_job(
-        job_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if clone_job_payload(connection, job_id, include_events=False) is None:
-            raise HTTPException(status_code=404, detail="Environment clone job not found.")
-        if not resume_clone_job(connection, job_id):
-            raise HTTPException(status_code=409, detail="This environment clone cannot be resumed.")
-        return _json({"message": "Environment clone queued to resume."})
-
-    @app.get("/api/admin/tools/environment-clone/jobs/{job_id}/events")
-    async def admin_environment_clone_events(job_id: int, request: Request):
-        def snapshot():
-            connection = connect_database(request.app.state.db_path)
-            try:
-                return clone_job_payload(connection, job_id, include_events=True)
-            finally:
-                connection.close()
-
-        if await asyncio.to_thread(snapshot) is None:
-            raise HTTPException(status_code=404, detail="Environment clone job not found.")
-
-        async def stream():
-            last_signature = ""
-            while True:
-                job = await asyncio.to_thread(snapshot)
-                if job is None:
-                    break
-                signature = f"{job['status']}|{job['updated_at']}|{len(job['events'])}"
-                if signature != last_signature:
-                    yield f"event: clone.snapshot\ndata: {json.dumps(job, separators=(',', ':'))}\n\n"
-                    last_signature = signature
-                if job["status"] in {"completed", "failed", "cancelled"}:
-                    break
-                await asyncio.sleep(1)
-            yield ": complete\n\n"
-
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    @app.get("/api/admin/tools/tournament-creator")
-    def admin_tournament_creator(
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        engine_records = {engine.id: engine for engine in list_engine_records(connection)}
-        eligible_engine_ids = {
-            engine.id
-            for engine in engine_records.values()
-            if _engine_is_tournament_ready(connection, engine)
-        }
-        rating_lists = []
-        for rating_list in list_rating_lists(connection):
-            engines = []
-            unavailable_engines = 0
-            for row in list_rating_rows(connection, rating_list.id):
-                engine_id = row.engine.engine_id
-                if engine_id not in eligible_engine_ids:
-                    unavailable_engines += 1
-                    continue
-                engines.append(
-                    {
-                        "id": engine_id,
-                        "name": row.engine.name,
-                        "version": row.engine.version,
-                        "elo": row.elo,
-                        "games_played": row.games_played,
-                    }
-                )
-            rating_lists.append(
-                {
-                    "id": rating_list.id,
-                    "name": rating_list.name,
-                    "variant": rating_list.variant,
-                    "rules_revision": rating_list.rules_revision,
-                    "engines": engines,
-                    "unavailable_engines": unavailable_engines,
-                }
-            )
-        form = _tournament_form_payload(web_app, request, connection)
-        form["engine_options"] = [
-            engine for engine in form["engine_options"]
-            if engine.id in eligible_engine_ids
-        ]
-        return _json(
-            {
-                "form": form,
-                "rating_lists": rating_lists,
-            }
-        )
-
-    @app.post("/api/admin/tools/tournament-creator/gauntlet-preview")
-    def admin_tournament_creator_gauntlet_preview(
-        payload: GauntletPreviewPayload,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        rating_list = get_rating_list(connection, payload.rating_list_id)
-        if rating_list is None:
-            raise HTTPException(status_code=404, detail="Rating list not found.")
-        hero = get_engine_record(connection, payload.hero_engine_id)
-        if (
-            hero is None
-            or not _engine_is_tournament_ready(connection, hero)
-        ):
-            raise HTTPException(status_code=422, detail="Choose an available hero engine.")
-        engine_records = {engine.id: engine for engine in list_engine_records(connection)}
-        candidates = []
-        for row in list_rating_rows(connection, payload.rating_list_id):
-            engine_id = row.engine.engine_id
-            record = engine_records.get(engine_id)
-            if engine_id == payload.hero_engine_id or record is None:
-                continue
-            if not _engine_is_tournament_ready(connection, record):
-                continue
-            candidates.append(row)
-        opponent_count = payload.gauntlet_size - 1
-        if len(candidates) < opponent_count:
-            raise HTTPException(
-                status_code=422,
-                detail=f"This list has only {len(candidates)} available opponent{'s' if len(candidates) != 1 else ''} for the selected hero.",
-            )
-        rank_denominator = max(1, len(candidates) - 1)
-        closeness_ranks = {
-            row.engine.engine_id: rank / rank_denominator
-            for rank, row in enumerate(
-                sorted(
-                    candidates,
-                    key=lambda item: (
-                        abs(item.elo - payload.elo_estimate),
-                        item.games_played,
-                        item.engine.engine_id,
-                    ),
-                )
-            )
-        }
-        coverage_ranks = {
-            row.engine.engine_id: rank / rank_denominator
-            for rank, row in enumerate(
-                sorted(
-                    candidates,
-                    key=lambda item: (
-                        item.games_played,
-                        abs(item.elo - payload.elo_estimate),
-                        item.engine.engine_id,
-                    ),
-                )
-            )
-        }
-
-        def selection_score(row) -> tuple[float, int, float, int]:
-            rating_distance = abs(row.elo - payload.elo_estimate)
-            return (
-                0.7 * closeness_ranks[row.engine.engine_id]
-                + 0.3 * coverage_ranks[row.engine.engine_id],
-                row.games_played,
-                rating_distance,
-                row.engine.engine_id,
-            )
-
-        selected = sorted(candidates, key=selection_score)[:opponent_count]
-        return _json(
-            {
-                "hero": {
-                    "id": hero.id,
-                    "name": hero.name,
-                    "version": hero.version,
-                },
-                "opponents": [
-                    {
-                        "id": row.engine.engine_id,
-                        "name": row.engine.name,
-                        "version": row.engine.version,
-                        "elo": row.elo,
-                        "games_played": row.games_played,
-                        "rating_distance": abs(row.elo - payload.elo_estimate),
-                        "selection_score": selection_score(row)[0],
-                    }
-                    for row in selected
-                ],
-            }
-        )
-
-    @app.post("/api/admin/tools/tournament-creator/batch")
-    def admin_tournament_creator_batch(
-        payload: TournamentCreatorBatchPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        try:
-            tournaments = [
-                (item.name, _validated_tournament_config(connection, item.config))
-                for item in payload.tournaments
-            ]
-            created = [
-                {
-                    "id": create_tournament(connection, name, config, status="draft"),
-                    "name": name,
-                    "participants": len(config.participants),
-                }
-                for name, config in tournaments
-            ]
-            connection.commit()
-        except HTTPException:
-            connection.rollback()
-            raise
-        except ValidationError as exc:
-            connection.rollback()
-            raise HTTPException(
-                status_code=422,
-                detail=[error["msg"] for error in exc.errors()],
-            ) from exc
-        except ValueError as exc:
-            connection.rollback()
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except sqlite3.IntegrityError as exc:
-            connection.rollback()
-            raise HTTPException(
-                status_code=409,
-                detail="Tournament data changed while the drafts were being created. Reload the tool and try again.",
-            ) from exc
-        except sqlite3.DatabaseError as exc:
-            connection.rollback()
-            LOG.exception("tournament creator batch failed")
-            raise HTTPException(
-                status_code=503,
-                detail="The database could not save the tournament drafts. Try again.",
-            ) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "tournaments": created,
-                "message": f"Created {len(created)} tournament draft{'s' if len(created) != 1 else ''}.",
-            },
-            status_code=201,
-        )
-
-    @app.get("/api/admin/tools/invalidate-engine-games")
-    def admin_invalidate_engine_games_context(
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        engine_ids_by_list = list_rating_list_engine_ids(connection)
-        relevant_engine_ids = {
-            engine_id
-            for engine_ids in engine_ids_by_list.values()
-            for engine_id in engine_ids
-        }
-        return _json(
-            {
-                "rating_lists": [
-                    {
-                        "id": rating_list.id,
-                        "name": rating_list.name,
-                        "engine_ids": engine_ids_by_list.get(rating_list.id, ()),
-                    }
-                    for rating_list in list_rating_lists(connection)
-                ],
-                "engines": [
-                    {
-                        "id": engine.id,
-                        "name": engine.name,
-                        "version": engine.version,
-                        "author": engine.author,
-                    }
-                    for engine in list_engine_records(connection)
-                    if engine.id in relevant_engine_ids
-                ],
-            }
-        )
-
-    @app.post("/api/admin/tools/invalidate-engine-games")
-    def admin_invalidate_engine_games(
-        payload: InvalidateRatingListEnginePayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        engine = get_engine_record(connection, payload.engine_id)
-        if engine is None:
-            raise HTTPException(status_code=404, detail="Engine version not found.")
-        rating_list = get_rating_list(connection, payload.rating_list_id)
-        if rating_list is None:
-            raise HTTPException(status_code=404, detail="Rating list not found.")
-        try:
-            result = invalidate_rating_list_engine_games(
-                connection,
-                payload.rating_list_id,
-                payload.engine_id,
-            )
-            connection.commit()
-        except ValueError as exc:
-            connection.rollback()
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except sqlite3.DatabaseError as exc:
-            connection.rollback()
-            LOG.exception(
-                "rating-list engine invalidation failed rating_list_id=%s engine_id=%s",
-                payload.rating_list_id,
-                payload.engine_id,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="The database could not invalidate the engine games. Try again.",
-            ) from exc
-        _publish_admin_change(web_app, request)
-        game_count = len(result.game_ids)
-        return _json(
-            {
-                "message": f"Invalidated {game_count} game{'s' if game_count != 1 else ''} for {engine.name} {engine.version}.",
-                "games_invalidated": game_count,
-                "tournaments_affected": len(result.tournament_ids),
-                "rating_lists_affected": len(result.rating_list_ids),
-                "list_memberships_removed": result.list_memberships_removed,
-            }
-        )
-
-    @app.get("/api/admin/tools/who-has-this")
-    def admin_who_has_this(
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        workers = list_workers(connection)
-        return _json(
-            {
-                "engines": [
-                    {
-                        "id": engine.id,
-                        "family_id": engine.engine_id,
-                        "name": engine.name,
-                        "author": engine.author,
-                        "version": engine.version,
-                        "repository": engine.repository_full_name,
-                        "distribution": engine.distribution,
-                        "artifact_ready": engine.artifact is not None,
-                        "active": engine.engine_active,
-                    }
-                    for engine in list_engine_records(connection)
-                ],
-                "workers": [
-                    {
-                        "id": worker.id,
-                        "label": worker.label,
-                        "status": worker.status,
-                    }
-                    for worker in workers
-                    if worker.status in {"connected", "ready", "busy"}
-                ],
-                "recent_jobs": [
-                    _tool_job_api_payload(connection, job, include_items=False)
-                    for job in list_tool_jobs(
-                        connection,
-                        tool_name="who_has_this",
-                        limit=12,
-                    )
-                ],
-            }
-        )
-
-    @app.get("/api/admin/tools/puzzle-suite-manager")
-    def admin_puzzle_suite_manager(
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        workers = list_workers(connection)
-        return _json(
-            {
-                "engines": [
-                    {
-                        "id": engine.id,
-                        "family_id": engine.engine_id,
-                        "name": engine.name,
-                        "author": engine.author,
-                        "version": engine.version,
-                        "distribution": engine.distribution,
-                        "artifact_ready": engine.artifact is not None,
-                        "active": engine.engine_active,
-                    }
-                    for engine in list_engine_records(connection)
-                ],
-                "rating_lists": [
-                    {
-                        "id": rating_list.id,
-                        "name": rating_list.name,
-                        "ratings": [
-                            {"engine_id": row.engine.engine_id, "elo": row.elo}
-                            for row in list_rating_rows(connection, rating_list.id)
-                        ],
-                    }
-                    for rating_list in list_rating_lists(connection)
-                ],
-                "suites": [
-                    _puzzle_suite_summary_payload(connection, suite)
-                    for suite in list_puzzle_suites(connection)
-                ],
-                "workers": [
-                    {
-                        "id": worker.id,
-                        "label": worker.label,
-                        "status": worker.status,
-                        "threads": None if worker.capacity is None else worker.capacity.threads,
-                        "hash_mb": None if worker.capacity is None else worker.capacity.hash_mb,
-                    }
-                    for worker in workers
-                    if worker.status in {"connected", "ready", "busy"}
-                ],
-            }
-        )
-
-    @app.post("/api/admin/tools/puzzle-suite-manager/suites")
-    def admin_create_puzzle_suite(
-        payload: PuzzleSuiteCreatePayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        try:
-            puzzles = _parse_puzzle_suite_block(payload.puzzles)
-            suite = create_puzzle_suite(connection, name=payload.name, puzzles=puzzles)
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "suite": _puzzle_suite_detail_payload(connection, suite),
-                "message": f"Imported {len(puzzles)} puzzles.",
-            },
-            status_code=201,
-        )
-
-    @app.get("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}")
-    def admin_puzzle_suite(
-        suite_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        suite = get_puzzle_suite(connection, suite_id)
-        if suite is None:
-            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
-        return _json({"suite": _puzzle_suite_detail_payload(connection, suite)})
-
-    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/uniqueness")
-    def admin_start_puzzle_suite_uniqueness(
-        suite_id: int,
-        payload: PuzzleSuiteUniquenessPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        suite = get_puzzle_suite(connection, suite_id)
-        if suite is None:
-            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
-        _ensure_puzzle_suite_idle(connection, suite_id)
-        puzzles = list_puzzle_suite_puzzles(connection, suite_id)
-        puzzle_input = [
-            {
-                "id": puzzle.id,
-                "fen": puzzle.fen,
-                "solutions": list(puzzle.solutions),
-            }
-            for puzzle in puzzles
-        ]
-        settings = payload.model_dump(mode="json")
-        try:
-            job = create_tool_job(
-                connection,
-                tool_name="puzzle_suite_uniqueness",
-                input_data={
-                    "suite_id": suite_id,
-                    "stage": "uniqueness",
-                    "puzzles": puzzle_input,
-                    **settings,
-                },
-                engine_version_ids=(payload.engine_id,),
-                required_threads=payload.threads,
-                required_hash_mb=payload.hash_mb,
-            )
-            prepare_puzzle_suite_run(
-                connection,
-                suite_id=suite_id,
-                job_id=job.id,
-                stage="uniqueness",
-                rating_list_id=None,
-                settings=settings,
-            )
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "job": _tool_job_api_payload(connection, job, include_items=True),
-                "message": f"Uniqueness analysis queued for {len(puzzles)} puzzles.",
-            },
-            status_code=201,
-        )
-
-    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/difficulty")
-    def admin_start_puzzle_suite_difficulty(
-        suite_id: int,
-        payload: PuzzleSuiteDifficultyPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        suite = get_puzzle_suite(connection, suite_id)
-        if suite is None:
-            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
-        _ensure_puzzle_suite_idle(connection, suite_id)
-        rating_list = get_rating_list(connection, payload.rating_list_id)
-        if rating_list is None:
-            raise HTTPException(status_code=422, detail="Rating list not found.")
-        ratings = {row.engine.engine_id: row.elo for row in list_rating_rows(connection, rating_list.id)}
-        missing = [engine_id for engine_id in payload.engine_ids if engine_id not in ratings]
-        if missing:
-            raise HTTPException(
-                status_code=422,
-                detail="Every selected engine must have an Elo in the selected rating list.",
-            )
-        suite_puzzles = list_puzzle_suite_puzzles(connection, suite_id)
-        unfiltered = bool(suite_puzzles) and all(
-            puzzle.uniqueness_status == "pending" for puzzle in suite_puzzles
-        )
-        if unfiltered:
-            puzzles = tuple(
-                (puzzle, puzzle.solutions[0])
-                for puzzle in suite_puzzles
-                if len(puzzle.solutions) == 1
-            )
-            if len(puzzles) != len(suite_puzzles):
-                raise HTTPException(
-                    status_code=422,
-                    detail="Every unfiltered puzzle must have exactly one supplied solution before rating.",
-                )
-        else:
-            puzzles = tuple(
-                (puzzle, puzzle.verified_solution)
-                for puzzle in suite_puzzles
-                if puzzle.included
-                and puzzle.uniqueness_status == "unique"
-                and puzzle.verified_solution
-            )
-        if not puzzles:
-            raise HTTPException(
-                status_code=422,
-                detail="Add an unfiltered suite with one supplied solution per puzzle, or include at least one verified unique puzzle.",
-            )
-        engine_elos = {str(engine_id): ratings[engine_id] for engine_id in payload.engine_ids}
-        settings = {
-            **payload.model_dump(mode="json"),
-            "engine_elos": engine_elos,
-            "rating_list_name": rating_list.name,
-        }
-        puzzle_input = [
-            {
-                "id": puzzle.id,
-                "fen": puzzle.fen,
-                "solutions": [solution],
-            }
-            for puzzle, solution in puzzles
-        ]
-        try:
-            job = create_tool_job(
-                connection,
-                tool_name="puzzle_suite_difficulty",
-                input_data={
-                    "suite_id": suite_id,
-                    "stage": "difficulty",
-                    "puzzles": puzzle_input,
-                    "multipv": 1,
-                    **settings,
-                },
-                engine_version_ids=payload.engine_ids,
-                required_threads=payload.threads,
-                required_hash_mb=payload.hash_mb,
-            )
-            prepare_puzzle_suite_run(
-                connection,
-                suite_id=suite_id,
-                job_id=job.id,
-                stage="difficulty",
-                rating_list_id=rating_list.id,
-                settings=settings,
-            )
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "job": _tool_job_api_payload(connection, job, include_items=True),
-                "message": f"Difficulty analysis queued across {len(payload.engine_ids)} engines.",
-            },
-            status_code=201,
-        )
-
-    @app.post("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/miss-finetuning")
-    def admin_start_puzzle_suite_miss_finetuning(
-        suite_id: int,
-        payload: PuzzleSuiteDifficultyPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        suite = get_puzzle_suite(connection, suite_id)
-        if suite is None:
-            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
-        _ensure_puzzle_suite_idle(connection, suite_id)
-        rating_list = get_rating_list(connection, payload.rating_list_id)
-        if rating_list is None:
-            raise HTTPException(status_code=422, detail="Rating list not found.")
-        ratings = {row.engine.engine_id: row.elo for row in list_rating_rows(connection, rating_list.id)}
-        missing = [engine_id for engine_id in payload.engine_ids if engine_id not in ratings]
-        if missing:
-            raise HTTPException(
-                status_code=422,
-                detail="Every selected engine must have an Elo in the selected rating list.",
-            )
-        miss_selection = _puzzle_suite_missed_puzzle_ids(connection, suite_id)
-        if miss_selection is None:
-            raise HTTPException(
-                status_code=422,
-                detail="Complete a difficulty rating run before miss finetuning.",
-            )
-        source_difficulty_run_id, missed_puzzle_ids = miss_selection
-        if not missed_puzzle_ids:
-            raise HTTPException(
-                status_code=422,
-                detail="Every puzzle was solved in the latest completed difficulty run.",
-            )
-        puzzles = []
-        for puzzle in list_puzzle_suite_puzzles(connection, suite_id):
-            if puzzle.id not in missed_puzzle_ids:
-                continue
-            solution = puzzle.verified_solution
-            if not solution and len(puzzle.solutions) == 1:
-                solution = puzzle.solutions[0]
-            if solution:
-                puzzles.append((puzzle, solution))
-        if len(puzzles) != len(missed_puzzle_ids):
-            raise HTTPException(
-                status_code=422,
-                detail="One or more missed puzzles no longer has exactly one target solution.",
-            )
-        thread_elo_bonus = 80.0 * math.log2(payload.threads)
-        base_engine_elos = {
-            str(engine_id): ratings[engine_id] for engine_id in payload.engine_ids
-        }
-        engine_elos = {
-            engine_id: round(float(elo) + thread_elo_bonus, 3)
-            for engine_id, elo in base_engine_elos.items()
-        }
-        settings = {
-            **payload.model_dump(mode="json"),
-            "engine_elos": engine_elos,
-            "base_engine_elos": base_engine_elos,
-            "thread_elo_bonus": round(thread_elo_bonus, 3),
-            "thread_elo_per_doubling": 80,
-            "rating_list_name": rating_list.name,
-            "source_difficulty_run_id": source_difficulty_run_id,
-            "suite_stage": "miss_finetuning",
-        }
-        puzzle_input = [
-            {
-                "id": puzzle.id,
-                "fen": puzzle.fen,
-                "solutions": [solution],
-            }
-            for puzzle, solution in puzzles
-        ]
-        try:
-            job = create_tool_job(
-                connection,
-                tool_name="puzzle_suite_difficulty",
-                input_data={
-                    "suite_id": suite_id,
-                    "stage": "difficulty",
-                    "suite_stage": "miss_finetuning",
-                    "puzzles": puzzle_input,
-                    "multipv": 1,
-                    **settings,
-                },
-                engine_version_ids=payload.engine_ids,
-                required_threads=payload.threads,
-                required_hash_mb=payload.hash_mb,
-            )
-            prepare_puzzle_suite_run(
-                connection,
-                suite_id=suite_id,
-                job_id=job.id,
-                stage="difficulty",
-                rating_list_id=rating_list.id,
-                settings=settings,
-            )
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "job": _tool_job_api_payload(connection, job, include_items=True),
-                "message": (
-                    f"Miss finetuning queued for {len(puzzles)} puzzles with "
-                    f"a {thread_elo_bonus:.1f} Elo thread adjustment."
-                ),
-            },
-            status_code=201,
-        )
-
-    @app.patch("/api/admin/tools/puzzle-suite-manager/suites/{suite_id}/puzzles/{puzzle_id}")
-    def admin_update_puzzle_suite_puzzle(
-        suite_id: int,
-        puzzle_id: int,
-        payload: PuzzleSuitePuzzleIncludePayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        if get_puzzle_suite(connection, suite_id) is None:
-            raise HTTPException(status_code=404, detail="Puzzle suite not found.")
-        try:
-            set_puzzle_suite_puzzle_included(
-                connection,
-                suite_id=suite_id,
-                puzzle_id=puzzle_id,
-                included=payload.included,
-            )
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json({"message": "Puzzle selection updated."})
-
-    @app.post("/api/admin/tools/who-has-this")
-    def admin_create_who_has_this(
-        payload: WhoHasThisPayload,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        try:
-            job = create_tool_job(
-                connection,
-                tool_name="who_has_this",
-                input_data={"option_name": payload.option_name},
-                engine_version_ids=payload.engine_ids,
-            )
-            connection.commit()
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _publish_admin_change(web_app, request)
-        return _json(
-            {
-                "job": _tool_job_api_payload(connection, job, include_items=True),
-                "message": "UCI option inspection queued.",
-            },
-            status_code=201,
-        )
-
-    @app.get("/api/admin/tools/jobs/{job_id}")
-    def admin_tool_job(
-        job_id: int,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        job = get_tool_job(connection, job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Tool job not found.")
-        return _json({"job": _tool_job_api_payload(connection, job, include_items=True)})
-
-    @app.post("/api/admin/tools/jobs/{job_id}/cancel")
-    def admin_cancel_tool_job(
-        job_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
-        job = get_tool_job(connection, job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="Tool job not found.")
-        if not cancel_tool_job(connection, job_id):
-            raise HTTPException(
-                status_code=409,
-                detail="Only queued or running tool jobs can be cancelled.",
-            )
-        connection.commit()
-        _publish_admin_change(web_app, request)
-        return _json({"message": "Tool job cancelled. Its worker will be released shortly."})
 
     # Workers
 
@@ -5710,125 +4389,6 @@ def register_api_routes(app: FastAPI) -> None:
     register_event_api_routes(app)
 
 
-def _require_viewable_event(
-    connection: sqlite3.Connection,
-    slug: str,
-    request: Request,
-) -> EventRecord:
-    from cope.web import app as web_app
-
-    event = get_event_by_slug(connection, slug)
-    if event is None:
-        raise HTTPException(status_code=404, detail="Event not found.")
-    if web_app._event_is_public(event):
-        return event
-    if not web_app._admin_request_authenticated(request):
-        raise HTTPException(status_code=401, detail="Admin session required.")
-    return event
-
-
-def _event_summary_payload(
-    connection: sqlite3.Connection,
-    event: EventRecord,
-    *,
-    admin: bool,
-) -> dict[str, Any]:
-    module = get_event_module(event.handler_key)
-    sessions = list_event_sessions(connection, event.id)
-    next_session = next(
-        (
-            session
-            for session in sessions
-            if session.status in {"live", "intermission", "scheduled", "pending", "postponed"}
-        ),
-        None,
-    )
-    payload = {
-        "record": event if admin else _public_event_record(event),
-        "counts": event_resource_counts(connection, event.id),
-        "next_session": (
-            next_session
-            if admin or next_session is None
-            else _public_event_child(next_session)
-        ),
-        "handler": {
-            "key": event.handler_key,
-            "required_version": event.handler_version,
-            "available": module is not None,
-            "current": module is not None and module.version == event.handler_version,
-            "label": module.label if module is not None else event.handler_key,
-            "installed_version": module.version if module is not None else None,
-        },
-    }
-    return payload
-
-
-def _event_detail_payload(
-    connection: sqlite3.Connection,
-    event: EventRecord,
-    *,
-    admin: bool,
-) -> dict[str, Any]:
-    module = get_event_module(event.handler_key)
-    defaults = get_chat_settings(connection)
-    chat_settings = get_event_chat_settings(connection, event.id, defaults=defaults)
-    stages = list_event_stages(connection, event.id)
-    sessions = list_event_sessions(connection, event.id)
-    cast = list_event_cast(connection, event.id)
-    contests = list_event_contests(connection, event.id)
-    contest_cast = list_event_contest_cast(connection, event.id)
-    updates = list_event_updates(connection, event.id, public_only=not admin)
-    awards = list_event_awards(connection, event.id)
-    if not admin:
-        stages = tuple(_public_event_child(item) for item in stages)
-        sessions = tuple(_public_event_child(item) for item in sessions)
-        cast = tuple(_public_event_child(item) for item in cast)
-        contests = tuple(_public_event_child(item, remove=("state",)) for item in contests)
-        contest_cast = tuple(_public_event_child(item) for item in contest_cast)
-        awards = tuple(_public_event_child(item) for item in awards)
-    return {
-        "server_time": datetime.now(UTC).isoformat(timespec="milliseconds"),
-        "event": event if admin else _public_event_record(event),
-        "handler": {
-            "key": event.handler_key,
-            "required_version": event.handler_version,
-            "available": module is not None,
-            "current": module is not None and module.version == event.handler_version,
-            "label": module.label if module is not None else event.handler_key,
-            "installed_version": module.version if module is not None else None,
-        },
-        "stages": stages,
-        "sessions": sessions,
-        "cast": cast,
-        "contests": contests,
-        "contest_cast": contest_cast,
-        "updates": updates,
-        "awards": awards,
-        "counts": event_resource_counts(connection, event.id),
-        "chat_messages": (
-            list_chat_messages(connection, limit=None, event_id=event.id, system=False)
-            + list_chat_messages(connection, limit=100, event_id=event.id, system=True)
-        ),
-        "chat_settings": chat_settings,
-        "custom": event_extension_payload(connection, event, admin=admin),
-    }
-
-
-def _public_event_record(event: EventRecord) -> dict[str, Any]:
-    payload = jsonable_encoder(event)
-    payload.pop("config", None)
-    payload.pop("state", None)
-    return payload
-
-
-def _public_event_child(item: Any, *, remove: tuple[str, ...] = ()) -> dict[str, Any]:
-    payload = jsonable_encoder(item)
-    payload.pop("metadata", None)
-    for key in remove:
-        payload.pop(key, None)
-    return payload
-
-
 def _public_engine_ratings(
     connection: sqlite3.Connection,
     engine_id: int,
@@ -5912,14 +4472,6 @@ def _public_engine_ratings(
     return result
 
 
-def _json(
-    payload: Any,
-    *,
-    status_code: int = 200,
-) -> JSONResponse:
-    return JSONResponse(jsonable_encoder(payload), status_code=status_code)
-
-
 def _settings_rows(rows: list[tuple[str, str]]) -> list[dict[str, str]]:
     return [{"label": label, "value": value} for label, value in rows]
 
@@ -5975,29 +4527,6 @@ def _validate_live_participant_engine(
             detail="Choose an active engine version that is ready to run.",
         )
     _validate_engine_variant(connection, record, variant)
-
-
-def _validate_engine_variant(connection: sqlite3.Connection, record, variant: str) -> None:
-    if variant == "standard":
-        return
-    capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (record.build_hash, variant)).fetchone()
-    if capability is None or capability["status"] != "supported":
-        raise HTTPException(status_code=422, detail=f"{variant} participants require recorded capability evidence for their current build.")
-
-
-def _engine_is_tournament_ready(
-    connection: sqlite3.Connection,
-    record,
-) -> bool:
-    if not record.active or not record.engine_active or not record.version.strip():
-        return False
-    if record.distribution == "worker_local":
-        return True
-    return engine_build_is_benchmarked(
-        connection,
-        engine_version_id=record.id,
-        build_hash=record.build_hash,
-    )
 
 
 def _live_tournament_roster_payload(
@@ -6066,126 +4595,6 @@ def _live_tournament_roster_payload(
             for engine_id in tournament.config.participants
         ],
         "hero_engine_id": format_options.get("hero_engine_id"),
-    }
-
-
-def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
-    defaults: dict[str, Any] = {
-        "format": "round_robin",
-        "format_options": {"cycles": 1},
-        "time_control": {
-            "category": "increment",
-            "initial_ms": 60_000,
-            "increment_ms": 1_000,
-        },
-        "concurrency": 1,
-        "opening_suite_id": None,
-        "adjudication": {
-            "draw": None,
-            "resign": None,
-            "max_moves": None,
-        },
-        "rated": True,
-        "lag_compensation_ms": 50,
-        "engine_threads": 1,
-        "engine_hash_mb": 16,
-    }
-    category_keys = {
-        "time_control",
-        "adjudication",
-        "rated",
-        "lag_compensation_ms",
-        "engine_threads",
-        "engine_hash_mb",
-    }
-    merged = {**defaults, **{key: item for key, item in value.items() if key in category_keys}}
-    try:
-        config = TournamentConfig(
-            participants=[1, 2],
-            **merged,
-        )
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=[error["msg"] for error in exc.errors()],
-        ) from exc
-    serialized = config.model_dump(mode="json")
-    for key in ("participants", "uci_options"):
-        serialized.pop(key, None)
-    return serialized
-
-
-def _validated_tournament_config(
-    connection: sqlite3.Connection,
-    submitted: TournamentConfig,
-) -> TournamentConfig:
-    records = {engine.id: engine for engine in list_engine_records(connection)}
-    missing = [engine_id for engine_id in submitted.participants if engine_id not in records]
-    if missing:
-        raise HTTPException(status_code=422, detail="One or more selected engines no longer exist.")
-    unavailable = [
-        engine_id for engine_id in submitted.participants
-        if not _engine_is_tournament_ready(connection, records[engine_id])
-    ]
-    if unavailable:
-        raise HTTPException(status_code=422, detail="Every participant must be active and ready to run.")
-
-    _validate_opening_suite_reference(connection, submitted.opening_suite_id)
-    try:
-        validate_tournament_variant(connection, submitted)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    for engine_id in submitted.participants:
-        _validate_engine_variant(connection, records[engine_id], submitted.variant)
-    return submitted
-
-
-def _validate_opening_suite_reference(
-    connection: sqlite3.Connection,
-    suite_id: int | None,
-) -> None:
-    if suite_id is not None and get_opening_suite(connection, suite_id) is None:
-        raise HTTPException(status_code=422, detail="Choose an existing opening suite.")
-
-
-def _tournament_form_payload(
-    web_app,
-    request: Request,
-    connection: sqlite3.Connection,
-    *,
-    tournament=None,
-) -> dict[str, Any]:
-    if tournament is not None:
-        config = tournament.config.model_dump(mode="json")
-        name = tournament.name
-        participants = list(tournament.config.participants)
-    else:
-        default_settings = _category_settings({})
-        config = {
-            "participants": [],
-            "engine_threads": 1,
-            "engine_hash_mb": 16,
-            "uci_options": {},
-            **default_settings,
-        }
-        name = ""
-        participants = []
-
-    participant_ids = set(participants)
-    engines = [
-        engine
-        for engine in list_engine_records(connection)
-        if (
-            _engine_is_tournament_ready(connection, engine)
-        ) or engine.id in participant_ids
-    ]
-    return {
-        "name": name,
-        "config": config,
-        "participants": participants,
-        "engine_options": engines,
-        "opening_suites": list_opening_suites(connection),
-        "variants": [dict(id=v.id, name=v.name, rules_revision=v.rules_revision) for v in VARIANTS.values()],
     }
 
 
@@ -6297,257 +4706,3 @@ def _deduplicate_openings(
         seen.add(key)
         result.append(opening)
     return result
-
-
-def _tool_job_api_payload(connection, job, *, include_items: bool) -> dict[str, Any]:
-    input_payload = dict(job.input)
-    puzzles = input_payload.pop("puzzles", None)
-    if isinstance(puzzles, list):
-        input_payload["puzzle_count"] = len(puzzles)
-    payload: dict[str, Any] = {
-        "id": job.id,
-        "tool_name": job.tool_name,
-        "status": job.status,
-        "input": input_payload,
-        "worker": (
-            None
-            if job.worker_id is None
-            else {"id": job.worker_id, "label": job.worker_label or f"Worker {job.worker_id}"}
-        ),
-        "total_items": job.total_items,
-        "completed_items": job.completed_items,
-        "required_threads": job.required_threads,
-        "required_hash_mb": job.required_hash_mb,
-        "progress_current": job.progress_current,
-        "progress_total": job.progress_total,
-        "progress_detail": job.progress_detail,
-        "attempt": job.attempt,
-        "error": job.error,
-        "created_at": job.created_at,
-        "started_at": job.started_at,
-        "finished_at": job.finished_at,
-    }
-    if include_items:
-        payload["items"] = [
-            {
-                "id": item.id,
-                "engine_id": item.engine_version_id,
-                "engine_name": item.engine_name,
-                "engine_version": item.engine_version,
-                "position": item.position,
-                "status": item.status,
-                "result": item.result,
-                "error": item.error,
-                "started_at": item.started_at,
-                "finished_at": item.finished_at,
-            }
-            for item in list_tool_job_items(connection, job.id)
-        ]
-    return payload
-
-
-def _parse_puzzle_suite_block(value: str) -> list[dict[str, Any]]:
-    lines = tuple(
-        (number, line.strip())
-        for number, line in enumerate(value.splitlines(), start=1)
-        if line.strip()
-    )
-    if not lines:
-        raise ValueError("paste at least one puzzle")
-    if len(lines) > 5000:
-        raise ValueError("a puzzle suite can contain at most 5,000 puzzles")
-    puzzles: list[dict[str, Any]] = []
-    for number, line in lines:
-        if line.count("|") != 1:
-            raise ValueError(f"line {number} must use fen|solution")
-        fen, solution_text = (part.strip() for part in line.split("|", 1))
-        raw_solutions = [part.strip() for part in re.split(r"[,/]+", solution_text) if part.strip()]
-        if not fen:
-            raise ValueError(f"line {number} is missing a FEN")
-        if not raw_solutions:
-            raise ValueError(f"line {number} is missing a solution")
-        try:
-            board = chess.Board(fen)
-        except ValueError as exc:
-            raise ValueError(f"line {number} has an invalid FEN: {exc}") from exc
-        if board.is_game_over() or not any(board.legal_moves):
-            raise ValueError(f"line {number} must contain a position with a legal move")
-        solutions: list[str] = []
-        for raw in raw_solutions:
-            try:
-                if re.fullmatch(r"[a-h][1-8][a-h][1-8][qrbn]?", raw, re.IGNORECASE):
-                    move = chess.Move.from_uci(raw.lower())
-                    if move not in board.legal_moves:
-                        raise ValueError
-                else:
-                    move = board.parse_san(raw)
-            except ValueError as exc:
-                raise ValueError(f"line {number}: {raw!r} is not a legal solution move") from exc
-            if move.uci() not in solutions:
-                solutions.append(move.uci())
-        puzzles.append({"fen": board.fen(), "solutions": solutions, "title": ""})
-    return puzzles
-
-
-def _ensure_puzzle_suite_idle(connection, suite_id: int) -> None:
-    row = connection.execute(
-        """
-        SELECT job.id
-        FROM puzzle_suite_runs run
-        JOIN tool_jobs job ON job.id = run.job_id
-        WHERE run.suite_id = ? AND job.status IN ('queued', 'running')
-        LIMIT 1
-        """,
-        (suite_id,),
-    ).fetchone()
-    if row is not None:
-        raise HTTPException(status_code=409, detail="This suite already has an active stage.")
-
-
-def _puzzle_suite_missed_puzzle_ids(
-    connection,
-    suite_id: int,
-) -> tuple[int, set[int]] | None:
-    for run in list_puzzle_suite_runs(connection, suite_id, limit=200):
-        if (
-            run.stage != "difficulty"
-            or run.settings.get("suite_stage") == "miss_finetuning"
-        ):
-            continue
-        job = get_tool_job(connection, run.job_id)
-        if job is None or job.status != "completed":
-            continue
-        results = list_puzzle_suite_engine_results(connection, run.id)
-        searched = {result.puzzle_id for result in results}
-        solved = {
-            result.puzzle_id for result in results if result.status == "solved"
-        }
-        return run.id, searched - solved
-    return None
-
-
-def _puzzle_suite_summary_payload(connection, suite) -> dict[str, Any]:
-    puzzles = list_puzzle_suite_puzzles(connection, suite.id)
-    runs = list_puzzle_suite_runs(connection, suite.id, limit=1)
-    active_job = None
-    if runs:
-        job = get_tool_job(connection, runs[0].job_id)
-        if job is not None and job.status in {"queued", "running"}:
-            active_job = _tool_job_api_payload(connection, job, include_items=False)
-    return {
-        "id": suite.id,
-        "name": suite.name,
-        "puzzle_count": len(puzzles),
-        "unique_count": sum(puzzle.uniqueness_status == "unique" for puzzle in puzzles),
-        "included_count": sum(puzzle.included for puzzle in puzzles),
-        "rated_count": sum(puzzle.difficulty_elo is not None for puzzle in puzzles),
-        "active_job": active_job,
-        "created_at": suite.created_at,
-        "updated_at": suite.updated_at,
-    }
-
-
-def _puzzle_suite_detail_payload(connection, suite) -> dict[str, Any]:
-    puzzles = list_puzzle_suite_puzzles(connection, suite.id)
-    runs = list_puzzle_suite_runs(connection, suite.id)
-    run_payloads = []
-    latest_difficulty_results: tuple[Any, ...] = ()
-    latest_miss_results: tuple[Any, ...] = ()
-    difficulty_results_selected = False
-    miss_results_selected = False
-    miss_selection = _puzzle_suite_missed_puzzle_ids(connection, suite.id)
-    source_difficulty_run_id = None if miss_selection is None else miss_selection[0]
-    for run in runs:
-        job = get_tool_job(connection, run.job_id)
-        if job is None:
-            continue
-        run_payloads.append(
-            {
-                "id": run.id,
-                "stage": run.settings.get("suite_stage", run.stage),
-                "rating_list_id": run.rating_list_id,
-                "settings": run.settings,
-                "created_at": run.created_at,
-                "job": _tool_job_api_payload(connection, job, include_items=True),
-            }
-        )
-        if (
-            run.stage == "difficulty"
-            and run.id == source_difficulty_run_id
-            and not difficulty_results_selected
-        ):
-            latest_difficulty_results = list_puzzle_suite_engine_results(connection, run.id)
-            difficulty_results_selected = True
-        if (
-            run.stage == "difficulty"
-            and run.settings.get("suite_stage") == "miss_finetuning"
-            and not miss_results_selected
-            and run.settings.get("source_difficulty_run_id") == source_difficulty_run_id
-        ):
-            latest_miss_results = list_puzzle_suite_engine_results(connection, run.id)
-            miss_results_selected = True
-    miss_result_puzzle_ids = {result.puzzle_id for result in latest_miss_results}
-    displayed_engine_results = (
-        tuple(
-            result
-            for result in latest_difficulty_results
-            if result.puzzle_id not in miss_result_puzzle_ids
-        )
-        + latest_miss_results
-    )
-    return {
-        **_puzzle_suite_summary_payload(connection, suite),
-        "difficulty_run_id": source_difficulty_run_id,
-        "miss_count": 0 if miss_selection is None else len(miss_selection[1]),
-        "puzzles": [
-            {
-                "id": puzzle.id,
-                "position": puzzle.position,
-                "title": puzzle.title,
-                "fen": puzzle.fen,
-                "solutions": list(puzzle.solutions),
-                "included": puzzle.included,
-                "uniqueness_status": puzzle.uniqueness_status,
-                "verified_solution": puzzle.verified_solution,
-                "best_move": puzzle.best_move,
-                "second_move": puzzle.second_move,
-                "best_sigmoid": puzzle.best_sigmoid,
-                "second_sigmoid": puzzle.second_sigmoid,
-                "sigmoid_gap": puzzle.sigmoid_gap,
-                "uniqueness_depth": puzzle.uniqueness_depth,
-                "uniqueness_nodes": puzzle.uniqueness_nodes,
-                "uniqueness_time_ms": puzzle.uniqueness_time_ms,
-                "uniqueness_error": puzzle.uniqueness_error,
-                "difficulty_elo": puzzle.difficulty_elo,
-            }
-            for puzzle in puzzles
-        ],
-        "runs": run_payloads,
-        "engine_results": [
-            {
-                "id": result.id,
-                "run_id": result.run_id,
-                "puzzle_id": result.puzzle_id,
-                "engine_id": result.engine_version_id,
-                "engine_name": result.engine_name,
-                "engine_version": result.engine_version,
-                "engine_elo": result.engine_elo,
-                "estimate_elo": result.estimate_elo,
-                "status": result.status,
-                "best_move": result.best_move,
-                "solution_nodes": result.solution_nodes,
-                "final_nodes": result.final_nodes,
-                "depth": result.depth,
-                "time_ms": result.time_ms,
-                "error": result.error,
-            }
-            for result in displayed_engine_results
-        ],
-    }
-
-
-def _publish_admin_change(web_app, request: Request) -> None:
-    try:
-        web_app._publish_admin_post_streams(request)
-    except Exception:
-        LOG.exception("admin change committed but live publication failed path=%s", request.url.path)

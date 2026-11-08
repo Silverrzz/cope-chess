@@ -5,7 +5,7 @@ import { api } from "@/api/client";
 import ContentState from "@/components/public/ContentState.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import GenericArchiveHero from "@/events/GenericArchiveHero.vue";
-import { archiveEventComponent } from "@/events/registry";
+import { eventComponents } from "@/events/registry";
 import type { EventSummary, PublicEventListResponse } from "@/types/events";
 
 const response = ref<PublicEventListResponse | null>(null);
@@ -51,7 +51,7 @@ async function load(): Promise<void> {
 }
 
 function eventComponent(event: EventSummary) {
-  return archiveEventComponent(event.handler.key) ?? GenericArchiveHero;
+  return eventComponents(event.handler)?.archive ?? GenericArchiveHero;
 }
 </script>
 

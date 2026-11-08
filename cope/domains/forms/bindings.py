@@ -3,17 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from cope.application.errors import ApplicationError
 
 from .definition import FormDefinition, compile_definition
 
 
-class FeedbackProposal(BaseModel):
+class CollectedResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class FeedbackProposal(CollectedResponse):
     message: str = Field(min_length=1, max_length=65536)
     reply: StrictBool = False
     contact: str | None = None
@@ -30,11 +34,13 @@ class BindingArgument:
 @dataclass(frozen=True)
 class FormBinding:
     key: str
+    label: str
     policy_revision: str
     arguments: tuple[BindingArgument, ...]
     proposal_model: type[BaseModel]
     permits_anonymous: bool
-    check_mapping: Callable[[FormDefinition], list[dict]]
+    check_mapping: Callable[[FormDefinition], list[dict]] | None = None
+    check_proposal: Callable[[BaseModel], None] | None = None
 
 
 def feedback_mapping(definition: FormDefinition) -> list[dict]:
@@ -50,8 +56,23 @@ def feedback_mapping(definition: FormDefinition) -> list[dict]:
     return []
 
 
+def validate_feedback(proposal: FeedbackProposal) -> None:
+    if proposal.reply and not proposal.contact:
+        raise ApplicationError("reply_contact_required", "Provide contact details when requesting a reply.", 422)
+
+
+COLLECTION = FormBinding(
+    key="response_collection.v1",
+    label="Collect responses",
+    policy_revision="response-collection-review.v1",
+    arguments=(),
+    proposal_model=CollectedResponse,
+    permits_anonymous=True,
+)
+
 FEEDBACK = FormBinding(
     key="feedback.v1",
+    label="Feedback",
     policy_revision="feedback-review.v1",
     arguments=(BindingArgument("message", ("text", "long_text"), True),
                BindingArgument("reply", ("checkbox",)), BindingArgument("contact", ("email",)),
@@ -59,9 +80,10 @@ FEEDBACK = FormBinding(
     proposal_model=FeedbackProposal,
     permits_anonymous=True,
     check_mapping=feedback_mapping,
+    check_proposal=validate_feedback,
 )
 
-BINDINGS = {FEEDBACK.key: FEEDBACK}
+BINDINGS = MappingProxyType({binding.key: binding for binding in (COLLECTION, FEEDBACK)})
 
 
 def compile_binding(definition: FormDefinition) -> FormBinding:
@@ -94,24 +116,30 @@ def compile_binding(definition: FormDefinition) -> FormBinding:
     for argument in binding.arguments:
         if argument.required and argument.name not in definition.mapping:
             errors.append({"path": ["mapping", argument.name], "code": "missing_mapping", "message": "Map this required binding input."})
-    errors.extend(binding.check_mapping(definition))
+    if binding.check_mapping is not None:
+        errors.extend(binding.check_mapping(definition))
     if errors:
         raise ApplicationError("invalid_binding_mapping", "Resolve the form binding mappings before publication.", 422, fields=errors)
     return binding
 
 
-def proposal_inputs(definition: FormDefinition, canonical: dict[str, Any]) -> BaseModel:
-    binding = compile_binding(definition)
+def review_subject(
+    binding: FormBinding, definition: FormDefinition, canonical: dict[str, Any], *,
+    form_id: str, release_id: str, owner_actor: str,
+) -> dict:
     arguments = {name: canonical[field_id] for name, field_id in definition.mapping.items() if field_id in canonical}
-    result = binding.proposal_model.model_validate(arguments)
-    if isinstance(result, FeedbackProposal) and result.reply and not result.contact:
-        raise ApplicationError("reply_contact_required", "Provide contact details when requesting a reply.", 422)
-    return result
-
-
-def review_subject(definition: FormDefinition, canonical: dict[str, Any], *, form_id: str, release_id: str, owner_actor: str) -> dict:
-    binding = compile_binding(definition)
-    proposal = proposal_inputs(definition, canonical)
+    try:
+        proposal = binding.proposal_model.model_validate(arguments)
+    except ValidationError as exc:
+        fields = [
+            {"path": [definition.mapping.get(str(error["loc"][0]), str(error["loc"][0])), *error["loc"][1:]],
+             "code": error["type"], "message": error["msg"]}
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+            if error["loc"]
+        ]
+        raise ApplicationError("invalid_form_proposal", "Check the answers required for this response.", 422, fields=fields) from exc
+    if binding.check_proposal is not None:
+        binding.check_proposal(proposal)
     subject = {"binding": binding.key, "policy_revision": binding.policy_revision,
                "form_id": form_id, "release_id": release_id, "owner_actor": owner_actor,
                "proposal": proposal.model_dump(mode="json"), "review_evidence": canonical}

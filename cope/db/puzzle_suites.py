@@ -124,11 +124,11 @@ def create_puzzle_suite(
 def get_puzzle_suite(
     connection: sqlite3.Connection,
     suite_id: int,
+    *,
+    lock: bool = False,
 ) -> PuzzleSuiteRecord | None:
-    row = connection.execute(
-        "SELECT * FROM puzzle_suites WHERE id = ?",
-        (suite_id,),
-    ).fetchone()
+    sql = "SELECT * FROM puzzle_suites WHERE id = ? FOR UPDATE" if lock else "SELECT * FROM puzzle_suites WHERE id = ?"
+    row = connection.execute(sql, (suite_id,)).fetchone()
     return None if row is None else _suite_from_row(row)
 
 

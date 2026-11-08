@@ -18,10 +18,12 @@ def command_catalog() -> dict:
     from cope.domains.execution.legacy_routes import commands as route_commands
     from cope.domains.execution.admission import commands as execution_commands
 
-    providers = (legacy_commands(), form_commands(), artifact_commands(),route_commands(),execution_commands())
+    from cope.domains.tools.application import commands as tool_commands
+
+    providers = (legacy_commands, form_commands, artifact_commands, route_commands, execution_commands, tool_commands)
     result = {}
     for provider in providers:
-        for command in provider:
+        for command in provider():
             if command.name in result:
                 raise RuntimeError(f"Duplicate application command: {command.name}")
             result[command.name] = command

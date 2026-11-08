@@ -10,7 +10,7 @@ import { errorText, formatDate, humanize } from "@/components/admin/format";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { useConfirm } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
-import { adminEventComponent } from "@/events/registry";
+import { eventComponents } from "@/events/registry";
 import type { EventDetailResponse } from "@/types/events";
 
 const props = defineProps<{ id: string }>();
@@ -23,7 +23,7 @@ const deleting = ref(false);
 const resetting = ref(false);
 const error = ref("");
 const showDetails = ref(false);
-const customComponent = computed(() => data.value ? adminEventComponent(data.value.handler.key) : null);
+const customComponent = computed(() => data.value ? eventComponents(data.value.handler)?.admin : null);
 
 onMounted(load);
 

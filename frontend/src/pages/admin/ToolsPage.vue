@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api } from '@/api/client'
+import { applicationQuery } from '@/api/application'
+import type { ApplicationQueryOutputs } from '@/types/application-inputs'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -9,30 +11,8 @@ import { errorText, formatDate } from '@/components/admin/format'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
-interface ToolSummary {
-  name: string
-  label: string
-  description: string
-  href: string
-  status: string
-}
-
-interface JobSummary {
-  id: number
-  tool_name: string
-  status: string
-  input: { option_name?: string; suite_id?: number; stage?: string; suite_stage?: string }
-  completed_items: number
-  total_items: number
-  created_at: string
-  worker?: { label: string } | null
-}
-
-interface Response {
-  tools: ToolSummary[]
-  recent_jobs: JobSummary[]
-  connected_workers: number
-}
+type Response = ApplicationQueryOutputs['tools.catalogue.v1']
+type JobSummary = Response['recent_jobs'][number]
 
 const data = ref<Response | null>(null)
 const loading = ref(true)
@@ -45,7 +25,7 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    data.value = await api.get<Response>('/api/admin/tools')
+    data.value = await applicationQuery('tools.catalogue.v1', {})
   } catch (cause) {
     error.value = errorText(cause)
   } finally {
@@ -57,23 +37,9 @@ function statusLabel(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1)
 }
 
-function jobTarget(job: JobSummary): { path: string; query: Record<string, string | number> } {
-  if (job.tool_name.startsWith('puzzle_suite_')) {
-    return { path: '/admin/tools/puzzle-suite-manager', query: { suite: job.input.suite_id ?? '' } }
-  }
-  return { path: '/admin/tools/who-has-this', query: { job: job.id } }
-}
-
-function jobLabel(job: JobSummary): string {
-  if (job.tool_name === 'puzzle_suite_uniqueness') return 'Puzzle uniqueness filter'
-  if (job.input.suite_stage === 'miss_finetuning') return 'Puzzle miss finetuning'
-  if (job.tool_name === 'puzzle_suite_difficulty') return 'Puzzle difficulty rating'
-  return job.input.option_name || 'Who Has This'
-}
-
 async function cancelJob(job: JobSummary): Promise<void> {
   if (!['queued', 'running'].includes(job.status) || cancellingJobId.value) return
-  const accepted = await confirm({ title: 'Cancel tool job?', message: `Cancel ${jobLabel(job)} and release its worker?`, confirmLabel: 'Cancel job', tone: 'danger' })
+  const accepted = await confirm({ title: 'Cancel tool job?', message: `Cancel ${job.label} and release its worker?`, confirmLabel: 'Cancel job', tone: 'danger' })
   if (!accepted) return
   cancellingJobId.value = job.id
   try {
@@ -124,7 +90,7 @@ onMounted(load)
           :key="job.id"
           class="recent-row"
         >
-          <RouterLink class="recent-row__target" :to="jobTarget(job)"><span class="recent-row__icon"><AppIcon :name="job.tool_name.startsWith('puzzle_suite_') ? 'puzzle' : 'search'" :size="16" /></span><span class="recent-row__main"><strong>{{ jobLabel(job) }}</strong><small>{{ formatDate(job.created_at) }}</small></span><span class="recent-row__progress">{{ job.completed_items }}/{{ job.total_items }}</span><span class="job-status" :class="`job-status--${job.status}`">{{ statusLabel(job.status) }}</span><AppIcon name="chevron-right" :size="16" /></RouterLink>
+          <RouterLink class="recent-row__target" :to="job.href"><span class="recent-row__icon"><AppIcon :name="job.tool_name.startsWith('puzzle_suite_') ? 'puzzle' : 'search'" :size="16" /></span><span class="recent-row__main"><strong>{{ job.label }}</strong><small>{{ formatDate(job.created_at) }}</small></span><span class="recent-row__progress">{{ job.completed_items }}/{{ job.total_items }}</span><span class="job-status" :class="`job-status--${job.status}`">{{ statusLabel(job.status) }}</span><AppIcon name="chevron-right" :size="16" /></RouterLink>
           <BaseButton v-if="['queued', 'running'].includes(job.status)" size="small" variant="danger" :loading="cancellingJobId === job.id" @click="cancelJob(job)"><template #icon><AppIcon name="x-circle" :size="14" /></template>Cancel</BaseButton>
         </div>
       </div>
