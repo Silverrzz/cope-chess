@@ -25,8 +25,9 @@ let controller: AbortController | null = null;
 let stream: EventSource | null = null;
 let refreshTimer: number | undefined;
 
-watch([() => props.arena, () => data.value?.event.status], ([arena, status]) => {
-  if (arena && status === "completed" && data.value?.event.slug === props.slug) {
+watch([() => props.arena, () => data.value?.event.slug, () => data.value?.event.status], ([arena, slug, status], [wasArena, previousSlug, previousStatus]) => {
+  const wasLive = previousStatus === "live" || previousStatus === "intermission";
+  if (arena && wasArena && slug === props.slug && slug === previousSlug && wasLive && status === "completed") {
     void router.replace({ name: "event", params: { slug: props.slug } });
   }
 });

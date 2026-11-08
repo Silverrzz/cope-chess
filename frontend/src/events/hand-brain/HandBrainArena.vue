@@ -10,6 +10,7 @@ import type { MoveRecord, TournamentDetailResponse } from '@/components/public/t
 import type { EventDetailResponse } from '@/types/events'
 import type { HandBrainPayload, HandBrainMatch, HandBrainSearch, HandBrainClock, HandBrainAnalysis, HandBrainTeam } from './types'
 import HandBrainTeamCard from './HandBrainTeamCard.vue'
+import HandBrainCheers from './HandBrainCheers.vue'
 import HandBrainBracket from './HandBrainBracket.vue'
 import { handBrainStandings } from './standings'
 import HandBrainEvalGraph from './HandBrainEvalGraph.vue'
@@ -36,9 +37,13 @@ let arenaFitFrame: number | undefined
 let headingResizeObserver: ResizeObserver | null = null
 let stream: EventSource | null = null
 let clockTimer: number | undefined
-let refreshTimer: number | undefined
+let recoveryTimer: number | undefined
 let pollTimer: number | undefined
 let controller: AbortController | null = null
+let lastLoadAt = 0
+let snapshotPly = 0
+let clockRevision = 0
+const pendingMoves = new Map<number, MoveRecord>()
 const match = computed(() => payload.value.matches.find(m => m.id === selectedMatchId.value) ?? payload.value.matches.find(m => m.status === 'live') ?? payload.value.matches[0] ?? null)
 const allGames = computed(() => match.value?.quads.flatMap(q => q.games.map(game => ({ game, quad: q }))) ?? [])
 const selection = computed(() => allGames.value.find(g => Number(g.game.id) === selectedGameId.value) ?? allGames.value.find(g => ['live','assigned','pending'].includes(g.game.status)) ?? allGames.value.at(-1))
@@ -56,8 +61,23 @@ const whiteTeam = computed(() => {
 })
 const blackTeam = computed(() => teams.value.find(t => t.id !== whiteTeam.value?.id) ?? null)
 const swapped = computed(() => (Number(selection.value?.game.game_number ?? 1) - 1) >= 2)
-const tc = computed(() => selection.value?.quad.time_control ?? { initial_ms: payload.value.rules.initial_ms, increment_ms: payload.value.rules.increment_ms })
+const liveStageTimeControls: Record<string, { initial_ms: number; increment_ms: number }> = {
+  Quarterfinal: { initial_ms: 80000, increment_ms: 800 },
+  Semifinal: { initial_ms: 120000, increment_ms: 1200 },
+  Final: { initial_ms: 180000, increment_ms: 1800 }
+}
+const liveStageTimeControl = computed(() => props.detail.event.id === 6 && props.detail.event.slug === 'engine-hand-brain' && match.value ? liveStageTimeControls[match.value.stage] : undefined)
+const tc = computed(() => selection.value?.quad.time_control ?? match.value?.time_control ?? liveStageTimeControl.value ?? payload.value.rules)
 const tcLabel = computed(() => `${tc.value.initial_ms / 1000}+${tc.value.increment_ms / 1000}`)
+const threads = computed(() => {
+  const quad = selection.value?.quad
+  const tournament = data.value?.tournament
+  const assigned = quad && tournament && Number(tournament.id) === quad.tournament_id
+    ? tournament.config?.engine_threads
+    : undefined
+  return quad?.threads ?? (typeof assigned === 'number' ? assigned : undefined) ?? match.value?.threads ?? payload.value.rules.threads
+})
+const threadLabel = computed(() => threads.value === 1 ? '1 thread per engine' : `Up to ${threads.value} threads per engine`)
 const replayAnalyses = computed(() => {
   const result: Record<string, HandBrainAnalysis> = {}
   for (const search of [...searches.value].sort((a,b) => a.ply-b.ply)) if (search.ply <= startPly.value + selectedPly.value) result[String(search.engine_id)] = { ...search.analysis, root_fen: search.root_fen, role: search.role, pv: search.analysis.pv ?? search.bestmove }
@@ -104,47 +124,94 @@ function cell(a: number, b: number) {
 }
 function selectMatch(value: HandBrainMatch) { selectedMatchId.value = value.id; selectedGameId.value = null }
 function parseEvent<T>(event: Event): T | null { try { return JSON.parse((event as MessageEvent).data).data as T } catch { return null } }
-function scheduleRefresh() { window.clearTimeout(refreshTimer); refreshTimer = window.setTimeout(() => { void load(true) }, 200) }
-async function load(silent = false) {
+function lastPly() { return moves.value.at(-1)?.ply ?? startPly.value }
+
+function applyPendingMoves() {
+  if (!data.value) return
+  const wasLatest = followed.value
+  let ply = lastPly()
+  for (const key of pendingMoves.keys()) if (key <= ply) pendingMoves.delete(key)
+  const added: MoveRecord[] = []
+  while (pendingMoves.has(ply + 1)) {
+    ply += 1
+    added.push(pendingMoves.get(ply)!)
+    pendingMoves.delete(ply)
+  }
+  if (!added.length) return
+  data.value.viewer_moves = [...moves.value, ...added]
+  if (wasLatest) selectedPly.value = moves.value.length
+}
+
+function requestRecovery(verifyGap = false) {
+  if (recoveryTimer !== undefined || !selection.value) return
+  recoveryTimer = window.setTimeout(() => {
+    recoveryTimer = undefined
+    if (!verifyGap || pendingMoves.size || snapshotPly > lastPly()) void load()
+  }, Math.max(1200, lastLoadAt + 5000 - Date.now()))
+}
+
+async function load() {
   const selected = selection.value
-  controller?.abort()
-  controller = new AbortController()
-  if (!selected) { data.value = null; searches.value = []; analyses.value = {}; clock.value = {}; stream?.close(); connected.value = false; return }
+  if (!selected || controller) return
+  const request = new AbortController()
+  controller = request
+  lastLoadAt = Date.now()
   const id = Number(selected.game.id), tournament = selected.quad.tournament_id
   const slug = encodeURIComponent(props.detail.event.slug)
+  const clockAtRequest = clockRevision
   try {
-    const wasLatest = selectedPly.value >= moves.value.length
     const [game, history] = await Promise.all([
-      api.get<TournamentDetailResponse>(`/api/events/${slug}/tournaments/${tournament}`, { query: { game_id: id }, signal: controller.signal }),
-      api.get<{ searches: HandBrainSearch[] }>(`/api/events/${slug}/hand-brain/games/${id}`, { signal: controller.signal }),
+      api.get<TournamentDetailResponse>(`/api/events/${slug}/tournaments/${tournament}`, { query: { game_id: id }, signal: request.signal }),
+      api.get<{ searches: HandBrainSearch[] }>(`/api/events/${slug}/hand-brain/games/${id}`, { signal: request.signal }),
     ])
-    if (Number(selection.value?.game.id) !== id) return
+    if (controller !== request) return
+    const wasLatest = followed.value
+    const receivedPly = game.viewer_moves.at(-1)?.ply ?? -1
+    for (const move of moves.value) if (move.ply > receivedPly) pendingMoves.set(move.ply, move)
+    const mergedSearches = new Map(searches.value.map(search => [`${search.ply}:${search.engine_id}`, search]))
+    for (const search of history.searches) mergedSearches.set(`${search.ply}:${search.engine_id}`, search)
     data.value = game
-    searches.value = history.searches
-    if (!silent || wasLatest) selectedPly.value = game.viewer_moves.length
-    if (game.clock_state) clock.value = { ...clock.value, ...game.clock_state } as HandBrainClock
+    searches.value = [...mergedSearches.values()]
+    applyPendingMoves()
+    if (wasLatest) selectedPly.value = moves.value.length
+    if (game.clock_state && clockRevision === clockAtRequest) clock.value = { ...clock.value, ...game.clock_state } as HandBrainClock
     error.value = ''
-    if (!silent) connect(slug, tournament, id)
-  } catch (cause) { if ((cause as Error).name !== 'AbortError') error.value = 'Connection interrupted. Retrying the broadcast…' }
+    if ((!stream || stream.readyState === EventSource.CLOSED) && selected.game.status !== 'finished') {
+      stream?.close()
+      connect(slug, tournament, id)
+    }
+  } catch {
+    if (!request.signal.aborted) {
+      request.abort()
+      error.value = 'Connection interrupted. Retrying the broadcast…'
+    }
+  } finally {
+    if (controller === request) controller = null
+  }
 }
 function connect(slug: string, tournament: number, id: number) {
-  stream?.close()
-  stream = new EventSource(`/events/${slug}/tournaments/${tournament}/stream?game_id=${id}&spectator=0`)
-  stream.onopen = () => { connected.value = true; void load(true) }
-  stream.onerror = () => { connected.value = false }
-  stream.addEventListener('game.move', event => {
+  const source = new EventSource(`/events/${slug}/tournaments/${tournament}/stream?game_id=${id}&spectator=0`)
+  stream = source
+  let opened = false
+  source.onopen = () => {
+    if (stream !== source) return
+    connected.value = true
+    if (opened) requestRecovery()
+    opened = true
+  }
+  source.onerror = () => { if (stream === source) connected.value = false }
+  source.addEventListener('game.move', event => {
     const incoming = parseEvent<{ game_id: number; move?: MoveRecord }>(event)
-    if (Number(incoming?.game_id) !== id || !incoming?.move || !data.value) return
-    const wasLatest = followed.value
-    const previous = data.value.viewer_moves.filter(m => m.ply !== incoming.move!.ply)
-    data.value.viewer_moves = [...previous, incoming.move].sort((a,b) => a.ply-b.ply)
-    if (wasLatest) selectedPly.value = data.value.viewer_moves.length
-    clock.value.running = false
-    scheduleRefresh()
+    if (stream !== source || Number(incoming?.game_id) !== id) return
+    if (!incoming?.move) { requestRecovery(); return }
+    if (incoming.move.ply <= lastPly()) return
+    pendingMoves.set(incoming.move.ply, incoming.move)
+    applyPendingMoves()
+    if (pendingMoves.size) requestRecovery(true)
   })
-  stream.addEventListener('engine.info', event => {
+  source.addEventListener('engine.info', event => {
     const incoming = parseEvent<{ game_id: number; engine_id: number; side: 'white' | 'black'; engine_data: HandBrainAnalysis }>(event)
-    if (!incoming || Number(incoming.game_id) !== id) return
+    if (stream !== source || !incoming || Number(incoming.game_id) !== id) return
     analyses.value = { ...analyses.value, [incoming.engine_id]: incoming.engine_data }
     const analysis = incoming.engine_data
     if (!analysis.root_fen || !analysis.role) return
@@ -152,11 +219,31 @@ function connect(slug: string, tournament: number, id: number) {
     const ply = (position.fullmove - 1) * 2 + (position.turn === 'b' ? 1 : 0)
     searches.value = [...searches.value.filter(s => !(s.ply === ply && s.engine_id === incoming.engine_id)), { game_id: id, engine_id: incoming.engine_id, role: analysis.role, ply, side: incoming.side, root_fen: analysis.root_fen, bestmove: analysis.pv?.split(' ')[0] ?? '', analysis, clocks: clock.value.engine_clocks_ms ?? {} }]
   })
-  stream.addEventListener('clock.sync', event => { const value = parseEvent<HandBrainClock>(event); if (Number(value?.game_id) === id) clock.value = value! })
-  stream.addEventListener('tournament.changed', scheduleRefresh)
-  stream.addEventListener('tournament.snapshot', scheduleRefresh)
+  source.addEventListener('clock.sync', event => {
+    const value = parseEvent<HandBrainClock>(event)
+    if (stream !== source || !value || Number(value.game_id) !== id) return
+    clockRevision += 1
+    clock.value = value
+  })
+  source.addEventListener('tournament.snapshot', event => {
+    const snapshot = parseEvent<{ game?: { id: number }; moves?: MoveRecord[] }>(event)
+    if (stream !== source || Number(snapshot?.game?.id) !== id) return
+    snapshotPly = snapshot?.moves?.at(-1)?.ply ?? 0
+    if (snapshotPly > lastPly()) requestRecovery(true)
+  })
 }
-watch(() => `${match.value?.id ?? ''}:${selection.value?.game.id ?? ''}`, () => { analyses.value = {}; clock.value = {}; void load() }, { immediate: true })
+watch(() => `${match.value?.id ?? ''}:${selection.value?.game.id ?? ''}`, () => {
+  stream?.close(); stream = null; connected.value = false
+  controller?.abort(); controller = null
+  window.clearTimeout(recoveryTimer); recoveryTimer = undefined
+  pendingMoves.clear(); snapshotPly = 0
+  data.value = null; searches.value = []; analyses.value = {}; clock.value = {}; selectedPly.value = 0
+  error.value = ''
+  void load()
+}, { immediate: true })
+watch([() => selection.value?.game.id, () => selection.value?.game.status], ([id, status], [previousId, previousStatus]) => {
+  if (id === previousId && status === 'finished' && previousStatus === 'live') requestRecovery()
+})
 watch([data, error], scheduleArenaFit, { flush: 'post' })
 function scheduleArenaFit(): void {
   if (arenaFitFrame !== undefined) window.cancelAnimationFrame(arenaFitFrame)
@@ -183,7 +270,10 @@ async function fitArenaToViewport(): Promise<void> {
 }
 onMounted(() => {
   clockTimer = window.setInterval(() => { now.value = Date.now() }, 100)
-  pollTimer = window.setInterval(() => { if (selection.value) void load(true) }, 10000)
+  pollTimer = window.setInterval(() => {
+    if (error.value || pendingMoves.size || snapshotPly > lastPly()
+      || (!connected.value && selection.value?.game.status !== 'finished')) requestRecovery()
+  }, 15000)
   headingResizeObserver = new ResizeObserver(scheduleArenaFit)
   if (headingElement.value) headingResizeObserver.observe(headingElement.value)
   window.addEventListener('resize', scheduleArenaFit)
@@ -191,7 +281,8 @@ onMounted(() => {
   scheduleArenaFit()
 })
 onBeforeUnmount(() => {
-  stream?.close(); controller?.abort(); window.clearInterval(clockTimer); window.clearInterval(pollTimer); window.clearTimeout(refreshTimer)
+  stream?.close(); stream = null; controller?.abort(); controller = null
+  window.clearInterval(clockTimer); window.clearInterval(pollTimer); window.clearTimeout(recoveryTimer)
   if (arenaFitFrame !== undefined) window.cancelAnimationFrame(arenaFitFrame)
   headingResizeObserver?.disconnect()
   window.removeEventListener('resize', scheduleArenaFit)
@@ -203,7 +294,7 @@ onBeforeUnmount(() => {
     <header ref="headingElement" class="tournament-heading">
       <div class="tournament-heading__title">
         <div class="title-line"><h1>{{ detail.event.title }}</h1><span class="relay-status">{{ selection?.game.result ?? (selection?.game.status === 'live' ? 'Live' : detail.event.status) }}</span><span class="relay-spectators"><AppIcon name="user" :size="14" />{{ detail.spectator_count ?? 0 }}</span></div>
-        <p>{{ match?.stage ?? 'Play-in' }} {{ match?.key }} / Quad {{ Math.max(1, match?.quads.findIndex(q => q.tournament_id === selection?.quad.tournament_id)! + 1 || 1) }}<template v-if="selection"> / Game {{ selection.game.game_number }}</template> / {{ tcLabel }} / 1 thread per engine</p>
+        <p>{{ match?.stage ?? 'Play-in' }} {{ match?.key }} / Quad {{ Math.max(1, match?.quads.findIndex(q => q.tournament_id === selection?.quad.tournament_id)! + 1 || 1) }}<template v-if="selection"> / Game {{ selection.game.game_number }}</template> / {{ tcLabel }} / {{ threadLabel }}</p>
       </div>
       <div class="tournament-heading__controls">
         <RouterLink :to="`/events/${detail.event.slug}`" class="event-page-link"><AppIcon name="arrow-left" :size="15" />Event page</RouterLink>
@@ -213,8 +304,10 @@ onBeforeUnmount(() => {
     <p v-if="error" class="connection-error" role="status">{{ error }}</p>
     <section ref="arenaElement" class="arena" aria-label="Hand and brain match">
       <div class="engine-column">
-        <HandBrainTeamCard :team="blackTeam" side="Black" :swapped="swapped" :analyses="replayAnalyses" :clocks="engineClocks" :active-engine="clock.active_engine_id" :running="liveThinking" :clock-offset-ms="clockOffsetMs" :fen="currentFen" />
-        <HandBrainTeamCard :team="whiteTeam" side="White" :swapped="swapped" :analyses="replayAnalyses" :clocks="engineClocks" :active-engine="clock.active_engine_id" :running="liveThinking" :clock-offset-ms="clockOffsetMs" :fen="currentFen" />
+        <HandBrainCheers :detail="detail" v-slot="{ cheer }">
+          <HandBrainTeamCard :team="blackTeam" side="Black" :swapped="swapped" :analyses="replayAnalyses" :clocks="engineClocks" :active-engine="clock.active_engine_id" :running="liveThinking" :clock-offset-ms="clockOffsetMs" :fen="currentFen" @cheer="cheer" />
+          <HandBrainTeamCard :team="whiteTeam" side="White" :swapped="swapped" :analyses="replayAnalyses" :clocks="engineClocks" :active-engine="clock.active_engine_id" :running="liveThinking" :clock-offset-ms="clockOffsetMs" :fen="currentFen" @cheer="cheer" />
+        </HandBrainCheers>
       </div>
       <div ref="boardColumnElement" class="board-column">
         <ChessViewer v-model="selectedPly" :opening="opening" :moves="moves" :arrows="arrows" :rings="rings" label="Hand and brain game" @orientation="orientation = $event" />
@@ -230,7 +323,7 @@ onBeforeUnmount(() => {
       <nav class="data-tabs" aria-label="Tournament information"><button v-for="name in ['standings', 'crosstable', 'settings']" :key="name" :aria-current="tab === name ? 'page' : undefined" @click="tab = name">{{ name === 'crosstable' ? 'Crosstable' : name === 'settings' ? 'Settings' : 'Standings' }}</button></nav>
       <section class="data-panel">
         <header><h2>{{ tab === 'crosstable' ? 'Crosstable' : tab === 'settings' ? 'Settings' : 'Standings' }}</h2></header>
-        <dl v-if="tab === 'settings'" class="settings-list"><div><dt>Time control per engine</dt><dd>{{ payload.rules.initial_ms / 1000 }}+{{ payload.rules.increment_ms / 1000 }}</dd></div><div><dt>Threads per engine</dt><dd>1</dd></div><div><dt>Concurrent games</dt><dd>1</dd></div><div><dt>Openings</dt><dd>Lichess UHO</dd></div><div><dt>Advance</dt><dd>More than 2 points in a quad</dd></div><div><dt>Drawn quad</dt><dd>Halve time control; minimum {{ payload.rules.minimum_initial_ms / 1000 }}+{{ payload.rules.minimum_increment_ms / 1000 }}</dd></div></dl>
+        <dl v-if="tab === 'settings'" class="settings-list"><div><dt>Time control per engine</dt><dd>{{ tcLabel }}</dd></div><div><dt>Threads per engine</dt><dd>{{ threads === 1 ? threads : `Up to ${threads}` }}</dd></div><div><dt>Concurrent games</dt><dd>1</dd></div><div><dt>Openings</dt><dd>Lichess UHO</dd></div><div><dt>Advance</dt><dd>More than 2 points in a quad</dd></div><div><dt>Drawn quad</dt><dd>Halve time control; minimum {{ payload.rules.minimum_initial_ms / 1000 }}+{{ payload.rules.minimum_increment_ms / 1000 }}</dd></div></dl>
         <div v-else class="table-wrap"><table v-if="tab === 'standings'"><thead><tr><th>Seed</th><th>Team</th><th>Engines</th><th>Matches W–L</th><th>Game points</th><th>Stage</th></tr></thead><tbody><tr v-for="team in standings" :key="team.id"><td class="rank-cell">{{ team.seed }}</td><td class="team-cell">{{ team.name }}</td><td>{{ team.members.map(m => m.name).join(' + ') }}</td><td class="number-cell">{{ team.won }}–{{ team.lost }}</td><td class="number-cell">{{ team.points }} / {{ team.games }}</td><td>{{ team.stage }}</td></tr></tbody></table>
         <table v-else class="cross-table"><thead><tr><th>Team / seed</th><th v-for="team in payload.teams" :key="team.id" :title="team.name">{{ team.seed }}</th></tr></thead><tbody><tr v-for="team in payload.teams" :key="team.id"><td class="team-cell">{{ team.name }}</td><td v-for="opponent in payload.teams" :key="opponent.id" :class="{ diagonal: opponent.id === team.id }">{{ opponent.id === team.id ? '·' : cell(team.id, opponent.id) }}</td></tr></tbody></table></div>
       </section>
@@ -360,7 +453,7 @@ onBeforeUnmount(() => {
 .cross-table .diagonal { background: var(--color-bg-subtle); color: var(--color-text-faint); }
 .connection-error { color: var(--color-warning); font-size: .75rem; }
 @media (max-width: 96rem) { .activity-column { grid-template-columns: minmax(18rem, .7fr) minmax(0, 1fr); grid-template-rows: minmax(18rem, 24rem); height: auto; } }
-@media (max-width: 58rem) { .engine-column { grid-template-rows: auto; }.engine-column > * { min-height: 21rem; }.activity-column { grid-template-columns: 1fr; grid-template-rows: auto minmax(20rem, 26rem); }.activity-column > :first-child { min-height: 12rem; } }
+@media (max-width: 58rem) { .engine-column { grid-template-rows: auto; }.engine-column > * { min-height: 21rem; }.activity-column { grid-template-columns: 1fr; grid-template-rows: 14rem minmax(20rem, 26rem); } }
 @media (max-width: 40rem) { .engine-column { grid-template-columns: 1fr; }.activity-logs { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }.activity-column { height: auto; }.title-line { flex-wrap: wrap; } }
 
 </style>

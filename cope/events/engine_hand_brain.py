@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import asdict
 
 from fastapi import Depends, HTTPException, Request
@@ -70,6 +71,8 @@ COLORS = (
     "#7ed5ba",
     "#d9a195",
     "#b5aceb",
+    "#e3bc77",
+    "#adcfcb",
 )
 BRACKET = (
     ("P1", "Play-in", 7, 10),
@@ -82,6 +85,31 @@ BRACKET = (
     ("S2", "Semifinal", "Q3", "Q4"),
     ("F", "Final", "S1", "S2"),
 )
+BRACKET_ELEVEN = (
+    ("P1", "Play-in", 6, 11),
+    ("P2", "Play-in", 7, 10),
+    ("P3", "Play-in", 8, 9),
+    ("Q1", "Quarterfinal", 1, "P3"),
+    ("Q2", "Quarterfinal", 4, 5),
+    ("Q3", "Quarterfinal", 2, "P2"),
+    ("Q4", "Quarterfinal", 3, "P1"),
+    ("S1", "Semifinal", "Q1", "Q2"),
+    ("S2", "Semifinal", "Q3", "Q4"),
+    ("F", "Final", "S1", "S2"),
+)
+BRACKET_TWELVE = (
+    ("P1", "Play-in", 6, 11),
+    ("P2", "Play-in", 7, 10),
+    ("P3", "Play-in", 8, 9),
+    ("P4", "Play-in", 5, 12),
+    ("Q1", "Quarterfinal", 1, "P3"),
+    ("Q2", "Quarterfinal", 4, "P4"),
+    ("Q3", "Quarterfinal", 2, "P2"),
+    ("Q4", "Quarterfinal", 3, "P1"),
+    ("S1", "Semifinal", "Q1", "Q2"),
+    ("S2", "Semifinal", "Q3", "Q4"),
+    ("F", "Final", "S1", "S2"),
+)
 
 
 def quad_time_control(index, config=None):
@@ -90,6 +118,12 @@ def quad_time_control(index, config=None):
     return IncrementTimeControl(
         initial_ms=max(1000, int(config.get("initial_ms", 60000)) // divisor),
         increment_ms=max(1, int(config.get("increment_ms", 600)) // divisor),
+    )
+
+
+def _stage_time_control(event, stage):
+    return event.config.get("stage_time_controls", {}).get(
+        stage, event.config.get("time_control")
     )
 
 
@@ -129,8 +163,8 @@ def initialize_bracket(connection, event_id):
     teams = [
         member for member in cast if member.kind == "team" and member.parent_id is None
     ]
-    if teams and len(teams) != 10:
-        raise ValueError("The bracket requires exactly ten teams")
+    if teams and len(teams) not in (10, 11, 12):
+        raise ValueError("The bracket requires ten, eleven or twelve teams")
     if not teams:
         engines = list_engine_records(connection)
         supported = {
@@ -190,7 +224,8 @@ def initialize_bracket(connection, event_id):
                         and engine is not None,
                     },
                 )
-    for position, (key, stage, a, b) in enumerate(BRACKET):
+    bracket = {11: BRACKET_ELEVEN, 12: BRACKET_TWELVE}.get(len(teams), BRACKET)
+    for position, (key, stage, a, b) in enumerate(bracket):
         create_event_contest(
             connection,
             event_id,
@@ -271,7 +306,7 @@ def _create_quad(connection, event, contest):
         format=TournamentFormat.ROUND_ROBIN,
         format_options=RoundRobinFormatOptions(),
         participants=anchors,
-        time_control=quad_time_control(index, event.config.get("time_control")),
+        time_control=quad_time_control(index, _stage_time_control(event, contest.summary)),
         concurrency=1,
         opening_suite_id=suite.id,
         adjudication=AdjudicationConfig(
@@ -358,6 +393,24 @@ def start_next_match(connection, event_id):
     return tournament_id
 
 
+def _validate_roster(connection, event_id):
+    cast = list_event_cast(connection, event_id)
+    teams = [member for member in cast if member.kind == "team" and member.parent_id is None]
+    roster = [member for member in cast if member.kind == "engine"]
+    if len(teams) not in (10, 11, 12) or len(roster) != len(teams) * 2:
+        raise ValueError("Each team needs exactly two engines")
+    if any(sum(member.parent_id == team.id for member in roster) != 2 for team in teams):
+        raise ValueError("Each team needs exactly two engines")
+    if any(
+        member.engine_version_id is None
+        or not member.metadata.get("searchmoves_confirmed")
+        for member in roster
+    ):
+        raise ValueError("All engines need builds with confirmed searchmoves support before the event starts")
+    if len({member.engine_version_id for member in roster}) != len(roster):
+        raise ValueError("Each engine may appear on only one team")
+
+
 def start_scheduled_hand_brain_events(connection, now):
     started = []
     for row in connection.execute(
@@ -367,18 +420,9 @@ def start_scheduled_hand_brain_events(connection, now):
         event = get_event(connection, row["id"])
         if not event.config.get("auto_start"):
             continue
-        roster = [
-            member
-            for member in list_event_cast(connection, event.id)
-            if member.kind == "engine"
-        ]
-        if len(roster) != 20 or any(
-            member.engine_version_id is None
-            or not member.metadata.get("searchmoves_confirmed")
-            for member in roster
-        ):
-            continue
-        if len({member.engine_version_id for member in roster}) != 20:
+        try:
+            _validate_roster(connection, event.id)
+        except ValueError:
             continue
         _opening_suite(connection)
         tournament_id = start_next_match(connection, event.id)
@@ -451,6 +495,9 @@ def advance_hand_brain(connection, tournament):
 
 def _payload(connection, event):
     cast = list_event_cast(connection, event.id)
+    engine_versions = {engine.id: engine for engine in list_engine_records(connection)}
+    stage_keys = {stage.id: stage.stage_key for stage in list_event_stages(connection, event.id)}
+    stage_resources = event.config.get("stage_engine_resources", {})
     teams = [
         {
             "id": team.id,
@@ -463,6 +510,8 @@ def _payload(connection, event):
                     "id": member.id,
                     "name": member.display_name,
                     "engine_id": member.engine_version_id,
+                    "version": engine_versions[member.engine_version_id].version
+                    if member.engine_version_id in engine_versions else None,
                     "ready": bool(member.metadata.get("searchmoves_confirmed")),
                 }
                 for member in cast
@@ -485,6 +534,7 @@ def _payload(connection, event):
                 {
                     "tournament_id": tournament_id,
                     "time_control": tournament.config.time_control.model_dump(),
+                    "threads": tournament.config.engine_threads,
                     "score": [value / 2 for value in quad_score(games, anchor)],
                     "games": [asdict(game) for game in games],
                 }
@@ -494,6 +544,10 @@ def _payload(connection, event):
                 "id": contest.id,
                 "key": contest.title,
                 "stage": contest.summary,
+                "time_control": quad_time_control(
+                    0, _stage_time_control(event, contest.summary)
+                ).model_dump(),
+                "threads": stage_resources.get(stage_keys.get(contest.stage_id), {}).get("threads", 1),
                 "sources": contest.state.get("sources", []),
                 "team_ids": _resolve_teams(connection, event.id, contest),
                 "status": contest.status,
@@ -526,6 +580,10 @@ class MemberBuildPayload(BaseModel):
     searchmoves_confirmed: bool
 
 
+class TeamCheerPayload(BaseModel):
+    team_id: int = Field(gt=0)
+
+
 def _admin_payload(connection, event):
     payload = _payload(connection, event)
     payload["engine_options"] = [
@@ -537,7 +595,45 @@ def _admin_payload(connection, event):
 
 def _register_api(app):
     from cope.web import app as web_app
-    from .engine_relay import _json, _publish_change
+    from .engine_relay import _CHEER_CLIENT, _json, _publish_change
+
+    @app.post("/api/events/{slug}/hand-brain/cheers")
+    def cheer(
+        slug: str,
+        payload: TeamCheerPayload,
+        request: Request,
+        connection=Depends(web_app._database),
+    ):
+        from cope.web.api import _require_viewable_event
+
+        event = _require_viewable_event(connection, slug, request)
+        if event.handler_key != MODULE_KEY:
+            raise HTTPException(404, "Hand and brain event not found")
+        hub = request.app.state.stream_hub
+        host = request.client.host if request.client else "unknown"
+        supplied_client = request.headers.get("x-cope-cheer-client", "")
+        client = supplied_client if _CHEER_CLIENT.fullmatch(supplied_client) else host
+        if not hub.allow_ephemeral(f"cheer-host:{slug}:{host}", rate=12.0, burst=24):
+            raise HTTPException(429, "Cheer rate limit exceeded.")
+        if not hub.allow_ephemeral(f"cheer-client:{slug}:{host}:{client}", rate=4.0, burst=8):
+            raise HTTPException(429, "Cheer rate limit exceeded.")
+        team = connection.execute(
+            "SELECT id FROM event_cast_members WHERE event_id = ? AND id = ? AND kind = 'team'",
+            (event.id, payload.team_id),
+        ).fetchone()
+        if team is None:
+            raise HTTPException(404, "Team not found.")
+        if not hub.allow_ephemeral(f"cheer-event:{event.id}", rate=20.0, burst=30):
+            raise HTTPException(429, "The crowd is cheering too quickly.")
+        cheer_id = secrets.token_hex(8)
+        hub.publish(
+            f"event.{event.id}",
+            "event.cheer",
+            {"id": cheer_id, "event_id": event.id, "team_id": payload.team_id},
+            source="web",
+            ephemeral=True,
+        )
+        return _json({"accepted": True, "cheer_id": cheer_id}, 202)
 
     def require_event(connection, event_id):
         event = get_event(connection, event_id)
@@ -554,7 +650,7 @@ def _register_api(app):
         initialize_bracket(connection, event_id)
         connection.commit()
         _publish_change(request, event_id)
-        return _json({"message": "Ten-team bracket prepared"})
+        return _json({"message": "Bracket prepared"})
 
     @app.put("/api/admin/events/{event_id}/hand-brain/members/{member_id}")
     def select_build(
@@ -602,21 +698,7 @@ def _register_api(app):
         initialize_bracket(connection, event_id)
         try:
             _opening_suite(connection)
-            roster = [
-                member
-                for member in list_event_cast(connection, event_id)
-                if member.kind == "engine"
-            ]
-            if len(roster) != 20 or any(
-                member.engine_version_id is None
-                or not member.metadata.get("searchmoves_confirmed")
-                for member in roster
-            ):
-                raise ValueError(
-                    "All twenty engines need builds with confirmed searchmoves support before the event starts"
-                )
-            if len({member.engine_version_id for member in roster}) != 20:
-                raise ValueError("Each engine may appear on only one team")
+            _validate_roster(connection, event_id)
             tournament_id = start_next_match(connection, event_id)
         except ValueError as error:
             raise HTTPException(409, str(error)) from error
@@ -674,7 +756,13 @@ def _provision(connection):
         status="scheduled",
         featured=True,
         scheduled_start_at="2026-11-07T17:00:00+00:00",
-        theme={"primary": "#b9133e", "accent": "#ff7293", "background": "#13080e", "surface": "#29101b", "text": "#ffe9e9"},
+        theme={
+            "primary": "#b9133e",
+            "accent": "#ff7293",
+            "background": "#13080e",
+            "surface": "#29101b",
+            "text": "#ffe9e9",
+        },
         config={"module": "engine-hand-brain", "announcement_only": True},
     )
     set_event_published(connection, event_id, True)

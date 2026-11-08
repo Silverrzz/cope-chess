@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { api } from '@/api/client'
+import AppIcon from '@/components/ui/AppIcon.vue'
 import { savedViewerName, saveViewerName } from '@/composables/useViewerPresence'
 
 import { errorMessage, formatDate } from './format'
@@ -24,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const log = ref<HTMLElement | null>(null)
+const showJumpToLatest = ref(false)
 const activeTab = ref<'chat' | 'system'>('chat')
 const displayName = ref('')
 const text = ref('')
@@ -53,7 +55,12 @@ onMounted(() => {
   scrollToLatest()
 })
 
-watch(() => [activeTab.value, visibleMessages.value.length], scrollToLatest)
+watch([activeTab, visibleMessages], async ([tab], [previousTab]) => {
+  const followLatest = tab !== previousTab || isAtBottom()
+  await nextTick()
+  if (followLatest) scrollToLatest()
+  else updateScrollPosition()
+})
 watch(displayName, saveViewerName)
 
 async function submit(): Promise<void> {
@@ -70,7 +77,6 @@ async function submit(): Promise<void> {
     const response = await api.post<{ message?: ChatMessage | null }>(target, { body })
     if (response.message) emit('sent', response.message)
     text.value = ''
-    await scrollToLatest()
   } catch (error) {
     submitError.value = errorMessage(error, 'Your message could not be sent.')
   } finally {
@@ -78,9 +84,18 @@ async function submit(): Promise<void> {
   }
 }
 
-async function scrollToLatest(): Promise<void> {
-  await nextTick()
+function isAtBottom(): boolean {
+  const feed = log.value
+  return !feed || feed.scrollHeight - feed.clientHeight - feed.scrollTop <= 2
+}
+
+function updateScrollPosition(): void {
+  showJumpToLatest.value = !isAtBottom()
+}
+
+function scrollToLatest(): void {
   if (log.value) log.value.scrollTop = log.value.scrollHeight
+  updateScrollPosition()
 }
 </script>
 
@@ -109,25 +124,38 @@ async function scrollToLatest(): Promise<void> {
       </button>
     </header>
 
-    <div
-      :id="activeTab === 'chat' ? 'chat-feed' : 'system-log-feed'"
-      ref="log"
-      class="chat-log"
-      role="tabpanel"
-      :aria-labelledby="activeTab === 'chat' ? 'chat-tab' : 'system-log-tab'"
-      aria-live="polite"
-      aria-relevant="additions"
-    >
-      <ol v-if="visibleMessages.length">
-        <li v-for="(message, index) in visibleMessages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': activeTab === 'system' }">
-          <div>
-            <strong v-if="activeTab === 'chat'">{{ message.display_name }}</strong>
-            <time v-if="message.at" :datetime="message.at">{{ formatDate(message.at, true) }}</time>
-          </div>
-          <p>{{ message.text }}</p>
-        </li>
-      </ol>
-      <p v-else class="chat-empty">{{ activeTab === 'chat' ? 'No chat messages yet.' : 'No system events yet.' }}</p>
+    <div class="chat-feed">
+      <div
+        :id="activeTab === 'chat' ? 'chat-feed' : 'system-log-feed'"
+        ref="log"
+        class="chat-log"
+        role="tabpanel"
+        :aria-labelledby="activeTab === 'chat' ? 'chat-tab' : 'system-log-tab'"
+        aria-live="polite"
+        aria-relevant="additions"
+        @scroll.passive="updateScrollPosition"
+      >
+        <ol v-if="visibleMessages.length">
+          <li v-for="(message, index) in visibleMessages" :key="message.id ?? `${message.at}-${index}`" :class="{ 'chat-message--system': activeTab === 'system' }">
+            <div>
+              <strong v-if="activeTab === 'chat'">{{ message.display_name }}</strong>
+              <time v-if="message.at" :datetime="message.at">{{ formatDate(message.at, true) }}</time>
+            </div>
+            <p>{{ message.text }}</p>
+          </li>
+        </ol>
+        <p v-else class="chat-empty">{{ activeTab === 'chat' ? 'No chat messages yet.' : 'No system events yet.' }}</p>
+      </div>
+      <button
+        v-if="showJumpToLatest"
+        type="button"
+        class="chat-jump"
+        aria-label="Scroll to latest"
+        title="Scroll to latest"
+        @click="scrollToLatest"
+      >
+        <AppIcon name="chevron-down" :size="16" />
+      </button>
     </div>
 
     <form v-if="activeTab === 'chat' && enabled" class="chat-form" autocomplete="off" @submit.prevent="submit">
@@ -208,6 +236,14 @@ async function scrollToLatest(): Promise<void> {
   text-align: center;
 }
 
+.chat-feed {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
 .chat-log {
   min-height: 0;
   flex: 1;
@@ -215,6 +251,31 @@ async function scrollToLatest(): Promise<void> {
   padding: 0.6rem 0.75rem;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
+}
+
+.chat-jump {
+  position: absolute;
+  inset-block-end: 0.5rem;
+  inset-inline-end: 1.25rem;
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--color-border, #d5dbe1);
+  border-radius: 50%;
+  background: var(--color-surface, #fff);
+  color: var(--color-text-muted, #607080);
+  cursor: pointer;
+}
+
+.chat-jump:hover {
+  color: var(--color-text, #17202a);
+}
+
+.chat-jump:focus-visible {
+  outline: 2px solid var(--color-accent, #2f78c4);
+  outline-offset: 1px;
 }
 
 .chat-log ol {

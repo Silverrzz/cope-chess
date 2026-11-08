@@ -5,6 +5,7 @@ import type { HandBrainTeam, HandBrainAnalysis } from './types'
 import RoleIcon from './RoleIcon.vue'
 
 const props = defineProps<{ team: HandBrainTeam | null; side: string; swapped: boolean; analyses: Record<string, HandBrainAnalysis>; clocks: Record<string, number>; activeEngine?: number | undefined; running?: boolean | undefined; clockOffsetMs?: number | undefined; fen: string }>()
+const emit = defineEmits<{ cheer: [team: HandBrainTeam] }>()
 const names: Record<string, string> = { p: 'Pawn', n: 'Knight', b: 'Bishop', r: 'Rook', q: 'Queen', k: 'King' }
 const members = computed(() => {
   const roster = props.team?.members ?? []
@@ -47,7 +48,20 @@ onBeforeUnmount(() => { for (const timer of timers.values()) window.clearTimeout
 </script>
 <template>
   <section class="team-card" :style="{ '--team': team?.color ?? 'var(--color-accent)' }" :aria-label="`${side} team ${team?.name ?? 'To be decided'}`">
-    <header><span class="side-stone" :class="side.toLowerCase()" /><span class="team-heading"><small>{{ side }}</small><strong>{{ team?.name ?? 'TBD' }}</strong></span></header>
+    <header>
+      <span class="side-stone" :class="side.toLowerCase()" />
+      <span class="team-heading"><small>{{ side }}</small><strong>{{ team?.name ?? 'TBD' }}</strong></span>
+      <button
+        v-if="team"
+        type="button"
+        class="team-cheer"
+        :style="{ '--team-color': team.color }"
+        :data-cheer-team-id="team.id"
+        :aria-label="`Cheer for ${team.name}`"
+        :title="`Cheer for ${team.name}`"
+        @click="emit('cheer', team)"
+      ><span aria-hidden="true">🎉</span></button>
+    </header>
     <div class="duet">
       <svg class="splitter" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="hand-field" d="M64 -4 45 42H56L36 104H105V-4Z" /><path class="bolt-shadow" d="M64 -4 45 42H56L36 104" /><path class="bolt-edge" d="M66 -4 47 40H58L38 104" /></svg>
       <RoleIcon class="watermark watermark--brain" role="brain" />
@@ -65,6 +79,8 @@ onBeforeUnmount(() => { for (const timer of timers.values()) window.clearTimeout
 .team-card { container-type: inline-size; position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; height: 100%; overflow: hidden; border: 1px solid var(--color-border); border-inline-start: 4px solid #05070a; border-radius: var(--radius-md, .5rem); background: var(--color-surface-raised, var(--color-surface)); color: var(--color-text); }
 .team-card:has(.side-stone.white) { border-inline-start-color: #f7f8fa; }
 .team-card header { display: flex; align-items: center; gap: .6rem; padding: .65rem .85rem; border-bottom: 1px solid var(--color-border); }
+.team-cheer { flex: 0 0 auto; width: 2rem; height: 2rem; margin-inline-start: auto; padding: 0; border: 1px solid var(--color-border); border-radius: var(--radius-sm, .35rem); background: var(--color-surface); color: var(--color-text); cursor: pointer; }
+.team-cheer:hover, .team-cheer:focus-visible { border-color: var(--team-color); background: color-mix(in srgb, var(--team-color) 18%, var(--color-surface)); }
 .side-stone { width: .55rem; height: .55rem; border-radius: 50%; border: 1px solid var(--color-border-strong); }.side-stone.white { background: #f7f8fa; }.side-stone.black { background: #05070a; }
 .team-heading { display: grid; gap: .1rem; min-width: 0; }.team-heading small { color: var(--color-text-muted); font-size: .62rem; font-weight: 750; letter-spacing: .045em; text-transform: uppercase; }.team-heading strong { color: var(--color-text); font-size: .9rem; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .duet { position: relative; min-height: 0; isolation: isolate; }.splitter { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }.hand-field { fill: var(--color-surface); }.bolt-shadow { fill: none; stroke: var(--color-border-strong); stroke-width: 2; vector-effect: non-scaling-stroke; }.bolt-edge { fill: none; stroke: var(--color-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
