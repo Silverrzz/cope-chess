@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Chessground } from 'chessground'
 import type { Api as ChessgroundApi } from 'chessground/api'
+import { getKeyAtDomPos } from 'chessground/board'
 import type { Config as ChessgroundConfig } from 'chessground/config'
 import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import { read as readGroundFen } from 'chessground/fen'
@@ -9,6 +10,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
+import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import {
   buildPositions,
@@ -65,7 +67,10 @@ const emit = defineEmits<{
 
 const viewer = ref<HTMLElement | null>(null)
 const board = ref<HTMLElement | null>(null)
+const { boardAnnotationsEnabled } = useViewerSettings()
 let ground: ChessgroundApi | null = null
+let annotationDrag: { pointerId: number; orig: Key; dest: Key | undefined } | null = null
+let annotationArrows: DrawShape[] = []
 const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
 const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
@@ -115,6 +120,10 @@ watch([
   () => props.rings.join('|'),
 ], renderBoard)
 
+watch(boardAnnotationsEnabled, (enabled) => {
+  if (!enabled) clearAnnotations()
+})
+
 onMounted(() => {
   if (board.value) {
     ground = Chessground(board.value, {
@@ -144,6 +153,71 @@ function selectPly(ply: number): void {
   if (next === selectedPly.value) return
   selectedPly.value = next
   emit('update:modelValue', next)
+}
+
+function annotationSquare(event: PointerEvent): Key | undefined {
+  if (!ground) return
+  const bounds = ground.state.dom.elements.board.getBoundingClientRect()
+  return getKeyAtDomPos([event.clientX, event.clientY], ground.state.orientation === 'white', bounds)
+}
+
+function startAnnotation(event: PointerEvent): void {
+  if (!boardAnnotationsEnabled.value || event.button !== 2 || !board.value) return
+  const square = annotationSquare(event)
+  if (!square) return
+  event.preventDefault()
+  board.value.setPointerCapture(event.pointerId)
+  annotationDrag = { pointerId: event.pointerId, orig: square, dest: undefined }
+}
+
+function previewAnnotation(event: PointerEvent): void {
+  if (!ground || annotationDrag?.pointerId !== event.pointerId) return
+  const { orig } = annotationDrag
+  const square = annotationSquare(event)
+  const dest = square === orig ? undefined : square
+  if (dest === annotationDrag.dest) return
+  annotationDrag.dest = dest
+  const hasArrow = annotationArrows.some((arrow) => arrow.orig === orig && arrow.dest === dest)
+  ground.setShapes(dest && !hasArrow ? [...annotationArrows, { orig, dest, brush: 'yellow' }] : annotationArrows)
+}
+
+function finishAnnotation(event: PointerEvent): void {
+  if (event.button !== 2 || !ground || annotationDrag?.pointerId !== event.pointerId) return
+  const { orig } = annotationDrag
+  annotationDrag = null
+  const dest = annotationSquare(event)
+  if (dest === orig) {
+    const custom = new Map(ground.state.highlight.custom)
+    if (custom.has(orig)) custom.delete(orig)
+    else custom.set(orig, 'annotation-highlight')
+    ground.set({ highlight: { custom } })
+  } else if (dest) {
+    const remaining = annotationArrows.filter((arrow) => arrow.orig !== orig || arrow.dest !== dest)
+    annotationArrows = remaining.length === annotationArrows.length
+      ? [...annotationArrows, { orig, dest, brush: 'yellow' }]
+      : remaining
+  }
+  ground.setShapes(annotationArrows)
+}
+
+function cancelAnnotation(event: PointerEvent): void {
+  if (annotationDrag?.pointerId !== event.pointerId) return
+  annotationDrag = null
+  ground?.setShapes(annotationArrows)
+}
+
+function clearAnnotations(): void {
+  if (!ground) return
+  const pointerId = annotationDrag?.pointerId
+  annotationDrag = null
+  if (pointerId !== undefined && board.value?.hasPointerCapture(pointerId)) board.value.releasePointerCapture(pointerId)
+  annotationArrows = []
+  if (ground.state.highlight.custom?.size) ground.set({ highlight: { custom: new Map() } })
+  if (ground.state.drawable.shapes.length) ground.setShapes([])
+}
+
+function handleContextMenu(event: MouseEvent): void {
+  if (boardAnnotationsEnabled.value) event.preventDefault()
 }
 
 function predictionShapes(arrow: BoardArrow, brush: string): DrawShape[] {
@@ -258,7 +332,18 @@ defineExpose({ selectPly, focusBoard })
     :tabindex="controls ? 0 : undefined"
   >
     <div class="board-frame">
-      <div ref="board" class="board-mount" role="img" :aria-label="`${label}, ${positionDescription}`"></div>
+      <div
+        ref="board"
+        class="board-mount"
+        role="img"
+        :aria-label="`${label}, ${positionDescription}`"
+        @pointerdown="startAnnotation"
+        @pointermove="previewAnnotation"
+        @pointerup="finishAnnotation"
+        @lostpointercapture="cancelAnnotation"
+        @contextmenu="handleContextMenu"
+        @click="clearAnnotations"
+      ></div>
     </div>
 
     <div v-if="controls" class="board-controls">
@@ -291,6 +376,9 @@ defineExpose({ selectPly, focusBoard })
   background-size: 85%;
   background-position: center;
   background-repeat: no-repeat;
+}
+.board-mount :deep(cg-board square.annotation-highlight) {
+  background: rgb(204 36 36 / 68%);
 }
 .chess-viewer {
   width: 100%;

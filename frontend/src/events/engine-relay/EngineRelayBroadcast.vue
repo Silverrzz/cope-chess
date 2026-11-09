@@ -1223,7 +1223,7 @@ function handleUserActivation(): void {
       </div>
       <aside class="activity-column" aria-label="Game activity">
         <MoveList class="arena-moves" :moves="moves.map((move) => move.san || move.uci)" :uci-moves="moves.map((move) => move.uci)" :annotations="moveAnnotations" :fen="opening.fen" :book-plies="bookPlies" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
-        <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="appendChat" />
+        <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" :game-id="viewerGame.id" @sent="appendChat" />
       </aside>
     </section>
 

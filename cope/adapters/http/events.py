@@ -101,6 +101,8 @@ def register_event_routes(app: FastAPI) -> None:
                 form,
                 event_id=event.id,
                 settings=settings,
+                allow_game_context=web_app._event_arena_is_public(event),
+                sender_ip_hash=web_app._chat_address_hash(request),
             )
 
         message = await asyncio.to_thread(create_message)

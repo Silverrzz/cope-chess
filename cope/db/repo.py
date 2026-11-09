@@ -328,6 +328,10 @@ class ChatMessageRecord:
     display_name: str
     text: str
     at: str
+    game_id: int | None = None
+    game_label: str | None = None
+    reply_to_id: int | None = None
+    sender_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4142,15 +4146,26 @@ def create_chat_message(
     event_id: int | None = None,
     display_name: str,
     text: str,
+    game_id: int | None = None,
+    game_label: str | None = None,
+    reply_to_id: int | None = None,
+    sender_key: str | None = None,
+    sender_ip_hash: str | None = None,
 ) -> int:
     if (tournament_id is None) == (event_id is None):
         raise ValueError("chat message requires exactly one subject")
     cursor = connection.execute(
         """
-        INSERT INTO chat_messages (tournament_id, event_id, display_name, text, at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO chat_messages (
+            tournament_id, event_id, display_name, text, at,
+            game_id, game_label, reply_to_id, sender_key, sender_ip_hash
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (tournament_id, event_id, display_name, text, utc_now()),
+        (
+            tournament_id, event_id, display_name, text, utc_now(),
+            game_id, game_label, reply_to_id, sender_key, sender_ip_hash,
+        ),
     )
     return int(cursor.lastrowid)
 
@@ -5243,6 +5258,10 @@ def _chat_message_from_row(row: sqlite3.Row) -> ChatMessageRecord:
         display_name=row["display_name"],
         text=row["text"],
         at=row["at"],
+        game_id=row["game_id"],
+        game_label=row["game_label"] if row["game_id"] is not None else None,
+        reply_to_id=row["reply_to_id"],
+        sender_key=row["sender_key"],
     )
 
 

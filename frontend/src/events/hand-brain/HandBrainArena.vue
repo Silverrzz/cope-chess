@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
 import { buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
 import ChatPanel from '@/components/public/ChatPanel.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
-import type { MoveRecord, TournamentDetailResponse } from '@/components/public/types'
+import type { ChatMessage, Identifier, MoveRecord, TournamentDetailResponse } from '@/components/public/types'
 import type { EventDetailResponse } from '@/types/events'
 import type { HandBrainPayload, HandBrainMatch, HandBrainSearch, HandBrainClock, HandBrainAnalysis, HandBrainTeam } from './types'
 import HandBrainTeamCard from './HandBrainTeamCard.vue'
@@ -17,6 +18,8 @@ import HandBrainEvalGraph from './HandBrainEvalGraph.vue'
 import StreamIndicator from '@/components/public/StreamIndicator.vue'
 
 const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number }>(), { clockOffsetMs: 0 })
+const route = useRoute()
+const router = useRouter()
 const payload = computed(() => props.detail.custom as HandBrainPayload)
 const selectedMatchId = ref<number | null>(null)
 const selectedGameId = ref<number | null>(null)
@@ -122,7 +125,35 @@ function cell(a: number, b: number) {
   const score = fixture.quads.reduce((sum,q) => sum + (q.score[index] ?? 0),0)
   return `${score}${fixture.status === 'live' ? ' ·' : ''}`
 }
-function selectMatch(value: HandBrainMatch) { selectedMatchId.value = value.id; selectedGameId.value = null }
+function selectMatch(value: HandBrainMatch): void {
+  selectedMatchId.value = value.id
+  selectedGameId.value = null
+  if (route.query.game_id === undefined) return
+  const query = { ...route.query }
+  delete query.game_id
+  void router.replace({ query })
+}
+
+function selectGame(gameId: Identifier): void {
+  void router.push({ query: { ...route.query, game_id: String(gameId) } })
+}
+
+function appendChat(message: ChatMessage): void {
+  if (message.id !== undefined && props.detail.chat_messages.some(item => String(item.id) === String(message.id))) return
+  props.detail.chat_messages.push(message)
+}
+
+watch(() => route.query.game_id, (gameId) => {
+  if (typeof gameId !== 'string') {
+    selectedGameId.value = null
+    return
+  }
+  const target = payload.value.matches.find(item => item.quads.some(quad => quad.games.some(game => String(game.id) === gameId)))
+  if (!target) return
+  selectedMatchId.value = target.id
+  selectedGameId.value = Number(gameId)
+}, { immediate: true })
+
 function parseEvent<T>(event: Event): T | null { try { return JSON.parse((event as MessageEvent).data).data as T } catch { return null } }
 function lastPly() { return moves.value.at(-1)?.ply ?? startPly.value }
 
@@ -314,10 +345,10 @@ onBeforeUnmount(() => {
       </div>
       <aside class="activity-column" aria-label="Game activity">
         <HandBrainEvalGraph :orientation="orientation" :searches="searches" :teams="teams" :selected-ply="selectedPly" :start-ply="startPly" :total-plies="moves.length" @seek="selectedPly = $event" />
-        <div class="activity-logs"><MoveList class="arena-moves" v-model="selectedPly" :moves="moves.map(m => m.san || m.uci)" :uci-moves="moves.map(m => m.uci)" :fen="opening.fen" :book-plies="moves.filter(m => m.is_book).length" /><ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" /></div>
+        <div class="activity-logs"><MoveList class="arena-moves" v-model="selectedPly" :moves="moves.map(m => m.san || m.uci)" :uci-moves="moves.map(m => m.uci)" :fen="opening.fen" :book-plies="moves.filter(m => m.is_book).length" /><ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" :game-id="selection?.game.id ?? null" @sent="appendChat" /></div>
       </aside>
     </section>
-    <div v-if="allGames.length" class="game-strip" aria-label="Select a game"><span>{{ teams[0]?.name }} {{ selection?.quad.score[0] ?? 0 }} – {{ selection?.quad.score[1] ?? 0 }} {{ teams[1]?.name }}</span><button v-for="item in allGames" :key="String(item.game.id)" :class="{ selected: item.game.id === selection?.game.id }" @click="selectedGameId = Number(item.game.id)">Q{{ match?.quads.findIndex(q => q.tournament_id === item.quad.tournament_id)! + 1 }} / G{{ item.game.game_number }} · {{ item.game.result ?? item.game.status }}</button></div>
+    <div v-if="allGames.length" class="game-strip" aria-label="Select a game"><span>{{ teams[0]?.name }} {{ selection?.quad.score[0] ?? 0 }} – {{ selection?.quad.score[1] ?? 0 }} {{ teams[1]?.name }}</span><button v-for="item in allGames" :key="String(item.game.id)" :class="{ selected: item.game.id === selection?.game.id }" @click="selectGame(item.game.id)">Q{{ match?.quads.findIndex(q => q.tournament_id === item.quad.tournament_id)! + 1 }} / G{{ item.game.game_number }} · {{ item.game.result ?? item.game.status }}</button></div>
     <HandBrainBracket :matches="payload.matches" :teams="payload.teams" :selected="match?.id" @select="selectMatch" />
     <section class="tournament-data">
       <nav class="data-tabs" aria-label="Tournament information"><button v-for="name in ['standings', 'crosstable', 'settings']" :key="name" :aria-current="tab === name ? 'page' : undefined" @click="tab = name">{{ name === 'crosstable' ? 'Crosstable' : name === 'settings' ? 'Settings' : 'Standings' }}</button></nav>

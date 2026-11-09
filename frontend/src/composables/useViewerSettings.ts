@@ -27,6 +27,8 @@ function stored(key: string, fallback: string): string {
 }
 const evaluationPerspective = ref<'white' | 'side-to-move'>(stored('cope-eval-perspective', 'white') === 'side-to-move' ? 'side-to-move' : 'white');
 const kibitzerEnabled = ref(stored('cope-kibitzer-enabled', 'true') !== 'false');
+const boardAnnotationsEnabled = ref(stored('cope-board-annotations-enabled', 'true') !== 'false');
+const chatGameLinksVisible = ref(stored('cope-chat-game-links-visible', 'true') !== 'false');
 
 export function useViewerSettings() {
   function setEvaluationPerspective(value: 'white' | 'side-to-move'): void {
@@ -36,6 +38,14 @@ export function useViewerSettings() {
   function setKibitzerEnabled(value: boolean): void {
     kibitzerEnabled.value = value;
     try { localStorage.setItem('cope-kibitzer-enabled', String(value)); } catch {}
+  }
+  function setBoardAnnotationsEnabled(value: boolean): void {
+    boardAnnotationsEnabled.value = value;
+    try { localStorage.setItem('cope-board-annotations-enabled', String(value)); } catch {}
+  }
+  function setChatGameLinksVisible(value: boolean): void {
+    chatGameLinksVisible.value = value;
+    try { localStorage.setItem('cope-chat-game-links-visible', String(value)); } catch {}
   }
   function setConfettiEnabled(enabled: boolean): void {
     confettiEnabled.value = enabled;
@@ -56,5 +66,12 @@ export function useViewerSettings() {
     }
   }
 
-  return { evaluationPerspective, kibitzerEnabled, setEvaluationPerspective, setKibitzerEnabled, confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled };
+  return {
+    evaluationPerspective, setEvaluationPerspective,
+    kibitzerEnabled, setKibitzerEnabled,
+    boardAnnotationsEnabled, setBoardAnnotationsEnabled,
+    chatGameLinksVisible, setChatGameLinksVisible,
+    confettiEnabled, setConfettiEnabled,
+    eventMusicEnabled, setEventMusicEnabled,
+  };
 }

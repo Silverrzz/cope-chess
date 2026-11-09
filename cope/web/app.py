@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import hashlib
 import hmac
+import ipaddress
 import math
 import re
 import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import asdict
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
@@ -47,6 +50,7 @@ from cope.db import (
     database_schema_version,
     get_chat_settings,
     get_chat_message,
+    get_engine,
     get_event_by_slug,
     get_event_chat_settings,
     get_game,
@@ -2544,7 +2548,9 @@ def _create_chat_message_from_form(
     form: dict[str, list[str]],
     *,
     tournament_id: int,
+    sender_ip_hash: str | None = None,
 ) -> dict[str, Any] | None:
+    _require_chat_address_allowed(connection, sender_ip_hash)
     settings = get_chat_settings(connection)
     if not settings.enabled:
         raise HTTPException(status_code=403, detail="Chat is disabled.")
@@ -2594,17 +2600,14 @@ def _create_chat_message_from_form(
         connection.commit()
         return None if message is None else _chat_message_payload(message)
 
-    message_id = create_chat_message(
+    return _create_user_chat_message(
         connection,
+        form,
         tournament_id=tournament_id,
         display_name=display_name,
         text=text,
+        sender_ip_hash=sender_ip_hash,
     )
-    message = get_chat_message(connection, message_id)
-    connection.commit()
-    if message is None:
-        raise RuntimeError("chat message disappeared after creation")
-    return _chat_message_payload(message)
 
 
 def _create_event_chat_message_from_form(
@@ -2613,7 +2616,10 @@ def _create_event_chat_message_from_form(
     *,
     event_id: int,
     settings: EventChatSettingsRecord,
+    allow_game_context: bool = True,
+    sender_ip_hash: str | None = None,
 ) -> dict[str, Any]:
+    _require_chat_address_allowed(connection, sender_ip_hash)
     if not settings.enabled:
         raise HTTPException(status_code=403, detail="Chat is disabled.")
 
@@ -2652,11 +2658,80 @@ def _create_event_chat_message_from_form(
                     detail=f"Slow mode is active. Try again in {remaining} seconds.",
                 )
 
-    message_id = create_chat_message(
+    return _create_user_chat_message(
         connection,
+        form,
         event_id=event_id,
         display_name=display_name,
         text=text,
+        allow_game_context=allow_game_context,
+        sender_ip_hash=sender_ip_hash,
+    )
+
+
+def _create_user_chat_message(
+    connection: sqlite3.Connection,
+    form: dict[str, list[str]],
+    *,
+    display_name: str,
+    text: str,
+    sender_ip_hash: str | None,
+    tournament_id: int | None = None,
+    event_id: int | None = None,
+    allow_game_context: bool = True,
+) -> dict[str, Any]:
+    reply_to_id = _chat_reference_id(form, "reply_to_id")
+    if form_value(form, "reply_to_id"):
+        reply = connection.execute(
+            "SELECT tournament_id, event_id, display_name FROM chat_messages WHERE id = ? FOR KEY SHARE",
+            (reply_to_id,),
+        ).fetchone()
+        if (
+            reply is None
+            or reply["tournament_id"] != tournament_id
+            or reply["event_id"] != event_id
+            or reply["display_name"] == "System"
+        ):
+            raise HTTPException(status_code=422, detail="The original chat message is unavailable.")
+
+    game = None
+    if allow_game_context and (game_id := _chat_reference_id(form, "game_id")) is not None:
+        game = connection.execute(
+            """
+            SELECT id, tournament_id, white_engine_id, black_engine_id
+            FROM games WHERE id = ? FOR KEY SHARE
+            """,
+            (game_id,),
+        ).fetchone()
+        if game is not None:
+            if tournament_id is not None:
+                if game["tournament_id"] != tournament_id:
+                    game = None
+            elif event_id is not None:
+                tournament = get_tournament(connection, game["tournament_id"])
+                if (
+                    tournament is None
+                    or tournament.status == "draft"
+                    or not _event_has_tournament(connection, event_id, tournament.id)
+                ):
+                    game = None
+
+    viewer_id = form_value(form, "viewer_id")
+    sender_key = None
+    if re.fullmatch(r"[0-9a-f]{32}", viewer_id):
+        sender_key = hashlib.sha256(f"chat:{tournament_id}:{event_id}:{viewer_id}".encode()).hexdigest()
+
+    message_id = create_chat_message(
+        connection,
+        tournament_id=tournament_id,
+        event_id=event_id,
+        display_name=display_name,
+        text=text,
+        game_id=game["id"] if game else None,
+        game_label=_chat_game_label(connection, game["white_engine_id"], game["black_engine_id"]) if game else None,
+        reply_to_id=reply_to_id,
+        sender_key=sender_key,
+        sender_ip_hash=sender_ip_hash,
     )
     message = get_chat_message(connection, message_id)
     connection.commit()
@@ -2666,14 +2741,58 @@ def _create_event_chat_message_from_form(
 
 
 def _chat_message_payload(message: ChatMessageRecord) -> dict[str, Any]:
-    return {
-        "id": message.id,
-        "tournament_id": message.tournament_id,
-        "event_id": message.event_id,
-        "display_name": message.display_name,
-        "text": message.text,
-        "at": message.at,
-    }
+    return asdict(message)
+
+
+def _chat_reference_id(form: dict[str, list[str]], field: str) -> int | None:
+    raw = form_value(form, field)
+    if not re.fullmatch(r"[0-9]{1,19}", raw):
+        return None
+    value = int(raw)
+    return value if 0 < value < 2**63 else None
+
+
+def _chat_game_label(connection: sqlite3.Connection, white_id: int, black_id: int) -> str:
+    names = []
+    for engine_id in (white_id, black_id):
+        engine = get_engine(connection, engine_id)
+        names.append(_engine_display_name(engine.name, engine.version) if engine else f"Engine {engine_id}")
+    return " vs ".join(names)
+
+
+def _chat_address_hash(request: Request) -> str | None:
+    from cope.adapters.http.forms import client_address
+
+    token = request.app.state.event_token
+    if not token:
+        return None
+    try:
+        address = ipaddress.ip_address(client_address(request))
+    except ValueError:
+        return None
+    if request.client and str(address) == request.client.host and not address.is_global and request.headers.get("x-forwarded-for"):
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return hmac.digest(token.encode(), f"cope:chat-address:{address}".encode(), "sha256").hex()
+
+
+def _lock_chat_address(connection: sqlite3.Connection, sender_ip_hash: str) -> None:
+    connection.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+        (f"cope:chat-address:{sender_ip_hash}",),
+    )
+
+
+def _require_chat_address_allowed(connection: sqlite3.Connection, sender_ip_hash: str | None) -> None:
+    if sender_ip_hash is None:
+        return
+    _lock_chat_address(connection, sender_ip_hash)
+    if connection.execute(
+        "SELECT 1 FROM chat_ip_blocks WHERE sender_ip_hash = ?",
+        (sender_ip_hash,),
+    ).fetchone():
+        raise HTTPException(status_code=403, detail="This IP address is blocked from chat.")
 
 
 def _require_public_chat_tournament(

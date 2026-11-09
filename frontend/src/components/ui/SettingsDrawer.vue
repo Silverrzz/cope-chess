@@ -10,7 +10,14 @@ import OptionPicker from "./OptionPicker.vue";
 
 const { theme, boardPresets, previewBoardTheme, revertBoardTheme, setBoardTheme } = useBoardTheme();
 const { resolvedTheme, setTheme } = useTheme();
-const { evaluationPerspective, kibitzerEnabled, setEvaluationPerspective, setKibitzerEnabled, confettiEnabled, eventMusicEnabled, setConfettiEnabled, setEventMusicEnabled } = useViewerSettings();
+const {
+  evaluationPerspective, setEvaluationPerspective,
+  kibitzerEnabled, setKibitzerEnabled,
+  boardAnnotationsEnabled, setBoardAnnotationsEnabled,
+  chatGameLinksVisible, setChatGameLinksVisible,
+  confettiEnabled, setConfettiEnabled,
+  eventMusicEnabled, setEventMusicEnabled,
+} = useViewerSettings();
 
 const open = ref(false);
 let originalDarkMode = resolvedTheme.value === "dark";
@@ -21,6 +28,8 @@ const draftConfettiEnabled = ref(confettiEnabled.value);
 const draftEventMusicEnabled = ref(eventMusicEnabled.value);
 const draftPerspective = ref(evaluationPerspective.value);
 const draftKibitzer = ref(kibitzerEnabled.value);
+const draftBoardAnnotations = ref(boardAnnotationsEnabled.value);
+const draftChatGameLinks = ref(chatGameLinksVisible.value);
 const draftDarkMode = ref(resolvedTheme.value === "dark");
 
 watch(open, async (isOpen) => {
@@ -28,6 +37,8 @@ watch(open, async (isOpen) => {
   originalPerspective = evaluationPerspective.value;
   draftPerspective.value = originalPerspective;
   draftKibitzer.value = kibitzerEnabled.value;
+  draftBoardAnnotations.value = boardAnnotationsEnabled.value;
+  draftChatGameLinks.value = chatGameLinksVisible.value;
   draft.value = { ...theme.value };
   draftConfettiEnabled.value = confettiEnabled.value;
   draftEventMusicEnabled.value = eventMusicEnabled.value;
@@ -52,6 +63,8 @@ watch(draft, (next) => {
 function save(): void {
   setEvaluationPerspective(draftPerspective.value);
   setKibitzerEnabled(draftKibitzer.value);
+  setBoardAnnotationsEnabled(draftBoardAnnotations.value);
+  setChatGameLinksVisible(draftChatGameLinks.value);
   setBoardTheme(draft.value);
   setConfettiEnabled(draftConfettiEnabled.value);
   setEventMusicEnabled(draftEventMusicEnabled.value);
@@ -90,6 +103,8 @@ function reset(): void {
   draftDarkMode.value = true;
   draftPerspective.value = "white";
   draftKibitzer.value = true;
+  draftBoardAnnotations.value = true;
+  draftChatGameLinks.value = true;
 }
 
 </script>
@@ -170,6 +185,16 @@ function reset(): void {
           <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
         </div>
         <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span></label>
+        <label class="setting-toggle">
+          <input v-model="draftBoardAnnotations" type="checkbox" />
+          <span><strong>Board annotations</strong><small>Right-click to highlight squares and drag to draw arrows.</small></span>
+        </label>
+
+        <h3>Chat</h3>
+        <label class="setting-toggle">
+          <input v-model="draftChatGameLinks" type="checkbox" />
+          <span><strong>Show game links</strong><small>See which game someone was watching when they sent a message.</small></span>
+        </label>
 
         <h3>Celebrations</h3>
         <label class="setting-toggle">

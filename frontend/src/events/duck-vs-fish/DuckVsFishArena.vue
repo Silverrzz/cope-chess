@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { api } from "@/api/client";
 import { buildPositions, positionFen } from "@/components/chess/chess";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
@@ -20,6 +20,7 @@ import { pondRoster, type PondPayload } from "./types";
 
 const props = defineProps<{ detail: EventDetailResponse }>();
 const route = useRoute();
+const router = useRouter();
 const payload = computed(() => props.detail.custom as PondPayload);
 const controlLabel = computed(() => timeControlLabel(payload.value.tournament?.config?.time_control));
 const initialClock = computed(() => {
@@ -30,13 +31,11 @@ const initialClock = computed(() => {
 const roster = computed(() => pondRoster(props.detail.cast));
 const games = ref<GameRecord[]>([]);
 const viewer = ref<TournamentDetailResponse | null>(null);
-const selected = ref<string | null>(null);
+const selected = ref<string | null>(typeof route.query.game_id === "string" ? route.query.game_id : null);
 const selectedPly = ref(0);
 const currentFen = ref("startpos");
 const busy = ref(false);
 const error = ref("");
-const localMessages = ref<ChatMessage[]>([]);
-const messages = computed(() => [...props.detail.chat_messages, ...localMessages.value.filter(message => !props.detail.chat_messages.some(existing => existing.id === message.id))]);
 const completed = computed(() => games.value.filter(game => game.status === "finished" && ["1-0", "0-1", "1/2-1/2"].includes(game.result ?? "")));
 const defaultReplay = computed(() => props.detail.event.status === "completed"
   ? completed.value.find(game => game.game_number === 1) ?? completed.value[0]
@@ -67,6 +66,7 @@ let refreshTimer: number | undefined;
 
 watch(() => payload.value.games, value => { games.value = value; }, { immediate: true });
 watch(() => [payload.value.tournament?.id, props.detail.event.revision], () => { void loadViewer(); }, { immediate: true });
+watch(() => route.query.game_id, value => { void loadViewer(typeof value === "string" ? value : null); });
 watch([arenaElement, boardColumnElement, viewer], scheduleArenaFit, { flush: "post" });
 watch(headingElement, (next, previous) => {
   if (previous) headingResizeObserver?.unobserve(previous);
@@ -155,7 +155,19 @@ async function fitArenaToViewport(): Promise<void> {
   arena.style.setProperty("--arena-board-size", `${boardSize}px`);
 }
 
-async function loadViewer(gameId?: string): Promise<void> {
+function selectGame(gameId: string | null): void {
+  const query = { ...route.query };
+  if (gameId) query.game_id = gameId;
+  else delete query.game_id;
+  void router.push({ query });
+}
+
+function appendChat(message: ChatMessage): void {
+  if (message.id !== undefined && props.detail.chat_messages.some(item => String(item.id) === String(message.id))) return;
+  props.detail.chat_messages.push(message);
+}
+
+async function loadViewer(gameId?: string | null): Promise<void> {
   const tournament = payload.value.tournament;
   if (!tournament || tournament.status === "draft") return;
   if (busy.value && gameId === undefined) return;
@@ -193,7 +205,7 @@ async function loadViewer(gameId?: string): Promise<void> {
         <div class="title-line"><h1>{{ detail.event.title }}</h1><span class="relay-status">{{ gameLabel }}</span><span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ (detail.spectator_count ?? 0).toLocaleString() }}</span></div>
         <p>Duck Chess<template v-if="viewerGame"> / Game {{ viewerGame.game_number ?? games.findIndex(game => game.id === viewerGame?.id) + 1 }}</template><template v-if="oddsLabel"> / {{ oddsLabel }}</template></p>
       </div>
-      <div class="tournament-heading__controls"><button v-if="selected && ['live', 'intermission'].includes(detail.event.status)" type="button" class="event-page-link" @click="selected = null; loadViewer()">Follow live <AppIcon name="arrow-right" :size="14" /></button><RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink></div>
+      <div class="tournament-heading__controls"><button v-if="selected && ['live', 'intermission'].includes(detail.event.status)" type="button" class="event-page-link" @click="selectGame(null)">Follow live <AppIcon name="arrow-right" :size="14" /></button><RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink></div>
     </header>
     <ContentState v-if="error" kind="error" :message="error" action-label="Try again" compact @action="loadViewer()" />
     <section ref="arenaElement" class="arena" aria-label="wakwak versus Fairy-Stockfish">
@@ -206,7 +218,7 @@ async function loadViewer(gameId?: string): Promise<void> {
       <div ref="boardColumnElement" class="board-column"><ChessViewer variant="duck" :key="viewerGame?.id ?? 'pending'" :opening="opening" :moves="moves" :model-value="selectedPly" label="wakwak versus Fairy-Stockfish" @update:model-value="selectedPly = $event" @position="currentFen = $event.fen" /></div>
       <aside class="activity-column" aria-label="Game activity">
         <MoveList class="arena-moves" :moves="moves.map(move => move.san || move.uci)" :uci-moves="moves.map(move => move.uci)" :fen="opening.fen" :book-plies="opening.book_moves?.length ?? 0" :model-value="selectedPly" @update:model-value="selectedPly = $event" />
-        <ChatPanel class="arena-chat" :messages="messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" @sent="localMessages.push($event)" />
+        <ChatPanel class="arena-chat" :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug" :game-id="viewerGame?.id ?? null" @sent="appendChat" />
       </aside>
     </section>
     <section class="tournament-data">
@@ -221,7 +233,7 @@ async function loadViewer(gameId?: string): Promise<void> {
       </section>
       <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
         <header><h2 id="games-title">Games</h2></header>
-        <div class="table-wrap"><table><thead><tr><th>Game</th><th>White</th><th>Black</th><th>Result</th><th></th></tr></thead><tbody><tr v-for="(game, index) in games" :key="game.id"><td>{{ index + 1 }}</td><td class="team-cell">{{ engineName(game.white_engine_id) }}</td><td class="team-cell">{{ engineName(game.black_engine_id) }}</td><td>{{ game.result || (['live', 'assigned'].includes(game.status) ? 'Live' : 'Pending') }}</td><td class="action-cell"><button v-if="['live', 'assigned', 'finished'].includes(game.status)" type="button" @click="loadViewer(String(game.id))">{{ game.status === 'finished' ? 'Replay' : 'View' }} <AppIcon name="arrow-right" :size="13" /></button></td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Game</th><th>White</th><th>Black</th><th>Result</th><th></th></tr></thead><tbody><tr v-for="(game, index) in games" :key="game.id"><td>{{ index + 1 }}</td><td class="team-cell">{{ engineName(game.white_engine_id) }}</td><td class="team-cell">{{ engineName(game.black_engine_id) }}</td><td>{{ game.result || (['live', 'assigned'].includes(game.status) ? 'Live' : 'Pending') }}</td><td class="action-cell"><button v-if="['live', 'assigned', 'finished'].includes(game.status)" type="button" @click="selectGame(String(game.id))">{{ game.status === 'finished' ? 'Replay' : 'View' }} <AppIcon name="arrow-right" :size="13" /></button></td></tr></tbody></table></div>
       </section>
       <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
         <header><h2 id="settings-title">Settings</h2></header>

@@ -1914,6 +1914,7 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 form,
                 tournament_id=tournament_id,
+                sender_ip_hash=web_app._chat_address_hash(request),
             )
 
         message = await asyncio.to_thread(create_message)
@@ -4534,6 +4535,31 @@ def register_api_routes(app: FastAPI) -> None:
         )
         _publish_admin_change(web_app, request)
         return _json({"message": "Message deleted."})
+
+    @app.post("/api/admin/chat/messages/{message_id}/block")
+    def admin_chat_block(
+        message_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Admin access is required to block IP addresses.")
+        row = connection.execute(
+            "SELECT sender_ip_hash FROM chat_messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Message not found.")
+        sender_ip_hash = row["sender_ip_hash"]
+        if not sender_ip_hash:
+            raise HTTPException(status_code=409, detail="This message has no recorded IP address.")
+        web_app._lock_chat_address(connection, sender_ip_hash)
+        connection.execute(
+            "INSERT INTO chat_ip_blocks (sender_ip_hash) VALUES (?) ON CONFLICT DO NOTHING",
+            (sender_ip_hash,),
+        )
+        connection.commit()
+        return _json({"message": "IP address blocked from chat."})
 
     register_event_api_routes(app)
 
