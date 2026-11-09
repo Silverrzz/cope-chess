@@ -83,7 +83,7 @@ export type TournamentFormat = 'round_robin' | 'swiss' | 'knockout' | 'gauntlet'
 export type TimeControlCategory = 'increment' | 'movetime' | 'movestogo' | 'movenodes'
 
 export type FormatOptions =
-  | { cycles: number }
+  | { cycles: number; games_per_engine?: number | null }
   | { rounds: number }
   | { tiebreak: 'extra_pair' }
   | { hero_engine_id: number; cycles: number }

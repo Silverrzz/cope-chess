@@ -14,11 +14,13 @@ from cope.core.models import (
 )
 from cope.chat import announce_tournament_started
 from cope.tournament.clock_scaling import pin_clock_profile
+from cope.tournament.round_robin import round_robin_pair_counts
 from cope.db import (
     GameRecord,
     TournamentParticipantGameRemoval,
     TournamentMatchRecord,
     TournamentRecord,
+    count_games,
     create_game,
     create_tournament_match,
     finish_tournament_match,
@@ -145,6 +147,9 @@ def _lock_live_roster_tournament(
         raise ValueError("participants can only be changed while the tournament is running or paused")
     if tournament.config.clock_reference_hardware_key is not None:
         raise ValueError("The roster of a hardware-scaled tournament is fixed once it starts")
+    options = tournament.config.format_options
+    if isinstance(options, RoundRobinFormatOptions) and options.games_per_engine is not None:
+        raise ValueError("The roster of a round robin with an exact game count is fixed once it starts")
     if tournament.config.format not in {
         TournamentFormat.ROUND_ROBIN,
         TournamentFormat.GAUNTLET,
@@ -230,16 +235,12 @@ def _start_tournament(
     set_tournament_status(connection, tournament.id, "running")
     running = _refresh_tournament(connection, tournament)
     advance = advance_tournament(connection, running)
-    record_games = tuple(
-        game
-        for game in list_games(connection, tournament.id)
-        if game.record_eligible
-    )
+    record_games = count_games(connection, tournament.id)
     if record_games:
         announce_tournament_started(
             connection,
             running,
-            scheduled_games=len(record_games),
+            scheduled_games=record_games,
         )
     return TournamentPreparation(
         tournament_id=tournament.id,
@@ -252,11 +253,14 @@ def materialize_tournament_schedule(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
 ) -> TournamentPreparation:
-    existing_games = list_games(connection, tournament.id)
-    existing_matches = list_tournament_matches(connection, tournament.id)
+    has_schedule = connection.execute(
+        """SELECT EXISTS (SELECT 1 FROM games WHERE tournament_id = ?)
+               OR EXISTS (SELECT 1 FROM tournament_matches WHERE tournament_id = ?) AS present""",
+        (tournament.id, tournament.id),
+    ).fetchone()["present"]
     created_games = 0
 
-    if not existing_games and not existing_matches:
+    if not has_schedule:
         from cope.events.duck_vs_fish import advance_odds
 
         odds_created = advance_odds(connection, tournament.id)
@@ -288,9 +292,13 @@ def advance_tournament(
     hand_brain = advance_hand_brain(connection, tournament)
     if hand_brain is not None:
         return hand_brain
-    games = list_games(connection, tournament.id)
     if tournament.config.format in {TournamentFormat.ROUND_ROBIN, TournamentFormat.GAUNTLET}:
-        return TournamentAdvance(complete=bool(games) and all(game.status == "finished" for game in games))
+        row = connection.execute(
+            """SELECT EXISTS (SELECT 1 FROM games WHERE tournament_id = ?)
+                  AND NOT EXISTS (SELECT 1 FROM games WHERE tournament_id = ? AND status <> 'finished') AS complete""",
+            (tournament.id, tournament.id),
+        ).fetchone()
+        return TournamentAdvance(complete=row["complete"])
     if tournament.config.format == TournamentFormat.SWISS:
         return _advance_swiss(connection, tournament)
     if tournament.config.format == TournamentFormat.KNOCKOUT:
@@ -307,42 +315,34 @@ def generate_round_robin_games(
         raise ValueError("round robin tournament has invalid format options")
 
     participants = tournament.config.participants
-    created_games = 0
     round_pairings = _round_robin_pairings(participants)
     rounds_per_cycle = len(round_pairings)
-    pairings_per_cycle = sum(len(pairings) for pairings in round_pairings)
-    opening_ids = _opening_ids(connection, tournament, options.cycles * pairings_per_cycle)
-    round_pairing_offsets: list[int] = []
-    next_pairing_offset = 0
-    for pairings in round_pairings:
-        round_pairing_offsets.append(next_pairing_offset)
-        next_pairing_offset += len(pairings)
+    pair_counts = (
+        round_robin_pair_counts(participants, options.games_per_engine)
+        if options.games_per_engine is not None else
+        {tuple(sorted(pair)): options.cycles for pairs in round_pairings for pair in pairs}
+    )
+    opening_ids = _opening_ids(connection, tournament, sum(pair_counts.values()))
 
-    for cycle_index in range(options.cycles):
-        for base_round, pairings in enumerate(round_pairings, start=1):
-            round_number = base_round + cycle_index * rounds_per_cycle
-            for pair_index, pairing in enumerate(pairings, start=1):
-                for leg_index in range(2):
-                    white_engine_id, black_engine_id = pairing
-                    if leg_index == 1:
-                        white_engine_id, black_engine_id = black_engine_id, white_engine_id
-                    _create_scheduled_game(
-                        connection,
-                        tournament,
-                        round_number=round_number,
-                        pair_index=pair_index,
-                        white_engine_id=white_engine_id,
-                        black_engine_id=black_engine_id,
-                        game_number=cycle_index * 2 + leg_index + 1,
-                        opening_offset=(
-                            cycle_index * pairings_per_cycle
-                            + round_pairing_offsets[base_round - 1]
-                            + pair_index - 1
-                        ),
-                        opening_ids=opening_ids,
-                    )
-                    created_games += 1
-    return created_games
+    def scheduled_rows():
+        opening_offset = 0
+        for cycle in range(max(pair_counts.values())):
+            for base_round, pairings in enumerate(round_pairings, start=1):
+                round_number = base_round + cycle * rounds_per_cycle
+                for pair_index, (white, black) in enumerate(pairings, start=1):
+                    if cycle >= pair_counts[tuple(sorted((white, black)))]:
+                        continue
+                    opening = opening_ids[opening_offset % len(opening_ids)] if opening_ids else None
+                    opening_offset += 1
+                    yield tournament.id, round_number, pair_index, white, black, cycle * 2 + 1, opening
+                    yield tournament.id, round_number, pair_index, black, white, cycle * 2 + 2, opening
+
+    connection.copy_rows(
+        """COPY games (tournament_id, round, pair_index, white_engine_id, black_engine_id, game_number, opening_id)
+           FROM STDIN""",
+        scheduled_rows(),
+    )
+    return 2 * sum(pair_counts.values())
 
 
 def _generate_round_robin_participant_games(

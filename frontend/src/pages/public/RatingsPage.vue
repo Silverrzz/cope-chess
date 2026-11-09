@@ -18,8 +18,6 @@ interface RatingListRecord {
   id: Identifier
   name: string
   anchor_engine_id?: Identifier | null
-  hardware_scaled?: boolean
-  monthly_refresh?: boolean
 }
 
 interface RatingRecord {
@@ -155,9 +153,6 @@ function selectRatingList(event: Event): void {
         <div class="category-overview__copy">
           <span>Selected list</span>
           <h2>{{ data.rating_list.name }}</h2>
-          <p v-if="data.rating_list.hardware_scaled || data.rating_list.monthly_refresh">
-            {{ [data.rating_list.hardware_scaled ? 'Hardware-scaled clocks' : '', data.rating_list.monthly_refresh ? 'Monthly results' : ''].filter(Boolean).join(' · ') }}
-          </p>
         </div>
         <dl>
           <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>

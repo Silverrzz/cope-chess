@@ -4007,7 +4007,10 @@ def _settings_view(
         "tiebreak": "Tiebreak",
         "hero_engine_id": "Gauntlet hero",
     }
-    for field, value in options.model_dump(mode="json").items():
+    option_values = options.model_dump(mode="json", exclude_none=True)
+    if "games_per_engine" in option_values:
+        option_values.pop("cycles", None)
+    for field, value in option_values.items():
         label = option_labels.get(field, field.replace("_", " ").title())
         if field == "hero_engine_id":
             value = engines.get(value, f"Engine {value}")

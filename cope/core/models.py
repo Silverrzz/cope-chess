@@ -196,6 +196,7 @@ class KnockoutTiebreak(StrEnum):
 
 class RoundRobinFormatOptions(StrictModel):
     cycles: int = Field(default=1, gt=0)
+    games_per_engine: int | None = Field(default=None, gt=0)
 
 
 class SwissFormatOptions(StrictModel):
@@ -293,6 +294,13 @@ class TournamentConfig(StrictModel):
         if isinstance(self.format_options, GauntletFormatOptions):
             if self.format_options.hero_engine_id not in self.participants:
                 raise ValueError("gauntlet hero_engine_id must be in participants")
+        if isinstance(self.format_options, RoundRobinFormatOptions) and self.format_options.games_per_engine is not None:
+            games = self.format_options.games_per_engine
+            players = len(self.participants)
+            if self.format_options.cycles != 1:
+                raise ValueError("Choose cycles or an exact game count per engine.")
+            if games % 2 or players * games % 4 or games < 2 * (players - 1):
+                raise ValueError("The exact game count must allow at least one colour-swapped pair against every opponent and an equal number of games for every engine.")
 
         return self
 

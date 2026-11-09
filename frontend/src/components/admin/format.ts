@@ -88,6 +88,7 @@ export function normalizeSettings(value: Partial<TournamentSettings> | undefined
   const format_options: TournamentSettings['format_options'] = value.format === 'round_robin'
     ? {
         cycles: positiveInt(rawOptions.cycles, 1),
+        ...(rawOptions.games_per_engine != null ? { games_per_engine: positiveInt(rawOptions.games_per_engine, 0) } : {}),
       }
     : value.format === 'swiss'
       ? { rounds: positiveInt(rawOptions.rounds, 7) }
@@ -166,6 +167,9 @@ function normalizeConfig(config: Partial<TournamentConfig>): TournamentConfig {
 export function estimatePairs(format: TournamentFormat, options: TournamentSettings['format_options'], players: number): number {
   if (players < 2) return 0
   if (format === 'round_robin') {
+    if ('games_per_engine' in options && options.games_per_engine != null) {
+      return players * options.games_per_engine / 4
+    }
     return (players * (players - 1)) / 2 * ('cycles' in options ? options.cycles : 0)
   }
   if (format === 'swiss') {

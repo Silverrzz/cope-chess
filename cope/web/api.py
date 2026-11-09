@@ -4688,6 +4688,9 @@ def _live_tournament_roster_payload(
         reason = "Live roster changes are available while the tournament is running or paused."
     elif not supported:
         reason = "Swiss pairings and knockout brackets are fixed after the tournament starts."
+    elif tournament.config.clock_reference_hardware_key is not None or getattr(tournament.config.format_options, "games_per_engine", None) is not None:
+        editable = False
+        reason = "This tournament uses a fixed roster."
     else:
         reason = ""
     participant_ids = set(tournament.config.participants)

@@ -64,6 +64,10 @@ function patchFormatOption(key: string, value: string | number | boolean): void 
   patch({ format_options: { ...model.value.format_options, [key]: value } as TournamentSettings['format_options'] })
 }
 
+function setExactGames(value: string): void {
+  patch({ format_options: { cycles: 1, games_per_engine: value ? Number(value) : null } })
+}
+
 function setTimeControl(category: TimeControlCategory): void {
   const time_control = category === 'increment'
     ? { category: 'increment' as const, initial_ms: 60_000, increment_ms: 1_000 }
@@ -145,8 +149,13 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
 
         <label v-if="model.format === 'round_robin'" class="field">
           <span class="field__label">Cycles</span>
-          <input class="input" type="number" min="1" step="1" :value="numberOption('cycles')" @input="patchFormatOption('cycles', Number(($event.target as HTMLInputElement).value))">
+          <input class="input" type="number" min="1" step="1" :value="numberOption('cycles')" :disabled="numberOption('games_per_engine') > 0" @input="patchFormatOption('cycles', Number(($event.target as HTMLInputElement).value))">
           <small class="field__help">Each cycle gives every pairing one game with each colour.</small>
+        </label>
+        <label v-if="model.format === 'round_robin'" class="field">
+          <span class="field__label">Exact games per engine <small>optional</small></span>
+          <input class="input" type="number" min="2" step="2" :value="numberOption('games_per_engine') || ''" @input="setExactGames(($event.target as HTMLInputElement).value)">
+          <small class="field__help">Balances opponents and colours across an exact game count.</small>
         </label>
 
         <label v-else-if="model.format === 'swiss'" class="field">

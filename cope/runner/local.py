@@ -1984,6 +1984,12 @@ def _finish_tournament_if_complete(
     if current is None or current.status != "running":
         return False
 
+    if current.config.format == "round_robin" and connection.execute(
+        "SELECT 1 FROM games WHERE tournament_id = ? AND status IN ('pending', 'assigned', 'live') LIMIT 1",
+        (current.id,),
+    ).fetchone() is not None:
+        return False
+
     games = list_games(connection, current.id)
     if not games:
         return False

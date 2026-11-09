@@ -7,7 +7,8 @@ from math import log
 from typing import Iterable
 
 from cope.rating_bounds import paired_error_margins
-from cope.core.models import TournamentFormat
+from cope.core.models import RoundRobinFormatOptions, TournamentFormat
+from cope.tournament.round_robin import round_robin_pair_counts
 
 from cope.db.repo import (
     RunnerCommandRecord,
@@ -497,7 +498,15 @@ def _validate_games(connection, tournament, games: tuple, *, monthly_refresh: bo
         if tournament.status != "finished" or tournament.started_at is None or tournament.config.format != TournamentFormat.ROUND_ROBIN:
             raise RatingCommitError("A monthly edition requires a finished round robin")
         pair_counts = Counter((game.white_engine_id, game.black_engine_id) for game in games)
-        if (
+        options = tournament.config.format_options
+        if isinstance(options, RoundRobinFormatOptions) and options.games_per_engine is not None:
+            expected = round_robin_pair_counts(tournament.config.participants, options.games_per_engine)
+            if len(pair_counts) != 2 * len(expected) or any(
+                pair_counts[white, black] != count or pair_counts[black, white] != count
+                for (white, black), count in expected.items()
+            ):
+                raise RatingCommitError("A monthly edition must complete its exact schedule for every pairing and colour")
+        elif (
             any(white == black for white, black in pair_counts)
             or len(pair_counts) != len(participants) * (len(participants) - 1)
             or len(set(pair_counts.values())) != 1

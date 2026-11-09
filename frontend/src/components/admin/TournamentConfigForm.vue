@@ -84,6 +84,13 @@ function validate(): string {
   if (['dfrc', 'duck960'].includes(config.value.variant || '') && !config.value.opening_suite_id) return 'Choose a starting-position suite for this variant.'
   const options = config.value.format_options
   if (config.value.format === 'round_robin' && (!('cycles' in options) || !Number.isInteger(options.cycles) || options.cycles < 1)) return 'Cycles must be a whole number of at least 1.'
+  if (config.value.format === 'round_robin' && 'games_per_engine' in options && options.games_per_engine != null) {
+    const games = options.games_per_engine
+    const players = config.value.participants.length
+    if (!Number.isInteger(games) || games % 2 !== 0 || (games * players) % 4 !== 0 || games < 2 * (players - 1)) {
+      return 'Choose an exact game count that allows colour-swapped pairs against every opponent.'
+    }
+  }
   if (config.value.format === 'swiss' && (!('rounds' in options) || !Number.isInteger(options.rounds) || options.rounds < 1)) return 'Swiss rounds must be a whole number of at least 1.'
   if (config.value.format === 'gauntlet') {
     if (!('hero_engine_id' in options) || !config.value.participants.includes(options.hero_engine_id)) return 'Select a hero from the participating engines.'

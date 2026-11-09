@@ -447,6 +447,8 @@ def _projected_game_total(config: TournamentConfig) -> int:
     participants = len(config.participants)
     options = config.format_options
     if isinstance(options, RoundRobinFormatOptions):
+        if options.games_per_engine is not None:
+            return participants * options.games_per_engine // 2
         return participants * (participants - 1) * options.cycles
     if isinstance(options, SwissFormatOptions):
         return (participants // 2) * options.rounds * 2
