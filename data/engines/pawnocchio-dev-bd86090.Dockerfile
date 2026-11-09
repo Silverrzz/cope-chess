@@ -1,6 +1,6 @@
 FROM gcc:14.3.0-bookworm AS builder
 
-ADD --checksum=sha256:1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz /tmp/zig.tar.xz
+ADD --checksum=sha256:70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz /tmp/zig.tar.xz
 
 RUN mkdir -p /opt/zig \
     && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig \
