@@ -607,10 +607,12 @@ def _enqueue_ephemeral_subscribers(
 @contextlib.asynccontextmanager
 async def _web_lifespan(app: FastAPI):
     from cope.domains.artifacts.cleanup import run_guest_upload_maintenance
+    from cope.web.donor_snapshot import run_donor_snapshot_updates
 
     tasks = (
         asyncio.create_task(app.state.tournament_estimate_cache.run(app.state.db_path), name="tournament-estimates"),
         asyncio.create_task(run_guest_upload_maintenance(app.state.db_path), name="form-upload-maintenance"),
+        asyncio.create_task(run_donor_snapshot_updates(app.state.db_path), name="donor-snapshot"),
     )
     try:
         yield

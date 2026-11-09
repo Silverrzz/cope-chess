@@ -42,7 +42,7 @@ from starlette.datastructures import UploadFile
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine
 from cope.db import engine_version_tags
-from cope.db.donors import donor_leaderboard, list_donor_workers, set_donor_group
+from cope.db.donors import list_donor_workers, set_donor_group
 from cope.environment_clone import (
     authorize_environment_export,
     clone_catalog_payload,
@@ -1421,8 +1421,13 @@ def register_api_routes(app: FastAPI) -> None:
         )
 
     @app.get("/api/donors")
-    def public_donors(connection: sqlite3.Connection = Depends(web_app._database)):
-        return _json(donor_leaderboard(connection))
+    def public_donors():
+        from cope.web.donor_snapshot import read_donor_snapshot
+
+        snapshot = read_donor_snapshot()
+        if snapshot is None:
+            raise HTTPException(status_code=503, detail="The donor leaderboard is being prepared.")
+        return _json(snapshot)
 
     @app.get("/api/tournaments")
     def public_tournaments(
