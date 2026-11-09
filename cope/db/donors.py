@@ -90,8 +90,24 @@ def donor_leaderboard(connection) -> dict:
         WITH tournament_threads AS MATERIALIZED (
             SELECT id, COALESCE((config::jsonb ->> 'engine_threads')::integer, 1) AS threads
             FROM tournaments
+        ), historical_policy AS MATERIALIZED (
+            SELECT profile.worker_id AS fallback_worker, migration.applied_at AS cutoff
+            FROM hardware_donor_workers profile
+            JOIN application_migrations migration ON migration.version = '0020_historical_donor_attribution.sql'
+            WHERE profile.historical_anchor = 'ellie'
+        ), styx_hardware AS MATERIALIZED (
+            SELECT worker_id, historical_styx_cpu AS cpu
+            FROM hardware_donor_workers
+            WHERE historical_anchor = 'styx'
         ), worker_totals AS (
-            SELECT COALESCE(credit.worker_id, assignment.worker_id) AS worker_id,
+            SELECT CASE
+                       WHEN policy.fallback_worker IS NULL THEN recorded.worker_id
+                       WHEN matched.worker_id IS NOT NULL THEN
+                           CASE WHEN profile.historical_styx_cpu = matched.cpu THEN recorded.worker_id
+                                ELSE matched.worker_id END
+                       WHEN profile.historical_styx_cpu IS NOT NULL THEN policy.fallback_worker
+                       ELSE COALESCE(recorded.worker_id, policy.fallback_worker)
+                   END AS worker_id,
                    COUNT(*) AS games,
                    COUNT(runtime.seconds) AS timed_games,
                    SUM(runtime.seconds * COALESCE(credit.thread_count, tournament.threads)) / 3600 AS cpu_hours
@@ -99,6 +115,8 @@ def donor_leaderboard(connection) -> dict:
             JOIN tournament_threads tournament ON tournament.id = game.tournament_id
             LEFT JOIN game_assignments assignment ON assignment.game_id = game.id
             LEFT JOIN hardware_donor_games credit ON credit.game_id = game.id
+            CROSS JOIN LATERAL (SELECT COALESCE(credit.worker_id, assignment.worker_id) AS worker_id) recorded
+            LEFT JOIN hardware_donor_workers profile ON profile.worker_id = recorded.worker_id
             CROSS JOIN LATERAL (
                 SELECT GREATEST(
                     CASE WHEN pg_input_is_valid(game.started_at, 'timestamptz')
@@ -109,6 +127,26 @@ def donor_leaderboard(connection) -> dict:
                 CASE WHEN pg_input_is_valid(game.finished_at, 'timestamptz')
                      THEN game.finished_at::timestamptz END AS finished_at
             ) timing
+            LEFT JOIN historical_policy policy ON timing.finished_at IS NULL OR timing.finished_at <= policy.cutoff
+            LEFT JOIN LATERAL (
+                SELECT candidate.worker_id, candidate.cpu
+                FROM styx_hardware candidate
+                WHERE policy.fallback_worker IS NOT NULL AND candidate.cpu = COALESCE(
+                    (SELECT min(lower(btrim(hardware.hw::jsonb ->> 'cpu_model')))
+                     FROM game_clock_calibrations calibration
+                     JOIN benchmark_hardware hardware ON hardware.hardware_key = calibration.worker_hardware_key
+                     WHERE calibration.game_id = game.id
+                       AND (assignment.assignment_key IS NULL OR calibration.assignment_key = assignment.assignment_key)
+                     HAVING COUNT(DISTINCT lower(btrim(hardware.hw::jsonb ->> 'cpu_model'))) = 1),
+                    NULLIF(lower(btrim(CASE WHEN pg_input_is_valid(game.white_hw, 'jsonb')
+                        THEN game.white_hw::jsonb ->> 'cpu_model' ELSE game.white_hw END)), ''),
+                    NULLIF(lower(btrim(CASE WHEN pg_input_is_valid(game.black_hw, 'jsonb')
+                        THEN game.black_hw::jsonb ->> 'cpu_model' ELSE game.black_hw END)), ''),
+                    profile.historical_styx_cpu
+                )
+                ORDER BY candidate.worker_id
+                LIMIT 1
+            ) matched ON TRUE
             CROSS JOIN LATERAL (
                 SELECT CASE WHEN isfinite(timing.started_at) AND isfinite(timing.finished_at)
                                  AND timing.finished_at >= timing.started_at
