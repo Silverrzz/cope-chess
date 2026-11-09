@@ -13,6 +13,7 @@ from cope.core.models import (
     TournamentFormat,
 )
 from cope.chat import announce_tournament_started
+from cope.tournament.clock_scaling import pin_clock_profile
 from cope.db import (
     GameRecord,
     TournamentParticipantGameRemoval,
@@ -21,6 +22,7 @@ from cope.db import (
     create_game,
     create_tournament_match,
     finish_tournament_match,
+    get_engine,
     get_tournament,
     invalidate_tournament_participant_games,
     list_due_scheduled_tournaments,
@@ -141,6 +143,8 @@ def _lock_live_roster_tournament(
         raise ValueError("Duck vs Fish odds participants cannot change")
     if tournament.status not in {"running", "paused"}:
         raise ValueError("participants can only be changed while the tournament is running or paused")
+    if tournament.config.clock_reference_hardware_key is not None:
+        raise ValueError("The roster of a hardware-scaled tournament is fixed once it starts")
     if tournament.config.format not in {
         TournamentFormat.ROUND_ROBIN,
         TournamentFormat.GAUNTLET,
@@ -178,6 +182,8 @@ def prepare_tournament(
             created_games=0,
             skipped_reason="tournament is no longer scheduled",
         )
+    if not _prepare_clock_reference(connection, current):
+        return TournamentPreparation(current.id, current.name, 0, "Waiting for exact-build reference benchmarks")
     return _start_tournament(connection, current)
 
 
@@ -193,7 +199,27 @@ def start_tournament(
         or tournament.started_at is not None
     ):
         raise ValueError("only a draft or unstarted scheduled tournament can be started")
+    if not _prepare_clock_reference(connection, tournament):
+        raise ValueError("Every participant needs an artifact-verified benchmark on the reference hardware")
     return _start_tournament(connection, tournament)
+
+
+def _prepare_clock_reference(connection, tournament):
+    key = tournament.config.clock_reference_hardware_key
+    if key is None:
+        return True
+    engines = {
+        engine_id: get_engine(connection, engine_id, tournament_id=tournament.id)
+        for engine_id in tournament.config.participants
+    }
+    if pin_clock_profile(connection, tournament, key, engines) is None:
+        return False
+    connection.executemany(
+        """INSERT INTO control_tournament_builds (tournament_id, engine_version_id, build_hash, engine_spec)
+           VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING""",
+        [(tournament.id, engine_id, engine.build_hash, engine.model_dump_json()) for engine_id, engine in engines.items()],
+    )
+    return True
 
 
 def _start_tournament(

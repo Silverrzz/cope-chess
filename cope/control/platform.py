@@ -69,7 +69,8 @@ def _scope(path, method):
     resource = segments[3] if path.startswith("/api/admin/") else segments[2]
     domain = {
         "workers": "workers", "benchmarkers": "workers", "benchmark-jobs": "engines", "benchmark-hardware": "engines",
-        "engines": "engines", "engine-versions": "engines", "git-hosts": "settings", "engine-dockerfiles": "engines",
+        "engines": "engines", "engine-versions": "engines", "engine-version-tags": "engines",
+        "git-hosts": "settings", "engine-dockerfiles": "engines",
         "events": "events", "event-modules": "events", "ratings": "ratings", "rating-lists": "ratings",
         "badges": "badges", "chat": "chat", "tournaments": "tournaments", "openings": "openings",
         "settings": "settings", "deployments": "deployments", "updates": "deployments", "dockerfile-pulls": "recipes",

@@ -32,6 +32,8 @@ class RatingListRecord:
     created_at: str
     variant: str = "standard"
     rules_revision: str = "chess1"
+    hardware_scaled: bool = False
+    monthly_refresh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +272,7 @@ class EngineVersionRecord:
     engine_active: bool
     created_at: str
     source_date: str | None = None
+    public_hidden: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1112,6 +1115,8 @@ def validate_rating_list_variant(connection, rating_list_id: int, config: Tourna
     rating = _rating_list_from_row(row)
     if (rating.variant, rating.rules_revision) != (config.variant, config.rules_revision):
         raise ValueError(f"Rating list {rating.name} ({rating.variant}/{rating.rules_revision}) is incompatible with {config.variant}/{config.rules_revision}")
+    if rating.hardware_scaled != (config.clock_reference_hardware_key is not None):
+        raise ValueError("The tournament and rating list must use the same hardware clock mode")
 
 
 def create_tournament(
@@ -4960,7 +4965,11 @@ def request_tournament_rating_commit(
     ).fetchone() is not None:
         raise ValueError("engine relay tournaments are never eligible for ratings")
     if rating_list_ids is None:
-        rating_list_ids = (item.id for item in list_rating_lists(connection) if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision))
+        rating_list_ids = (
+            item.id for item in list_rating_lists(connection)
+            if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)
+            and item.hardware_scaled == (tournament.config.clock_reference_hardware_key is not None)
+        )
     selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
     if not selected or any(value <= 0 for value in selected):
         raise ValueError("choose at least one rating list")
@@ -5035,19 +5044,28 @@ def list_tournament_rating_commits(
     )
 
 
-def create_rating_list(connection: sqlite3.Connection, name: str, variant: str = "standard") -> int:
+def create_rating_list(
+    connection: sqlite3.Connection, name: str, variant: str = "standard", *,
+    hardware_scaled: bool = False, monthly_refresh: bool = False,
+) -> int:
     definition = get_variant(variant)
+    if hardware_scaled and variant != "standard":
+        raise ValueError("Hardware-scaled rating lists require standard chess")
     cursor = connection.execute(
-        "INSERT INTO rating_lists (name, created_at, variant, rules_revision) VALUES (?, ?, ?, ?)",
-        (name.strip(), utc_now(), definition.id, definition.rules_revision),
+        """INSERT INTO rating_lists (name, created_at, variant, rules_revision, hardware_scaled, monthly_refresh)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (name.strip(), utc_now(), definition.id, definition.rules_revision, hardware_scaled, monthly_refresh),
     )
     return int(cursor.lastrowid)
 
 
 def set_rating_list_variant(connection, rating_list_id: int, variant: str) -> None:
     definition = get_variant(variant)
-    if connection.execute("SELECT id FROM rating_lists WHERE id = ? FOR UPDATE", (rating_list_id,)).fetchone() is None:
+    row = connection.execute("SELECT hardware_scaled FROM rating_lists WHERE id = ? FOR UPDATE", (rating_list_id,)).fetchone()
+    if row is None:
         raise ValueError("Rating list does not exist")
+    if row["hardware_scaled"] and variant != "standard":
+        raise ValueError("Hardware-scaled rating lists require standard chess")
     for row in connection.execute("SELECT tournament_id FROM tournament_rating_list_commits WHERE rating_list_id = ? AND status IN ('pending', 'claimed', 'applied')", (rating_list_id,)):
         tournament = get_tournament(connection, row["tournament_id"])
         if tournament is not None and (tournament.config.variant, tournament.config.rules_revision) != (variant, definition.rules_revision):
@@ -5110,6 +5128,8 @@ def _rating_list_from_row(row: sqlite3.Row) -> RatingListRecord:
         variant=row["variant"],
         rules_revision=row["rules_revision"],
         created_at=row["created_at"],
+        hardware_scaled=row["hardware_scaled"],
+        monthly_refresh=row["monthly_refresh"],
     )
 
 
@@ -5175,6 +5195,7 @@ def _engine_version_from_row(row: sqlite3.Row) -> EngineVersionRecord:
         engine_active=engine_active,
         created_at=row["created_at"],
         source_date=row["source_date"],
+        public_hidden=row["public_hidden"],
     )
 
 

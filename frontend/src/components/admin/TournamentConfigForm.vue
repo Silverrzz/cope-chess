@@ -30,6 +30,16 @@ const settings = computed<TournamentSettings>({
   get: () => config.value,
   set: (value) => { config.value = { ...config.value, ...value } },
 })
+const clockReference = computed({
+  get: () => config.value.clock_reference_hardware_key ?? null,
+  set: (value: string | null) => {
+    config.value = {
+      ...config.value,
+      clock_reference_hardware_key: value,
+      lag_compensation_ms: value ? 0 : props.seed.config.lag_compensation_ms || 50,
+    }
+  },
+})
 
 const selectedOpening = computed(() => props.seed.opening_suites.find((suite) => suite.id === config.value.opening_suite_id))
 const hasLocalEngines = computed(() => props.seed.engine_options.some((engine) => engine.distribution === 'worker_local'))
@@ -81,6 +91,13 @@ function validate(): string {
   }
 
   const control = config.value.time_control
+  if (config.value.clock_reference_hardware_key && (
+    config.value.variant !== 'standard' || control.category !== 'increment'
+    || config.value.engine_threads !== 1 || config.value.lag_compensation_ms !== 0
+  )) return 'Hardware-scaled clocks require standard chess, an increment time control, one thread, and zero lag compensation.'
+  if (config.value.clock_reference_hardware_key && props.seed.engine_options.some((engine) =>
+    config.value.participants.includes(engine.id) && engine.distribution === 'worker_local'
+  )) return 'Hardware-scaled clocks require managed builds for every participant.'
   if (control.category === 'increment' && (control.initial_ms <= 0 || control.increment_ms < 0)) return 'Enter a positive initial time and a non-negative increment.'
   if (control.category === 'movetime' && control.move_time_ms <= 0) return 'Time per move must be greater than zero.'
   if (control.category === 'movestogo' && (control.initial_ms <= 0 || !Number.isInteger(control.moves_to_go) || control.moves_to_go < 1)) return 'Enter a positive clock time and move quota.'
@@ -133,6 +150,16 @@ function submit(): void {
         <div class="custom-settings">
           <TournamentSettingsEditor v-model="settings" :engines="seed.engine_options" :opening-suites="seed.opening_suites" :participants="config.participants" />
         </div>
+        <label class="field">
+          <span class="field__label">Clock calibration</span>
+          <select v-model="clockReference" class="input">
+            <option :value="null">Fixed clocks</option>
+            <option v-for="profile in seed.clock_reference_profiles ?? []" :key="profile.hardware_key" :value="profile.hardware_key">
+              {{ profile.hw.cpu_model }} · {{ profile.hw.physical_cores }} cores · {{ profile.hardware_key.slice(0, 8) }}
+            </option>
+          </select>
+          <small v-if="config.clock_reference_hardware_key">Every engine must be benchmarked on this reference and on each worker that plays scaled games.</small>
+        </label>
       </section>
 
       <section class="panel form-panel">

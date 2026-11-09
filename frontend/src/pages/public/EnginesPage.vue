@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { engineVersionLabel } from '@/components/public/format'
+import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
+import type { EngineVersionTag } from '@/components/engines/types'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { api } from '@/api/client'
@@ -26,6 +28,7 @@ interface EngineVersionSummary {
   repository_full_name: string
   active: boolean
   created_at: string
+  tags?: EngineVersionTag[]
 }
 
 interface EngineFamilyRecord {
@@ -191,6 +194,7 @@ function clearFilters(): void {
               <StatusPill :status="engine.active ? 'ready' : 'unavailable'" />
             </header>
             <p class="engine-card__author">{{ engine.author ? `By ${engine.author}` : 'Unknown author' }}</p>
+            <EngineVersionTags :tags="engine.versions[0]?.tags ?? []" />
             <dl class="engine-card__stats">
               <div><dt>Games</dt><dd>{{ engine.record.games.toLocaleString() }}</dd></div>
               <div><dt>Score</dt><dd>{{ scoreLabel(engine) }}</dd></div>

@@ -95,6 +95,13 @@ from cope.tournament.engine_instance import (
     EngineSearchResult,
 )
 from cope.tournament.game_runner import GameRunner
+from cope.tournament.clock_scaling import (
+    applied_clock,
+    calibrate_game,
+    game_calibration,
+    restore_scaled_clock,
+    save_game_calibration,
+)
 from cope.version import app_version
 from cope.tournament.game_state import GameState
 from cope.tournament.time_control import RuntimeTimeControl, TimeControlCategory
@@ -338,7 +345,7 @@ def _next_tournament_worker_assignment(
     worker: WorkerRecord,
     tournament: TournamentRecord,
     *,
-    available_resources: tuple[int, int],
+    available_resources: tuple[int, int, int],
     excluded_engine_ids: frozenset[int],
     excluded_game_ids: frozenset[int],
     claim_event_fixture: bool = False,
@@ -402,7 +409,9 @@ def _next_tournament_worker_assignment(
         if validate_event_roster
         else required_resources
     )
-    available_threads, available_hash_mb = available_resources
+    available_threads, available_hash_mb, available_physical_threads = available_resources
+    if tournament.config.clock_reference_hardware_key is not None:
+        available_threads = available_physical_threads
     if (
         available_threads < capacity_required.threads
         or available_hash_mb < capacity_required.hash_mb
@@ -413,11 +422,20 @@ def _next_tournament_worker_assignment(
         for engine in engines.values()
         if engine.distribution == "managed"
     )
-    benchmark_reference = (
-        get_common_benchmark_reference(connection, managed_engines)
-        if managed_engines
-        else None
-    )
+    calibration = None
+    if tournament.config.clock_reference_hardware_key is not None:
+        calibration = calibrate_game(connection, tournament, game, worker, runtime_engines)
+        if calibration is None:
+            return None
+        benchmark_reference = GameBenchmarkReferenceRecord(
+            hardware_key=calibration.reference_key,
+            engine_nps={
+                game.white_engine_id: calibration.white.reference_nps,
+                game.black_engine_id: calibration.black.reference_nps,
+            },
+        )
+    else:
+        benchmark_reference = get_common_benchmark_reference(connection, managed_engines) if managed_engines else None
     if managed_engines and benchmark_reference is None:
         return None
     claimed = None
@@ -436,6 +454,8 @@ def _next_tournament_worker_assignment(
         if claimed is not None:
             release_event_fixture_worker(connection, tournament.id, worker.id)
         return None
+    if calibration is not None:
+        save_game_calibration(connection, game.id, assignment_record.assignment_key, calibration)
     opening = get_opening_position(connection, game.opening_id)
     LOG.info(
         "claimed game worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s event_preload=%s",
@@ -658,6 +678,18 @@ def run_worker_assignment_game(
     )
 
     runtime_time_control = _runtime_time_control(tournament.config.time_control)
+    white_control = black_control = runtime_time_control
+    calibration = None
+    if tournament.config.clock_reference_hardware_key is not None:
+        calibration = game_calibration(connection, game_record.id, assignment.assignment.assignment_key)
+        if calibration is None or calibration["reference_hardware_key"] != tournament.config.clock_reference_hardware_key:
+            raise RuntimeError("Hardware-scaled assignment is missing its pinned clocks")
+        white_control = _runtime_time_control(applied_clock(calibration, "white"))
+        black_control = _runtime_time_control(applied_clock(calibration, "black"))
+        progress(
+            "benchmark", "clock_calibration", "completed", "Applied pinned hardware-scaled clocks",
+            metadata={key: value for key, value in calibration.items() if key not in {"game_id", "assignment_key"}},
+        )
     relay = assignment.assignment.engine_relay
     runtime_engine_ids = {
         *assignment.assignment.slots.values(),
@@ -703,14 +735,17 @@ def run_worker_assignment_game(
         white=white,
         black=black,
         state=GameState(board=board),
-        white_tm=runtime_time_control.create_manager(),
-        black_tm=runtime_time_control.create_manager(),
+        white_tm=white_control.create_manager(),
+        black_tm=black_control.create_manager(),
     )
     if checkpoint is not None:
         white_clock = checkpoint.state.get("white_clock")
         black_clock = checkpoint.state.get("black_clock")
         if not isinstance(white_clock, dict) or not isinstance(black_clock, dict):
             raise RuntimeError("pause checkpoint clock state is invalid")
+        if calibration is not None:
+            white_clock = restore_scaled_clock(white_clock, checkpoint.state.get("white_worker_nps"), calibration["white_worker_nps"])
+            black_clock = restore_scaled_clock(black_clock, checkpoint.state.get("black_worker_nps"), calibration["black_worker_nps"])
         game.white_tm.restore(white_clock)
         game.black_tm.restore(black_clock)
     relay_engine_data = _relay_engine_data(relay)
@@ -1104,6 +1139,10 @@ def run_worker_assignment_game(
                 **({"engine_clocks": runner.snapshot()} if hand_brain else {}),
                 "white_clock": game.white_tm.snapshot(),
                 "black_clock": game.black_tm.snapshot(),
+                **({
+                    "white_worker_nps": calibration["white_worker_nps"],
+                    "black_worker_nps": calibration["black_worker_nps"],
+                } if calibration is not None else {}),
             },
         )
         connection.commit()
@@ -1157,7 +1196,7 @@ def run_worker_assignment_game(
         current=len(moves),
         total=max(len(moves), 1),
     )
-    pgn = _build_pgn(connection, tournament, game_record, opening, moves, result, termination)
+    pgn = _build_pgn(connection, tournament, game_record, opening, moves, result, termination, calibration)
     progress(
         "conclude",
         "persist",
@@ -1621,7 +1660,7 @@ def _worker_available_resources(
     worker: WorkerRecord,
     *,
     used_resources: tuple[int, int] | None = None,
-) -> tuple[int, int] | None:
+) -> tuple[int, int, int] | None:
     capacity = worker.capacity
     if capacity is None:
         return None
@@ -1656,9 +1695,19 @@ def _worker_available_resources(
             used_hash_mb += resources.hash_mb
     else:
         used_threads, used_hash_mb = used_resources
+    thread_capacity = capacity.threads
+    if used_threads and connection.execute(
+        """SELECT 1 FROM game_assignments assignment
+           JOIN game_clock_calibrations calibration
+             ON calibration.game_id = assignment.game_id AND calibration.assignment_key = assignment.assignment_key
+           WHERE assignment.worker_id = ? AND assignment.status IN ('assigned', 'acked', 'live') LIMIT 1""",
+        (worker.id,),
+    ).fetchone() is not None:
+        thread_capacity = min(thread_capacity, worker.hw.physical_cores)
     return (
-        max(0, capacity.threads - used_threads),
+        max(0, thread_capacity - used_threads),
         max(0, capacity.hash_mb - used_hash_mb),
+        max(0, min(capacity.threads, worker.hw.physical_cores) - used_threads),
     )
 
 
@@ -2157,10 +2206,18 @@ def _build_pgn(
     moves: Sequence[MoveRecord],
     result: str,
     termination: str,
+    calibration=None,
 ) -> str:
-    white = get_engine(connection, game.white_engine_id)
-    black = get_engine(connection, game.black_engine_id)
+    white = get_engine(connection, game.white_engine_id, tournament_id=tournament.id if calibration is not None else None)
+    black = get_engine(connection, game.black_engine_id, tournament_id=tournament.id if calibration is not None else None)
     extra_headers: dict[str, Any] = {}
+    if calibration is not None:
+        for side in ("white", "black"):
+            initial = calibration[f"{side}_initial_ms"]
+            increment = calibration[f"{side}_increment_ms"]
+            extra_headers[f"{side.title()}TimeControlMs"] = f"{initial}+{increment}"
+        extra_headers["ClockReferenceHardware"] = calibration["reference_hardware_key"]
+        extra_headers["ClockWorkerHardware"] = calibration["worker_hardware_key"]
     white_name = (
         " ".join((white.name, white.version))
         if white is not None

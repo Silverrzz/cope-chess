@@ -615,7 +615,7 @@ onBeforeUnmount(() => {
         </dl>
         <dl v-else class="definition-list">
           <div><dt>Format</dt><dd>{{ humanize(data.tournament.config.format) }}</dd></div>
-          <div><dt>Time control</dt><dd>{{ formatTimeControl(data.tournament.config.time_control) }}</dd></div>
+          <div><dt>Time control</dt><dd>{{ formatTimeControl(data.tournament.config.time_control) }}<template v-if="data.tournament.config.clock_reference_hardware_key"> · Hardware-scaled</template></dd></div>
           <div><dt>Participants</dt><dd>{{ data.tournament.config.participants.length }}</dd></div>
           <div><dt>Concurrency</dt><dd>{{ data.tournament.config.concurrency }}</dd></div>
           <div><dt>Engine threads</dt><dd>{{ data.tournament.config.engine_threads }}</dd></div>

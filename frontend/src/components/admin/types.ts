@@ -1,4 +1,5 @@
 import type { Variant } from '@/components/chess/chess'
+import type { EngineVersionTag } from '@/components/engines/types'
 export type Id = number
 
 export interface EngineArtifact {
@@ -32,6 +33,8 @@ export interface Engine {
   benchmark_current?: boolean
   worker_local_count?: number
   engine_active?: boolean
+  public_hidden?: boolean
+  tags?: EngineVersionTag[]
   created_at?: string
 }
 
@@ -120,6 +123,7 @@ export interface TournamentConfig extends TournamentSettings {
   engine_threads: number
   engine_hash_mb: number
   uci_options: Record<string, string | number | boolean>
+  clock_reference_hardware_key?: string | null
 }
 
 export interface Tournament {
@@ -199,4 +203,9 @@ export interface FormSeed {
   config: TournamentConfig
   engine_options: Engine[]
   opening_suites: OpeningSuite[]
+  clock_reference_profiles?: Array<{
+    hardware_key: string
+    machine_id: string
+    hw: { cpu_model: string; physical_cores: number }
+  }>
 }

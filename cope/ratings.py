@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from math import log
 from typing import Iterable
 
 from cope.rating_bounds import paired_error_margins
+from cope.core.models import TournamentFormat
 
 from cope.db.repo import (
     RunnerCommandRecord,
+    get_rating_list,
     get_tournament,
     list_games,
     list_games_for_tournaments,
@@ -112,7 +115,8 @@ def apply_tournament_rating_commit(
     ).fetchone() is not None:
         raise RatingCommitError("engine relay tournaments are never eligible for ratings")
     games = _committable_games(tournament, list_games(connection, tournament_id))
-    _validate_games(tournament, games)
+    rating_list = get_rating_list(connection, rating_list_id)
+    _validate_games(connection, tournament, games, monthly_refresh=rating_list.monthly_refresh)
     applied_at = utc_now()
     cursor = connection.execute(
         f"""
@@ -160,7 +164,7 @@ def recalculate_ratings(
 
     placeholders = ", ".join("?" for _ in selected)
     anchor_rows = connection.execute(
-        f"SELECT id, anchor_engine_id, anchor_elo FROM rating_lists WHERE id IN ({placeholders})",
+        f"SELECT id, anchor_engine_id, anchor_elo, monthly_refresh FROM rating_lists WHERE id IN ({placeholders})",
         selected,
     ).fetchall()
     if len(anchor_rows) != len(selected):
@@ -172,10 +176,22 @@ def recalculate_ratings(
         )
         for row in anchor_rows
     }
+    monthly_lists = {int(row["id"]) for row in anchor_rows if row["monthly_refresh"]}
     commits = connection.execute(
         f"""
-        SELECT * FROM tournament_rating_list_commits
-        WHERE status = 'applied' AND rating_list_id IN ({placeholders})
+        WITH editions AS (
+            SELECT rating_commit.*, list.monthly_refresh,
+                   row_number() OVER (
+                     PARTITION BY rating_commit.rating_list_id
+                     ORDER BY (CASE WHEN list.monthly_refresh THEN tournament.started_at::timestamptz END) DESC NULLS LAST,
+                              rating_commit.tournament_id DESC
+                   ) AS edition_rank
+            FROM tournament_rating_list_commits rating_commit
+            JOIN rating_lists list ON list.id = rating_commit.rating_list_id
+            JOIN tournaments tournament ON tournament.id = rating_commit.tournament_id
+            WHERE rating_commit.status = 'applied' AND rating_commit.rating_list_id IN ({placeholders})
+        )
+        SELECT * FROM editions WHERE NOT monthly_refresh OR edition_rank = 1
         ORDER BY rating_list_id, COALESCE(applied_at, requested_at), tournament_id
         """,
         selected,
@@ -211,7 +227,7 @@ def recalculate_ratings(
         except ValueError as exc:
             raise RatingCommitError(str(exc)) from exc
         games = _committable_games(tournament, tuple(games_by_tournament[tournament_id]))
-        _validate_games(tournament, games)
+        _validate_games(connection, tournament, games, monthly_refresh=rating_list_id in monthly_lists)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at
         games_by_list[rating_list_id].extend(
             (tournament_id, game, history_at) for game in games
@@ -468,7 +484,7 @@ def _committable_games(tournament, games: tuple) -> tuple:
     return games
 
 
-def _validate_games(tournament, games: tuple) -> None:
+def _validate_games(connection, tournament, games: tuple, *, monthly_refresh: bool) -> None:
     if not games:
         raise RatingCommitError("tournament has no finished games")
     participants = set(tournament.config.participants)
@@ -477,6 +493,29 @@ def _validate_games(tournament, games: tuple) -> None:
             raise RatingCommitError(f"game {game.id} does not have a finished result")
         if game.white_engine_id not in participants or game.black_engine_id not in participants:
             raise RatingCommitError(f"game {game.id} contains a non-participant engine")
+    if monthly_refresh:
+        if tournament.status != "finished" or tournament.started_at is None or tournament.config.format != TournamentFormat.ROUND_ROBIN:
+            raise RatingCommitError("A monthly edition requires a finished round robin")
+        pair_counts = Counter((game.white_engine_id, game.black_engine_id) for game in games)
+        if (
+            any(white == black for white, black in pair_counts)
+            or len(pair_counts) != len(participants) * (len(participants) - 1)
+            or len(set(pair_counts.values())) != 1
+        ):
+            raise RatingCommitError("A monthly edition requires equal game counts for every pairing and colour")
+    if tournament.config.clock_reference_hardware_key is not None:
+        missing = connection.execute(
+            """SELECT game.id FROM games game
+               WHERE game.id = ANY(?) AND NOT EXISTS (
+                 SELECT 1 FROM game_assignments assignment
+                 JOIN game_clock_calibrations calibration
+                   ON calibration.game_id = assignment.game_id AND calibration.assignment_key = assignment.assignment_key
+                 WHERE assignment.game_id = game.id AND calibration.reference_hardware_key = ?
+               ) LIMIT 1""",
+            ([game.id for game in games], tournament.config.clock_reference_hardware_key),
+        ).fetchone()
+        if missing is not None:
+            raise RatingCommitError(f"game {missing['id']} has no hardware clock calibration")
 
 
 def _calculate_ratings_together(

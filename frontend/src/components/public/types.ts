@@ -122,6 +122,8 @@ export interface EngineRecord {
   uci_options?: Record<string, unknown>
   active?: boolean
   source_date?: string | null
+  tags?: import('@/components/engines/types').EngineVersionTag[]
+  public_hidden?: boolean
 
 }
 

@@ -10,6 +10,7 @@ from cope.core.models import TournamentConfig
 from cope.db import (
     engine_build_is_benchmarked,
     get_opening_suite,
+    list_benchmark_hardware,
     list_engine_records,
     list_opening_suites,
 )
@@ -113,6 +114,11 @@ def _validated_tournament_config(
     ]
     if unavailable:
         raise HTTPException(status_code=422, detail="Every participant must be active and ready to run.")
+    if submitted.clock_reference_hardware_key is not None:
+        if any(records[engine_id].distribution != "managed" for engine_id in submitted.participants):
+            raise HTTPException(status_code=422, detail="Hardware-scaled clocks require managed builds for every participant.")
+        if not any(profile.hardware_key == submitted.clock_reference_hardware_key for profile in list_benchmark_hardware(connection)):
+            raise HTTPException(status_code=422, detail="Choose a known benchmark hardware profile.")
 
     _validate_opening_suite_reference(connection, submitted.opening_suite_id)
     try:
@@ -169,5 +175,6 @@ def _tournament_form_payload(
         "participants": participants,
         "engine_options": engines,
         "opening_suites": list_opening_suites(connection),
+        "clock_reference_profiles": list_benchmark_hardware(connection),
         "variants": [dict(id=v.id, name=v.name, rules_revision=v.rules_revision) for v in VARIANTS.values()],
     }

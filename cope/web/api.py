@@ -41,6 +41,7 @@ from starlette.datastructures import UploadFile
 
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine
+from cope.db import engine_version_tags
 from cope.environment_clone import (
     authorize_environment_export,
     clone_catalog_payload,
@@ -427,10 +428,11 @@ def _load_engine_dockerfile(selected_path: str) -> str:
         raise HTTPException(status_code=500, detail="The engine Dockerfile could not be read.") from exc
 
 
-def _engine_version_admin_payload(version) -> dict[str, Any]:
+def _engine_version_admin_payload(version, tags) -> dict[str, Any]:
     payload = jsonable_encoder(version)
     payload["benchmark_current"] = version.benchmark_current
     payload["active"] = version.active
+    payload["tags"] = tags.get(version.id, [])
     return payload
 
 
@@ -515,8 +517,11 @@ def _admin_rating_list_summaries(connection: sqlite3.Connection) -> list[dict[st
         {
             "id": int(row["id"]),
             "name": str(row["name"]),
+            "variant": row["variant"],
             "anchor_engine_id": row["anchor_engine_id"],
             "anchor_elo": float(row["anchor_elo"]),
+            "hardware_scaled": row["hardware_scaled"],
+            "monthly_refresh": row["monthly_refresh"],
             "created_at": str(row["created_at"]),
             "engine_versions": int(row["engine_versions"]),
             "games": int(row["games"]),
@@ -642,6 +647,8 @@ class RatingListVariantPayload(BaseModel):
 class RatingListPayload(BaseModel):
     variant: VariantId = "standard"
     name: str = Field(min_length=1, max_length=120)
+    hardware_scaled: bool = False
+    monthly_refresh: bool = False
 
     @field_validator("name")
     @classmethod
@@ -760,6 +767,27 @@ class BadgePayload(BaseModel):
         if any(engine_id < 1 for engine_id in value):
             raise ValueError("engine ids must be positive")
         return list(dict.fromkeys(value))
+
+
+class EngineVersionTagPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class EngineVersionMetadataPayload(BaseModel):
+    public_hidden: bool | None = None
+    tag_ids: list[int] | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_metadata(self):
+        if self.public_hidden is None and self.tag_ids is None:
+            raise ValueError("Specify visibility or tags.")
+        return self
 
 
 class EngineVersionUpdatePayload(BaseModel):
@@ -1611,11 +1639,24 @@ def register_api_routes(app: FastAPI) -> None:
                 opponent_ids_by_engine.setdefault(str(row["engine_id"]), []).append(
                     int(row["opponent_engine_id"])
                 )
+        rows = list_rating_rows(connection, rating_list.id) if rating_list else []
+        ratings = jsonable_encoder(rows)
+        if rows:
+            tags = engine_version_tags.tags_by_version(connection)
+            hidden = {row["id"] for row in connection.execute(
+                "SELECT id FROM engine_versions WHERE public_hidden AND id = ANY(?)",
+                ([row.engine.engine_id for row in rows],),
+            )}
+            for rating in ratings:
+                engine = rating["engine"]
+                version_id = engine["engine_id"]
+                engine["tags"] = tags.get(version_id, [])
+                engine["public_hidden"] = version_id in hidden
         return _json(
             {
                 "rating_list": rating_list,
                 "rating_lists": rating_lists,
-                "ratings": list_rating_rows(connection, rating_list.id) if rating_list else [],
+                "ratings": ratings,
                 "filter_options": {
                     "opponent_ids_by_engine": opponent_ids_by_engine,
                 },
@@ -1627,7 +1668,8 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         families = list_engine_families(connection)
-        versions = list_engine_records(connection)
+        versions = [version for version in list_engine_records(connection) if not version.public_hidden]
+        tags = engine_version_tags.tags_by_version(connection)
         badges_by_family = list_engine_badges(connection)
         versions_by_family = {family.id: [] for family in families}
         for version in versions:
@@ -1667,6 +1709,7 @@ def register_api_routes(app: FastAPI) -> None:
                             "repository_full_name": version.repository_full_name,
                             "active": version.active,
                             "created_at": version.created_at,
+                            "tags": tags.get(version.id, []),
                         }
                         for version in family_versions
                     ],
@@ -1701,14 +1744,15 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         engine = get_engine_record(connection, engine_id)
-        if engine is None:
+        if engine is None or engine.public_hidden:
             raise HTTPException(status_code=404, detail="Engine not found.")
         family = get_engine_family(connection, engine.engine_id)
         engine_records = list_engine_records(connection)
         versions = tuple(
             version for version in engine_records
-            if version.engine_id == engine.engine_id
+            if version.engine_id == engine.engine_id and not version.public_hidden
         )
+        tags = engine_version_tags.tags_by_version(connection)
         games = list_engine_games(
             connection,
             engine_id,
@@ -1719,7 +1763,7 @@ def register_api_routes(app: FastAPI) -> None:
         )
         return _json(
             {
-                "engine": engine,
+                "engine": {**jsonable_encoder(engine), "tags": tags.get(engine.id, [])},
                 "family": family,
                 "versions": versions,
                 "games": games,
@@ -1739,6 +1783,7 @@ def register_api_routes(app: FastAPI) -> None:
                         "active": version.active,
                     }
                     for version in engine_records
+                    if not version.public_hidden
                 ],
                 "record": engine_result_summary(connection, engine_id),
                 "filter_options": engine_game_filter_options(connection, engine_id),
@@ -1915,11 +1960,16 @@ def register_api_routes(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         try:
-            rating_list_id = create_rating_list(connection, payload.name, payload.variant)
+            rating_list_id = create_rating_list(
+                connection, payload.name, payload.variant,
+                hardware_scaled=payload.hardware_scaled, monthly_refresh=payload.monthly_refresh,
+            )
             connection.commit()
         except sqlite3.IntegrityError as exc:
             connection.rollback()
             raise HTTPException(status_code=409, detail="A rating list with that name already exists.") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         _publish_admin_change(web_app, request)
         return _json({"id": rating_list_id, "message": "Rating list created."}, status_code=201)
 
@@ -2425,7 +2475,11 @@ def register_api_routes(app: FastAPI) -> None:
             "engines": engines,
             "settings": _settings_rows(web_app._settings_view(connection, tournament)),
             "commits": list_tournament_rating_commits(connection, tournament.id),
-            "rating_lists": [item for item in list_rating_lists(connection) if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)],
+            "rating_lists": [
+                item for item in list_rating_lists(connection)
+                if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)
+                and item.hardware_scaled == (tournament.config.clock_reference_hardware_key is not None)
+            ],
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
             "roster": _live_tournament_roster_payload(connection, tournament),
             "capabilities": {
@@ -3431,6 +3485,7 @@ def register_api_routes(app: FastAPI) -> None:
     def admin_engines(connection: sqlite3.Connection = Depends(web_app._database)):
         engines = list_engine_families(connection)
         versions = list_engine_records(connection)
+        tags = engine_version_tags.tags_by_version(connection)
         versions_by_family = {engine.id: [] for engine in engines}
         for version in versions:
             versions_by_family.setdefault(version.engine_id, []).append(version)
@@ -3440,7 +3495,7 @@ def register_api_routes(app: FastAPI) -> None:
                     {
                         **jsonable_encoder(engine),
                         "versions": [
-                            _engine_version_admin_payload(version)
+                            _engine_version_admin_payload(version, tags)
                             for version in versions_by_family[engine.id]
                         ],
                     }
@@ -3521,10 +3576,11 @@ def register_api_routes(app: FastAPI) -> None:
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine not found.")
         versions = list_engine_versions(connection, engine_id)
+        tags = engine_version_tags.tags_by_version(connection)
         return _json(
             {
                 "engine": engine,
-                "versions": [_engine_version_admin_payload(version) for version in versions],
+                "versions": [_engine_version_admin_payload(version, tags) for version in versions],
                 "game_counts": list_engine_game_counts(
                     connection,
                     (version.id for version in versions),
@@ -3669,12 +3725,69 @@ def register_api_routes(app: FastAPI) -> None:
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
         return _json({
-            "version": _engine_version_admin_payload(version),
+            "version": _engine_version_admin_payload(version, engine_version_tags.tags_by_version(connection)),
             "benchmarks": [
                 _benchmark_job_admin_payload(item)
                 for item in list_engine_benchmark_jobs(connection, engine_version_id=version_id)
             ],
         })
+
+    @app.get("/api/admin/engine-version-tags")
+    def admin_engine_version_tags(connection: sqlite3.Connection = Depends(web_app._database)):
+        return _json({"tags": engine_version_tags.list_tags(connection)})
+
+    def save_engine_version_tag(connection, payload, tag_id=None):
+        try:
+            tag = engine_version_tags.save_tag(connection, payload.name, payload.color.lower(), tag_id)
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail="An engine version tag with that name already exists.") from exc
+        if tag is None:
+            raise HTTPException(status_code=404, detail="Engine version tag not found.")
+        connection.commit()
+        return tag
+
+    @app.post("/api/admin/engine-version-tags")
+    def admin_create_engine_version_tag(
+        payload: EngineVersionTagPayload,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        return _json({"tag": save_engine_version_tag(connection, payload)}, status_code=201)
+
+    @app.put("/api/admin/engine-version-tags/{tag_id}")
+    def admin_update_engine_version_tag(
+        tag_id: int,
+        payload: EngineVersionTagPayload,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        return _json({"tag": save_engine_version_tag(connection, payload, tag_id)})
+
+    @app.delete("/api/admin/engine-version-tags/{tag_id}")
+    def admin_delete_engine_version_tag(
+        tag_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if not engine_version_tags.delete_tag(connection, tag_id):
+            raise HTTPException(status_code=404, detail="Engine version tag not found.")
+        connection.commit()
+        return _json({"message": "Engine version tag deleted."})
+
+    @app.put("/api/admin/engine-versions/{version_id}/metadata")
+    def admin_update_engine_version_metadata(
+        version_id: int,
+        payload: EngineVersionMetadataPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            updated = engine_version_tags.update_metadata(connection, version_id, payload.public_hidden, payload.tag_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not updated:
+            raise HTTPException(status_code=404, detail="Engine version not found.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"id": version_id, "message": "Engine version metadata saved."})
 
     @app.put("/api/admin/engine-versions/{version_id}")
     def admin_update_engine_version(

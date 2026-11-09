@@ -111,6 +111,7 @@ from cope.runner.events import (
     start_event_publisher,
 )
 from cope.tournament.engine_instance import EngineCommandOutput
+from cope.tournament.clock_scaling import game_calibration
 
 
 LOG = logging.getLogger("cope.worker_server")
@@ -1333,15 +1334,15 @@ class WorkerHandshakeServer:
                 cancellation,
                 pause_signal,
             )
-            self._clear_engine_preparation_backoff(
-                worker,
-                ready.prepared_engine_ids,
-            )
             await asyncio.to_thread(
                 self._acknowledge_assignment,
                 worker,
                 assignment,
                 ready,
+            )
+            self._clear_engine_preparation_backoff(
+                worker,
+                ready.prepared_engine_ids,
             )
             self._record_assignment_progress(
                 assignment,
@@ -2339,6 +2340,19 @@ class WorkerHandshakeServer:
     ) -> None:
         connection = connect_database(self._config.db_path)
         try:
+            calibration = game_calibration(connection, ready.game_id, ready.assignment_key)
+            if calibration is not None:
+                for side, engine_id in assignment.assignment.slots.items():
+                    expected = calibration[f"{side.name.lower()}_worker_nps"]
+                    measured = ready.hardware_scores[engine_id].worker_nps
+                    if measured * 5 < expected * 4 or measured * 5 > expected * 6:
+                        raise AssignmentPreparationFailed(AssignmentFailed(
+                            **assignment.assignment.message_fields(),
+                            engine_id=engine_id,
+                            engine_name=assignment.engines[engine_id].name,
+                            stage="clock_calibration",
+                            error=f"Worker benchmark {measured:,} NPS differs from the pinned {expected:,} NPS by more than 20%.",
+                        ))
             acknowledge_game_assignment(
                 connection,
                 ready.assignment_id,

@@ -344,7 +344,7 @@ def sync_engine_dockerfiles(connection: DatabaseConnection) -> int:
         try:
             content = read_engine_dockerfile(str(row["dockerfile_path"]))
         except (EngineDockerfileError, FileNotFoundError):
-            content = ""
+            continue
         build_hash = engine_build_hash(
             str(row["repository_url"]),
             str(row["source_ref"]),

@@ -98,7 +98,7 @@ class _EngineBenchmarkCache:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(ENGINE_BENCHMARK_CONCURRENCY)
-        self._tasks: dict[str, asyncio.Task[tuple[int, int]]] = {}
+        self._tasks: dict[tuple[str, str | None], asyncio.Task[tuple[int, int]]] = {}
 
     async def benchmark(
         self,
@@ -106,7 +106,7 @@ class _EngineBenchmarkCache:
         spec,
         timeout_s: int,
     ) -> tuple[int, int]:
-        key = spec.build_hash
+        key = (spec.build_hash, spec.artifact.sha256 if spec.artifact is not None else None)
         async with self._lock:
             task = self._tasks.get(key)
             if task is None:

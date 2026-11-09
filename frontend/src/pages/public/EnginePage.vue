@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
+import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EngineGameFiltersModal from '@/components/public/EngineGameFiltersModal.vue'
 import GameTable from '@/components/public/GameTable.vue'
@@ -279,6 +280,7 @@ async function load(): Promise<void> {
           <RouterLink class="back-link" to="/engines"><AppIcon name="arrow-left" :size="14" /> All engines</RouterLink>
           <div class="engine-title-row"><h1>{{ data.family?.name || data.engine.name }}</h1><StatusPill :status="data.family?.active && data.engine.active ? 'ready' : 'unavailable'" /></div>
           <p v-if="data.family?.author || data.engine.author">By {{ data.family?.author || data.engine.author }}</p>
+          <EngineVersionTags :tags="data.engine.tags ?? []" />
         </div>
         <label v-if="data.versions.length > 1 || engineVersionLabel(data.engine.version)" class="version-picker">
           <span>Engine version</span>

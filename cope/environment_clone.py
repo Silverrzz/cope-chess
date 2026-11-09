@@ -72,6 +72,8 @@ DATASETS = (
     CloneDataset("engine_dockerfiles", "Dockerfile recipes", "Materialize exact build recipes into a collision-safe cloned namespace.", "Engines", None, ("engine_versions",), True),
     CloneDataset("badges", "Badges", "Engine badge definitions.", "Engines", "badges", default=True, serial=True),
     CloneDataset("engine_badges", "Badge assignments", "Assignments of badges to engine families.", "Engines", "engine_badges", ("badges", "engines"), True),
+    CloneDataset("engine_version_tags", "Version tags", "Named, coloured tags for engine versions.", "Engines", "engine_version_tags", default=True, serial=True),
+    CloneDataset("engine_version_tag_assignments", "Version tag assignments", "Tags attached to exact engine versions.", "Engines", "engine_version_tag_assignments", ("engine_versions", "engine_version_tags"), True),
     CloneDataset("engine_artifacts", "Artifact descriptors", "Content-addressed managed-engine artifact metadata.", "Artifacts", "engine_artifacts", ("engine_versions",), True, companions=("artifact_files",)),
     CloneDataset("artifact_files", "Artifact archives", "Verified compressed engine archives used by game workers.", "Artifacts", None, ("engine_artifacts",), True),
     CloneDataset("benchmark_hardware", "Benchmark hardware", "Immutable benchmark hardware profiles.", "Benchmarks", "benchmark_hardware", default=True),
@@ -100,6 +102,8 @@ DATASETS = (
     CloneDataset("worker_failures", "Worker failures", "Engine and assignment failure history.", "Workers", "worker_failures", ("workers", "game_assignments", "games", "engine_versions"), serial=True),
     CloneDataset("worker_resource_samples", "Worker resource samples", "CPU, memory, disk, and engine resource history.", "Workers", "worker_resource_samples", ("workers",), serial=True),
     CloneDataset("game_hardware_scores", "Game hardware scores", "Per-game normalized hardware results.", "Games", "game_hardware_scores", ("games", "game_assignments", "workers", "engine_versions", "benchmark_hardware")),
+    CloneDataset("tournament_clock_profiles", "Tournament clock profiles", "Pinned engine artifact speeds for reference and worker hardware.", "Tournaments", "tournament_clock_profiles", ("control_tournament_builds", "benchmark_hardware")),
+    CloneDataset("game_clock_calibrations", "Applied game clocks", "Exact per-side clocks and calibration inputs for each game attempt.", "Games", "game_clock_calibrations", ("game_assignments", "tournament_clock_profiles")),
     CloneDataset("rating_lists", "Rating list definitions", "Lists, anchors, and baseline Elo settings.", "Ratings", "rating_lists", ("engine_versions",), serial=True),
     CloneDataset("engine_acknowledged_queue", "Acknowledged engine queue", "Recognised engines planned for addition.", "Engines", "engine_acknowledged_queue", (), serial=True),
     CloneDataset("engine_waiting_test_queue", "Waiting test queue", "Engine versions and rating lists queued for testing.", "Engines", "engine_waiting_test_queue", ("engine_versions", "rating_lists"), serial=True),
@@ -149,12 +153,12 @@ PRESETS = {
     "engine_catalog": {
         "label": "Engine catalog only",
         "description": "Engine definitions and build recipes without binary artifacts or benchmarks.",
-        "datasets": ["git_hosts", "engines", "engine_versions", "engine_dockerfiles", "badges", "engine_badges"],
+        "datasets": ["git_hosts", "engines", "engine_versions", "engine_dockerfiles", "badges", "engine_badges", "engine_version_tags", "engine_version_tag_assignments"],
     },
     "competition_archive": {
         "label": "Competition archive",
         "description": "Openings, tournaments, games, moves, hardware scores, and ratings.",
-        "datasets": ["openings", "participants", "tournament_matches", "games", "moves", "game_hardware_scores", "rating_list_ratings", "engine_elo_history", "rating_list_history", "tournament_rating_list_commits"],
+        "datasets": ["openings", "participants", "tournament_matches", "games", "moves", "game_hardware_scores", "tournament_clock_profiles", "game_clock_calibrations", "rating_list_ratings", "engine_elo_history", "rating_list_history", "tournament_rating_list_commits"],
     },
     "events_and_chat": {
         "label": "Events and broadcasts",
@@ -958,6 +962,9 @@ def dataset_order_expression(item: CloneDataset) -> str:
         return "id"
     orders = {
         "engine_badges": "badge_id, engine_id",
+        "engine_version_tag_assignments": "version_id, tag_id",
+        "tournament_clock_profiles": "tournament_id, hardware_key, version_id",
+        "game_clock_calibrations": "game_id, assignment_key",
         "engine_artifacts": "created_at, build_hash",
         "benchmark_hardware": "created_at, hardware_key",
         "participants": "tournament_id, seed",

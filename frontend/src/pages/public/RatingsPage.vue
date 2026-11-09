@@ -4,6 +4,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
+import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
+import type { EngineVersionTag } from '@/components/engines/types'
 import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import RatingListPgnModal from '@/components/public/RatingListPgnModal.vue'
@@ -16,6 +18,8 @@ interface RatingListRecord {
   id: Identifier
   name: string
   anchor_engine_id?: Identifier | null
+  hardware_scaled?: boolean
+  monthly_refresh?: boolean
 }
 
 interface RatingRecord {
@@ -40,6 +44,7 @@ const data = ref<RatingsResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const onlyBestVersions = ref(true)
+const excludedTag = ref('')
 const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
@@ -48,9 +53,17 @@ const routeRatingList = computed(() => {
   return value ? String(value) : ''
 })
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
+const ratingTags = computed(() => {
+  const tags = new Map<number, EngineVersionTag>()
+  for (const row of data.value?.ratings ?? []) {
+    for (const tag of row.engine.tags ?? []) tags.set(tag.id, tag)
+  }
+  return [...tags.values()].sort((left, right) => left.name.localeCompare(right.name))
+})
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
-  return onlyBestVersions.value ? bestVersionRatings(ratings) : ratings
+  const filtered = ratings.filter((row) => !row.engine.tags?.some((tag) => String(tag.id) === excludedTag.value))
+  return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
 const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
 const pgnEngineOptions = computed(() => (data.value?.ratings ?? []).map((row) => ({
@@ -65,6 +78,7 @@ onBeforeUnmount(() => controller?.abort())
 watch(routeRatingList, (next, previous) => {
   if (next !== previous) {
     pgnModalOpen.value = false
+    excludedTag.value = ''
     void load()
   }
 })
@@ -121,6 +135,13 @@ function selectRatingList(event: Event): void {
         <div class="ratings-controls">
           <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download PGNs</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
+          <label v-if="ratingTags.length" class="category-picker">
+            <span>Exclude tag</span>
+            <select v-model="excludedTag">
+              <option value="">None</option>
+              <option v-for="tag in ratingTags" :key="tag.id" :value="String(tag.id)">{{ tag.name }}</option>
+            </select>
+          </label>
           <label v-if="data.rating_lists.length" class="category-picker">
             <span>Rating list</span>
             <select :value="selectedRatingList" @change="selectRatingList">
@@ -134,6 +155,9 @@ function selectRatingList(event: Event): void {
         <div class="category-overview__copy">
           <span>Selected list</span>
           <h2>{{ data.rating_list.name }}</h2>
+          <p v-if="data.rating_list.hardware_scaled || data.rating_list.monthly_refresh">
+            {{ [data.rating_list.hardware_scaled ? 'Hardware-scaled clocks' : '', data.rating_list.monthly_refresh ? 'Monthly results' : ''].filter(Boolean).join(' · ') }}
+          </p>
         </div>
         <dl>
           <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>
@@ -164,7 +188,12 @@ function selectRatingList(event: Event): void {
             <tbody>
               <tr v-for="(row, index) in displayedRatings" :key="engineId(row.engine)">
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
-                <td data-label="Engine"><RouterLink :to="`/engines/${engineId(row.engine)}`">{{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small></RouterLink></td>
+                <td data-label="Engine">
+                  <component :is="row.engine.public_hidden ? 'span' : 'RouterLink'" :to="row.engine.public_hidden ? undefined : `/engines/${engineId(row.engine)}`">
+                    {{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small>
+                  </component>
+                  <EngineVersionTags :tags="row.engine.tags ?? []" />
+                </td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
                 <td class="error-column" data-label="95% error">
                   <span v-if="String(engineId(row.engine)) === String(data.rating_list?.anchor_engine_id)" title="Fixed reference for this rating list">Anchor</span>

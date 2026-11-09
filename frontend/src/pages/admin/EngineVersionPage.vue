@@ -8,6 +8,7 @@ import { useEventStream } from '@/composables/useEventStream'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import DockerfilePicker from '@/components/admin/DockerfilePicker.vue'
 import EngineOptionsEditor from '@/components/admin/EngineOptionsEditor.vue'
+import EngineVersionMetadata from '@/components/admin/EngineVersionMetadata.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StreamStatus from '@/components/ui/StreamStatus.vue'
 import { errorText, formatBytes, formatDate, formatNumber, humanize } from '@/components/admin/format'
@@ -504,6 +505,7 @@ onBeforeUnmount(() => {
       <template #actions><RouterLink v-if="version" class="button button--ghost" :to="`/admin/engines/${version.engine_id}`">Back to engine</RouterLink></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
+    <EngineVersionMetadata v-if="version && version.id === id" :key="version.id" :version="version" />
     <div v-if="loading" class="panel loading-card">Loading version…</div>
     <form v-else-if="version" class="page-stack" @submit.prevent="save">
       <section class="panel detail-card">
