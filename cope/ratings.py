@@ -7,7 +7,7 @@ from math import log
 from typing import Iterable
 
 from cope.rating_bounds import paired_error_margins
-from cope.core.models import RoundRobinFormatOptions, TournamentFormat
+from cope.core.models import RoundRobinFormatOptions, TournamentConfig, TournamentFormat
 from cope.tournament.round_robin import round_robin_pair_counts
 
 from cope.db.repo import (
