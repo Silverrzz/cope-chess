@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from cope.db.donors import donor_leaderboard
-
 from .contracts import Input, Query
+from .errors import ApplicationError
 
 
 class Empty(Input):
@@ -24,7 +23,12 @@ class DonorLeaderboard(Input):
 
 
 def leaderboard(connection, principal, target, payload: Empty) -> dict:
-    return donor_leaderboard(connection)
+    from cope.web.donor_snapshot import read_donor_snapshot
+
+    snapshot = read_donor_snapshot()
+    if snapshot is None:
+        raise ApplicationError("donors_snapshot_unavailable", "The donor leaderboard is being prepared.", 503)
+    return snapshot
 
 
 def queries() -> tuple[Query, ...]:
