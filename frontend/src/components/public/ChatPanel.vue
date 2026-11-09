@@ -9,6 +9,7 @@ import { useToast } from '@/composables/useToast'
 import { chatViewerId, savedViewerName, saveViewerName } from '@/composables/useViewerPresence'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 import { useSessionStore } from '@/stores/session'
+import { timestampDate } from '@/utils/time'
 
 import { errorMessage, formatDate } from './format'
 import { emojiDataUrl, formatChatEmoji, loadChatEmoji } from './chatEmoji'
@@ -74,20 +75,29 @@ const systemMessages = computed(() => orderedMessages.value.filter((message) => 
 const visibleMessages = computed(() => activeTab.value === 'chat' ? chatMessages.value : systemMessages.value)
 const messagesById = computed(() => new Map(chatMessages.value.map((message) => [String(message.id), message])))
 const replyingTo = computed(() => replyId.value === null ? undefined : messagesById.value.get(String(replyId.value)))
-const chatRows = computed(() => visibleMessages.value.map((message, index, messages) => {
-  const previous = messages[index - 1]
-  const continued = activeTab.value === 'chat' && previous?.display_name === message.display_name
-    && (message.sender_key || previous.sender_key
-      ? message.sender_key === previous.sender_key
-      : message.display_name !== 'Anonymous')
-  return {
-    message,
-    continued,
-    showGame: chatGameLinksVisible.value && message.game_id != null
-      && (!continued || String(previous?.game_id) !== String(message.game_id)),
-    reply: message.reply_to_id == null ? undefined : messagesById.value.get(String(message.reply_to_id)),
-  }
-}))
+const chatRows = computed(() => {
+  let groupStart: ChatMessage | undefined
+  let groupTime = NaN
+  return visibleMessages.value.map((message) => {
+    const time = message.at ? timestampDate(message.at).getTime() : NaN
+    const continued = activeTab.value === 'chat' && groupStart?.display_name === message.display_name
+      && (message.sender_key || groupStart.sender_key
+        ? message.sender_key === groupStart.sender_key
+        : message.display_name !== 'Anonymous')
+      && String(message.game_id ?? '') === String(groupStart.game_id ?? '')
+      && time >= groupTime && time - groupTime <= 60_000
+    if (!continued) {
+      groupStart = message
+      groupTime = time
+    }
+    return {
+      message,
+      continued,
+      showGame: !continued && chatGameLinksVisible.value && message.game_id != null,
+      reply: message.reply_to_id == null ? undefined : messagesById.value.get(String(message.reply_to_id)),
+    }
+  })
+})
 const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
 const requiresName = computed(() => props.settings.allow_anonymous_names === false)
@@ -378,10 +388,10 @@ function scrollToLatest(): void {
             @contextmenu="openMenu($event, message)"
             @keydown="handleMessageKey($event, message)"
           >
-            <div v-if="!continued || showGame" class="chat-message__header">
-              <strong v-if="activeTab === 'chat' && !continued" :title="message.display_name">{{ message.display_name }}</strong>
+            <div v-if="!continued" class="chat-message__header">
+              <strong v-if="activeTab === 'chat'" :title="message.display_name">{{ message.display_name }}</strong>
               <template v-if="showGame && message.game_id != null">
-                <span v-if="!continued" aria-hidden="true">-</span>
+                <span aria-hidden="true">-</span>
                 <a
                   class="chat-message__game"
                   :href="router.resolve(gameTarget(message.game_id)).href"
@@ -389,7 +399,7 @@ function scrollToLatest(): void {
                   @click="jumpToGame(message.game_id, $event)"
                 >View Game</a>
               </template>
-              <template v-if="!continued && message.at">
+              <template v-if="message.at">
                 <span v-if="activeTab === 'chat'" aria-hidden="true">-</span>
                 <time :datetime="message.at">{{ formatDate(message.at, true) }}</time>
               </template>
