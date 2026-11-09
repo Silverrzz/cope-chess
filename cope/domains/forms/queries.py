@@ -224,8 +224,11 @@ def form_detail(connection, principal, target, payload: Empty) -> dict:
            JOIN form_release_acceptance a ON a.release_id = r.id WHERE r.form_id = %s ORDER BY r.number DESC LIMIT 100""", (form["id"],),
     ).fetchall()
     copies = connection.execute(
-        """SELECT c.id, c.current_revision, c.archived, c.updated_at, o.state_version FROM form_working_copies c
-           JOIN application_objects o ON o.id = c.id WHERE c.form_id = %s AND c.owner_actor = %s
+        """SELECT c.id, c.current_revision, c.archived, c.updated_at, o.state_version, r.basis_version
+           FROM form_working_copies c
+           JOIN application_objects o ON o.id = c.id
+           JOIN form_working_copy_revisions r ON r.copy_id = c.id AND r.revision = c.current_revision
+           WHERE c.form_id = %s AND c.owner_actor = %s
            ORDER BY c.updated_at DESC LIMIT 200""", (form["id"], principal.actor),
     ).fetchall()
     return {"id": str(form["id"]), "slug": form["slug"], "label": form["label"], "closed": form["closed"],

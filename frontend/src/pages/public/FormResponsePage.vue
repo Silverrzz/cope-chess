@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import StatusBadge from '@/components/admin/StatusBadge.vue'
+import { formatDate, humanize } from '@/components/admin/format'
+import FormAnswerSummary from '@/components/forms/FormAnswerSummary.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, onBeforeRouteLeave, useRoute } from 'vue-router'
@@ -7,11 +12,15 @@ import { claimHeaders, formResponse, rememberClaim, storedClaim, type FormClaim 
 import { createFormUploader, downloadAttachment } from '@/api/form-uploads'
 import FormFields from '@/components/forms/FormFields.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
+import { useConfirm } from '@/composables/useConfirm'
 import { useSessionStore } from '@/stores/session'
 import { canonicalAnswers, initialAnswers, type FormAnswers, type FormErrors, type FormField, type FormResponse } from '@/types/forms'
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
+const { confirm } = useConfirm()
+const adminView = computed(() => route.name === 'admin-form-response')
+const editing = ref(false)
 const session = useSessionStore()
 const response = ref<FormResponse | null>(null)
 const claim = ref<FormClaim | null>(null)
@@ -25,13 +34,14 @@ const errors = ref<FormErrors>({})
 const message = ref('')
 const errorSummary = ref<HTMLElement | null>(null)
 const fields = ref<InstanceType<typeof FormFields> | null>(null)
-const decision = ref<'accepted' | 'declined' | 'changes_requested'>('changes_requested')
+const decision = ref<'' | 'accepted' | 'declined' | 'changes_requested'>('')
 const reason = ref('')
 const uploading = ref(0)
 const dirty = computed(() => JSON.stringify(answers.value) !== saved.value && !!response.value)
 const busy = computed(() => mutation.busy.value || reviewMutation.busy.value || uploading.value > 0)
 const uncertain = computed(() => mutation.uncertain.value || reviewMutation.uncertain.value)
-const labels: Record<string, string> = { awaiting_review: 'Awaiting review', accepted: 'Accepted', declined: 'Declined', changes_requested: 'Changes requested', withdrawn: 'Withdrawn' }
+const inboxLink = computed(() => response.value ? `/admin/form-responses?form=${response.value.form_id}` : '/admin/form-responses')
+const publicTitle = computed(() => response.value ? 'Your response' : 'Open your response')
 const guestExtensions = computed(() => claim.value ? response.value?.attachment_policy.guest_extensions : undefined)
 const maxUpload = computed(() => {
   const policy = response.value?.attachment_policy
@@ -70,23 +80,28 @@ async function amend(): Promise<void> {
   const clear = Object.keys(response.value.answers).filter((key) => !(key in snapshot))
   try {
     const receipt = await mutation.execute<'forms.amend.v1'>({ command: 'forms.amend.v1', target: props.id, expected_version: response.value.revision, input: { set: snapshot, clear } })
-    await load(true)
-    message.value = `Saved response revision ${receipt.output.revision}. Its current review status is shown below.`
+    await load()
+    editing.value = false
+    message.value = `Response updated to revision ${receipt.output.revision}.`
   } catch (cause) { await failure(cause) }
 }
 async function withdraw(): Promise<void> {
   if (!response.value) return
-  if (!mutation.uncertain.value && !window.confirm('Withdraw this response? It will no longer be available for acceptance. Its history will be retained.')) return
+  if (!mutation.uncertain.value && !await confirm({
+    title: 'Withdraw this response?',
+    message: 'Your response will be marked withdrawn and its history will be kept.',
+    confirmLabel: 'Withdraw response', tone: 'danger',
+  })) return
   try {
     await mutation.execute<'forms.withdraw.v1'>({ command: 'forms.withdraw.v1', target: props.id, expected_version: response.value.state_version, input: {} })
-    await load(); message.value = 'Response withdrawn.'
+    await load(); editing.value = false; message.value = 'Response withdrawn.'
   } catch (cause) { await failure(cause) }
 }
 async function review(): Promise<void> {
-  if (!response.value) return
+  if (!response.value || !decision.value || !adminView.value) return
   try {
     await reviewMutation.execute<'forms.review.v1'>({ command: 'forms.review.v1', target: props.id, expected_version: response.value.revision, input: { state_version: response.value.state_version, subject_digest: response.value.subject_digest, decision: decision.value, reason: reason.value } })
-    await load(); reason.value = ''; message.value = 'Review decision recorded for the displayed response revision.'
+    await load(); decision.value = ''; reason.value = ''; message.value = 'Review decision recorded.'
   } catch (cause) { await failure(cause) }
 }
 async function recover(event: Event): Promise<void> {
@@ -108,10 +123,26 @@ function download(): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
   const anchor = document.createElement('a'); anchor.href = url; anchor.download = `cope-response-${props.id}.json`; anchor.click(); URL.revokeObjectURL(url)
 }
+function startEditing(): void {
+  if (!response.value?.can_amend) return
+  answers.value = initialAnswers(response.value.definition.fields, structuredClone(response.value.answers))
+  saved.value = JSON.stringify(answers.value)
+  editing.value = true
+}
+
+async function cancelEdit(): Promise<void> {
+  if (dirty.value && !await confirm({ title: 'Discard changes?', message: 'Your submitted response will stay as it is.', confirmLabel: 'Discard changes' })) return
+  if (response.value) answers.value = initialAnswers(response.value.definition.fields, response.value.answers)
+  saved.value = JSON.stringify(answers.value)
+  errors.value = {}
+  error.value = ''
+  editing.value = false
+}
+
 function beforeUnload(event: BeforeUnloadEvent): void { if (dirty.value || uncertain.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => {
   const formId = typeof route.query.form === 'string' ? route.query.form : ''
-  claim.value = session.authenticated ? null : storedClaim(formId, props.id)
+  claim.value = adminView.value || session.authenticated ? null : storedClaim(formId, props.id)
   window.addEventListener('beforeunload', beforeUnload); void load()
 })
 onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
@@ -119,15 +150,114 @@ onBeforeRouteLeave(() => !(dirty.value || uncertain.value) || window.confirm('Le
 </script>
 
 <template>
-  <main class="response-page" :aria-busy="loading"><header><p class="eyebrow">Private response</p><h1>{{ response?.definition.title ?? 'Your response' }}</h1><p v-if="response">{{ labels[response.state] }} · revision {{ response.revision }} · submitted {{ new Date(response.created_at).toLocaleString() }}</p><p v-if="response?.next_actor">Next action: {{ response.next_actor === 'reviewer' ? 'a reviewer will consider your response' : 'the submitter can review the requested changes' }}.</p></header>
-    <div v-if="error" ref="errorSummary" class="notice error" role="alert" tabindex="-1"><strong>{{ error }}</strong><ul v-if="Object.keys(errors).length"><li v-for="(messages, path) in errors" :key="path"><BaseButton type="button" variant="ghost" size="small" @click="fields?.focusField(String(path))">{{ messages.join(' ') }}</BaseButton></li></ul><BaseButton v-if="response && !uncertain" type="button" class="button button--ghost" @click="load(true)" variant="ghost">Refresh current status and keep my edits</BaseButton></div><p v-if="message" class="notice" role="status">{{ message }}</p><p v-if="uncertain" class="notice" role="alert">The action’s outcome is unconfirmed. Retry the same action to recover its receipt.</p>
-    <section v-if="!session.authenticated && !response" class="notice"><h2>Open a private response</h2><label>Restore access from your downloaded receipt<input type="file" accept="application/json,.json" @change="recover"></label><p>Keep this receipt private. It grants access to your response until the credential expires.</p></section>
-    <template v-if="response"><div class="toolbar"><BaseButton type="button" class="button button--ghost" @click="download" variant="ghost">Download access receipt</BaseButton><RouterLink v-if="session.user?.role === 'admin'" :to="`/admin/form-responses?form=${response.form_id}`">Response inbox</RouterLink><RouterLink :to="`/forms/${response.slug}`">Open form</RouterLink></div><p v-if="claim" class="privacy">Save your access receipt to return later. It contains a private credential valid until {{ new Date(claim.expires_at).toLocaleString() }}.</p><form novalidate @submit.prevent="amend"><FormFields ref="fields" v-model="answers" :fields="response.definition.fields" :errors="errors" :upload="upload" :max-upload-bytes="maxUpload" :guest-extensions="guestExtensions" :download="downloadFile" :disabled="!response.can_amend || busy || uncertain" /><div v-if="response.can_amend || response.can_withdraw" class="toolbar"><BaseButton type="submit" v-if="response.can_amend" class="button" :disabled="reviewMutation.uncertain.value || mutation.unavailable('forms.amend.v1')">Save amendment</BaseButton><BaseButton v-if="response.can_withdraw" type="button" class="button button--ghost" :disabled="reviewMutation.uncertain.value || mutation.unavailable('forms.withdraw.v1')" @click="withdraw" variant="ghost">Withdraw response</BaseButton></div></form>
-    <section v-if="response.can_review" class="review"><h2>Review revision {{ response.revision }}</h2><p>This decision applies to the displayed answers and their current review subject.</p><dl v-if="response.review_context"><dt>Purpose</dt><dd>{{ response.review_context.binding }}</dd><dt>Policy</dt><dd>{{ response.review_context.policy_revision }}</dd></dl><form @submit.prevent="review"><fieldset :disabled="busy || uncertain"><label>Decision<select v-model="decision" class="input"><option value="changes_requested">Request changes</option><option value="accepted">Accept</option><option value="declined">Decline</option></select></label><label>Reason<textarea v-model="reason" class="input" rows="3" maxlength="8000" /></label></fieldset><BaseButton type="submit" class="button" :disabled="busy || mutation.uncertain.value">Record decision</BaseButton></form></section>
-    <section class="history"><h2>Review history</h2><p v-if="!response.reviews.length">No review decision has been recorded.</p><ol><li v-for="entry in response.reviews" :key="entry.id"><strong>{{ labels[entry.decision] }} · response revision {{ entry.response_revision }}</strong><time>{{ new Date(entry.created_at).toLocaleString() }}</time><p v-if="entry.reason">{{ entry.reason }}</p><small v-if="entry.response_revision !== response.revision">A previous revision. This decision does not determine the current response status.</small></li></ol></section></template>
-  </main>
+  <div class="page-stack response-page" :class="adminView ? 'admin-page' : 'response-page--public'" :aria-busy="loading">
+    <template v-if="adminView">
+      <nav class="response-breadcrumbs" aria-label="Breadcrumb"><RouterLink :to="inboxLink">Responses</RouterLink><span aria-hidden="true">/</span><span aria-current="page">Review response</span></nav>
+      <AdminPageHeader :title="response?.definition.title ?? 'Review response'">
+        <template v-if="response" #actions><BaseButton :to="`/forms/${response.slug}`" variant="secondary">Open form</BaseButton></template>
+      </AdminPageHeader>
+    </template>
+    <header v-else class="panel panel__body response-hero">
+      <StatusBadge v-if="response" :status="response.state === 'awaiting_review' ? 'completed' : response.state"
+        :label="response.state === 'awaiting_review' ? 'Submitted' : humanize(response.state)" />
+      <h1>{{ publicTitle }}</h1>
+      <p v-if="response">{{ response.definition.title }}</p>
+      <p v-else-if="!loading">Use your access receipt to reopen a guest response.</p>
+    </header>
+
+    <div v-if="error" ref="errorSummary" class="response-alert" tabindex="-1">
+      <InlineFeedback :message="error" />
+      <ul v-if="Object.keys(errors).length" class="form-errors">
+        <li v-for="(messages, path) in errors" :key="path"><BaseButton variant="ghost" size="small" @click="fields?.focusField(String(path))">{{ messages.join(' ') }}</BaseButton></li>
+      </ul>
+      <BaseButton v-if="response && !uncertain" variant="ghost" size="small" @click="load(editing)">Refresh response</BaseButton>
+    </div>
+    <InlineFeedback :message="message" tone="info" />
+    <InlineFeedback v-if="uncertain" message="Retry the same action to recover its receipt." tone="info" />
+    <div v-if="loading && !response" class="panel panel__body" role="status">Loading response…</div>
+    <section v-else-if="!adminView && !session.authenticated && !response" class="panel panel__body response-panel">
+      <h2>Restore access</h2>
+      <label>Access receipt<input class="input" type="file" accept="application/json,.json" @change="recover"></label>
+      <p class="response-muted">Use the JSON receipt you downloaded after submitting.</p>
+    </section>
+
+    <template v-if="response">
+      <div class="response-workspace" :class="{ 'response-workspace--review': adminView && response.can_review }">
+        <section class="panel panel__body response-panel">
+          <header class="response-heading">
+            <div><h2>{{ editing ? 'Edit your answers' : 'Submitted answers' }}</h2><p class="response-muted">Revision {{ response.revision }} · {{ formatDate(response.created_at) }}</p></div>
+            <StatusBadge v-if="adminView" :status="response.state" />
+            <BaseButton v-else-if="response.can_amend && !editing" size="small" variant="secondary" :disabled="busy || uncertain" @click="startEditing">Edit response</BaseButton>
+          </header>
+          <form v-if="editing && !adminView" novalidate class="response-edit" @submit.prevent="amend">
+            <FormFields ref="fields" v-model="answers" :fields="response.definition.fields" :errors="errors" :upload="upload"
+              :max-upload-bytes="maxUpload" :guest-extensions="guestExtensions" :download="downloadFile" :disabled="!response.can_amend || busy || uncertain" />
+            <div class="response-actions">
+              <BaseButton variant="ghost" :disabled="busy || uncertain" @click="cancelEdit">Cancel</BaseButton>
+              <BaseButton type="submit" variant="primary" :disabled="(!dirty && !mutation.uncertain.value) || mutation.unavailable('forms.amend.v1')">{{ mutation.uncertain.value ? 'Retry save' : 'Save changes' }}</BaseButton>
+            </div>
+          </form>
+          <FormAnswerSummary v-else :fields="response.definition.fields" :answers="response.answers" :download="downloadFile" />
+        </section>
+
+        <section v-if="adminView && response.can_review" class="panel panel__body response-panel">
+          <header class="response-heading"><div><h2>Review</h2><p class="response-muted">Decision for revision {{ response.revision }}</p></div></header>
+          <form class="response-edit" @submit.prevent="review">
+            <fieldset :disabled="busy || uncertain">
+              <label>Decision<select v-model="decision" class="input" required>
+                <option value="" disabled>Choose a decision</option><option value="accepted">Accept</option>
+                <option value="changes_requested">Request changes</option><option value="declined">Decline</option>
+              </select></label>
+              <label>Note to the respondent<textarea v-model="reason" class="input" rows="4" maxlength="8000" /></label>
+            </fieldset>
+            <BaseButton type="submit" variant="primary" :disabled="!decision || reviewMutation.unavailable('forms.review.v1')">{{ reviewMutation.uncertain.value ? 'Retry decision' : 'Save decision' }}</BaseButton>
+          </form>
+        </section>
+      </div>
+
+      <section v-if="!adminView" class="panel panel__body response-panel">
+        <header class="response-heading">
+          <div><h2>Response access</h2><p v-if="claim" class="response-muted">Keep your receipt private to reopen this response from another browser.</p></div>
+        </header>
+        <div class="response-actions">
+          <BaseButton variant="secondary" @click="download">Download receipt</BaseButton>
+          <BaseButton :to="`/forms/${response.slug}`" variant="ghost">Back to form</BaseButton>
+          <BaseButton v-if="response.can_withdraw && !editing" variant="ghost" :disabled="mutation.unavailable('forms.withdraw.v1')" @click="withdraw">Withdraw response</BaseButton>
+          <BaseButton v-if="response.can_review" :to="`/admin/form-responses/${response.id}`" variant="ghost">Open admin review</BaseButton>
+        </div>
+      </section>
+
+      <section v-if="response.reviews.length" class="panel panel__body response-panel">
+        <h2>Review history</h2>
+        <ol class="response-history">
+          <li v-for="entry in response.reviews" :key="entry.id">
+            <div class="response-actions"><StatusBadge :status="entry.decision" /><span class="response-muted">Revision {{ entry.response_revision }} · {{ formatDate(entry.created_at) }}</span></div>
+            <p v-if="entry.reason">{{ entry.reason }}</p>
+          </li>
+        </ol>
+      </section>
+    </template>
+  </div>
 </template>
 
 <style scoped>
-.response-page{display:grid;gap:1.3rem;margin:2rem auto;max-width:48rem;padding:0 1rem}.response-page h1{font-size:1.8rem}.response-page h2{font-size:1.1rem}.notice,.review{border:1px solid var(--color-border);border-radius:.7rem;padding:1rem}.notice{font-size:.85rem}.error{color:var(--color-danger,#b91c1c)}.toolbar{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:1rem}.privacy{color:var(--color-text-muted,#64748b);font-size:.8rem}.review fieldset{border:0;display:grid;gap:1rem;margin:0 0 1rem;padding:0}.review label,.notice label{display:grid;gap:.4rem;font-size:.85rem}.review dl{display:grid;grid-template-columns:auto 1fr;font-size:.8rem;gap:.4rem .8rem}.review dd{margin:0}.history ol{list-style:none;margin:0;padding:0}.history li{border-top:1px solid var(--color-border);display:grid;gap:.4rem;padding:1rem 0;font-size:.85rem}.history li p{margin:0;white-space:pre-wrap}.history time,.history small{color:var(--color-text-muted,#64748b);font-size:.75rem}
+.response-page--public { width: min(100%, 50rem); margin-inline: auto; padding: clamp(1rem, 4vw, 2.5rem) 1rem; }
+.response-breadcrumbs, .response-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.response-breadcrumbs, .response-muted { font-size: .85rem; color: var(--color-text-muted); }
+.response-hero, .response-panel, .response-edit, .response-alert { display: grid; gap: .85rem; }
+.response-hero { justify-items: start; }
+.response-hero h1, .response-hero p, .response-panel h2, .response-panel p { margin: 0; }
+.response-hero h1 { font-size: clamp(1.65rem, 4vw, 2.15rem); }
+.response-panel h2 { font-size: 1.1rem; }
+.response-heading { display: flex; justify-content: space-between; align-items: start; gap: .75rem; flex-wrap: wrap; padding-bottom: .85rem; border-bottom: 1px solid var(--color-border); }
+.response-heading p { margin-top: .25rem; }
+.response-workspace { display: grid; gap: 1rem; align-items: start; }
+.response-workspace--review { grid-template-columns: minmax(0, 1.5fr) minmax(17rem, 1fr); }
+.response-edit fieldset { display: grid; gap: .85rem; padding: 0; margin: 0; border: 0; min-width: 0; }
+.response-edit label, .response-panel > label { display: grid; gap: .35rem; font-size: .85rem; font-weight: 600; }
+.response-edit > .base-button { justify-self: start; }
+.response-history { list-style: none; padding: 0; margin: 0; }
+.response-history li { display: grid; gap: .5rem; border-top: 1px solid var(--color-border); padding-block: .8rem; }
+.response-history p { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 54rem) { .response-workspace--review { grid-template-columns: 1fr; } }
 </style>

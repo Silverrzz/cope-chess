@@ -30,9 +30,9 @@ async function replace(makeText: (selected: string) => string): Promise<void> {
   area.value?.setSelectionRange(...caret)
 }
 
-function open(next: typeof panel.value): void {
+function chooseInsert(event: Event): void {
   remember()
-  panel.value = panel.value === next ? '' : next
+  panel.value = (event.target as HTMLSelectElement).value as typeof panel.value
 }
 
 function wrap(before: string, after: string, fallback: string): void {
@@ -63,10 +63,11 @@ function select(choice: FormChoice): void {
       <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="wrap('**', '**', 'bold text')"><strong>Bold</strong></BaseButton>
       <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="wrap('*', '*', 'italic text')"><em>Italic</em></BaseButton>
       <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="wrap('[', '](https://)', 'link text')">Link</BaseButton>
-      <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="open('mention')">Mention game</BaseButton>
-      <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="open('game')">Game replay</BaseButton>
-      <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="open('board')">Chess position</BaseButton>
-      <BaseButton type="button" variant="ghost" size="small" :disabled="disabled" @click="open('ratings')">Rating list</BaseButton>
+      <select class="input insert-select" aria-label="Insert Cope content" :value="panel" :disabled="disabled" @change="chooseInsert">
+        <option value="">Insert Cope content</option>
+        <option value="mention">Mention game</option><option value="game">Game replay</option>
+        <option value="board">Chess position</option><option value="ratings">Rating list</option>
+      </select>
     </div>
     <FormResourcePicker v-if="panel && panel !== 'board'" :key="panel" :kind="panel === 'ratings' ? 'rating_list' : 'game'" :disabled="disabled" @selected="select" />
     <div v-else-if="panel === 'board'" class="position-editor">
@@ -79,7 +80,8 @@ function select(choice: FormChoice): void {
 <style scoped>
 .markdown-editor, .markdown-editor label { display: grid; gap: .45rem; }
 .markdown-editor textarea { line-height: 1.55; }
-.markdown-actions { display: flex; flex-wrap: wrap; gap: .2rem; }
+.markdown-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem; }
+.markdown-actions .insert-select { width: auto; min-height: 2.125rem; padding: .35rem .55rem; margin-inline-start: .35rem; font-size: .8125rem; }
 .position-editor { display: flex; gap: .6rem; align-items: end; }
 .position-editor label { flex: 1; }
 </style>

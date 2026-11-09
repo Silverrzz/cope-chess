@@ -107,7 +107,7 @@ export interface FormDetail {
   content_revision: number
   state_version: number
   releases: { id: string; number: number; definition: FormDefinition; created_at: string; accepting: boolean; valid_until: string | null }[]
-  copies: { id: string; current_revision: number; archived: boolean; updated_at: string; state_version: number }[]
+  copies: { id: string; basis_version: number; current_revision: number; archived: boolean; updated_at: string; state_version: number }[]
 }
 
 export interface Page<T> {
