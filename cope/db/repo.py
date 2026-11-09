@@ -35,6 +35,8 @@ class RatingListRecord:
     rules_revision: str = "chess1"
     hardware_scaled: bool = False
     monthly_refresh: bool = False
+    description: str = ""
+    display_order: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +51,7 @@ class TournamentRecord:
     scheduled_start_at: str | None
     started_at: str | None
     finished_at: str | None
+    historical: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,7 @@ class GameRecord:
     pgn: str | None
     started_at: str | None
     finished_at: str | None
+    source_tournament_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1583,6 +1587,12 @@ def delete_tournament(connection: sqlite3.Connection, tournament_id: int) -> Non
             raise ValueError("tournament results are already part of the ratings")
         if rating_commit.status in {"pending", "claimed"}:
             raise ValueError("tournament has a rating commit in progress")
+    if connection.execute(
+        """SELECT 1 FROM games game JOIN historical_tournament_games archive ON archive.game_id = game.id
+           WHERE game.tournament_id = ? LIMIT 1""",
+        (tournament_id,),
+    ).fetchone() is not None:
+        raise ValueError("tournament results are part of a historical tournament")
     event_ids = tuple(
         int(row["event_id"])
         for row in connection.execute(
@@ -1723,6 +1733,14 @@ def get_game(connection: sqlite3.Connection, game_id: int) -> GameRecord | None:
     return _game_from_row(row)
 
 
+def get_tournament_game(connection: sqlite3.Connection, tournament_id: int, game_id: int) -> GameRecord | None:
+    row = connection.execute(
+        "SELECT * FROM tournament_games WHERE tournament_id = ? AND id = ?",
+        (tournament_id, game_id),
+    ).fetchone()
+    return None if row is None else _game_from_row(row)
+
+
 def list_games(
     connection: sqlite3.Connection,
     tournament_id: int,
@@ -1736,13 +1754,13 @@ def list_games(
         else """
         id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
         match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
-        termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
+        termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at, source_tournament_id
         """
     )
     if status is None:
         rows = connection.execute(
             f"""
-            SELECT {columns} FROM games
+            SELECT {columns} FROM tournament_games
             WHERE tournament_id = ?
             ORDER BY round, pair_index, id
             """,
@@ -1751,7 +1769,7 @@ def list_games(
     else:
         rows = connection.execute(
             f"""
-            SELECT {columns} FROM games
+            SELECT {columns} FROM tournament_games
             WHERE tournament_id = ? AND status = ?
             ORDER BY round, pair_index, id
             """,
@@ -1773,8 +1791,8 @@ def list_games_for_tournaments(
         SELECT
           id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
           match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
-          termination, NULL::text AS pgn, started_at, finished_at
-        FROM games
+          termination, NULL::text AS pgn, started_at, finished_at, source_tournament_id
+        FROM tournament_games
         WHERE tournament_id IN ({placeholders})
         ORDER BY tournament_id, round, pair_index, id
         """,
@@ -1873,7 +1891,7 @@ def count_games(
     conditions += result_sql
     parameters.extend(result_parameters)
     row = connection.execute(
-        f"SELECT COUNT(*) AS count FROM games WHERE {conditions}",
+        f"SELECT COUNT(*) AS count FROM tournament_games WHERE {conditions}",
         tuple(parameters),
     ).fetchone()
     return int(row["count"])
@@ -1891,7 +1909,7 @@ def list_games_page(
     columns = """
       id, tournament_id, round, pair_index, white_engine_id, black_engine_id,
       match_id, game_number, tiebreak_kind, opening_id, status, record_eligible, result,
-      termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at
+      termination, NULL::text AS pgn, white_hw, black_hw, started_at, finished_at, source_tournament_id
     """
     offset = (page - 1) * page_size
     conditions = "tournament_id = ? AND record_eligible = 1"
@@ -1905,7 +1923,7 @@ def list_games_page(
     parameters.extend((page_size, offset))
     rows = connection.execute(
         f"""
-        SELECT {columns} FROM games
+        SELECT {columns} FROM tournament_games
         WHERE {conditions}
         ORDER BY id DESC
         LIMIT ? OFFSET ?
@@ -2143,8 +2161,10 @@ def _ensure_games_are_not_committed(
 ) -> None:
     placeholders = ", ".join("?" for _ in game_ids)
     row = connection.execute(
-        f"SELECT 1 FROM rating_list_history WHERE game_id IN ({placeholders}) LIMIT 1",
-        game_ids,
+        f"""SELECT 1 FROM rating_list_history WHERE game_id IN ({placeholders})
+            UNION ALL SELECT 1 FROM historical_tournament_games WHERE game_id IN ({placeholders})
+            LIMIT 1""",
+        (*game_ids, *game_ids),
     ).fetchone()
     if row is not None:
         raise ValueError("game results are already part of a rating list")
@@ -5067,15 +5087,15 @@ def list_tournament_rating_commits(
 
 def create_rating_list(
     connection: sqlite3.Connection, name: str, variant: str = "standard", *,
-    hardware_scaled: bool = False, monthly_refresh: bool = False,
+    hardware_scaled: bool = False, monthly_refresh: bool = False, description: str = "",
 ) -> int:
     definition = get_variant(variant)
     if hardware_scaled and variant != "standard":
         raise ValueError("Hardware-scaled rating lists require standard chess")
     cursor = connection.execute(
-        """INSERT INTO rating_lists (name, created_at, variant, rules_revision, hardware_scaled, monthly_refresh)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (name.strip(), utc_now(), definition.id, definition.rules_revision, hardware_scaled, monthly_refresh),
+        """INSERT INTO rating_lists (name, created_at, variant, rules_revision, hardware_scaled, monthly_refresh, description)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (name.strip(), utc_now(), definition.id, definition.rules_revision, hardware_scaled, monthly_refresh, description.strip()),
     )
     return int(cursor.lastrowid)
 
@@ -5094,6 +5114,49 @@ def set_rating_list_variant(connection, rating_list_id: int, variant: str) -> No
     connection.execute("UPDATE rating_lists SET variant = ?, rules_revision = ? WHERE id = ?", (variant, definition.rules_revision, rating_list_id))
 
 
+def update_rating_list(
+    connection: sqlite3.Connection, rating_list_id: int, *, name: str | None = None,
+    description: str | None = None, variant: str | None = None,
+    hardware_scaled: bool | None = None, monthly_refresh: bool | None = None,
+) -> None:
+    row = connection.execute("SELECT * FROM rating_lists WHERE id = ? FOR UPDATE", (rating_list_id,)).fetchone()
+    if row is None:
+        raise ValueError("Rating list does not exist")
+    name = row["name"] if name is None else name.strip()
+    description = row["description"] if description is None else description.strip()
+    variant = row["variant"] if variant is None else variant
+    hardware_scaled = row["hardware_scaled"] if hardware_scaled is None else hardware_scaled
+    monthly_refresh = row["monthly_refresh"] if monthly_refresh is None else monthly_refresh
+    rules_revision = row["rules_revision"] if variant == row["variant"] else get_variant(variant).rules_revision
+    if hardware_scaled and variant != "standard":
+        raise ValueError("Hardware-scaled rating lists require standard chess")
+    if (row["variant"], row["rules_revision"], row["hardware_scaled"], row["monthly_refresh"]) != (
+        variant, rules_revision, hardware_scaled, monthly_refresh,
+    ) and connection.execute(
+        """SELECT 1 FROM tournament_rating_list_commits
+           WHERE rating_list_id = ? AND status IN ('pending', 'claimed', 'applied')
+           UNION ALL SELECT 1 FROM rating_list_ratings WHERE rating_list_id = ? LIMIT 1""",
+        (rating_list_id, rating_list_id),
+    ).fetchone() is not None:
+        raise ValueError("Clear the tournament commits and calculated ratings before changing the list rules")
+    connection.execute(
+        """UPDATE rating_lists SET name = ?, description = ?, variant = ?, rules_revision = ?,
+           hardware_scaled = ?, monthly_refresh = ? WHERE id = ?""",
+        (name, description, variant, rules_revision, hardware_scaled, monthly_refresh, rating_list_id),
+    )
+
+
+def reorder_rating_lists(connection: sqlite3.Connection, rating_list_ids: list[int]) -> None:
+    connection.execute("LOCK TABLE rating_lists IN EXCLUSIVE MODE")
+    current_ids = {int(row["id"]) for row in connection.execute("SELECT id FROM rating_lists")}
+    if len(rating_list_ids) != len(current_ids) or set(rating_list_ids) != current_ids:
+        raise ValueError("Provide every current rating list exactly once")
+    connection.executemany(
+        "UPDATE rating_lists SET display_order = ? WHERE id = ?",
+        enumerate(rating_list_ids, start=1),
+    )
+
+
 def get_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> RatingListRecord | None:
     row = connection.execute("SELECT * FROM rating_lists WHERE id = ?", (rating_list_id,)).fetchone()
     return None if row is None else _rating_list_from_row(row)
@@ -5102,7 +5165,7 @@ def get_rating_list(connection: sqlite3.Connection, rating_list_id: int) -> Rati
 def list_rating_lists(connection: sqlite3.Connection) -> tuple[RatingListRecord, ...]:
     return tuple(
         _rating_list_from_row(row)
-        for row in connection.execute("SELECT * FROM rating_lists ORDER BY name, id")
+        for row in connection.execute("SELECT * FROM rating_lists ORDER BY display_order NULLS LAST, name, id")
     )
 
 
@@ -5151,6 +5214,8 @@ def _rating_list_from_row(row: sqlite3.Row) -> RatingListRecord:
         created_at=row["created_at"],
         hardware_scaled=row["hardware_scaled"],
         monthly_refresh=row["monthly_refresh"],
+        description=row["description"],
+        display_order=row["display_order"],
     )
 
 
@@ -5285,6 +5350,7 @@ def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
         scheduled_start_at=row["scheduled_start_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        historical=row.get("historical", False),
     )
 
 
@@ -5319,6 +5385,7 @@ def _game_from_row(row: sqlite3.Row) -> GameRecord:
         pgn=row["pgn"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        source_tournament_id=row.get("source_tournament_id"),
     )
 
 

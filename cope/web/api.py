@@ -198,11 +198,12 @@ from cope.web.engine_sources import (
 )
 from cope.web.openings import format_opening, parse_opening_input
 from cope.variants import VariantId
-from cope.db.repo import set_rating_list_variant
+from cope.db.repo import get_tournament_game, reorder_rating_lists, set_rating_list_variant, update_rating_list
 from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
 from cope.ratings import (
+    create_historical_rating_list,
     RatingCommitError,
     recalculate_ratings,
     uncommit_tournament_ratings,
@@ -513,13 +514,15 @@ def _admin_rating_list_summaries(connection: sqlite3.Connection) -> list[dict[st
         FROM rating_lists rating_list
         LEFT JOIN rating_stats ON rating_stats.rating_list_id = rating_list.id
         LEFT JOIN commit_stats ON commit_stats.rating_list_id = rating_list.id
-        ORDER BY rating_list.name, rating_list.id
+        ORDER BY rating_list.display_order NULLS LAST, rating_list.name, rating_list.id
         """
     )
     return [
         {
             "id": int(row["id"]),
             "name": str(row["name"]),
+            "description": row["description"],
+            "display_order": row["display_order"],
             "variant": row["variant"],
             "anchor_engine_id": row["anchor_engine_id"],
             "anchor_elo": float(row["anchor_elo"]),
@@ -552,8 +555,9 @@ def _admin_rating_list_tournaments(
         ),
         selected_games AS MATERIALIZED (
           SELECT game.id, game.tournament_id
-          FROM games game
+          FROM tournament_games game
           WHERE game.status = 'finished'
+            AND game.record_eligible = 1
             AND game.result IN ('1-0', '0-1', '1/2-1/2')
             AND game.tournament_id IN (
               SELECT tournament_id FROM selected_commits
@@ -562,7 +566,7 @@ def _admin_rating_list_tournaments(
         hardware_by_game AS (
           SELECT score.game_id
           FROM game_hardware_scores score
-          JOIN selected_games game ON game.id = score.game_id
+          JOIN (SELECT DISTINCT id FROM selected_games) game ON game.id = score.game_id
           GROUP BY score.game_id
           HAVING COUNT(*) = 2
         ),
@@ -652,6 +656,7 @@ class RatingListPayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     hardware_scaled: bool = False
     monthly_refresh: bool = False
+    description: str = Field(default="", max_length=2000)
 
     @field_validator("name")
     @classmethod
@@ -660,6 +665,36 @@ class RatingListPayload(BaseModel):
         if not value:
             raise ValueError("rating list name cannot be blank")
         return value
+
+
+class RatingListUpdatePayload(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    variant: VariantId | None = None
+    hardware_scaled: bool | None = None
+    monthly_refresh: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str | None) -> str | None:
+        return None if value is None else RatingListPayload.strip_name(value)
+
+
+class RatingListOrderPayload(BaseModel):
+    rating_list_ids: list[int] = Field(min_length=1)
+
+
+class HistoricalRatingListPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    tournament_name: str = Field(min_length=1, max_length=160)
+    source_rating_list_id: int = Field(gt=0)
+    engine_version_ids: list[int] = Field(min_length=2)
+    expected_game_count: int = Field(gt=0)
+
+    @field_validator("name", "tournament_name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        return RatingListPayload.strip_name(value)
 
 
 class TournamentStatusPayload(BaseModel):
@@ -1527,7 +1562,7 @@ def register_api_routes(app: FastAPI) -> None:
         raw_game_id = request.query_params.get("game_id")
         if raw_game_id is not None:
             try:
-                viewer_game = get_game(connection, int(raw_game_id))
+                viewer_game = get_tournament_game(connection, tournament.id, int(raw_game_id))
             except ValueError:
                 viewer_game = None
             if viewer_game is None or viewer_game.tournament_id != tournament.id:
@@ -1993,6 +2028,7 @@ def register_api_routes(app: FastAPI) -> None:
             rating_list_id = create_rating_list(
                 connection, payload.name, payload.variant,
                 hardware_scaled=payload.hardware_scaled, monthly_refresh=payload.monthly_refresh,
+                description=payload.description,
             )
             connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -2002,6 +2038,66 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         _publish_admin_change(web_app, request)
         return _json({"id": rating_list_id, "message": "Rating list created."}, status_code=201)
+
+    @app.put("/api/admin/rating-lists/order")
+    def admin_reorder_rating_lists(
+        payload: RatingListOrderPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            reorder_rating_lists(connection, payload.rating_list_ids)
+            connection.commit()
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"rating_list_ids": payload.rating_list_ids, "message": "Rating list order saved."})
+
+    @app.patch("/api/admin/rating-lists/{rating_list_id}")
+    def admin_update_rating_list(
+        rating_list_id: int,
+        payload: RatingListUpdatePayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if get_rating_list(connection, rating_list_id) is None:
+            raise HTTPException(status_code=404, detail="Rating list not found.")
+        try:
+            update_rating_list(connection, rating_list_id, **payload.model_dump(exclude_none=True))
+            rating_list = get_rating_list(connection, rating_list_id)
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail="A rating list with that name already exists.") from exc
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({"rating_list": rating_list, "message": "Rating list settings saved."})
+
+    @app.post("/api/admin/rating-lists/historical")
+    def admin_create_historical_rating_list(
+        payload: HistoricalRatingListPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            rating_list_id, tournament_id, result = create_historical_rating_list(
+                connection, **payload.model_dump(),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail="A rating list with that name already exists.") from exc
+        except (RatingCommitError, ValueError) as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        _publish_admin_change(web_app, request)
+        return _json({
+            "rating_list_id": rating_list_id, "tournament_id": tournament_id,
+            "result": result, "message": "Historical rating list created.",
+        }, status_code=201)
 
     @app.put("/api/admin/rating-lists/{rating_list_id}/variant")
     def admin_set_rating_list_variant(
@@ -4640,7 +4736,7 @@ def _public_engine_ratings(
         FROM ranked
         JOIN rating_lists rating_list ON rating_list.id = ranked.rating_list_id
         WHERE ranked.engine_id = ?
-        ORDER BY rating_list.name, rating_list.id
+        ORDER BY rating_list.display_order NULLS LAST, rating_list.name, rating_list.id
         """,
         (engine_id,),
     ).fetchall()
@@ -4724,6 +4820,8 @@ def _ensure_tournament_games_mutable(
     connection: sqlite3.Connection,
     tournament_id: int,
 ) -> None:
+    if _require_tournament(connection, tournament_id).historical:
+        raise HTTPException(status_code=409, detail="Historical tournaments reference games from their original tournaments.")
     locked = next(
         (
             commit
@@ -4798,10 +4896,10 @@ def _live_tournament_roster_payload(
         SELECT engine_id, status, COUNT(*) AS count
         FROM (
           SELECT white_engine_id AS engine_id, status
-          FROM games WHERE tournament_id = ?
+          FROM tournament_games WHERE tournament_id = ?
           UNION ALL
           SELECT black_engine_id AS engine_id, status
-          FROM games WHERE tournament_id = ?
+          FROM tournament_games WHERE tournament_id = ?
         ) participant_games
         GROUP BY engine_id, status
         """,

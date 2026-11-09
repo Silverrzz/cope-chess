@@ -12,11 +12,14 @@ from cope.tournament.round_robin import round_robin_pair_counts
 
 from cope.db.repo import (
     RunnerCommandRecord,
+    create_rating_list,
+    create_tournament,
     get_rating_list,
     get_tournament,
     list_games,
     list_games_for_tournaments,
     list_tournaments_by_ids,
+    update_rating_list_anchor,
     utc_now,
     validate_rating_list_variant,
 )
@@ -47,6 +50,82 @@ class RatingRecalculationResult:
     tournaments_applied: int
     games_applied: int
     engines_updated: int
+
+
+def create_historical_rating_list(
+    connection: sqlite3.Connection, *, name: str, tournament_name: str,
+    source_rating_list_id: int, engine_version_ids: list[int], expected_game_count: int,
+) -> tuple[int, int, RatingRecalculationResult]:
+    source_list = connection.execute(
+        "SELECT * FROM rating_lists WHERE id = ? FOR SHARE", (source_rating_list_id,),
+    ).fetchone()
+    if source_list is None or source_list["monthly_refresh"] or source_list["hardware_scaled"]:
+        raise RatingCommitError("Choose a cumulative rating list with fixed clocks")
+    if len(set(engine_version_ids)) != len(engine_version_ids) or min(engine_version_ids) <= 0:
+        raise RatingCommitError("Provide distinct engine version IDs")
+    games = connection.execute(
+        """SELECT game.id, game.tournament_id, game.white_engine_id, game.black_engine_id,
+                  game.started_at, game.finished_at
+           FROM tournament_rating_list_commits source
+           JOIN games game ON game.tournament_id = source.tournament_id
+           JOIN engine_versions white ON white.id = game.white_engine_id
+           JOIN engine_versions black ON black.id = game.black_engine_id
+           WHERE source.rating_list_id = ? AND source.status = 'applied'
+             AND game.record_eligible = 1 AND game.status = 'finished'
+             AND game.result IN ('1-0', '0-1', '1/2-1/2')
+             AND white.id = ANY(?) AND black.id = ANY(?) AND white.engine_id <> black.engine_id""",
+        (source_rating_list_id, engine_version_ids, engine_version_ids),
+    ).fetchall()
+    if len(games) != expected_game_count:
+        raise RatingCommitError(f"Expected {expected_game_count} historical games, found {len(games)}")
+    sources = list_tournaments_by_ids(connection, (game["tournament_id"] for game in games))
+    original = sources[0].config
+    if any(
+        (item.config.variant, item.config.rules_revision, item.config.time_control)
+        != (original.variant, original.rules_revision, original.time_control)
+        for item in sources
+    ):
+        raise RatingCommitError("Historical games must share a variant, rules revision, and time control")
+    participants = sorted({game[side] for game in games for side in ("white_engine_id", "black_engine_id")})
+    config = TournamentConfig.model_validate({
+        **original.model_dump(mode="json"),
+        "format": "round_robin",
+        "format_options": {"cycles": 1},
+        "participants": participants,
+        "concurrency": 1,
+        "opening_suite_id": original.opening_suite_id if all(
+            item.config.opening_suite_id == original.opening_suite_id for item in sources
+        ) else None,
+    })
+    rating_list_id = create_rating_list(connection, name, original.variant)
+    tournament_id = create_tournament(connection, tournament_name, config, status="finished")
+    connection.execute(
+        "UPDATE tournaments SET historical = TRUE, started_at = ?, finished_at = ? WHERE id = ?",
+        (
+            min((game["started_at"] for game in games if game["started_at"]), default=None),
+            max((game["finished_at"] for game in games if game["finished_at"]), default=None),
+            tournament_id,
+        ),
+    )
+    connection.copy_rows(
+        "COPY historical_tournament_games (tournament_id, game_id) FROM STDIN",
+        ((tournament_id, game["id"]) for game in games),
+    )
+    anchor = connection.execute(
+        """SELECT engine_id, elo FROM rating_list_ratings WHERE rating_list_id = ? AND engine_id = ANY(?)
+           ORDER BY elo DESC, engine_id LIMIT 1""",
+        (source_rating_list_id, participants),
+    ).fetchone()
+    if anchor is not None:
+        update_rating_list_anchor(connection, rating_list_id, anchor["engine_id"], anchor["elo"])
+    now = utc_now()
+    connection.execute(
+        """INSERT INTO tournament_rating_list_commits
+           (tournament_id, rating_list_id, status, requested_at, applied_at)
+           VALUES (?, ?, 'applied', ?, ?)""",
+        (tournament_id, rating_list_id, now, now),
+    )
+    return rating_list_id, tournament_id, recalculate_ratings(connection, rating_list_ids=(rating_list_id,))
 
 
 def expected_score(
@@ -211,8 +290,8 @@ def recalculate_ratings(
     for game in list_games_for_tournaments(connection, committed_tournament_ids):
         games_by_tournament[game.tournament_id].append(game)
 
-    games_by_list: dict[int, list[tuple[int, object, str]]] = {
-        list_id: [] for list_id in selected
+    games_by_list: dict[int, dict[int, tuple[int, object, str]]] = {
+        list_id: {} for list_id in selected
     }
     games_applied = 0
     applied_at = utc_now()
@@ -230,10 +309,11 @@ def recalculate_ratings(
         games = _committable_games(tournament, tuple(games_by_tournament[tournament_id]))
         _validate_games(connection, tournament, games, monthly_refresh=rating_list_id in monthly_lists)
         history_at = commit["applied_at"] or commit["requested_at"] or applied_at
-        games_by_list[rating_list_id].extend(
-            (tournament_id, game, history_at) for game in games
-        )
-        games_applied += len(games)
+        category_games = games_by_list[rating_list_id]
+        previous_count = len(category_games)
+        for game in games:
+            category_games.setdefault(game.id, (tournament_id, game, history_at))
+        games_applied += len(category_games) - previous_count
 
     ratings: dict[int, dict[int, float]] = {}
     games_played: dict[int, dict[int, int]] = {}
@@ -241,7 +321,7 @@ def recalculate_ratings(
     rating_errors: dict[int, dict[int, float | None]] = {}
     for rating_list_id in selected:
         anchor_engine_id, anchor_elo = anchors[rating_list_id]
-        category_games = games_by_list[rating_list_id]
+        category_games = games_by_list[rating_list_id].values()
         category_ratings, category_counts = _calculate_ratings_together(
             tuple(game for _, game, _ in category_games),
             anchor_engine_id=anchor_engine_id,

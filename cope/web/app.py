@@ -3084,6 +3084,8 @@ def _game_payload(
         "white_name": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),
         "black_name": engines.get(game.black_engine_id, f"Engine {game.black_engine_id}"),
     }
+    if game.source_tournament_id is not None:
+        payload["source_tournament_id"] = game.source_tournament_id
     if live:
         payload.update(
             {
@@ -3592,7 +3594,7 @@ def _standings(
         for row in connection.execute(
             """
             SELECT white_engine_id, black_engine_id, result, COUNT(*) AS games
-            FROM games
+            FROM tournament_games
             WHERE tournament_id = ? AND record_eligible = 1 AND result IS NOT NULL
             GROUP BY white_engine_id, black_engine_id, result
             """,
@@ -3726,7 +3728,7 @@ def _tournament_rating_summaries(
         FROM tournament_rating_list_commits rating_commit
         JOIN rating_lists rating_list ON rating_list.id = rating_commit.rating_list_id
         WHERE rating_commit.tournament_id = ? AND rating_commit.status = 'applied'
-        ORDER BY rating_list.name, rating_commit.rating_list_id
+        ORDER BY rating_list.display_order NULLS LAST, rating_list.name, rating_commit.rating_list_id
         """,
         (tournament_id,),
     ).fetchall()
@@ -3857,7 +3859,7 @@ def _tournament_summary(
         "participant_count": len(participant_names),
         "progress_percent": round(finished_games / total_games * 100) if total_games else 0,
         "time_control": _time_control_label(tournament.config.time_control),
-        "format": tournament.config.format.value.replace("_", " ").title(),
+        "format": "Historical results" if tournament.historical else tournament.config.format.value.replace("_", " ").title(),
         "estimate": tournament_estimate.to_dict(),
     }
 
@@ -3917,8 +3919,8 @@ def _tournament_summaries(
                  SELECT COUNT(*)
                  FROM (
                    SELECT 1
-                   FROM games pair_game
-                   WHERE pair_game.tournament_id = games.tournament_id
+                   FROM tournament_games pair_game
+                   WHERE pair_game.tournament_id = tournament_games.tournament_id
                      AND pair_game.record_eligible = 1
                    GROUP BY
                      LEAST(pair_game.white_engine_id, pair_game.black_engine_id),
@@ -3926,11 +3928,12 @@ def _tournament_summaries(
                      pair_game.opening_id,
                      pair_game.match_id,
                      (pair_game.game_number - 1) / 2,
-                     pair_game.tiebreak_kind
+                     pair_game.tiebreak_kind,
+                     pair_game.source_tournament_id
                  ) game_pairs
                ) AS pairs,
                {duration_columns}
-        FROM games
+        FROM tournament_games
         WHERE tournament_id IN ({placeholders}) AND record_eligible = 1
         GROUP BY tournament_id
         """,
@@ -4060,7 +4063,7 @@ def _tournament_game_summary(
     rows = connection.execute(
         """
         SELECT status, COUNT(*) AS count
-        FROM games
+        FROM tournament_games
         WHERE tournament_id = ? AND record_eligible = 1
         GROUP BY status
         """,
@@ -4075,7 +4078,7 @@ def _tournament_game_summary(
         SELECT COUNT(*) AS count
         FROM (
           SELECT 1
-          FROM games
+          FROM tournament_games
           WHERE tournament_id = ? AND record_eligible = 1
           GROUP BY
             LEAST(white_engine_id, black_engine_id),
@@ -4083,7 +4086,8 @@ def _tournament_game_summary(
             opening_id,
             match_id,
             (game_number - 1) / 2,
-            tiebreak_kind
+            tiebreak_kind,
+            source_tournament_id
         ) game_pairs
         """,
         (tournament_id,),
@@ -4093,7 +4097,7 @@ def _tournament_game_summary(
     return summary
 
 
-def _game_pair_key(game: GameRecord) -> tuple[int, int, int | None, int | None, int, str | None]:
+def _game_pair_key(game: GameRecord) -> tuple[int, int, int | None, int | None, int, str | None, int | None]:
     first_engine_id, second_engine_id = sorted(
         (game.white_engine_id, game.black_engine_id)
     )
@@ -4104,6 +4108,7 @@ def _game_pair_key(game: GameRecord) -> tuple[int, int, int | None, int | None, 
         game.match_id,
         (game.game_number - 1) // 2,
         game.tiebreak_kind,
+        game.source_tournament_id,
     )
 
 
@@ -4118,9 +4123,11 @@ def _settings_view(
     rows: list[tuple[str, str]] = [
         ("Variant", get_variant(config.variant).name),
         ("Rules", config.rules_revision),
-        ("Format", config.format.value.replace("_", " ").title()),
+        ("Format", "Historical results" if tournament.historical else config.format.value.replace("_", " ").title()),
         ("Time control", _time_control_label(config.time_control)),
     ]
+    if tournament.historical:
+        return rows
 
     options = config.format_options
     option_labels = {

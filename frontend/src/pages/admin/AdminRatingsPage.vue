@@ -15,6 +15,7 @@ interface RatingList {
   variant: string
   id: number
   name: string
+  description: string
   created_at: string
   engine_versions: number
   games: number
@@ -31,7 +32,9 @@ const loading = ref(true)
 const pending = ref(false)
 const error = ref('')
 const showCreate = ref(false)
+const orderedLists = ref<RatingList[] | null>(null)
 const name = ref('')
+const description = ref('')
 const variant = ref<Variant>('standard')
 const hardwareScaled = ref(false)
 const monthlyRefresh = ref(false)
@@ -53,6 +56,7 @@ async function createList(): Promise<void> {
     const response = await api.post<{ id: number; message: string }>('/api/admin/rating-lists', {
       body: {
         name: name.value.trim(),
+        description: description.value,
         variant: variant.value,
         hardware_scaled: variant.value === 'standard' && hardwareScaled.value,
         monthly_refresh: monthlyRefresh.value,
@@ -64,18 +68,49 @@ async function createList(): Promise<void> {
   finally { pending.value = false }
 }
 
+function moveList(index: number, offset: number): void {
+  const lists = orderedLists.value
+  const nextIndex = index + offset
+  if (!lists || nextIndex < 0 || nextIndex >= lists.length) return
+  const moving = lists.splice(index, 1)
+  lists.splice(nextIndex, 0, ...moving)
+}
+
+async function saveOrder(): Promise<void> {
+  if (!orderedLists.value) return
+  pending.value = true
+  error.value = ''
+  try {
+    const response = await api.put<{ message: string }>('/api/admin/rating-lists/order', {
+      body: { rating_list_ids: orderedLists.value.map(item => item.id) },
+    })
+    toast.success(response.message)
+    orderedLists.value = null
+    await load()
+  } catch (cause) {
+    error.value = errorText(cause)
+    toast.error(cause)
+  } finally {
+    pending.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
 <template>
   <div class="admin-page page-stack">
     <AdminPageHeader title="Rating lists">
-      <template #actions><button class="button button--primary" type="button" @click="showCreate = true">New rating list</button></template>
+      <template #actions>
+        <button class="button button--secondary" type="button" :disabled="loading || pending || !data?.rating_lists.length || !!orderedLists" @click="orderedLists = [...(data?.rating_lists ?? [])]; showCreate = false">Reorder lists</button>
+        <button class="button button--primary" type="button" :disabled="!!orderedLists" @click="showCreate = true">New rating list</button>
+      </template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
 
     <form v-if="showCreate" class="panel create-list" @submit.prevent="createList">
       <label><span>List name</span><input v-model="name" class="input" maxlength="120" autofocus placeholder="e.g. Classical" /></label>
+      <label><span>Description</span><input v-model="description" class="input" maxlength="2000" /></label>
       <label><span>Variant</span><VariantPicker v-model="variant" /></label>
       <label v-if="variant === 'standard'"><span>Clock mode</span><select v-model="hardwareScaled" class="input"><option :value="false">Fixed</option><option :value="true">Hardware-scaled</option></select></label>
       <label><span>Results window</span><select v-model="monthlyRefresh" class="input"><option :value="false">Cumulative</option><option :value="true">Latest monthly edition</option></select></label>
@@ -84,6 +119,21 @@ onMounted(load)
 
     <section class="summary panel"><span>{{ formatNumber(data?.rating_lists.length) }} lists</span><span>{{ formatNumber(totalRatedEngines) }} rated engine versions</span></section>
     <div v-if="loading" class="panel loading" role="status">Loading rating lists…</div>
+    <form v-else-if="orderedLists" class="panel rating-order" @submit.prevent="saveOrder">
+      <ol>
+        <li v-for="(ratingList, index) in orderedLists" :key="ratingList.id">
+          <span>{{ ratingList.name }}</span>
+          <div>
+            <button class="button button--secondary button--small" type="button" :aria-label="`Move ${ratingList.name} up`" :disabled="pending || index === 0" @click="moveList(index, -1)">↑</button>
+            <button class="button button--secondary button--small" type="button" :aria-label="`Move ${ratingList.name} down`" :disabled="pending || index === orderedLists.length - 1" @click="moveList(index, 1)">↓</button>
+          </div>
+        </li>
+      </ol>
+      <div class="rating-order-actions">
+        <button class="button button--ghost" type="button" :disabled="pending" @click="orderedLists = null">Cancel</button>
+        <button class="button button--primary" :disabled="pending">{{ pending ? 'Saving…' : 'Save order' }}</button>
+      </div>
+    </form>
     <section v-else-if="data?.rating_lists.length" class="list-grid">
       <RouterLink v-for="ratingList in data.rating_lists" :key="ratingList.id" class="panel list-card" :to="`/admin/ratings/${ratingList.id}`">
         <div><h2>{{ ratingList.name }}</h2><small>{{ ratingList.variant }}<template v-if="ratingList.hardware_scaled"> · Scaled clocks</template><template v-if="ratingList.monthly_refresh"> · Monthly</template></small><span>Open rating list →</span></div>
@@ -95,5 +145,11 @@ onMounted(load)
 </template>
 
 <style scoped>
+.rating-order { padding: 1rem; }
+.rating-order ol { margin: 0 0 1rem; padding-left: 1.5rem; }
+.rating-order li { padding: .5rem; border-bottom: 1px solid var(--color-border); }
+.rating-order li div { float: right; display: flex; gap: .35rem; }
+.rating-order li span { display: inline-block; min-height: 2rem; padding-top: .4rem; }
+.rating-order-actions { display: flex; justify-content: end; gap: .5rem; }
 .create-list{align-items:end;display:flex;gap:1rem;padding:1rem}.create-list label{display:grid;flex:1;gap:.4rem}.create-list label span{font-size:.75rem;font-weight:700}.create-list>div{display:flex;gap:.5rem}.summary{display:flex;gap:1.5rem;padding:.8rem 1rem;color:var(--color-text-muted);font-size:.76rem}.loading{min-height:12rem;padding:2rem}.list-grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fill,minmax(18rem,1fr))}.list-card{color:inherit;display:grid;gap:1.2rem;padding:1.15rem;text-decoration:none;transition:border-color .15s,transform .15s}.list-card:hover{border-color:var(--color-accent);transform:translateY(-2px)}.list-card>div{align-items:start;display:flex;justify-content:space-between;gap:1rem}.list-card h2{font-size:1rem;margin:0}.list-card>div span{color:var(--color-accent);font-size:.7rem;font-weight:700}.list-card dl{display:grid;grid-template-columns:repeat(3,1fr);margin:0}.list-card dl div{display:grid;gap:.25rem}.list-card dt{color:var(--color-text-muted);font-size:.62rem}.list-card dd{font-size:1.05rem;font-weight:750;margin:0}@media(max-width:38rem){.create-list{align-items:stretch;flex-direction:column}}
 </style>

@@ -294,8 +294,11 @@ def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int |
         conditions.append("game.id = ?")
         parameters.append(filters.game_id)
     if filters.tournament_id is not None:
-        conditions.append("game.tournament_id = ?")
-        parameters.append(filters.tournament_id)
+        conditions.append(
+            "(game.tournament_id = ? OR EXISTS (SELECT 1 FROM historical_tournament_games archive "
+            "WHERE archive.game_id = game.id AND archive.tournament_id = ?))"
+        )
+        parameters.extend((filters.tournament_id, filters.tournament_id))
     if filters.rating_list_id is not None:
         conditions.append(
             "EXISTS (SELECT 1 FROM rating_list_history history "

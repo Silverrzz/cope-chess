@@ -595,7 +595,7 @@ onBeforeUnmount(() => {
           <div v-if="data.games.length" class="game-table-wrap">
             <table class="data-table"><thead><tr><th>Round</th><th>White</th><th>Result</th><th>Black</th><th>Status</th><th>Finished</th><th>Actions</th></tr></thead><tbody>
               <tr v-for="game in data.games" :key="game.id">
-                <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td><td><div class="game-actions"><button v-if="game.status === 'finished' && game.result" class="button button--secondary button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Replay this completed game'" @click="replayGame(game)">{{ pending === `replay-${game.id}` ? 'Resetting…' : 'Replay' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Invalidate this game pair'" @click="invalidateGame(game)">{{ pending === `invalidate-${game.id}` ? 'Invalidating…' : 'Invalidate' }}</button></div></td>
+                <td>{{ game.round }}</td><td><RouterLink :to="`/tournaments/${id}?game_id=${game.id}`">{{ engineName(game.white_engine_id) }}</RouterLink></td><td><strong>{{ game.result ?? 'vs' }}</strong></td><td>{{ engineName(game.black_engine_id) }}</td><td><StatusBadge :status="game.status" /></td><td>{{ formatDate(game.finished_at) }}</td><td><div v-if="!data.tournament.historical" class="game-actions"><button v-if="game.status === 'finished' && game.result" class="button button--secondary button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Replay this completed game'" @click="replayGame(game)">{{ pending === `replay-${game.id}` ? 'Resetting…' : 'Replay' }}</button><button class="button button--danger button--small" type="button" :disabled="!!pending || resultsLocked" :title="resultsLocked ? 'Uncommit tournament ratings first.' : 'Invalidate this game pair'" @click="invalidateGame(game)">{{ pending === `invalidate-${game.id}` ? 'Invalidating…' : 'Invalidate' }}</button></div></td>
               </tr>
             </tbody></table>
           </div>
@@ -614,7 +614,7 @@ onBeforeUnmount(() => {
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
         </dl>
         <dl v-else class="definition-list">
-          <div><dt>Format</dt><dd>{{ humanize(data.tournament.config.format) }}</dd></div>
+          <div><dt>Format</dt><dd>{{ data.tournament.historical ? 'Historical results' : humanize(data.tournament.config.format) }}</dd></div>
           <div><dt>Time control</dt><dd>{{ formatTimeControl(data.tournament.config.time_control) }}<template v-if="data.tournament.config.clock_reference_hardware_key"> · Hardware-scaled</template></dd></div>
           <div><dt>Participants</dt><dd>{{ data.tournament.config.participants.length }}</dd></div>
           <div><dt>Concurrency</dt><dd>{{ data.tournament.config.concurrency }}</dd></div>

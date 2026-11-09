@@ -273,11 +273,11 @@ def engine_game_filter_options(
         )
     rating_lists = connection.execute(
         """
-        SELECT DISTINCT rating_list.id, rating_list.name
+        SELECT DISTINCT rating_list.id, rating_list.name, rating_list.display_order
         FROM rating_list_history history
         JOIN rating_lists rating_list ON rating_list.id = history.rating_list_id
         WHERE history.engine_id = ?
-        ORDER BY rating_list.name, rating_list.id
+        ORDER BY rating_list.display_order NULLS LAST, rating_list.name, rating_list.id
         """,
         (engine_id,),
     )

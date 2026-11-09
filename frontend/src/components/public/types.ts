@@ -18,6 +18,7 @@ export interface TournamentRecord {
   id: Identifier
   name: string
   status: string
+  historical?: boolean
   current_round?: number
   created_at?: string
   scheduled_start_at?: string | null
@@ -29,6 +30,7 @@ export interface TournamentRecord {
 export interface GameRecord {
   id: Identifier
   tournament_id: Identifier
+  source_tournament_id?: Identifier | null
   round?: number
   pair_index?: number
   game_number?: number

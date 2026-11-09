@@ -1192,7 +1192,10 @@ function forgetManualFollowPauseGame(): void {
             <StatusPill :status="data.tournament.status" />
             <SpectatorCount :count="data.spectator_count ?? 0" />
             <p>
-              {{ format ? statusLabel(format) : 'Tournament' }}
+              {{ data.tournament.historical ? 'Historical results' : format ? statusLabel(format) : 'Tournament' }}
+              <template v-if="viewerGame?.source_tournament_id">
+                / <RouterLink :to="`/tournaments/${viewerGame.source_tournament_id}?game_id=${viewerGame.id}`">Original game #{{ viewerGame.id }}</RouterLink>
+              </template>
               <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
               <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
               <template v-if="data.tournament.status === 'scheduled' && data.tournament.scheduled_start_at"> / Starts {{ formatDate(data.tournament.scheduled_start_at, true) }}</template>

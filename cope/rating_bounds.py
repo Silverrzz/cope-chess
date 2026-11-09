@@ -38,15 +38,16 @@ def paired_error_margins(games, ratings: dict[int, float], anchor_engine_id: int
         information[second, first] -= weight
         adjacency[first].add(second)
         adjacency[second].add(first)
+        source_tournament_id = game.source_tournament_id or game.tournament_id
         if game.opening_id is None:
-            frequencies[(game.tournament_id, first, second, 1, white_first)][round(first_score * 2)] += 1
+            frequencies[(source_tournament_id, first, second, 1, white_first)][round(first_score * 2)] += 1
             continue
-        key = (game.tournament_id, game.opening_id, first, second)
+        key = (source_tournament_id, game.opening_id, first, second)
         queues = pending[key]
         side = int(white_first)
         if queues[1 - side]:
             total = first_score + queues[1 - side].popleft()
-            frequencies[(game.tournament_id, first, second, 2, None)][round(total * 2)] += 1
+            frequencies[(source_tournament_id, first, second, 2, None)][round(total * 2)] += 1
             if not queues[0] and not queues[1]:
                 del pending[key]
         else:

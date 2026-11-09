@@ -131,6 +131,7 @@ export interface Tournament {
   name: string
   config: TournamentConfig
   status: string
+  historical?: boolean
   current_round?: number
   created_at?: string
   scheduled_start_at?: string | null
@@ -154,6 +155,7 @@ export interface TournamentEstimate {
 export interface Game {
   id: Id
   tournament_id: Id
+  source_tournament_id?: Id | null
   round: number
   white_engine_id: Id
   black_engine_id: Id

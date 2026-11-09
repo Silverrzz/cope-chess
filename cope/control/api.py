@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from dataclasses import asdict
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -145,7 +146,7 @@ def context_payload(connection, identity):
         "variants": [{"id": item.id, "name": item.name, "rules_revision": item.rules_revision,
                       "chess960": item.chess960, "requires_openings": item.requires_openings,
                       "uci_options": item.uci_options()} for item in VARIANTS.values()],
-        "rating_lists": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_rating_lists(connection)],
+        "rating_lists": [asdict(item) for item in list_rating_lists(connection)],
         "opening_suites": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_opening_suites(connection)],
         "worker_controls": [dict(row) for row in connection.execute("SELECT * FROM control_worker_settings ORDER BY worker_id")],
         "git_hosts": [{"id": item.id, "name": item.name, "base_url": item.base_url} for item in list_git_hosts(connection, enabled_only=True)],
