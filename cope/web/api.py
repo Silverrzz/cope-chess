@@ -95,6 +95,7 @@ from cope.db import (
     get_cope_build_settings,
     get_platform_settings,
     get_engine_record,
+    get_engine,
     get_engine_artifact_by_sha256,
     get_engine_family,
     get_engine_version_record,
@@ -144,6 +145,7 @@ from cope.db import (
     record_manual_benchmark,
     register_engine_artifact,
     reschedule_engine_benchmarks,
+    schedule_benchmark_jobs,
     request_tournament_rating_commit,
     restore_tournament,
     resume_paused_tournament_games,
@@ -816,6 +818,10 @@ class ManualBenchmarkPayload(BaseModel):
         if self.hardware_key is None and (self.machine_id is None or self.hardware is None):
             raise ValueError("Select a hardware profile or enter new hardware details.")
         return self
+
+
+class ScheduleEngineBenchmarkPayload(BaseModel):
+    hardware_key: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class RatingCalculationPayload(BaseModel):
@@ -3920,12 +3926,7 @@ def register_api_routes(app: FastAPI) -> None:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.post("/api/admin/engine-versions/{version_id}/benchmarks/reschedule")
-    def admin_reschedule_engine_benchmarks(
-        version_id: int,
-        request: Request,
-        connection: sqlite3.Connection = Depends(web_app._database),
-    ):
+    def benchmarkable_engine(connection, version_id):
         version = get_engine_version_record(connection, version_id)
         if version is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
@@ -3942,9 +3943,44 @@ def register_api_routes(app: FastAPI) -> None:
                 status_code=409,
                 detail="The selected Dockerfile changed in data/engines. Save the version before benchmarking.",
             )
-        engine = next((item for item in list_engines(connection) if item.engine_id == version_id), None)
+        engine = get_engine(connection, version_id)
         if engine is None:
             raise HTTPException(status_code=404, detail="Engine version not found.")
+        if engine.build_hash != version.build_hash:
+            raise HTTPException(status_code=409, detail="The engine build changed. Reload the version and try again.")
+        return engine
+
+    @app.post("/api/admin/engine-versions/{version_id}/benchmarks/schedule")
+    def admin_schedule_engine_benchmark(
+        version_id: int,
+        payload: ScheduleEngineBenchmarkPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = benchmarkable_engine(connection, version_id)
+        if connection.execute(
+            "SELECT 1 FROM benchmarkers WHERE hardware_key = ? AND status <> 'revoked'",
+            (payload.hardware_key,),
+        ).fetchone() is None:
+            raise HTTPException(status_code=422, detail="Choose hardware with a registered benchmarker.")
+        schedule_benchmark_jobs(connection, hardware_key=payload.hardware_key, engines=(engine,))
+        job = connection.execute(
+            "SELECT id, status FROM benchmark_jobs WHERE build_hash = ? AND hardware_key = ?",
+            (engine.build_hash, payload.hardware_key),
+        ).fetchone()
+        if job is None:
+            raise HTTPException(status_code=409, detail="The benchmark queue changed. Reload and try again.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"job_id": job["id"], "status": job["status"]})
+
+    @app.post("/api/admin/engine-versions/{version_id}/benchmarks/reschedule")
+    def admin_reschedule_engine_benchmarks(
+        version_id: int,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = benchmarkable_engine(connection, version_id)
         try:
             count = reschedule_engine_benchmarks(connection, engine=engine)
         except ValueError as exc:

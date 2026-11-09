@@ -451,9 +451,15 @@ def complete_benchmark_job(
     output: str,
     artifact_sha256: str,
 ) -> None:
+    from cope.core.benchmark import parse_benchmark_nps
+
     current = _validated_running_job(connection, job, benchmarker_id)
     now = _utc_now()
     recorded_output = (current.output.rstrip() or output.strip())[-64_000:]
+    nps = parse_benchmark_nps(output) or nps
+    if parse_benchmark_nps(recorded_output, summary_only=True) != nps:
+        if parse_benchmark_nps(output, summary_only=True) == nps:
+            recorded_output = output.strip()[-64_000:]
     connection.execute(
         """
         INSERT INTO engine_benchmarks (

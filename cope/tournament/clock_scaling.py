@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cope.core.benchmark import benchmark_hardware_key
+from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
 from cope.core.models import IncrementTimeControl
 
 
@@ -43,25 +43,39 @@ def _profile(connection, tournament, key, engines):
     return {row["version_id"]: row["nps"] for row in rows}
 
 
+def _pin_verified_profile(connection, tournament, key, rows):
+    if len(rows) != len(tournament.config.participants):
+        return False
+    for row in rows:
+        if row["elapsed_ms"] <= 0:
+            return False
+        if row["output"] and parse_benchmark_nps(row["output"], summary_only=True) != row["nps"]:
+            return False
+    connection.executemany(
+        """INSERT INTO tournament_clock_profiles
+               (tournament_id, hardware_key, version_id, build_hash, artifact_sha256, nps)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING""",
+        [(tournament.id, key, row["version_id"], row["build_hash"], row["artifact_sha256"], row["nps"]) for row in rows],
+    )
+    return True
+
+
 def pin_clock_profile(connection, tournament, key, engines):
     if any(engine is None or engine.distribution != "managed" or engine.artifact is None for engine in engines.values()):
         return None
-    connection.execute(
-        """WITH available AS (
-             SELECT benchmark.hardware_key, build.id, build.build_hash, build.artifact_sha256, benchmark.nps
-             FROM unnest(?::bigint[], ?::text[], ?::text[]) AS build(id, build_hash, artifact_sha256)
-             JOIN engine_benchmarks benchmark
-               ON benchmark.build_hash = build.build_hash AND benchmark.artifact_sha256 = build.artifact_sha256
-             WHERE benchmark.hardware_key = ?
-           )
-           INSERT INTO tournament_clock_profiles
-               (tournament_id, hardware_key, version_id, build_hash, artifact_sha256, nps)
-           SELECT ?, hardware_key, id, build_hash, artifact_sha256, nps
-           FROM available WHERE (SELECT count(*) FROM available) = ?
-           ON CONFLICT DO NOTHING""",
+    rows = connection.execute(
+        """SELECT build.id AS version_id, build.build_hash, build.artifact_sha256,
+                  benchmark.nps, benchmark.output, benchmark.elapsed_ms
+           FROM unnest(?::bigint[], ?::text[], ?::text[]) AS build(id, build_hash, artifact_sha256)
+           JOIN engine_benchmarks benchmark
+             ON benchmark.build_hash = build.build_hash AND benchmark.artifact_sha256 = build.artifact_sha256
+           WHERE benchmark.hardware_key = ?""",
         (list(engines), [engine.build_hash for engine in engines.values()],
-         [engine.artifact.sha256 for engine in engines.values()], key, tournament.id, len(engines)),
-    )
+         [engine.artifact.sha256 for engine in engines.values()], key),
+    ).fetchall()
+    if not _pin_verified_profile(connection, tournament, key, rows):
+        return None
     return _profile(connection, tournament, key, engines)
 
 
@@ -75,22 +89,17 @@ def calibrate_game(connection, tournament, game, worker, engines) -> GameClockCa
         return None
     profile = _profile(connection, tournament, worker_key, engines)
     if profile is None and worker_key != reference_key:
-        connection.execute(
-            """WITH available AS (
-                 SELECT reference.version_id, reference.build_hash, reference.artifact_sha256, benchmark.nps
-                 FROM tournament_clock_profiles reference
-                 JOIN engine_benchmarks benchmark
-                   ON benchmark.build_hash = reference.build_hash
-                  AND benchmark.artifact_sha256 = reference.artifact_sha256
-                 WHERE reference.tournament_id = ? AND reference.hardware_key = ? AND benchmark.hardware_key = ?
-               )
-               INSERT INTO tournament_clock_profiles
-                   (tournament_id, hardware_key, version_id, build_hash, artifact_sha256, nps)
-               SELECT ?, ?, version_id, build_hash, artifact_sha256, nps
-               FROM available WHERE (SELECT count(*) FROM available) = ?
-               ON CONFLICT DO NOTHING""",
-            (tournament.id, reference_key, worker_key, tournament.id, worker_key, len(tournament.config.participants)),
-        )
+        rows = connection.execute(
+            """SELECT reference.version_id, reference.build_hash, reference.artifact_sha256,
+                      benchmark.nps, benchmark.output, benchmark.elapsed_ms
+               FROM tournament_clock_profiles reference
+               JOIN engine_benchmarks benchmark
+                 ON benchmark.build_hash = reference.build_hash AND benchmark.artifact_sha256 = reference.artifact_sha256
+               WHERE reference.tournament_id = ? AND reference.hardware_key = ? AND benchmark.hardware_key = ?""",
+            (tournament.id, reference_key, worker_key),
+        ).fetchall()
+        if not _pin_verified_profile(connection, tournament, worker_key, rows):
+            return None
         profile = _profile(connection, tournament, worker_key, engines)
     if profile is None:
         return None
