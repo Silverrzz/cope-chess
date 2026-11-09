@@ -1024,6 +1024,11 @@ def sanitized_export_row(dataset: str, row: dict[str, Any], selection: set[str])
     elif dataset == "deployment_targets":
         row["target_id"] = None
         row["repository_url"] = sanitized_clone_url(row.get("repository_url"))
+    elif dataset == "chat_messages":
+        row.pop("sender_ip_hash", None)
+        if "games" not in selection:
+            row.pop("game_id", None)
+            row.pop("game_label", None)
     return row
 
 
@@ -1605,6 +1610,11 @@ def imported_row(dataset: str, row: dict[str, Any], selected: set[str]) -> dict[
     elif dataset == "deployment_targets":
         row["target_id"] = None
         row["repository_url"] = sanitized_clone_url(row.get("repository_url"))
+    elif dataset == "chat_messages":
+        row.pop("sender_ip_hash", None)
+        if "games" not in selected:
+            row.pop("game_id", None)
+            row.pop("game_label", None)
     if dataset == "engine_versions" and "engine_dockerfiles" in selected and row.get("distribution") == "managed":
         row["dockerfile_path"] = f"cloned/{row['build_hash']}.Dockerfile"
     elif dataset == "tournaments" and row.get("status") in {"scheduled", "running", "paused"}:

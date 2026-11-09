@@ -1002,6 +1002,10 @@ function selectGame(event: Event): void {
   void navigateToGame(value, false, 'manual')
 }
 
+function openChatGame(gameId: Identifier): void {
+  void navigateToGame(gameId, false, 'manual')
+}
+
 function gameLabel(game: GameRecord): string {
   const white = engineName(data.value?.engines, game.white_engine_id, game.white_name)
   const black = engineName(data.value?.engines, game.black_engine_id, game.black_name)
@@ -1286,6 +1290,8 @@ function forgetManualFollowPauseGame(): void {
             :messages="orderedMessages"
             :settings="data.chat_settings || {}"
             :tournament-id="data.tournament.id"
+            :game-id="viewerGame.id"
+            :navigate-game="openChatGame"
             @sent="appendChatMessage"
           />
         </aside>
@@ -1293,7 +1299,7 @@ function forgetManualFollowPauseGame(): void {
 
       <section v-else class="empty-arena">
         <ContentState kind="empty" compact title="No game selected" />
-        <ChatPanel class="empty-chat" :messages="orderedMessages" :settings="data.chat_settings || {}" :tournament-id="data.tournament.id" @sent="appendChatMessage" />
+        <ChatPanel class="empty-chat" :messages="orderedMessages" :settings="data.chat_settings || {}" :tournament-id="data.tournament.id" :navigate-game="openChatGame" @sent="appendChatMessage" />
       </section>
 
       <section class="tournament-data">

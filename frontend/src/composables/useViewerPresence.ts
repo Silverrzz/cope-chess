@@ -51,6 +51,10 @@ export function savedViewerName(): string {
   return readIdentity().name
 }
 
+export function chatViewerId(): string {
+  return readIdentity().viewer_id
+}
+
 export function useViewerPresence(): { viewerStreamUrl: (path: string) => string; syncViewerIdentity: () => Promise<void> } {
   let timer: number | undefined
   function storageChanged(event: StorageEvent): void {

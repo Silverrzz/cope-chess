@@ -245,6 +245,10 @@ export interface ChatMessage {
   display_name: string
   text: string
   at?: string
+  game_id?: Identifier | null
+  game_label?: string | null
+  reply_to_id?: Identifier | null
+  sender_key?: string | null
 }
 
 export interface ChatSettings {
