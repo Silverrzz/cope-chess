@@ -86,6 +86,9 @@ class TournamentEstimator:
         future_games = max(0, projected_total - len(tournament_games))
         remaining_games = max(0, len(tournament_games) - terminal_games + future_games)
         concurrency = max(1, tournament.config.concurrency)
+        if tournament.status == "running":
+            active_games = sum(game.status in {"assigned", "live"} for game in tournament_games)
+            concurrency = min(concurrency, active_games)
 
         if tournament.status in {"finished", "aborted"} or remaining_games == 0:
             return TournamentEstimate(
@@ -103,17 +106,17 @@ class TournamentEstimator:
                 state="complete",
             )
 
-        if duration_seconds <= 0:
+        if duration_seconds <= 0 or concurrency == 0:
             return TournamentEstimate(
                 estimated_finish_at=None,
                 estimated_remaining_seconds=None,
-                median_game_seconds=None,
-                sample_size=0,
+                median_game_seconds=round(median_duration_seconds) if median_duration_seconds else None,
+                sample_size=len(durations),
                 remaining_games=remaining_games,
                 projected_total_games=projected_total,
                 concurrency=concurrency,
                 confidence="unavailable",
-                basis="unavailable",
+                basis=basis,
                 state="unavailable",
             )
 
