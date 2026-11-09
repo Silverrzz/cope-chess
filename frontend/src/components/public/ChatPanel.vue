@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { api } from '@/api/client'
@@ -11,6 +11,7 @@ import { useViewerSettings } from '@/composables/useViewerSettings'
 import { useSessionStore } from '@/stores/session'
 
 import { errorMessage, formatDate } from './format'
+import { emojiDataUrl, formatChatEmoji, loadChatEmoji } from './chatEmoji'
 import type { ChatMessage, ChatSettings, Identifier } from './types'
 
 const props = withDefaults(defineProps<{
@@ -34,6 +35,13 @@ const emit = defineEmits<{
 
 const log = ref<HTMLElement | null>(null)
 const composer = ref<HTMLTextAreaElement | null>(null)
+const emojiDialog = ref<HTMLDialogElement | null>(null)
+const emojiPickerReady = ref(false)
+const emojiNames = shallowRef<ReadonlyMap<string, string>>(new Map())
+const emojiQuery = ref<{ name: string; start: number; end: number } | null>(null)
+const emojiIndex = ref(0)
+const emojiListId = useId()
+const composerId = useId()
 const menuElement = ref<HTMLElement | null>(null)
 const menu = ref<{ message: ChatMessage; anchor: HTMLElement; x: number; y: number } | null>(null)
 const replyId = ref<Identifier | null>(null)
@@ -85,11 +93,30 @@ const maxLength = computed(() => Math.max(1, props.settings.max_message_length |
 const requiresName = computed(() => props.settings.allow_anonymous_names === false)
 const reservedName = computed(() => displayName.value.trim().toLocaleLowerCase() === 'system')
 const canSend = computed(() => (props.tournamentId !== null || !!props.eventSlug) && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
+const emojiSuggestions = computed(() => {
+  const query = emojiQuery.value?.name
+  const matches: { name: string; emoji: string }[] = []
+  if (!query) return matches
+  const seen = new Set<string>()
+  const exact = emojiNames.value.get(query)
+  if (exact) {
+    matches.push({ name: query, emoji: exact })
+    seen.add(exact)
+  }
+  for (const [name, emoji] of emojiNames.value) {
+    if (!name.startsWith(query) || seen.has(emoji)) continue
+    matches.push({ name, emoji })
+    seen.add(emoji)
+    if (matches.length === 6) break
+  }
+  return matches
+})
 
 onMounted(() => {
   displayName.value = savedViewerName()
   scrollToLatest()
   document.addEventListener('pointerdown', dismissMenuOnOutsideClick)
+  void loadChatEmoji().then((names) => { emojiNames.value = names }).catch(() => {})
 })
 onBeforeUnmount(() => document.removeEventListener('pointerdown', dismissMenuOnOutsideClick))
 
@@ -108,23 +135,95 @@ async function submit(): Promise<void> {
   submitError.value = ''
   const body = new FormData()
   body.set('display_name', displayName.value.trim())
-  body.set('text', text.value.trim())
+  const messageText = text.value.trim()
   body.set('viewer_id', chatViewerId())
   if (props.gameId !== null) body.set('game_id', String(props.gameId))
   if (replyingTo.value && replyId.value !== null) body.set('reply_to_id', String(replyId.value))
   try {
+    const names = messageText.includes(':') && !emojiNames.value.size
+      ? await loadChatEmoji().catch(() => emojiNames.value)
+      : emojiNames.value
+    body.set('text', formatChatEmoji(messageText, names))
     const target = props.eventSlug
       ? `/api/events/${encodeURIComponent(props.eventSlug)}/chat`
       : `/api/tournaments/${encodeURIComponent(String(props.tournamentId))}/chat`
     const response = await api.post<{ message?: ChatMessage | null }>(target, { body })
     if (response.message) emit('sent', response.message)
     text.value = ''
+    emojiQuery.value = null
     replyId.value = null
   } catch (error) {
     submitError.value = errorMessage(error, 'Your message could not be sent.')
   } finally {
     submitting.value = false
   }
+}
+
+function updateEmojiQuery(): void {
+  const input = composer.value
+  if (!input || input.selectionStart !== input.selectionEnd) {
+    emojiQuery.value = null
+    return
+  }
+  const cursor = input.selectionStart
+  const before = input.value.slice(0, cursor)
+  const name = /(?:^|[\s([{"':]):([a-z0-9_+-]+)$/i.exec(before)?.[1]?.toLowerCase()
+  const start = name ? cursor - name.length - 1 : cursor
+  if (emojiQuery.value?.name === name && emojiQuery.value?.start === start && emojiQuery.value?.end === cursor) return
+  emojiQuery.value = name ? { name, start, end: cursor } : null
+  emojiIndex.value = 0
+}
+
+async function insertEmoji(emoji: string, range = emojiQuery.value): Promise<void> {
+  const input = composer.value
+  if (!input) return
+  const start = range?.start ?? input.selectionStart
+  const end = range?.end ?? input.selectionEnd
+  const tail = text.value.slice(end)
+  const suffix = range ? /^[a-z0-9_+-]*:?/i.exec(tail)?.[0] ?? '' : ''
+  const next = text.value.slice(0, start) + emoji + tail.slice(suffix.length)
+  if (next.length > maxLength.value) return
+  text.value = next
+  emojiQuery.value = null
+  emojiDialog.value?.close()
+  await nextTick()
+  input.focus()
+  input.setSelectionRange(start + emoji.length, start + emoji.length)
+}
+
+function handleComposerKey(event: KeyboardEvent): void {
+  if (event.isComposing) return
+  const choices = emojiSuggestions.value
+  if (choices.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+    event.preventDefault()
+    const offset = event.key === 'ArrowDown' ? 1 : -1
+    emojiIndex.value = (emojiIndex.value + offset + choices.length) % choices.length
+  } else if (choices.length && (event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+    event.preventDefault()
+    const choice = choices[emojiIndex.value]
+    if (choice) void insertEmoji(choice.emoji)
+  } else if (event.key === 'Escape' && choices.length) {
+    event.preventDefault()
+    emojiQuery.value = null
+  } else if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void submit()
+  }
+}
+
+async function openEmojiPicker(): Promise<void> {
+  try {
+    await import('emoji-picker-element')
+    emojiPickerReady.value = true
+    emojiDialog.value?.showModal()
+  } catch (error) {
+    toast.error(error)
+  }
+}
+
+function selectPickerEmoji(event: Event): void {
+  const emoji = (event as CustomEvent<{ unicode?: string }>).detail?.unicode
+  if (emoji) void insertEmoji(emoji, null)
 }
 
 function gameTarget(gameId: Identifier): RouteLocationRaw {
@@ -280,20 +379,27 @@ function scrollToLatest(): void {
             @keydown="handleMessageKey($event, message)"
           >
             <div v-if="!continued || showGame" class="chat-message__header">
-              <strong v-if="activeTab === 'chat' && !continued">{{ message.display_name }}</strong>
-              <span v-if="showGame && message.game_id != null" class="chat-message__game">
-                {{ continued ? 'Viewing' : '– viewing' }}
-                <a :href="router.resolve(gameTarget(message.game_id)).href" @click="jumpToGame(message.game_id, $event)">
-                  {{ message.game_label || `Game ${message.game_id}` }}
-                </a>
-              </span>
-              <time v-if="!continued && message.at" :datetime="message.at">{{ formatDate(message.at, true) }}</time>
+              <strong v-if="activeTab === 'chat' && !continued" :title="message.display_name">{{ message.display_name }}</strong>
+              <template v-if="showGame && message.game_id != null">
+                <span v-if="!continued" aria-hidden="true">-</span>
+                <a
+                  class="chat-message__game"
+                  :href="router.resolve(gameTarget(message.game_id)).href"
+                  :title="message.game_label ?? undefined"
+                  @click="jumpToGame(message.game_id, $event)"
+                >View Game</a>
+              </template>
+              <template v-if="!continued && message.at">
+                <span v-if="activeTab === 'chat'" aria-hidden="true">-</span>
+                <time :datetime="message.at">{{ formatDate(message.at, true) }}</time>
+              </template>
             </div>
-            <div v-if="message.reply_to_id != null" class="chat-message__reply">
-              <template v-if="reply">Replying to <strong>{{ reply.display_name }}</strong><span>{{ reply.text }}</span></template>
-              <template v-else>Original message unavailable</template>
-            </div>
-            <p>{{ message.text }}</p>
+            <blockquote
+              v-if="message.reply_to_id != null"
+              class="chat-message__reply"
+              :title="reply ? formatChatEmoji(reply.text, emojiNames) : undefined"
+            >{{ reply ? formatChatEmoji(reply.text, emojiNames) : 'Original message unavailable' }}</blockquote>
+            <p>{{ activeTab === 'chat' ? formatChatEmoji(message.text, emojiNames) : message.text }}</p>
           </li>
         </ol>
         <p v-else class="chat-empty">{{ activeTab === 'chat' ? 'No chat messages yet.' : 'No system events yet.' }}</p>
@@ -322,19 +428,63 @@ function scrollToLatest(): void {
         <input v-model="displayName" name="display_name" maxlength="40" autocomplete="nickname" :required="requiresName" placeholder="Your name">
         <small v-if="reservedName" class="chat-error" role="alert">System is a reserved display name.</small>
       </label>
-      <label>
-        <span>Message</span>
-        <textarea ref="composer" v-model="text" name="text" :maxlength="maxLength" rows="2" required placeholder="Write a message" @keydown.enter.prevent="submit"></textarea>
-      </label>
+      <div class="chat-form__message">
+        <label :for="composerId">Message</label>
+        <div class="chat-composer">
+          <textarea
+            :id="composerId"
+            ref="composer"
+            v-model="text"
+            name="text"
+            :maxlength="maxLength"
+            rows="2"
+            required
+            placeholder="Write a message"
+            aria-autocomplete="list"
+            :aria-controls="emojiSuggestions.length ? emojiListId : undefined"
+            :aria-activedescendant="emojiSuggestions.length ? emojiListId + '-' + emojiIndex : undefined"
+            @input="updateEmojiQuery"
+            @click="updateEmojiQuery"
+            @keyup.left.right.home.end="updateEmojiQuery"
+            @blur="emojiQuery = null"
+            @keydown="handleComposerKey"
+          ></textarea>
+          <ul v-if="emojiSuggestions.length" :id="emojiListId" class="chat-emoji-suggestions" role="listbox" aria-label="Emoji suggestions">
+            <li
+              v-for="({ name, emoji }, index) in emojiSuggestions"
+              :id="emojiListId + '-' + index"
+              :key="name"
+              role="option"
+              :aria-selected="index === emojiIndex"
+              @pointerenter="emojiIndex = index"
+              @mousedown.prevent
+              @click="insertEmoji(emoji)"
+            ><span aria-hidden="true">{{ emoji }}</span> :{{ name }}:</li>
+          </ul>
+        </div>
+      </div>
       <div class="chat-form__footer">
         <span>{{ text.length }} / {{ maxLength }}</span>
-        <button type="submit" :disabled="!canSend">
-          {{ submitting ? 'Sending...' : 'Send' }}
-        </button>
+        <div class="chat-form__actions">
+          <button type="button" class="chat-emoji-trigger" aria-haspopup="dialog" aria-label="Choose an emoji" title="Choose an emoji" @click="openEmojiPicker">
+            <span aria-hidden="true">☺</span>
+          </button>
+          <button type="submit" :disabled="!canSend">
+            {{ submitting ? 'Sending...' : 'Send' }}
+          </button>
+        </div>
       </div>
       <p v-if="submitError" class="chat-error" role="alert">{{ submitError }}</p>
     </form>
     <p v-else-if="activeTab === 'chat'" class="chat-disabled">Chat is currently closed.</p>
+
+    <dialog ref="emojiDialog" class="chat-emoji-dialog" aria-label="Choose an emoji" @click.self="emojiDialog?.close()">
+      <header>
+        <strong>Choose an emoji</strong>
+        <button type="button" aria-label="Close emoji picker" @click="emojiDialog?.close()"><AppIcon name="close" :size="16" /></button>
+      </header>
+      <emoji-picker v-if="emojiPickerReady" :data-source="emojiDataUrl" @emoji-click="selectPickerEmoji" />
+    </dialog>
 
     <Teleport to="body">
       <div
@@ -471,39 +621,35 @@ function scrollToLatest(): void {
 
 .chat-message__header {
   display: flex;
-  flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.45rem;
-}
-
-.chat-message__game,
-.chat-message__reply {
+  gap: 0.32rem;
   color: var(--color-text-muted);
   font-size: 0.7rem;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
-.chat-message__game a {
+.chat-message__header strong {
+  overflow: hidden;
+  color: var(--color-text);
+  text-overflow: ellipsis;
+  font-size: 0.77rem;
+}
+
+.chat-message__game {
   color: var(--color-accent);
   text-decoration: underline;
   text-underline-offset: 0.14em;
 }
 
 .chat-message__reply {
-  margin-block-start: 0.18rem;
+  margin: 0.18rem 0 0;
   padding-inline-start: 0.45rem;
   border-inline-start: 2px solid var(--color-border);
-}
-
-.chat-message__reply span {
-  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-log strong {
-  font-size: 0.77rem;
 }
 
 .chat-log time {
@@ -549,6 +695,49 @@ function scrollToLatest(): void {
   font-weight: 700;
 }
 
+.chat-form__message {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.chat-composer {
+  position: relative;
+}
+
+.chat-composer textarea {
+  display: block;
+}
+
+.chat-emoji-suggestions {
+  position: absolute;
+  z-index: 2;
+  inset-inline: 0;
+  inset-block-end: calc(100% + 0.25rem);
+  margin: 0;
+  padding: 0.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-md);
+  list-style: none;
+}
+
+.chat-emoji-suggestions li {
+  padding: 0.3rem 0.45rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.chat-emoji-suggestions li[aria-selected='true'] {
+  background: var(--color-surface-hover);
+}
+
+.chat-emoji-suggestions li span {
+  margin-inline-end: 0.3rem;
+}
+
 .chat-form input,
 .chat-form textarea {
   width: 100%;
@@ -581,6 +770,11 @@ function scrollToLatest(): void {
   font-size: 0.65rem;
 }
 
+.chat-form__actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
 .chat-form button {
   min-height: 2.15rem;
   padding-inline: 0.85rem;
@@ -597,6 +791,65 @@ function scrollToLatest(): void {
 .chat-form button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.chat-form .chat-emoji-trigger {
+  width: 2.15rem;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 1.2rem;
+}
+
+.chat-form .chat-emoji-trigger:hover {
+  color: var(--color-accent);
+}
+
+.chat-emoji-dialog {
+  width: min(25rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.chat-emoji-dialog::backdrop {
+  background: var(--color-overlay);
+}
+
+.chat-emoji-dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.chat-emoji-dialog header button {
+  display: grid;
+  padding: 0.25rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat-emoji-dialog emoji-picker {
+  --background: var(--color-surface-raised);
+  --border-color: transparent;
+  --indicator-color: var(--color-accent);
+  --input-border-color: var(--color-border-strong);
+  --input-font-color: var(--color-text);
+  --input-placeholder-color: var(--color-text-muted);
+  --outline-color: var(--color-focus);
+  --text-color: var(--color-text);
+  width: 100%;
+  height: min(25rem, calc(100dvh - 6rem));
 }
 
 .chat-form__reply {
