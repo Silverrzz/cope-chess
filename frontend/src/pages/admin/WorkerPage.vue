@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api } from '@/api/client'
+import { api, ApiError } from '@/api/client'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
+import WorkerDonorGroup from '@/components/admin/WorkerDonorGroup.vue'
 import WorkerTokenPanel from '@/components/admin/WorkerTokenPanel.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { errorText, formatDate, formatNumber } from '@/components/admin/format'
-import type { Worker, WorkerRow } from '@/components/admin/types'
+import type { DonorWorker, Worker, WorkerRow } from '@/components/admin/types'
+import { useSessionStore } from '@/stores/session'
 
 interface WorkerFailure { id: number; worker_id: number | null; worker_label: string; machine_id: string | null; assignment_id: number | null; game_id: number | null; engine_id: number | null; engine_name: string; stage: string; error: string; occurred_at: string }
 interface WorkerTournament { id: number; name: string; status: string }
@@ -28,10 +30,12 @@ type WorkerView = 'overview' | 'resources' | 'system'
 
 const route = useRoute()
 const router = useRouter()
+const session = useSessionStore()
 const toast = useToast()
 const { confirm } = useConfirm()
 const id = computed(() => Number(route.params.id))
 const data = ref<Response | null>(null)
+const retiredWorker = ref<DonorWorker | null>(null)
 const minted = ref<Minted | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -178,7 +182,18 @@ async function load(background = false, replaceSettings = false): Promise<void> 
     label.value = response.worker.label
     if (!preserveSettings) syncSettings(response)
     error.value = ''
-  } catch (cause) { error.value = errorText(cause) }
+  } catch (cause) {
+    error.value = errorText(cause)
+    if (!background && session.user?.role === 'admin' && cause instanceof ApiError && cause.status === 404) {
+      try {
+        const result = await api.get<{ workers: DonorWorker[] }>('/api/admin/workers/donors')
+        retiredWorker.value = result.workers.find(worker => worker.id === id.value && worker.retired) ?? null
+        if (retiredWorker.value) error.value = ''
+      } catch (lookupError) {
+        error.value = errorText(lookupError)
+      }
+    }
+  }
   finally { if (!background) loading.value = false }
 }
 
@@ -288,7 +303,7 @@ async function copy(value: string): Promise<void> {
   window.setTimeout(() => { copied.value = false }, 1600)
 }
 
-onMounted(async () => { await load(); connectStream() })
+onMounted(async () => { await load(); if (data.value) connectStream() })
 onBeforeUnmount(() => source?.close())
 </script>
 
@@ -296,6 +311,15 @@ onBeforeUnmount(() => source?.close())
   <div class="admin-page worker-control-page">
     <InlineFeedback :message="error" />
     <div v-if="loading" class="panel detail-loading" role="status"><span></span>Establishing worker control…</div>
+    <template v-else-if="retiredWorker">
+      <AdminPageHeader :title="retiredWorker.label" :description="`Retired worker #${retiredWorker.id}`">
+        <template #actions><RouterLink class="button button--ghost" to="/admin/workers"><AppIcon name="arrow-left" :size="15" /> All workers</RouterLink></template>
+      </AdminPageHeader>
+      <section class="panel system-card">
+        <header><span><AppIcon name="edit" :size="17" /></span><div><h2>Identity</h2></div></header>
+        <WorkerDonorGroup :key="retiredWorker.id" :worker-id="retiredWorker.id" />
+      </section>
+    </template>
     <template v-else-if="data">
       <AdminPageHeader :title="data.worker.label" :description="`Worker #${data.worker.id} · ${data.row.machine?.label ?? 'Machine identity pending'}`">
         <template #actions>
@@ -459,6 +483,7 @@ onBeforeUnmount(() => source?.close())
             <header><span><AppIcon name="edit" :size="17" /></span><div><h2>Identity</h2><p>Make this machine easy to recognise.</p></div></header>
             <form class="identity-form" @submit.prevent="rename"><label><span>Worker label</span><input v-model="label" class="input" required maxlength="80"></label><button class="button button--primary button--small" type="submit" :disabled="pending === 'label'">{{ pending === 'label' ? 'Saving…' : 'Save label' }}</button></form>
             <dl class="compact-facts"><div><dt>Worker ID</dt><dd>#{{ data.worker.id }}</dd></div><div><dt>Machine ID</dt><dd><code>{{ data.worker.machine_id ?? 'Pending first connection' }}</code></dd></div><div><dt>Release</dt><dd><code>{{ data.worker.app_version?.slice(0, 12) ?? 'Not reported' }}</code></dd></div></dl>
+            <WorkerDonorGroup v-if="session.user?.role === 'admin'" :key="data.worker.id" :worker-id="data.worker.id" />
           </section>
           <section class="panel system-card">
             <header><span><AppIcon name="server" :size="17" /></span><div><h2>Hardware profile</h2><p>Detected directly from the machine.</p></div></header>

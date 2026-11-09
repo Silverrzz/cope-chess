@@ -6,10 +6,10 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
-import DonorGroups from '@/components/admin/DonorGroups.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import { errorText, formatDate } from '@/components/admin/format'
+import type { DonorWorker } from '@/components/admin/types'
 import { useSessionStore } from '@/stores/session'
 
 interface WorkerListItem {
@@ -46,6 +46,7 @@ const session = useSessionStore()
 const toast = useToast()
 const { confirm } = useConfirm()
 const workers = ref<WorkerListItem[]>([])
+const retiredWorkers = ref<DonorWorker[]>([])
 const benchmarkers = ref<BenchmarkerListItem[]>([])
 const page = ref(1)
 const perPage = 100
@@ -69,6 +70,16 @@ let fallbackTimer: number | undefined
 let loadPromise: Promise<void> | null = null
 
 const totalPages = computed(() => Math.max(1, Math.ceil(totalWorkers.value / perPage)))
+
+async function loadRetiredWorkers(): Promise<void> {
+  if (session.user?.role !== 'admin') return
+  try {
+    const result = await api.get<{ workers: DonorWorker[] }>('/api/admin/workers/donors')
+    retiredWorkers.value = result.workers.filter(worker => worker.retired)
+  } catch (cause) {
+    toast.error(cause)
+  }
+}
 
 function applySnapshot(snapshot: WorkerSnapshot): void {
   workers.value = snapshot.workers
@@ -156,6 +167,7 @@ async function remove(worker: WorkerListItem): Promise<void> {
   try {
     const response = await api.delete<{ message: string }>(`/api/admin/workers/${worker.id}`)
     toast.success(response.message)
+    void loadRetiredWorkers()
     await load()
   } catch (cause) {
     error.value = errorText(cause)
@@ -172,6 +184,7 @@ async function revoke(worker: WorkerListItem): Promise<void> {
   try {
     const response = await api.post<{ message: string }>(`/api/admin/workers/${worker.id}/revoke`)
     toast.success(response.message)
+    void loadRetiredWorkers()
     await load()
   } catch (cause) {
     error.value = errorText(cause)
@@ -204,6 +217,7 @@ function shortVersion(value?: string | null): string {
 
 onMounted(() => {
   connectStream()
+  void loadRetiredWorkers()
   fallbackTimer = window.setTimeout(() => {
     fallbackTimer = undefined
     if (loading.value) void load()
@@ -266,7 +280,14 @@ onBeforeUnmount(() => {
       </nav>
     </section>
 
-    <DonorGroups v-if="session.user?.role === 'admin'" />
+    <details v-if="retiredWorkers.length" class="panel retired-workers">
+      <summary>Retired workers ({{ retiredWorkers.length }})</summary>
+      <ul>
+        <li v-for="worker in retiredWorkers" :key="worker.id">
+          <RouterLink :to="`/admin/workers/${worker.id}`">{{ worker.label }} #{{ worker.id }}</RouterLink>
+        </li>
+      </ul>
+    </details>
 
     <section class="panel worker-panel">
       <header class="panel-heading"><div><h2>Benchmarkers</h2><p>Dedicated clients that measure engine performance for build activation and worker calibration.</p></div><span>{{ totalBenchmarkers }}</span></header>
@@ -293,6 +314,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.retired-workers summary { cursor: pointer; }
+.retired-workers ul { display: flex; flex-wrap: wrap; gap: .4rem 1rem; list-style: none; margin: .65rem 0 0; padding: 0; }
 .create-worker { align-items: end; display: grid; gap: 1rem; grid-template-columns: minmax(16rem, 1.5fr) minmax(14rem, 1fr) auto; padding: 1rem; }
 .create-worker h2 { font-size: .9rem; margin: 0; }.create-worker p { color: var(--color-text-muted, #64748b); font-size: .72rem; margin: .2rem 0 0; }.create-worker label { display: grid; font-size: .76rem; font-weight: 650; gap: .35rem; }
 .worker-summary { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); }.worker-summary > div { align-items: center; background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d9e0ea); border-radius: var(--radius-md, .6rem); display: flex; gap: .5rem; padding: .7rem .8rem; }.worker-summary strong { font-size: .9rem; }.worker-summary span:last-child { color: var(--color-text-muted, #64748b); font-size: .7rem; margin-left: auto; }.stream-dot { background: var(--color-danger, #b42318); border-radius: 50%; height: .5rem; width: .5rem; }.stream-dot.connected { background: var(--color-success, #15803d); box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--color-success, #15803d) 15%, transparent); }

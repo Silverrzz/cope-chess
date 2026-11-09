@@ -164,6 +164,13 @@ export interface Game {
   finished_at?: string | null
 }
 
+export interface DonorWorker {
+  id: number
+  label: string
+  donor_name: string | null
+  retired: boolean
+}
+
 export interface Worker {
   id: Id
   label: string
