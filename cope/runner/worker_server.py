@@ -111,7 +111,7 @@ from cope.runner.events import (
     start_event_publisher,
 )
 from cope.tournament.engine_instance import EngineCommandOutput
-from cope.tournament.clock_scaling import game_calibration
+from cope.tournament.clock_scaling import calibrate_game, game_calibration, save_game_calibration
 
 
 LOG = logging.getLogger("cope.worker_server")
@@ -2340,19 +2340,19 @@ class WorkerHandshakeServer:
     ) -> None:
         connection = connect_database(self._config.db_path)
         try:
-            calibration = game_calibration(connection, ready.game_id, ready.assignment_key)
-            if calibration is not None:
-                for side, engine_id in assignment.assignment.slots.items():
-                    expected = calibration[f"{side.name.lower()}_worker_nps"]
-                    measured = ready.hardware_scores[engine_id].worker_nps
-                    if measured * 5 < expected * 4 or measured * 5 > expected * 6:
-                        raise AssignmentPreparationFailed(AssignmentFailed(
-                            **assignment.assignment.message_fields(),
-                            engine_id=engine_id,
-                            engine_name=assignment.engines[engine_id].name,
-                            stage="clock_calibration",
-                            error=f"Worker benchmark {measured:,} NPS differs from the pinned {expected:,} NPS by more than 20%.",
-                        ))
+            game = get_game(connection, ready.game_id)
+            tournament = get_tournament(connection, game.tournament_id) if game is not None else None
+            if tournament is None:
+                raise ProtocolValidationError("Assignment tournament no longer exists")
+            if tournament.config.clock_reference_hardware_key is not None:
+                if assignment.benchmark_reference is None or assignment.benchmark_reference.hardware_key != tournament.config.clock_reference_hardware_key:
+                    raise ProtocolValidationError("Assignment clock reference mismatch")
+                calibration = calibrate_game(
+                    connection, tournament, game, worker, assignment.engines, ready.hardware_scores,
+                )
+                if calibration is None:
+                    raise ProtocolValidationError("Worker measurements cannot calibrate the assigned clocks")
+                save_game_calibration(connection, ready.game_id, ready.assignment_key, calibration)
             acknowledge_game_assignment(
                 connection,
                 ready.assignment_id,
