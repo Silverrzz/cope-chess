@@ -2352,6 +2352,12 @@ class WorkerHandshakeServer:
                 )
                 if calibration is None:
                     raise ProtocolValidationError("Worker measurements cannot calibrate the assigned clocks")
+                connection.execute(
+                    """INSERT INTO benchmark_hardware (hardware_key, machine_id, hw, created_at)
+                       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                       ON CONFLICT (hardware_key) DO NOTHING""",
+                    (calibration.worker_key, worker.machine_id, worker.hw.model_dump_json()),
+                )
                 save_game_calibration(connection, ready.game_id, ready.assignment_key, calibration)
             acknowledge_game_assignment(
                 connection,
