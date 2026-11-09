@@ -951,6 +951,14 @@ class WorkerSettingsPayload(BaseModel):
 class DeploymentPayload(BaseModel):
     ref: str = Field(default="", max_length=200)
     scope: Literal["platform", "web"] = "platform"
+    exclude_worker_ids: list[int] = Field(default_factory=list, max_length=100)
+
+    @field_validator("exclude_worker_ids")
+    @classmethod
+    def validate_excluded_workers(cls, value: list[int]) -> list[int]:
+        if any(not 0 < worker_id < 2**63 for worker_id in value):
+            raise ValueError("excluded worker ids must be valid positive integers")
+        return value
 
     @field_validator("ref")
     @classmethod
@@ -2179,6 +2187,7 @@ def register_api_routes(app: FastAPI) -> None:
                 connection,
                 requested_ref=requested_ref,
                 scope=payload.scope,
+                exclude_worker_ids=tuple(payload.exclude_worker_ids),
             )
             connection.commit()
         except ValueError as error:
