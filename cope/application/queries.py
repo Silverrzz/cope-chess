@@ -10,6 +10,7 @@ from .identity import Principal, current_principal
 def query_catalog() -> dict:
     from cope.domains.forms.queries import queries as form_queries
     from .delivery_queries import queries as delivery_queries
+    from .donor_queries import queries as donor_queries
     from cope.domains.activity.queries import queries as activity_queries
     from .object_queries import queries as object_queries
     from cope.domains.execution.legacy_routes import queries as route_queries
@@ -18,7 +19,7 @@ def query_catalog() -> dict:
     from cope.domains.tools.application import queries as tool_queries
     from cope.events.application import queries as event_queries
 
-    providers = (form_queries, delivery_queries, activity_queries, object_queries, route_queries,
+    providers = (form_queries, delivery_queries, donor_queries, activity_queries, object_queries, route_queries,
                  execution_queries, tool_queries, event_queries)
     result = {}
     for provider in providers:
