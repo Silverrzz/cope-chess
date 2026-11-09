@@ -1209,6 +1209,7 @@ def run_worker_assignment_game(
         result=result,
         termination=termination,
         pgn=pgn,
+        donor_threads=assignment.required_resources.threads,
     )
     if game_record.record_eligible:
         announce_game_finished(

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
 from cope.engine_dockerfiles import engine_build_hash
+from cope.db.donors import preserve_worker_donor_history, record_game_donor
 from cope.variants import create_board, get_variant
 from cope.core.models import (
     AssignmentProgress,
@@ -2192,6 +2193,7 @@ def finish_game(
     pgn: str | None = None,
     white_hw: HardwareInfo | None = None,
     black_hw: HardwareInfo | None = None,
+    donor_threads: int | None = None,
 ) -> None:
     connection.execute(
         """
@@ -2219,6 +2221,7 @@ def finish_game(
         "DELETE FROM game_pause_checkpoints WHERE game_id = ?",
         (game_id,),
     )
+    record_game_donor(connection, game_id, donor_threads)
 
 
 def record_move(
@@ -3639,6 +3642,7 @@ def revoke_worker(connection: sqlite3.Connection, worker_id: int) -> None:
         now=now,
         reason="worker revoked",
     )
+    preserve_worker_donor_history(connection, worker_id)
     connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 
@@ -3848,6 +3852,7 @@ def delete_worker(connection: sqlite3.Connection, worker_id: int) -> None:
         reason="worker deleted",
         occurred_at=now,
     )
+    preserve_worker_donor_history(connection, worker_id)
     connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 

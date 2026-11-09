@@ -67,6 +67,12 @@ const router = createRouter({
           meta: { title: "Ratings" },
         },
         {
+          path: "donors",
+          name: "donors",
+          component: () => import("@/pages/public/DonorsPage.vue"),
+          meta: { title: "Donors" },
+        },
+        {
           path: "engines",
           name: "engines",
           component: () => import("@/pages/public/EnginesPage.vue"),

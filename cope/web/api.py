@@ -42,6 +42,7 @@ from starlette.datastructures import UploadFile
 from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine
 from cope.db import engine_version_tags
+from cope.db.donors import donor_leaderboard, list_donor_workers, set_donor_group
 from cope.environment_clone import (
     authorize_environment_export,
     clone_catalog_payload,
@@ -917,6 +918,11 @@ class WorkerTokenPayload(BaseModel):
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
 
 
+class DonorGroupPayload(BaseModel):
+    worker_ids: list[int] = Field(min_length=1, max_length=1000)
+    name: str | None = Field(default=None, max_length=80)
+
+
 class BenchmarkerPayload(BaseModel):
     label: str = Field(default="benchmarker", min_length=1, max_length=80)
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
@@ -1405,6 +1411,10 @@ def register_api_routes(app: FastAPI) -> None:
                 "engine_queues": _engine_queues_payload(connection),
             }
         )
+
+    @app.get("/api/donors")
+    def public_donors(connection: sqlite3.Connection = Depends(web_app._database)):
+        return _json(donor_leaderboard(connection))
 
     @app.get("/api/tournaments")
     def public_tournaments(
@@ -4317,6 +4327,33 @@ def register_api_routes(app: FastAPI) -> None:
             {"id": worker_id, "message": "Worker created."},
             status_code=201,
         )
+
+    @app.get("/api/admin/workers/donors")
+    def admin_donor_workers(
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Admin access is required to manage donor groups.")
+        return _json({"workers": list_donor_workers(connection)})
+
+    @app.put("/api/admin/workers/donors")
+    def admin_update_donor_group(
+        payload: DonorGroupPayload,
+        request: Request,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Admin access is required to manage donor groups.")
+        worker_ids = sorted(set(payload.worker_ids))
+        if any(not 0 < worker_id < 2**63 for worker_id in worker_ids):
+            raise HTTPException(status_code=422, detail="Select valid workers.")
+        name = (payload.name or "").strip() or None
+        if not set_donor_group(connection, worker_ids, name):
+            connection.rollback()
+            raise HTTPException(status_code=404, detail="One or more selected workers could not be found.")
+        connection.commit()
+        return _json({"workers": list_donor_workers(connection), "message": "Donor grouping updated."})
 
     @app.get("/api/admin/workers/{worker_id}")
     def admin_worker(

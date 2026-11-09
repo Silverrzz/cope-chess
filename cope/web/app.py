@@ -1250,6 +1250,7 @@ def _is_platform_access_request(request: Request) -> bool:
         return True
     public_api_roots = (
         "/api/home",
+        "/api/donors",
         "/api/tournaments",
         "/api/events",
         "/api/ratings",

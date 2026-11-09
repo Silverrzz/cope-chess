@@ -6,9 +6,11 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import DonorGroups from '@/components/admin/DonorGroups.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import { errorText, formatDate } from '@/components/admin/format'
+import { useSessionStore } from '@/stores/session'
 
 interface WorkerListItem {
   id: number
@@ -40,6 +42,7 @@ interface WorkerSnapshot {
 }
 
 const router = useRouter()
+const session = useSessionStore()
 const toast = useToast()
 const { confirm } = useConfirm()
 const workers = ref<WorkerListItem[]>([])
@@ -262,6 +265,8 @@ onBeforeUnmount(() => {
         <button class="button button--ghost button--small" type="button" :disabled="page >= totalPages" @click="changePage(page + 1)">Next</button>
       </nav>
     </section>
+
+    <DonorGroups v-if="session.user?.role === 'admin'" />
 
     <section class="panel worker-panel">
       <header class="panel-heading"><div><h2>Benchmarkers</h2><p>Dedicated clients that measure engine performance for build activation and worker calibration.</p></div><span>{{ totalBenchmarkers }}</span></header>

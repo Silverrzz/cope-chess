@@ -18,6 +18,7 @@ const navItems = [
   { label: "Tournaments", to: "/tournaments" },
   { label: "Engines", to: "/engines" },
   { label: "Events", to: "/events" },
+  { label: "Donors", to: "/donors" },
 ];
 
 function navActive(path: string): boolean {
