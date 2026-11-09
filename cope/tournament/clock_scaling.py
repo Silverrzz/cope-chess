@@ -79,37 +79,27 @@ def pin_clock_profile(connection, tournament, key, engines):
     return _profile(connection, tournament, key, engines)
 
 
-def calibrate_game(connection, tournament, game, worker, engines) -> GameClockCalibration | None:
+def clock_reference_nps(connection, tournament, engines):
+    key = tournament.config.clock_reference_hardware_key
+    return None if key is None else _profile(connection, tournament, key, engines)
+
+
+def calibrate_game(connection, tournament, game, worker, engines, hardware_scores) -> GameClockCalibration | None:
     reference_key = tournament.config.clock_reference_hardware_key
     if reference_key is None or worker.machine_id is None or worker.hw is None:
         return None
     worker_key = benchmark_hardware_key(worker.machine_id, worker.hw)
-    reference = _profile(connection, tournament, reference_key, engines)
+    reference = clock_reference_nps(connection, tournament, engines)
     if reference is None:
-        return None
-    profile = _profile(connection, tournament, worker_key, engines)
-    if profile is None and worker_key != reference_key:
-        rows = connection.execute(
-            """SELECT reference.version_id, reference.build_hash, reference.artifact_sha256,
-                      benchmark.nps, benchmark.output, benchmark.elapsed_ms
-               FROM tournament_clock_profiles reference
-               JOIN engine_benchmarks benchmark
-                 ON benchmark.build_hash = reference.build_hash AND benchmark.artifact_sha256 = reference.artifact_sha256
-               WHERE reference.tournament_id = ? AND reference.hardware_key = ? AND benchmark.hardware_key = ?""",
-            (tournament.id, reference_key, worker_key),
-        ).fetchall()
-        if not _pin_verified_profile(connection, tournament, worker_key, rows):
-            return None
-        profile = _profile(connection, tournament, worker_key, engines)
-    if profile is None:
         return None
     base = tournament.config.time_control
     sides = []
     for engine_id in (game.white_engine_id, game.black_engine_id):
+        score = hardware_scores.get(engine_id)
         reference_nps = reference[engine_id]
-        worker_nps = profile[engine_id]
-        if reference_nps > 4 * worker_nps or worker_nps > 4 * reference_nps:
+        if score is None or score.benchmark_nps != reference_nps or score.worker_nps <= 0:
             return None
+        worker_nps = score.worker_nps
         initial = _scaled_ms(base.initial_ms, reference_nps, worker_nps)
         increment = _scaled_ms(base.increment_ms, reference_nps, worker_nps)
         if initial <= 0 or (base.increment_ms and increment <= 0):

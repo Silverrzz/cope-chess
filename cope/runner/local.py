@@ -97,10 +97,9 @@ from cope.tournament.engine_instance import (
 from cope.tournament.game_runner import GameRunner
 from cope.tournament.clock_scaling import (
     applied_clock,
-    calibrate_game,
+    clock_reference_nps,
     game_calibration,
     restore_scaled_clock,
-    save_game_calibration,
 )
 from cope.version import app_version
 from cope.tournament.game_state import GameState
@@ -422,17 +421,13 @@ def _next_tournament_worker_assignment(
         for engine in engines.values()
         if engine.distribution == "managed"
     )
-    calibration = None
     if tournament.config.clock_reference_hardware_key is not None:
-        calibration = calibrate_game(connection, tournament, game, worker, runtime_engines)
-        if calibration is None:
+        reference_nps = clock_reference_nps(connection, tournament, runtime_engines)
+        if reference_nps is None:
             return None
         benchmark_reference = GameBenchmarkReferenceRecord(
-            hardware_key=calibration.reference_key,
-            engine_nps={
-                game.white_engine_id: calibration.white.reference_nps,
-                game.black_engine_id: calibration.black.reference_nps,
-            },
+            hardware_key=tournament.config.clock_reference_hardware_key,
+            engine_nps=reference_nps,
         )
     else:
         benchmark_reference = get_common_benchmark_reference(connection, managed_engines) if managed_engines else None
@@ -454,8 +449,6 @@ def _next_tournament_worker_assignment(
         if claimed is not None:
             release_event_fixture_worker(connection, tournament.id, worker.id)
         return None
-    if calibration is not None:
-        save_game_calibration(connection, game.id, assignment_record.assignment_key, calibration)
     opening = get_opening_position(connection, game.opening_id)
     LOG.info(
         "claimed game worker_id=%s assignment_id=%s game_id=%s tournament=%s round=%s event_preload=%s",

@@ -4335,6 +4335,7 @@ def create_deployment_job(
     *,
     requested_ref: str,
     scope: str = "platform",
+    exclude_worker_ids: tuple[int, ...] = (),
 ) -> int:
     if scope not in {"platform", "web"}:
         raise ValueError("unsupported deployment scope")
@@ -4383,10 +4384,10 @@ def create_deployment_job(
             )
             SELECT ?, 'worker', id, label, app_commit, 'pending', ?
             FROM workers
-            WHERE status != 'revoked'
+            WHERE status != 'revoked' AND NOT (id = ANY(CAST(? AS BIGINT[])))
             ORDER BY id
             """,
-            (job_id, now),
+            (job_id, now, list(exclude_worker_ids)),
         )
         connection.execute(
             """
