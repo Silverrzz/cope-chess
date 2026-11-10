@@ -186,10 +186,12 @@ function selectRatingList(event: Event): void {
               <tr v-for="(row, index) in displayedRatings" :key="engineId(row.engine)">
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
                 <td data-label="Engine">
-                  <component :is="row.engine.public_hidden ? 'span' : 'RouterLink'" :to="row.engine.public_hidden ? undefined : `/engines/${engineId(row.engine)}`">
-                    {{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small>
-                  </component>
-                  <EngineVersionTags :tags="row.engine.tags ?? []" />
+                  <div class="rating-engine">
+                    <component :is="row.engine.public_hidden ? 'span' : 'RouterLink'" :to="row.engine.public_hidden ? undefined : `/engines/${engineId(row.engine)}`">
+                      {{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small>
+                    </component>
+                    <EngineVersionTags :tags="row.engine.tags ?? []" />
+                  </div>
                 </td>
                 <td class="rating-column" data-label="Rating">{{ ratingLabel(row.elo) }}</td>
                 <td class="error-column" data-label="95% error">
@@ -421,6 +423,7 @@ function selectRatingList(event: Event): void {
   padding: 0.85rem 1rem;
   border-block-end: 1px solid var(--color-border, #d5dbe1);
   text-align: start;
+  vertical-align: middle;
 }
 
 .ratings-table th {
@@ -445,7 +448,12 @@ function selectRatingList(event: Event): void {
   text-underline-offset: 0.16em;
 }
 
-.rank-column { width: 4.2rem; text-align: center !important; }
+.ratings-table .rank-column {
+  width: 3.5rem;
+  padding-inline: 0.5rem;
+  text-align: center;
+}
+
 .rank-column span {
   display: inline-grid;
   width: 1.8rem;
@@ -455,6 +463,14 @@ function selectRatingList(event: Event): void {
   background: color-mix(in srgb, var(--color-text, #17202a) 6%, transparent);
   font-size: 0.74rem;
   font-weight: 760;
+  vertical-align: middle;
+}
+
+.rating-engine {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
 }
 
 .rating-column { font-size: 1rem; font-weight: 800; font-variant-numeric: tabular-nums; }
