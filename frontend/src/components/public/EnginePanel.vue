@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath } from '@/router/publicUrls'
 import { computed } from 'vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 
@@ -56,7 +57,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
     <div v-if="loading" class="engine-panel__loading">
       <strong>
-        <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
+        <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
         <template v-else>{{ title }}</template>
       </strong>
       <BaseSpinner :size="22" :label="`${title} is preparing`" />
@@ -68,7 +69,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
           <img v-if="icon" class="engine-panel__icon" :src="icon" alt="" />
           <span>{{ side }}</span>
           <strong>
-            <RouterLink v-if="engineId !== null" :to="`/engines/${engineId}`">{{ title }}</RouterLink>
+            <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
             <template v-else>{{ title }}</template>
           </strong>
         </div>

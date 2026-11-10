@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { tournamentPath } from '@/router/publicUrls'
 import { engineVersionLabel } from '@/components/public/format'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
@@ -135,7 +136,7 @@ function progress(item: TournamentSummary): number {
             <div class="live-card__body">
               <header>
                 <div>
-                  <h3><RouterLink :to="`/tournaments/${item.tournament.record.id}`">{{ item.tournament.record.name }}</RouterLink></h3>
+                  <h3><RouterLink :to="tournamentPath(item.tournament.record.id)">{{ item.tournament.record.name }}</RouterLink></h3>
                   <p>{{ item.tournament.format || 'Tournament' }} / {{ item.tournament.time_control || 'Time control not set' }}</p>
                 </div>
                 <div class="live-card__status">
@@ -146,7 +147,7 @@ function progress(item: TournamentSummary): number {
 
               <div v-if="item.preview" class="live-card__preview-heading">
                 <span>Live game</span>
-                <RouterLink :to="`/tournaments/${item.tournament.record.id}?game_id=${item.preview.game.id}`">
+                <RouterLink :to="tournamentPath(item.tournament.record.id, item.preview.game.id)">
                   {{ item.preview.white_name }} <span>vs</span> {{ item.preview.black_name }}
                 </RouterLink>
                 <small>Round {{ item.preview.game.round ?? '-' }}</small>
@@ -162,8 +163,8 @@ function progress(item: TournamentSummary): number {
                 <div v-if="item.preview"><dt>Preview plies</dt><dd>{{ item.preview.moves.length }}</dd></div>
                 <div v-if="item.preview"><dt>Last move</dt><dd>{{ item.preview.last_move?.san || '-' }}</dd></div>
               </dl>
-              <RouterLink v-if="item.preview" class="watch-link" :to="`/tournaments/${item.tournament.record.id}?game_id=${item.preview.game.id}`">Watch game</RouterLink>
-              <RouterLink v-else class="watch-link" :to="`/tournaments/${item.tournament.record.id}`">Open tournament</RouterLink>
+              <RouterLink v-if="item.preview" class="watch-link" :to="tournamentPath(item.tournament.record.id, item.preview.game.id)">Watch game</RouterLink>
+              <RouterLink v-else class="watch-link" :to="tournamentPath(item.tournament.record.id)">Open tournament</RouterLink>
             </div>
           </article>
         </div>

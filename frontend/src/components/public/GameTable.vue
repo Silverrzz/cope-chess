@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath, tournamentPath } from '@/router/publicUrls'
 import type { RouteLocationRaw } from 'vue-router'
 
 import type { GameRecord } from './types'
@@ -25,7 +26,7 @@ const props = withDefaults(defineProps<{
 })
 
 function gameUrl(game: GameRecord): RouteLocationRaw {
-  return props.gameRoutes[String(game.id)] ?? `/tournaments/${game.tournament_id}?game_id=${game.id}`
+  return props.gameRoutes[String(game.id)] ?? tournamentPath(game.tournament_id, game.id)
 }
 </script>
 
@@ -51,13 +52,13 @@ function gameUrl(game: GameRecord): RouteLocationRaw {
           </td>
           <td v-if="showRound" class="column-small" data-label="Round">{{ game.round ?? '-' }}</td>
           <td data-label="White">
-            <RouterLink v-if="participantLinks" :to="`/engines/${game.white_engine_id}`">
+            <RouterLink v-if="participantLinks" :to="enginePath(game.white_engine_id)">
               {{ engineName(engines, game.white_engine_id, game.white_name) }}
             </RouterLink>
             <span v-else class="participant-name">{{ engineName(engines, game.white_engine_id, game.white_name) }}</span>
           </td>
           <td data-label="Black">
-            <RouterLink v-if="participantLinks" :to="`/engines/${game.black_engine_id}`">
+            <RouterLink v-if="participantLinks" :to="enginePath(game.black_engine_id)">
               {{ engineName(engines, game.black_engine_id, game.black_name) }}
             </RouterLink>
             <span v-else class="participant-name">{{ engineName(engines, game.black_engine_id, game.black_name) }}</span>

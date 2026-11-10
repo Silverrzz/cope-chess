@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath, ratingPath } from '@/router/publicUrls'
 import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -48,7 +49,7 @@ const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
 const routeRatingList = computed(() => {
-  const value = Array.isArray(route.query.rating_list_id) ? route.query.rating_list_id[0] : route.query.rating_list_id
+  const value = route.meta.publicResourceId ?? route.query.rating_list_id
   return value ? String(value) : ''
 })
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
@@ -61,7 +62,8 @@ const ratingTags = computed(() => {
 })
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
-  const filtered = ratings.filter((row) => !row.engine.tags?.some((tag) => String(tag.id) === excludedTag.value))
+  const search = String(route.query.search ?? '').trim().toLowerCase()
+  const filtered = ratings.filter((row) => !search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search)).filter((row) => !row.engine.tags?.some((tag) => String(tag.id) === excludedTag.value))
   return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
 const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
@@ -117,7 +119,9 @@ function signedRating(value?: number | null): string {
 
 function selectRatingList(event: Event): void {
   const ratingListId = (event.target as HTMLSelectElement).value
-  void router.push({ path: '/ratings', query: ratingListId ? { rating_list_id: ratingListId } : {} })
+  const target = router.resolve(ratingListId ? ratingPath(ratingListId) : '/ratings')
+  const { rating_list_id: _, ...filters } = route.query
+  void router.push({ path: target.path, query: { ...filters, ...target.query } })
 }
 </script>
 
@@ -187,7 +191,7 @@ function selectRatingList(event: Event): void {
                 <td class="rank-column" data-label="Rank"><span>{{ index + 1 }}</span></td>
                 <td data-label="Engine">
                   <div class="rating-engine">
-                    <component :is="row.engine.public_hidden ? 'span' : 'RouterLink'" :to="row.engine.public_hidden ? undefined : `/engines/${engineId(row.engine)}`">
+                    <component :is="row.engine.public_hidden ? 'span' : 'RouterLink'" :to="row.engine.public_hidden ? undefined : enginePath(engineId(row.engine))">
                       {{ row.engine.name }} <small v-if="engineVersionLabel(row.engine.version)">{{ engineVersionLabel(row.engine.version) }}</small>
                     </component>
                     <EngineVersionTags :tags="row.engine.tags ?? []" />
@@ -204,7 +208,7 @@ function selectRatingList(event: Event): void {
                 <td class="delta-column" data-label="Opponent delta" :class="{ 'delta-column--positive': (row.average_opponent_elo_delta ?? 0) > 0, 'delta-column--negative': (row.average_opponent_elo_delta ?? 0) < 0 }">{{ signedRating(row.average_opponent_elo_delta) }}</td>
                 <td data-label="Games">{{ row.games_played.toLocaleString() }}</td>
                 <td class="date-column" data-label="Updated">{{ formatDate(row.updated_at) }}</td>
-                <td class="action-column"><RouterLink :to="`/engines/${engineId(row.engine)}`" :aria-label="`View ${row.engine.name}`">View</RouterLink></td>
+                <td class="action-column"><RouterLink :to="enginePath(engineId(row.engine))" :aria-label="`View ${row.engine.name}`">View</RouterLink></td>
               </tr>
             </tbody>
           </table>

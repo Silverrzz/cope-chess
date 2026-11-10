@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath, tournamentPath } from '@/router/publicUrls'
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdated, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
@@ -115,8 +116,8 @@ const currentPositionPly = ref(0)
 const kibitzerHistory = ref<Record<string, Record<number, KibitzerEvaluation>>>({})
 const streamState = ref<StreamState>('closed')
 const rememberedFollowedEngineId = ref(readFollowedEngineId())
-const initialRouteGameId = queryValue(route.query.game_id)
-const initialTournamentId = String(route.params.id || '')
+const initialRouteGameId = String(route.params.gameId || queryValue(route.query.game_id))
+const initialTournamentId = String(route.meta.publicResourceId ?? route.params.id ?? '')
 const initialManualPauseGameId = readManualFollowPauseGameId(initialTournamentId)
 const followManuallyPaused = ref(Boolean(
   initialRouteGameId
@@ -145,14 +146,22 @@ let automaticGameNavigationId = ''
 let headingResizeObserver: ResizeObserver | null = null
 let viewportBeforeUpdate: ViewportPosition | null = null
 
-const tournamentId = computed(() => String(route.params.id || ''))
-const routeGameId = computed(() => queryValue(route.query.game_id))
+const tournamentId = computed(() => String(route.meta.publicResourceId ?? route.params.id ?? ''))
+const routeGameId = computed(() => String(route.params.gameId || queryValue(route.query.game_id)))
 const gamePage = computed(() => Math.max(1, Number(queryValue(route.query.page)) || 1))
+const gameResult = computed(() => {
+  const result = queryValue(route.query.result)
+  return ['draw', 'decisive', 'white-win', 'black-win'].includes(result) ? result : undefined
+})
+const linkedPly = computed(() => {
+  const match = /^#ply-(\d+)$/.exec(route.hash)
+  return match ? Number(match[1]) : undefined
+})
 const viewerMode = computed<ViewerMode>(() => queryValue(route.query.view) === 'cross' ? 'cross' : 'focus')
 const selectedGameId = computed(() => routeGameId.value || String(data.value?.viewer_game?.id || ''))
 const tournamentComplete = computed(() => ['finished', 'aborted'].includes(data.value?.tournament.status || ''))
 const activeTab = computed<TabKey>(() => {
-  const tab = queryValue(route.query.tab)
+  const tab = String(route.params.section || queryValue(route.query.tab))
   return ['standings', 'games', 'settings'].includes(tab) ? tab as TabKey : 'standings'
 })
 const viewerGame = computed(() => data.value?.viewer_game || null)
@@ -310,7 +319,7 @@ watch(routeGameId, (gameId, previousGameId) => {
 })
 
 watch(
-  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${viewerMode.value}`,
+  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${gameResult.value}:${viewerMode.value}`,
   () => {
     if (pendingGameNavigationId && routeGameId.value === pendingGameNavigationId) pendingGameNavigationId = ''
     if (
@@ -327,6 +336,10 @@ watch(
   },
   { immediate: true },
 )
+
+watch(linkedPly, (ply) => {
+  if (ply !== undefined && data.value) selectedPly.value = Math.min(ply, data.value.viewer_moves.length)
+})
 
 watch(() => data.value?.tournament.name, (name) => {
   if (name) document.title = `${name} | COPE Chess`
@@ -443,6 +456,7 @@ async function loadDetail(background: boolean): Promise<void> {
       query: {
         game_id: requestedGameId || undefined,
         page: gamePage.value,
+        result: gameResult.value,
         cross_table: viewerMode.value === 'cross' || undefined,
       },
       signal: controller.signal,
@@ -450,7 +464,7 @@ async function loadDetail(background: boolean): Promise<void> {
     applyDetail(response)
     loadError.value = ''
 
-    if (viewerMode.value === 'focus' && !routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
+    if (!route.meta.publicResourceId && viewerMode.value === 'focus' && !routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
       const preloadedGameId = String(response.viewer_game.id)
       if (followedEngineId.value && !followManuallyPaused.value) {
         rememberAutomaticallyFollowedGame(preloadedGameId)
@@ -486,7 +500,7 @@ function applyDetail(response: TournamentDetailResponse): void {
   indexCrossTableGames(response.cross_table_games || [])
 
   if (String(previousGame ?? '') !== String(response.viewer_game?.id ?? '') || followedLatest) {
-    selectedPly.value = response.viewer_moves.length
+    selectedPly.value = Math.min(linkedPly.value ?? response.viewer_moves.length, response.viewer_moves.length)
   } else {
     selectedPly.value = Math.min(selectedPly.value, response.viewer_moves.length)
   }
@@ -844,7 +858,8 @@ async function navigateToGame(
   automaticGameNavigationId = source === 'follow' ? targetId : ''
   pendingGameNavigationId = targetId
   try {
-    const location = { query: { ...route.query, game_id: targetId } }
+    const target = router.resolve(tournamentPath(tournamentId.value, targetId))
+    const location = { path: target.path, query: { ...route.query, ...target.query } }
     if (replace) await router.replace(location)
     else await router.push(location)
   } finally {
@@ -1017,8 +1032,9 @@ function gameLabel(game: GameRecord): string {
   return `${white} vs ${black}, ${position}${outcome}`
 }
 
-function tabTarget(tab: TabKey): RouteLocationRaw {
-  return { query: { ...route.query, tab } }
+function tabTarget(tab: TabKey) {
+  const { page: _, tab: _tab, game_id: _game, ...query } = route.query
+  return { path: `${tournamentPath(tournamentId.value)}/${tab}`, query }
 }
 
 function viewTarget(mode: ViewerMode): RouteLocationRaw {
@@ -1030,7 +1046,9 @@ function viewTarget(mode: ViewerMode): RouteLocationRaw {
 
 function setGamePage(page: number): void {
   if (page < 1 || page > gamePages.value || page === gamePage.value) return
-  void router.push({ query: { ...route.query, page: String(page), tab: 'games' } })
+  const target = tabTarget('games')
+  const { tab: _, game_id: _game, ...query } = route.query
+  void router.push({ ...target, query: { ...query, page: page > 1 ? String(page) : undefined } })
 }
 
 function appendChatMessage(message: ChatMessage): void {
@@ -1194,7 +1212,7 @@ function forgetManualFollowPauseGame(): void {
             <p>
               {{ data.tournament.historical ? 'Historical results' : format ? statusLabel(format) : 'Tournament' }}
               <template v-if="viewerGame?.source_tournament_id">
-                / <RouterLink :to="`/tournaments/${viewerGame.source_tournament_id}?game_id=${viewerGame.id}`">Original game #{{ viewerGame.id }}</RouterLink>
+                / <RouterLink :to="tournamentPath(viewerGame.source_tournament_id, viewerGame.id)">Original game #{{ viewerGame.id }}</RouterLink>
               </template>
               <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
               <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>
@@ -1320,13 +1338,13 @@ function forgetManualFollowPauseGame(): void {
               <tbody>
                 <tr v-for="(standing, index) in data.standings" :key="standing.engine_id">
                   <td class="rank-cell">{{ index + 1 }}</td>
-                  <td><RouterLink :to="`/engines/${standing.engine_id}`">{{ standing.name }}</RouterLink></td>
+                  <td><RouterLink :to="enginePath(standing.engine_id)">{{ standing.name }}</RouterLink></td>
                   <td class="number-cell">{{ standing.points }}</td>
                   <td class="number-cell">{{ scorePercentLabel(standing.score_percent) }}</td>
                   <td class="number-cell">{{ standing.played }}</td>
                   <td v-if="format === 'swiss'" class="number-cell">{{ standing.buchholz ?? 0 }}</td>
                   <td v-if="format === 'knockout'" class="number-cell">{{ standing.stage ?? 0 }}</td>
-                  <td class="action-cell"><RouterLink :to="`/engines/${standing.engine_id}`" :aria-label="`View ${standing.name}`">View</RouterLink></td>
+                  <td class="action-cell"><RouterLink :to="enginePath(standing.engine_id)" :aria-label="`View ${standing.name}`">View</RouterLink></td>
                 </tr>
               </tbody>
             </table>
@@ -1360,7 +1378,7 @@ function forgetManualFollowPauseGame(): void {
                 <thead><tr><th>Engine</th><th>Hash</th><th>Threads</th><th>Active hardware</th></tr></thead>
                 <tbody>
                   <tr v-for="row in data.engine_hardware" :key="row.engine_id">
-                    <td><RouterLink :to="`/engines/${row.engine_id}`">{{ row.name }}</RouterLink></td>
+                    <td><RouterLink :to="enginePath(row.engine_id)">{{ row.name }}</RouterLink></td>
                     <td>{{ row.hash || '-' }}</td>
                     <td>{{ row.threads || '-' }}</td>
                     <td>{{ row.hardware || 'Not reported' }}</td>

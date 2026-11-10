@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath } from '@/router/publicUrls'
 import { computed } from 'vue'
 import type { HeadToHeadScore, StandingRecord } from './types'
 
@@ -48,7 +49,7 @@ function matchupLabel(name: string, opponent: string, score?: HeadToHeadScore): 
           <tr v-for="(row, index) in rows" :key="row.standing.engine_id">
             <th scope="row" class="engine-heading">
               <span class="engine-rank">{{ index + 1 }}</span>
-              <RouterLink :to="`/engines/${row.standing.engine_id}`">{{ row.standing.name }}</RouterLink>
+              <RouterLink :to="enginePath(row.standing.engine_id)">{{ row.standing.name }}</RouterLink>
             </th>
             <td
               v-for="cell in row.cells"

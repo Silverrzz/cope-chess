@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { engineFamilyPath } from '@/router/publicUrls'
 import { engineVersionLabel } from '@/components/public/format'
 import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
 import type { EngineVersionTag } from '@/components/engines/types'
@@ -184,7 +185,7 @@ function clearFilters(): void {
 
         <div v-if="displayedEngines.length" class="engine-grid">
           <article v-for="engine in displayedEngines" :key="engine.id" class="engine-card">
-            <RouterLink class="engine-card__link" :to="`/engines/${engine.latest_version_id}`" :aria-label="`View ${engine.name}`" />
+            <RouterLink class="engine-card__link" :to="engineFamilyPath(engine.id, engine.latest_version_id)" :aria-label="`View ${engine.name}`" />
             <header class="engine-card__heading">
               <span class="engine-card__mark" aria-hidden="true"><AppIcon name="engine" :size="21" /></span>
               <div>

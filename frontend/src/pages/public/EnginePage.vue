@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { enginePath } from '@/router/publicUrls'
 import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -84,7 +85,7 @@ const filterModalOpen = ref(false)
 const selectedRatingListId = ref('')
 let controller: AbortController | null = null
 
-const engineId = computed(() => String(route.params.id || ''))
+const engineId = computed(() => String(route.meta.publicResourceId ?? route.params.id ?? ''))
 const scorePercent = computed(() => {
   if (!data.value?.record.games) return 0
   return Math.round(((data.value.record.wins + data.value.record.draws * 0.5) / data.value.record.games) * 100)
@@ -219,7 +220,7 @@ function resultForEngine(game: GameRecord): 'W' | 'D' | 'L' {
 
 function selectVersion(value: string | number): void {
   const target = String(value)
-  if (target !== engineId.value) void router.push(`/engines/${target}`)
+  if (target !== engineId.value) void router.push(enginePath(target))
 }
 
 function applyFilters(filters: EngineGameFilters): void {

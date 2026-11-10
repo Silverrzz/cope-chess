@@ -1840,6 +1840,10 @@ def _game_result_filter(
         + [f"{termination} LIKE ?", f"{termination} LIKE ?"]
     )
     filters: dict[str, tuple[str, tuple[str, ...]]] = {
+        "draw": (draw, ()),
+        "decisive": (decisive, ()),
+        "white-win": ("result = '1-0'", ()),
+        "black-win": ("result = '0-1'", ()),
         "win_checkmate": (f"{decisive} AND {termination} = ?", ("checkmate",)),
         "win_king_capture": (f"{decisive} AND {termination} = ?", ("king capture",)),
         "win_no_legal_move": (f"{decisive} AND {termination} = ?", ("no legal move",)),

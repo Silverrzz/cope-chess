@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { tournamentPath } from '@/router/publicUrls'
 import { computed } from 'vue'
 
 import type { TournamentSummary } from './types'
@@ -33,7 +34,7 @@ const scheduleFact = computed(() => {
   <article class="tournament-card" :class="{ 'tournament-card--compact': compact }">
     <header class="tournament-card__header">
       <div class="tournament-card__heading">
-        <h2><RouterLink :to="`/tournaments/${item.record.id}`">{{ item.record.name }}</RouterLink></h2>
+        <h2><RouterLink :to="tournamentPath(item.record.id)">{{ item.record.name }}</RouterLink></h2>
         <p>{{ item.format || 'Tournament' }}<span aria-hidden="true"> / </span>{{ item.time_control || 'Time control not set' }}</p>
       </div>
       <div class="tournament-card__status">
@@ -77,7 +78,7 @@ const scheduleFact = computed(() => {
     <ProgressBar v-if="total" :value="progress" :label="`${finished} of ${total} games finished`" />
     <p v-else class="tournament-card__empty">No games scheduled yet.</p>
 
-    <RouterLink class="tournament-card__open" :to="`/tournaments/${item.record.id}`" :aria-label="`Open ${item.record.name}`">
+    <RouterLink class="tournament-card__open" :to="tournamentPath(item.record.id)" :aria-label="`Open ${item.record.name}`">
       Open tournament
     </RouterLink>
   </article>

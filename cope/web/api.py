@@ -33,7 +33,7 @@ from cope.application import ApplicationError, Principal as ApplicationPrincipal
 from cope.application.commands import execute_compatibility
 from cope.application.identity import bootstrap_authority_lock,bootstrap_secret,current_principal,revoke_browser_credential
 from cope.adapters.http.browser_identity import cookie_browser_principal,request_browser_principal
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -1094,6 +1094,29 @@ class ViewerIdentityPayload(BaseModel):
 
 def register_api_routes(app: FastAPI) -> None:
     from cope.web import app as web_app
+    from cope.web.public_urls import public_url_catalog, rename_public_slug
+
+    @app.get("/api/public-urls")
+    def public_urls(connection: sqlite3.Connection = Depends(web_app._database)):
+        return _json(public_url_catalog(connection))
+
+    @app.put("/api/admin/public-urls/{kind}/{resource_id}")
+    def admin_rename_public_slug(
+        kind: Literal["rating", "engine", "version", "tournament"],
+        resource_id: int,
+        slug: str = Body(embed=True, min_length=1, max_length=160),
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        try:
+            rename_public_slug(connection, kind, resource_id, slug)
+            connection.commit()
+        except LookupError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            connection.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _json({"slug": slug})
 
     @app.post("/api/viewer-identity")
     def update_viewer_identity(payload: ViewerIdentityPayload, request: Request):
@@ -1522,6 +1545,7 @@ def register_api_routes(app: FastAPI) -> None:
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=25, le=200),
         cross_table: bool = Query(default=False),
+        result: Literal["draw", "decisive", "white-win", "black-win"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         tournament = _require_tournament(connection, tournament_id)
@@ -1546,13 +1570,15 @@ def register_api_routes(app: FastAPI) -> None:
             engines,
             estimate_cache=request.app.state.tournament_estimate_cache,
         )[0]
-        total_games = count_games(connection, tournament.id, status="finished")
+        result_types = (result,) if result else None
+        total_games = count_games(connection, tournament.id, status="finished", result_types=result_types)
         games = list_games_page(
             connection,
             tournament.id,
             page=page,
             page_size=page_size,
             status="finished",
+            result_types=result_types,
         )
         active_games = list_active_games(
             connection,

@@ -4,6 +4,7 @@ import AdminLayout from "@/components/layout/AdminLayout.vue";
 import AuthLayout from "@/components/layout/AuthLayout.vue";
 import PublicLayout from "@/components/layout/PublicLayout.vue";
 import { useSessionStore } from "@/stores/session";
+import { resolvePublicUrl } from "./publicUrls";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -54,14 +55,14 @@ const router = createRouter({
           meta: { title: "Tournaments" },
         },
         {
-          path: "tournaments/:id",
+          path: "tournaments/:id/:section(standings|games|settings)?/:gameId(\\d+)?",
           name: "tournament",
           component: () => import("@/pages/public/TournamentPage.vue"),
           props: true,
           meta: { title: "Tournament" },
         },
         {
-          path: "ratings",
+          path: "ratings/:id?",
           name: "ratings",
           component: () => import("@/pages/public/RatingsPage.vue"),
           meta: { title: "Ratings" },
@@ -77,6 +78,12 @@ const router = createRouter({
           name: "engines",
           component: () => import("@/pages/public/EnginesPage.vue"),
           meta: { title: "Engines" },
+        },
+        {
+          path: "engines/:id/versions/:version",
+          name: "engine-version",
+          component: () => import("@/pages/public/EnginePage.vue"),
+          meta: { title: "Engine version" },
         },
         {
           path: "engines/:id",
@@ -371,6 +378,7 @@ router.beforeEach(async (to) => {
   }
 
   if (to.meta.guestOnly && session.authenticated) return { name: "admin-dashboard" };
+  if (to.meta.requiresPlatformAccess) return (await resolvePublicUrl(to)) ?? true;
   return true;
 });
 

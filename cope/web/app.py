@@ -109,6 +109,7 @@ from cope.domains.tools.catalogue import describe_job
 from cope.events.registry import event_arena_is_public as _event_arena_is_public
 from cope.web.forms import form_value
 from cope.web.estimate_cache import TournamentEstimateCache
+from cope.web.public_urls import public_redirect, public_url_catalog
 from cope.version import app_version
 from cope.tournament.estimates import TournamentEstimate, TournamentEstimator, completed_tournament_estimate
 
@@ -797,6 +798,10 @@ def create_app(
             return RedirectResponse(url="/", status_code=307)
 
         if _is_spa_request(request) and FRONTEND_INDEX.is_file():
+            if re.match(r"^/(ratings|engines|tournaments)(/|$)", path):
+                redirect = await asyncio.to_thread(_public_page_redirect, request)
+                if redirect is not None:
+                    return RedirectResponse(redirect, status_code=308)
             preview_html = await asyncio.to_thread(_social_preview_html, request)
             response = (
                 HTMLResponse(preview_html)
@@ -1258,6 +1263,7 @@ def _is_platform_access_request(request: Request) -> bool:
         "/api/ratings",
         "/api/engines",
         "/api/pgn",
+        "/api/public-urls",
     )
     if any(path == root or path.startswith(f"{root}/") for root in public_api_roots):
         return True
@@ -1403,8 +1409,16 @@ def _tournament_event_ids(app: FastAPI, tournament_id: int) -> tuple[int, ...]:
         connection.close()
 
 
+def _public_page_redirect(request: Request) -> str | None:
+    connection = connect_database(request.app.state.db_path)
+    try:
+        return public_redirect(connection, request.url.path, request.url.query)
+    finally:
+        connection.close()
+
+
 def _social_preview_html(request: Request) -> str | None:
-    match = re.fullmatch(r"/tournaments/(\d+)/?", request.url.path)
+    match = re.fullmatch(r"/tournaments/([^/]+)(?:/(standings|settings|games)(?:/([1-9][0-9]{0,18}))?)?/?", request.url.path)
     event_match = re.fullmatch(r"/events/([a-z0-9]+(?:-[a-z0-9]+)*)/?", request.url.path)
     if match is None and event_match is None:
         return None
@@ -1430,7 +1444,15 @@ def _social_preview_html(request: Request) -> str | None:
 
         if match is None:
             return None
-        tournament = get_tournament(connection, int(match.group(1)))
+        token = match.group(1)
+        if re.fullmatch(r"[1-9][0-9]{0,17}", token):
+            tournament_id = int(token)
+        else:
+            entry = public_url_catalog(connection)["paths"].get(f"/tournaments/{token}")
+            if entry is None:
+                return None
+            tournament_id = entry["id"]
+        tournament = get_tournament(connection, tournament_id)
         if (
             tournament is None
             or tournament.status == "draft"
@@ -1439,7 +1461,7 @@ def _social_preview_html(request: Request) -> str | None:
             return None
 
         game = None
-        raw_game_id = request.query_params.get("game_id")
+        raw_game_id = match.group(3) or request.query_params.get("game_id")
         if raw_game_id is not None:
             game_id = _positive_int(raw_game_id)
             game = get_game(connection, game_id) if game_id is not None else None
