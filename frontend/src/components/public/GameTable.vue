@@ -48,7 +48,7 @@ function gameUrl(game: GameRecord): RouteLocationRaw {
       <tbody>
         <tr v-for="game in games" :key="game.id">
           <td v-if="showTournament" data-label="Tournament">
-            <RouterLink :to="gameUrl(game)">{{ tournamentName(tournamentNames, game.tournament_id) }}</RouterLink>
+            <RouterLink :to="tournamentPath(game.tournament_id)">{{ tournamentName(tournamentNames, game.tournament_id) }}</RouterLink>
           </td>
           <td v-if="showRound" class="column-small" data-label="Round">{{ game.round ?? '-' }}</td>
           <td data-label="White">

@@ -3055,10 +3055,10 @@ def _upcoming_rows(
     engines: dict[int, str],
     *,
     limit: int,
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, int | str | None]]:
     pending_games = list_upcoming_games(connection, limit=max(limit * 16, limit))
     tournaments = {tournament.id: tournament for tournament in list_tournaments(connection)}
-    rows: list[dict[str, str | None]] = []
+    rows: list[dict[str, int | str | None]] = []
     scheduled_tournament_ids: set[int] = set()
     for game in pending_games:
         tournament = tournaments.get(game.tournament_id)
@@ -3067,7 +3067,8 @@ def _upcoming_rows(
                 continue
             scheduled_tournament_ids.add(tournament.id)
         rows.append({
-            "href": f"/tournaments/{game.tournament_id}?game_id={game.id}",
+            "game_id": game.id,
+            "href": f"/tournaments/{game.tournament_id}",
             "tournament": tournament.name if tournament is not None else f"Tournament {game.tournament_id}",
             "round": str(game.round),
             "white": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),

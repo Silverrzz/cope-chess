@@ -6,7 +6,6 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
 import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
-import type { EngineVersionTag } from '@/components/engines/types'
 import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import RatingListPgnModal from '@/components/public/RatingListPgnModal.vue'
@@ -44,7 +43,6 @@ const data = ref<RatingsResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const onlyBestVersions = ref(true)
-const excludedTag = ref('')
 const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
@@ -53,17 +51,10 @@ const routeRatingList = computed(() => {
   return value ? String(value) : ''
 })
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
-const ratingTags = computed(() => {
-  const tags = new Map<number, EngineVersionTag>()
-  for (const row of data.value?.ratings ?? []) {
-    for (const tag of row.engine.tags ?? []) tags.set(tag.id, tag)
-  }
-  return [...tags.values()].sort((left, right) => left.name.localeCompare(right.name))
-})
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   const search = String(route.query.search ?? '').trim().toLowerCase()
-  const filtered = ratings.filter((row) => !search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search)).filter((row) => !row.engine.tags?.some((tag) => String(tag.id) === excludedTag.value))
+  const filtered = ratings.filter((row) => !search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search))
   return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
 const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
@@ -79,7 +70,6 @@ onBeforeUnmount(() => controller?.abort())
 watch(routeRatingList, (next, previous) => {
   if (next !== previous) {
     pgnModalOpen.value = false
-    excludedTag.value = ''
     void load()
   }
 })
@@ -138,13 +128,6 @@ function selectRatingList(event: Event): void {
         <div class="ratings-controls">
           <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download PGNs</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
-          <label v-if="ratingTags.length" class="category-picker">
-            <span>Exclude tag</span>
-            <select v-model="excludedTag">
-              <option value="">None</option>
-              <option v-for="tag in ratingTags" :key="tag.id" :value="String(tag.id)">{{ tag.name }}</option>
-            </select>
-          </label>
           <label v-if="data.rating_lists.length" class="category-picker">
             <span>Rating list</span>
             <select :value="selectedRatingList" @change="selectRatingList">

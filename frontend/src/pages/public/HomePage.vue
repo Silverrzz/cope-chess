@@ -29,6 +29,7 @@ interface RunningTournamentCard {
 }
 
 interface UpcomingRow {
+  game_id: number
   href: string
   tournament: string
   round: string
@@ -147,7 +148,7 @@ function progress(item: TournamentSummary): number {
 
               <div v-if="item.preview" class="live-card__preview-heading">
                 <span>Live game</span>
-                <RouterLink :to="tournamentPath(item.tournament.record.id, item.preview.game.id)">
+                <RouterLink :to="tournamentPath(item.tournament.record.id)">
                   {{ item.preview.white_name }} <span>vs</span> {{ item.preview.black_name }}
                 </RouterLink>
                 <small>Round {{ item.preview.game.round ?? '-' }}</small>
@@ -163,8 +164,7 @@ function progress(item: TournamentSummary): number {
                 <div v-if="item.preview"><dt>Preview plies</dt><dd>{{ item.preview.moves.length }}</dd></div>
                 <div v-if="item.preview"><dt>Last move</dt><dd>{{ item.preview.last_move?.san || '-' }}</dd></div>
               </dl>
-              <RouterLink v-if="item.preview" class="watch-link" :to="tournamentPath(item.tournament.record.id, item.preview.game.id)">Watch game</RouterLink>
-              <RouterLink v-else class="watch-link" :to="tournamentPath(item.tournament.record.id)">Open tournament</RouterLink>
+              <RouterLink class="tournament-link" :to="tournamentPath(item.tournament.record.id)">Open tournament</RouterLink>
             </div>
           </article>
         </div>
@@ -214,7 +214,7 @@ function progress(item: TournamentSummary): number {
             </div>
           </div>
           <div v-if="data.upcoming_rows.length" class="upcoming-list">
-            <RouterLink v-for="row in data.upcoming_rows" :key="`${row.href}-${row.tournament}-${row.round}`" :to="row.href" class="upcoming-row">
+            <RouterLink v-for="row in data.upcoming_rows" :key="row.game_id" :to="row.href" class="upcoming-row">
               <div>
                 <strong>{{ row.tournament }}</strong>
                 <span v-if="row.status === 'scheduled' && row.scheduled_start_at">Starts {{ formatDate(row.scheduled_start_at, true) }}</span>
@@ -447,7 +447,7 @@ function progress(item: TournamentSummary): number {
   font-weight: 700;
 }
 
-.watch-link {
+.tournament-link {
   align-self: flex-start;
   margin-block-start: auto;
   color: var(--color-accent, #2f78c4);
