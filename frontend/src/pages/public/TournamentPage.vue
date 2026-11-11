@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { enginePath, tournamentPath } from '@/router/publicUrls'
+import { enginePath, tournamentPath, type TournamentTab } from '@/router/publicUrls'
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, onUpdated, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
@@ -48,7 +48,6 @@ import type {
   TournamentDetailResponse,
 } from '@/components/public/types'
 
-type TabKey = 'standings' | 'games' | 'settings'
 type ViewerMode = 'focus' | 'cross'
 type StreamState = 'connecting' | 'live' | 'reconnecting' | 'closed'
 type FollowState = 'off' | 'paused' | 'live' | 'preparing' | 'fallback' | 'waiting'
@@ -140,7 +139,6 @@ let clockFrame: number | undefined
 let arenaFitFrame: number | undefined
 let streamNeedsRefresh = false
 let crossTableGameIndex = new Map<string, number>()
-let preloadedGameNavigationId = ''
 let pendingGameNavigationId = ''
 let automaticGameNavigationId = ''
 let headingResizeObserver: ResizeObserver | null = null
@@ -160,9 +158,9 @@ const linkedPly = computed(() => {
 const viewerMode = computed<ViewerMode>(() => queryValue(route.query.view) === 'cross' ? 'cross' : 'focus')
 const selectedGameId = computed(() => routeGameId.value || String(data.value?.viewer_game?.id || ''))
 const tournamentComplete = computed(() => ['finished', 'aborted'].includes(data.value?.tournament.status || ''))
-const activeTab = computed<TabKey>(() => {
+const activeTab = computed<TournamentTab>(() => {
   const tab = String(route.params.section || queryValue(route.query.tab))
-  return ['standings', 'games', 'settings'].includes(tab) ? tab as TabKey : 'standings'
+  return ['standings', 'games', 'settings'].includes(tab) ? tab as TournamentTab : 'standings'
 })
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
@@ -299,17 +297,14 @@ watch(tournamentId, (id) => {
 })
 
 watch(routeGameId, (gameId, previousGameId) => {
-  if (!gameId || gameId === previousGameId) return
-  if (gameId === automaticGameNavigationId) {
+  if (gameId === previousGameId) return
+  if (!gameId || gameId === automaticGameNavigationId) {
     automaticGameNavigationId = ''
+    followManuallyPaused.value = false
     manualFollowPauseGameId.value = ''
     forgetManualFollowPauseGame()
     return
   }
-  if (
-    gameId === preloadedGameNavigationId
-    && sameId(data.value?.viewer_game?.id, preloadedGameNavigationId)
-  ) return
   followManuallyPaused.value = true
   if (manualFollowPauseGameId.value !== gameId) {
     manualFollowPauseGameId.value = ''
@@ -322,16 +317,6 @@ watch(
   () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${gameResult.value}:${viewerMode.value}`,
   () => {
     if (pendingGameNavigationId && routeGameId.value === pendingGameNavigationId) pendingGameNavigationId = ''
-    if (
-      preloadedGameNavigationId
-      && routeGameId.value === preloadedGameNavigationId
-      && sameId(data.value?.viewer_game?.id, preloadedGameNavigationId)
-    ) {
-      preloadedGameNavigationId = ''
-      connectStream()
-      return
-    }
-    preloadedGameNavigationId = ''
     void loadDetail(false)
   },
   { immediate: true },
@@ -444,40 +429,31 @@ function restoreViewportPosition(position: ViewportPosition): void {
   window.scrollTo(position.left, position.top)
 }
 
-async function loadDetail(background: boolean): Promise<void> {
+async function loadDetail(background: boolean, preferredGameId?: Identifier): Promise<void> {
   controller?.abort()
-  controller = new AbortController()
+  const request = new AbortController()
+  controller = request
   if (!background || !data.value) loading.value = true
   if (!background) loadError.value = ''
 
-  const requestedGameId = routeGameId.value || selectedGameId.value
+  const pinnedGameId = routeGameId.value
   try {
     const response = await api.get<TournamentDetailResponse>(`/api/tournaments/${encodeURIComponent(tournamentId.value)}`, {
       query: {
-        game_id: requestedGameId || undefined,
+        game_id: pinnedGameId || preferredGameId,
         page: gamePage.value,
         result: gameResult.value,
         cross_table: viewerMode.value === 'cross' || undefined,
       },
-      signal: controller.signal,
+      signal: request.signal,
     })
+    if (request.signal.aborted) return
+    if (!pinnedGameId && preferredGameId && response.viewer_locked) return loadDetail(background)
     applyDetail(response)
     loadError.value = ''
-
-    if (!route.meta.publicResourceId && viewerMode.value === 'focus' && !routeGameId.value && !pendingGameNavigationId && response.viewer_game) {
-      const preloadedGameId = String(response.viewer_game.id)
-      if (followedEngineId.value && !followManuallyPaused.value) {
-        rememberAutomaticallyFollowedGame(preloadedGameId)
-      }
-      preloadedGameNavigationId = preloadedGameId
-      try {
-        await router.replace({ query: { ...route.query, game_id: preloadedGameId } })
-      } finally {
-        if (routeGameId.value !== preloadedGameId) preloadedGameNavigationId = ''
-      }
-    }
     if (!pendingGameNavigationId) connectStream()
   } catch (error) {
+    if (request.signal.aborted) return
     if (error instanceof ApiError && error.status === 404 && error.message === 'Event tournament.') {
       await router.replace({ name: 'home' })
       return
@@ -485,9 +461,14 @@ async function loadDetail(background: boolean): Promise<void> {
     if ((error as { name?: string })?.name !== 'AbortError') {
       loadError.value = errorMessage(error, 'This tournament could not be loaded.')
     }
+    return
   } finally {
-    loading.value = false
+    if (controller === request) {
+      controller = null
+      loading.value = false
+    }
   }
+  reconcileFollowedGame()
 }
 
 function applyDetail(response: TournamentDetailResponse): void {
@@ -516,7 +497,6 @@ function applyDetail(response: TournamentDetailResponse): void {
   }
 
   updateManualFollowPause(response.viewer_game)
-  reconcileFollowedGame()
 }
 
 const { viewerStreamUrl, syncViewerIdentity } = useViewerPresence()
@@ -798,7 +778,7 @@ function gameIncludesEngine(game: GameRecord, engineId: Identifier): boolean {
 }
 
 function reconcileFollowedGame(): void {
-  if (viewerMode.value === 'cross' || !data.value || !followedEngineId.value || followManuallyPaused.value || pendingGameNavigationId) return
+  if (viewerMode.value === 'cross' || !data.value || !followedEngineId.value || followManuallyPaused.value || controller || pendingGameNavigationId) return
   const activeGames = data.value.active_games
     .filter((game): game is GameRecord => isActiveGame(game))
     .filter((game, index, games) => games.findIndex((candidate) => sameId(candidate.id, game.id)) === index)
@@ -814,7 +794,8 @@ function reconcileFollowedGame(): void {
   }
 
   if (targetGame && !sameId(targetGame.id, selectedGameId.value)) {
-    void navigateToGame(targetGame.id, true, 'follow')
+    if (routeGameId.value) void navigateToGame(targetGame.id, true, 'follow')
+    else void loadDetail(true, targetGame.id)
   }
 }
 
@@ -858,8 +839,8 @@ async function navigateToGame(
   automaticGameNavigationId = source === 'follow' ? targetId : ''
   pendingGameNavigationId = targetId
   try {
-    const target = router.resolve(tournamentPath(tournamentId.value, targetId))
-    const location = { path: target.path, query: { ...route.query, ...target.query } }
+    const { tab: _tab, game_id: _game, ...query } = route.query
+    const location = { path: tournamentPath(tournamentId.value, { gameId: targetId }), query }
     if (replace) await router.replace(location)
     else await router.push(location)
   } finally {
@@ -903,7 +884,15 @@ function releaseManualFollowPause(gameId: Identifier | null | undefined): void {
 
 function scheduleSnapshotRefresh(): void {
   window.clearTimeout(refreshTimer)
-  refreshTimer = window.setTimeout(() => { void loadDetail(true) }, 120)
+  refreshTimer = window.setTimeout(() => {
+    if (controller) {
+      scheduleSnapshotRefresh()
+      return
+    }
+    const game = viewerGame.value
+    const preferredGameId = isActiveGame(game) && sameId(game.tournament_id, tournamentId.value) ? game.id : undefined
+    void loadDetail(true, preferredGameId)
+  }, 120)
 }
 
 function applyClockState(state: ClockState, observedAt?: string): void {
@@ -1032,9 +1021,9 @@ function gameLabel(game: GameRecord): string {
   return `${white} vs ${black}, ${position}${outcome}`
 }
 
-function tabTarget(tab: TabKey) {
+function tabTarget(tab: TournamentTab) {
   const { page: _, tab: _tab, game_id: _game, ...query } = route.query
-  return { path: `${tournamentPath(tournamentId.value)}/${tab}`, query }
+  return { path: tournamentPath(tournamentId.value, { tab }), query }
 }
 
 function viewTarget(mode: ViewerMode): RouteLocationRaw {
@@ -1212,7 +1201,7 @@ function forgetManualFollowPauseGame(): void {
             <p>
               {{ data.tournament.historical ? 'Historical results' : format ? statusLabel(format) : 'Tournament' }}
               <template v-if="viewerGame?.source_tournament_id">
-                / <RouterLink :to="tournamentPath(viewerGame.source_tournament_id, viewerGame.id)">Original game #{{ viewerGame.id }}</RouterLink>
+                / <RouterLink :to="tournamentPath(viewerGame.source_tournament_id, { gameId: viewerGame.id })">Original game #{{ viewerGame.id }}</RouterLink>
               </template>
               <template v-if="data.tournament.current_round"> / Round {{ data.tournament.current_round }}</template>
               <template v-if="viewerMode === 'focus' && viewerGame?.result"> / {{ resultLabel(viewerGame.result) }}</template>

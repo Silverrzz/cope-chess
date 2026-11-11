@@ -4,6 +4,7 @@ import type { RouteLocationNormalized } from 'vue-router'
 import { api } from '@/api/client'
 
 type Id = string | number
+export type TournamentTab = 'standings' | 'games' | 'settings'
 type Section = 'ratings' | 'tournaments' | 'engines' | 'versions'
 type Catalog = Record<Section, Record<string, string>> & {
   paths: Record<string, { id: number; path: string }>
@@ -31,11 +32,9 @@ export function engineFamilyPath(id: Id, version: Id): string {
   return catalog.value?.engines[id] ?? enginePath(version)
 }
 
-export function tournamentPath(id: Id, game?: Id): string {
-  const base = catalog.value?.tournaments[id]
-  if (base) return game ? `${base}/games/${encodeURIComponent(String(game))}` : base
-  const legacy = `/tournaments/${encodeURIComponent(String(id))}`
-  return game ? `${legacy}?game_id=${encodeURIComponent(String(game))}` : legacy
+export function tournamentPath(id: Id, { gameId, tab = 'standings' }: { gameId?: Id; tab?: TournamentTab } = {}): string {
+  const base = catalog.value?.tournaments[id] ?? `/tournaments/${encodeURIComponent(String(id))}`
+  return gameId ? `${base}/games/${encodeURIComponent(String(gameId))}` : `${base}/${tab}`
 }
 
 function first(value: unknown): string {
@@ -73,7 +72,7 @@ export async function resolvePublicUrl(to: RouteLocationNormalized) {
     const tab = first(to.params.section) || first(query.tab)
     const game = first(to.params.gameId) || (!to.params.section ? first(query.game_id) : '')
     if (/^[1-9]\d{0,18}$/.test(game)) path += `/games/${game}`
-    else if (['standings', 'games', 'settings'].includes(tab)) path += `/${tab}`
+    else path += ['standings', 'games', 'settings'].includes(tab) ? `/${tab}` : '/standings'
     delete query.tab
     delete query.game_id
   }

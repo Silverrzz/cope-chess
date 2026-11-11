@@ -3068,7 +3068,7 @@ def _upcoming_rows(
             scheduled_tournament_ids.add(tournament.id)
         rows.append({
             "game_id": game.id,
-            "href": f"/tournaments/{game.tournament_id}",
+            "href": f"/tournaments/{game.tournament_id}/standings",
             "tournament": tournament.name if tournament is not None else f"Tournament {game.tournament_id}",
             "round": str(game.round),
             "white": engines.get(game.white_engine_id, f"Engine {game.white_engine_id}"),

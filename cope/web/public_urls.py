@@ -98,8 +98,8 @@ def public_redirect(connection, path, query):
         tab = values.get("tab", "")
         if not suffix and re.fullmatch(r"[1-9][0-9]{0,18}", game):
             suffix = f"/games/{game}"
-        elif not suffix and tab in {"standings", "games", "settings"}:
-            suffix = f"/{tab}"
+        elif not suffix:
+            suffix = f"/{tab}" if tab in {"standings", "games", "settings"} else "/standings"
         canonical += suffix
         removed.update(("game_id", "tab"))
     if canonical == path and not removed.intersection(values):

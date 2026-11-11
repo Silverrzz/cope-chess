@@ -26,7 +26,7 @@ const props = withDefaults(defineProps<{
 })
 
 function gameUrl(game: GameRecord): RouteLocationRaw {
-  return props.gameRoutes[String(game.id)] ?? tournamentPath(game.tournament_id, game.id)
+  return props.gameRoutes[String(game.id)] ?? tournamentPath(game.tournament_id, { gameId: game.id })
 }
 </script>
 
