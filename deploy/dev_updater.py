@@ -37,6 +37,7 @@ from cope.db import (
     update_server_deployment_target,
 )
 from cope.version import app_version
+from cope.storage_maintenance import maintain_storage
 
 
 LOG = logging.getLogger("cope.updater")
@@ -95,7 +96,14 @@ def run_updater(config: UpdaterConfig) -> None:
         name="updater-heartbeat",
         daemon=True,
     ).start()
+    next_storage_check = 0.0
     while True:
+        if time.monotonic() >= next_storage_check:
+            try:
+                maintain_storage(source_dir, config.image_name)
+            except Exception:
+                LOG.exception("storage maintenance failed")
+            next_storage_check = time.monotonic() + 900.0
         connection = connect_database(config.db_path)
         try:
             touch_service_heartbeat(connection, "updater", app_version())
@@ -287,6 +295,7 @@ def _run_deployment(
             if result.returncode != 0:
                 raise RuntimeError("target commit is not a fast-forward from the deployed source")
         _set_target_commit(config, job_id, target_commit, repository_identity)
+        maintain_storage(source_dir, config.image_name, require_build_space=True)
         _set_job_status(config, job_id, "building")
         _set_server_target(config, job_id, "updating", current_commit=original_commit)
         _run(["docker", "image", "inspect", config.image_name], check=True)
@@ -354,7 +363,6 @@ def _run_deployment(
             current_commit=target_commit,
         )
         _set_job_status(config, job_id, "succeeded")
-        _run(["docker", "image", "rm", "--force", rollback_tag], check=False)
         LOG.info(
             "deployment completed job_id=%s scope=%s commit=%s",
             job_id,
