@@ -614,6 +614,7 @@ async def _web_lifespan(app: FastAPI):
         asyncio.create_task(app.state.tournament_estimate_cache.run(app.state.db_path), name="tournament-estimates"),
         asyncio.create_task(run_guest_upload_maintenance(app.state.db_path), name="form-upload-maintenance"),
         asyncio.create_task(run_donor_snapshot_updates(app.state.db_path), name="donor-snapshot"),
+        asyncio.create_task(app.state.discord_runtime.run(), name="discord-notifications"),
     )
     try:
         yield
@@ -631,12 +632,15 @@ def create_app(
     event_token: str | None = None,
     admin_token: str | None = None,
 ) -> FastAPI:
+    from cope.discord_bot.runtime import DiscordRuntime
+
     app = FastAPI(title="COPE Chess", lifespan=_web_lifespan)
     app.state.db_path = str(db_path)
     app.state.worker_server_url = worker_server_url
     app.state.benchmarker_server_url = benchmarker_server_url
     app.state.event_token = event_token or default_web_event_token()
     app.state.configured_admin_token = admin_token or default_admin_token()
+    app.state.discord_runtime = DiscordRuntime(app.state.db_path, app.state.configured_admin_token)
     app.state.admin_token = app.state.configured_admin_token
     app.state.manager_token = None
     app.state.access_tokens_loaded = False
@@ -1190,8 +1194,10 @@ def create_app(
         )
 
     from cope.web.api import register_api_routes
+    from cope.web.discord_settings import register_discord_settings
 
     register_api_routes(app)
+    register_discord_settings(app, _admin_session_role)
     from cope.control.api import register_control_routes
     from cope.control.mcp import install_mcp
 

@@ -20,6 +20,7 @@ database = [
     "psycopg-pool>=3.2,<4",
 ]
 web = [
+    "discord.py>=2.7,<3",
     "fastapi>=0.111",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",

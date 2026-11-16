@@ -244,7 +244,10 @@ def recalculate_ratings(
 
     placeholders = ", ".join("?" for _ in selected)
     anchor_rows = connection.execute(
-        f"SELECT id, anchor_engine_id, anchor_elo, monthly_refresh FROM rating_lists WHERE id IN ({placeholders})",
+        f"""
+        SELECT id, anchor_engine_id, anchor_elo, monthly_refresh FROM rating_lists
+        WHERE id IN ({placeholders}) ORDER BY id FOR NO KEY UPDATE
+        """,
         selected,
     ).fetchall()
     if len(anchor_rows) != len(selected):
@@ -467,6 +470,7 @@ def recalculate_ratings(
                 (rating_list_id,),
             )
 
+    connection.execute("SELECT cope_notifications.capture_ratings(CAST(? AS bigint[]))", (list(selected),))
     return RatingRecalculationResult(
         lists_updated=len(selected),
         tournaments_applied=len(commits),
