@@ -291,7 +291,7 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
 
 <template>
   <div class="admin-page page-stack form-editor-page" :aria-busy="loading || opening">
-    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink to="/admin/forms">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? 'Form' }}</span></nav>
+    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink to="/admin/forms/collections">Response collections</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? 'Form' }}</span></nav>
     <AdminPageHeader :title="live?.definition.title ?? form?.label ?? 'Form editor'">
       <template v-if="form" #actions>
         <BaseButton :to="`/admin/form-responses?form=${form.id}`" variant="secondary">Responses</BaseButton>

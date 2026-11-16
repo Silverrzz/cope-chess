@@ -13,6 +13,9 @@ const router = createRouter({
       path: "/forms",
       component: PublicLayout,
       children: [
+        { path: "", name: "forms", component: () => import("@/pages/public/FormsDirectoryPage.vue"), meta: { title: "Forms" } },
+        { path: "ballots/:slug", name: "secret-ballot", component: () => import("@/pages/public/SecretBallotPage.vue"), props: true, meta: { title: "Ballot form" } },
+        { path: "tools/voter-proof/:slug", name: "voter-proof", component: () => import("@/pages/public/VoterProofPage.vue"), props: true, meta: { title: "Voter proof" } },
         { path: "responses/:id", name: "form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Private response" } },
         { path: ":slug", name: "public-form", component: () => import("@/pages/public/PublicFormPage.vue"), props: true, meta: { title: "Form" } },
       ],
@@ -118,7 +121,10 @@ const router = createRouter({
       meta: { requiresAdmin: true },
       children: [
         { path: "activity", name: "admin-activity", component: () => import("@/pages/admin/ActivityPage.vue"), meta: { title: "Activity" } },
-        { path: "forms", name: "admin-forms", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Forms" } },
+        { path: "forms", name: "admin-forms", component: () => import("@/pages/admin/BallotFormsPage.vue"), meta: { title: "Forms" } },
+        { path: "forms/collections", name: "admin-form-collections", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Response collections" } },
+        { path: "forms/new-ballot", name: "admin-new-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), meta: { title: "New ballot form" } },
+        { path: "forms/ballots/:slug", name: "admin-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), props: true, meta: { title: "Manage ballot form" } },
         { path: "forms/:id", name: "admin-form-editor", component: () => import("@/pages/admin/FormEditorPage.vue"), props: true, meta: { title: "Form editor" } },
         { path: "form-responses", name: "admin-form-responses", component: () => import("@/pages/admin/FormResponsesPage.vue"), meta: { title: "Response inbox" } },
         { path: "form-responses/:id", name: "admin-form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Review response" } },

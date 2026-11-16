@@ -19,6 +19,7 @@ const navItems = [
   { label: "Engines", to: "/engines" },
   { label: "Events", to: "/events" },
   { label: "Donors", to: "/donors" },
+  { label: "Forms", to: "/forms" },
 ];
 
 function navActive(path: string): boolean {
@@ -201,7 +202,7 @@ watch(
   padding-block: 0;
 }
 
-@media (max-width: 42rem) {
+@media (max-width: 53rem) {
   .public-header__inner {
     gap: var(--space-3);
   }
