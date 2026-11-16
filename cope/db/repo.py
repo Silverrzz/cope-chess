@@ -1367,6 +1367,8 @@ def set_tournament_concurrency(
     connection: sqlite3.Connection,
     tournament_id: int,
     concurrency: int,
+    *,
+    exclude_from_all_workers: bool | None = None,
 ) -> None:
     tournament = get_tournament(connection, tournament_id)
     if tournament is None:
@@ -1375,6 +1377,10 @@ def set_tournament_concurrency(
         {
             **tournament.config.model_dump(mode="json"),
             "concurrency": concurrency,
+            "exclude_from_all_workers": (
+                tournament.config.exclude_from_all_workers
+                if exclude_from_all_workers is None else exclude_from_all_workers
+            ),
         }
     )
     connection.execute(

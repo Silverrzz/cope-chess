@@ -346,6 +346,25 @@ async function saveConcurrency(): Promise<void> {
   finally { pending.value = '' }
 }
 
+async function toggleWorkerExclusion(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  input.checked = !!data.value?.tournament.config.exclude_from_all_workers
+  if (!data.value || pending.value) return
+  pending.value = 'worker-exclusion'
+  try {
+    const tournament = data.value.tournament
+    const response = await api.put<{ message: string }>(`/api/admin/tournaments/${id.value}`, {
+      body: {
+        name: tournament.name,
+        config: { ...tournament.config, exclude_from_all_workers: !tournament.config.exclude_from_all_workers },
+      },
+    })
+    toast.success(response.message)
+    await load()
+  } catch (cause) { error.value = errorText(cause); toast.error(cause) }
+  finally { pending.value = '' }
+}
+
 async function addParticipant(engineId: number): Promise<void> {
   pending.value = 'participant-add'
   try {
@@ -609,6 +628,10 @@ onBeforeUnmount(() => {
         <section id="tournament-settings" v-show="activePanel === 'settings'" class="configuration-panel" role="tabpanel" aria-labelledby="settings-tab">
           <TournamentConfigForm v-if="data.tournament.status === 'draft' && data.form" :seed="data.form" :pending="pending === 'save'" submit-label="Save draft" @submit="saveDraft" @cancel="router.push('/admin/tournaments')" />
           <div v-else class="settings-panel">
+            <div v-if="['running', 'paused'].includes(data.tournament.status)" class="worker-exclusion-setting">
+              <label><input type="checkbox" :checked="!!data.tournament.config.exclude_from_all_workers" :disabled="!!pending" @change="toggleWorkerExclusion"> Exclude from all workers</label>
+              <p>Only workers explicitly selecting this tournament can receive its games. Games already assigned continue.</p>
+            </div>
             <p class="settings-created">Created {{ formatDate(data.tournament.created_at) }}</p>
         <dl v-if="settingsRows.length" class="definition-list">
           <div v-for="([label, value], index) in settingsRows" :key="`${label}-${index}`"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
@@ -704,6 +727,9 @@ onBeforeUnmount(() => {
 .viewer-empty, .viewer-error { color: var(--color-text-muted); display: block; font-size: .66rem; }
 .viewer-error { margin-top: .5rem; }
 .settings-created { color: var(--color-text-muted); font-size: .68rem; margin: 0; padding: .85rem 1.15rem .2rem; }
+.worker-exclusion-setting { padding: .85rem 1.15rem; }
+.worker-exclusion-setting label { display: flex; align-items: center; gap: .5rem; }
+.worker-exclusion-setting p { color: var(--color-text-muted); font-size: .75rem; margin: .4rem 0 0; }
 .games-panel { min-width: 0; }
 .games-panel h2 { font-size: .82rem; margin: 0; }
 .games-panel__heading { align-items: center; display: flex; flex-wrap: wrap; gap: .65rem; justify-content: space-between; padding: .55rem 1.15rem; }

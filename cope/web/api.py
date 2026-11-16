@@ -2667,29 +2667,30 @@ def register_api_routes(app: FastAPI) -> None:
         if tournament.status not in {"draft", "running", "paused"}:
             raise HTTPException(
                 status_code=409,
-                detail="Only draft tournaments and the name or concurrency of running or paused tournaments can be edited here.",
+                detail="Only draft tournaments and the name, concurrency or worker exclusion of running or paused tournaments can be edited here.",
             )
         try:
             name_changed = payload.name != tournament.name
             if tournament.status in {"running", "paused"}:
                 unchanged_config = payload.config.model_dump(
                     mode="json",
-                    exclude={"concurrency"},
+                    exclude={"concurrency", "exclude_from_all_workers"},
                 )
                 current_config = tournament.config.model_dump(
                     mode="json",
-                    exclude={"concurrency"},
+                    exclude={"concurrency", "exclude_from_all_workers"},
                 )
                 if unchanged_config != current_config:
                     raise HTTPException(
                         status_code=409,
-                        detail="Only the name and game concurrency can be changed while a tournament is running or paused.",
+                        detail="Only the name, game concurrency and worker exclusion can be changed while a tournament is running or paused.",
                     )
                 update_tournament_name(connection, tournament_id, payload.name)
                 set_tournament_concurrency(
                     connection,
                     tournament_id,
                     payload.config.concurrency,
+                    exclude_from_all_workers=payload.config.exclude_from_all_workers,
                 )
             else:
                 config = _validated_tournament_config(connection, payload.config)
@@ -2723,7 +2724,9 @@ def register_api_routes(app: FastAPI) -> None:
         _publish_admin_change(web_app, request)
         if tournament.status in {"running", "paused"}:
             concurrency_changed = payload.config.concurrency != tournament.config.concurrency
-            if name_changed and concurrency_changed:
+            if payload.config.exclude_from_all_workers != tournament.config.exclude_from_all_workers:
+                message = "Tournament settings updated."
+            elif name_changed and concurrency_changed:
                 message = "Tournament name and concurrency updated."
             elif name_changed:
                 message = "Tournament renamed."

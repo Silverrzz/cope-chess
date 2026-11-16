@@ -352,6 +352,11 @@ def _next_tournament_worker_assignment(
 ) -> WorkerGameAssignment | None:
     if tournament.status not in {"running", "scheduled"}:
         return None
+    if tournament.config.exclude_from_all_workers and (
+        worker.tournament_scope != "selected"
+        or tournament.id not in list_worker_tournament_ids(connection, worker.id)
+    ):
+        return None
     if _active_game_count(connection, tournament.id) >= tournament.config.concurrency:
         return None
     if worker.hw is None:
