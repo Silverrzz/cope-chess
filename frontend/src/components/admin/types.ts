@@ -95,6 +95,7 @@ export type TimeControl =
   | { category: 'movenodes'; nodes: number }
 
 export interface TournamentSettings {
+  exclude_from_all_workers?: boolean
   variant?: Variant
   rules_revision?: string
   format: TournamentFormat

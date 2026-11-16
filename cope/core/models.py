@@ -225,6 +225,7 @@ class TournamentConfig(StrictModel):
     participants: list[int] = Field(min_length=2)
     time_control: TimeControl
     concurrency: int = Field(default=1, gt=0)
+    exclude_from_all_workers: bool = False
     opening_suite_id: int | None = Field(default=None, gt=0)
     adjudication: AdjudicationConfig
     rated: bool = True

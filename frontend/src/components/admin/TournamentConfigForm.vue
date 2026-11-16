@@ -183,6 +183,8 @@ function submit(): void {
           </label>
         </div>
         <div class="tournament-options">
+          <label><input v-model="config.exclude_from_all_workers" type="checkbox"> Exclude from all workers</label>
+          <p>Only workers explicitly selecting this tournament can receive its games.</p>
           <p>These options are applied to every engine for every game in this tournament.</p>
           <EngineOptionsEditor v-model="config.uci_options" />
         </div>
