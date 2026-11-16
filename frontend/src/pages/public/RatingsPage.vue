@@ -54,7 +54,7 @@ const selectedRatingList = computed(() => routeRatingList.value || String(data.v
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   const search = String(route.query.search ?? '').trim().toLowerCase()
-  const filtered = ratings.filter((row) => !search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search))
+  const filtered = ratings.filter((row) => !row.engine.public_hidden && (!search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search)))
   return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
 const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
