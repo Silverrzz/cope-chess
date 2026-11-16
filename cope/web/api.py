@@ -2631,7 +2631,7 @@ def register_api_routes(app: FastAPI) -> None:
             "rating_lists": [
                 item for item in list_rating_lists(connection)
                 if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)
-                and item.hardware_scaled == (tournament.config.clock_reference_hardware_key is not None)
+                and (not item.hardware_scaled or tournament.config.clock_reference_hardware_key is not None)
             ],
             "actions": web_app.TOURNAMENT_ACTIONS.get(tournament.status, {}),
             "roster": _live_tournament_roster_payload(connection, tournament),

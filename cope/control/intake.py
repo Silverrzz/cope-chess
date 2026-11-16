@@ -401,7 +401,6 @@ def _materialise_one(context, queue_id):
             return {"queue_id": queue_id, "status": "waiting", "reason": "Awaiting top-20 strength evidence on the reference rating list"}
         if not eligible:
             return {"queue_id": queue_id, "status": "skipped", "reason": "Does not qualify for top-20 classical", "assessment": assessment}
-    validate_rating_list_variant(connection, preset["rating_list_id"], TournamentConfig.model_validate(preset["config"]))
     if preset["variant"] != "standard":
         capability = connection.execute("SELECT status FROM engine_variant_capabilities WHERE build_hash = ? AND variant = ?", (hero.build_hash, preset["variant"])).fetchone()
         status = capability["status"] if capability else "unknown"
@@ -459,6 +458,9 @@ def _materialise_one(context, queue_id):
             if not board.is_valid():
                 raise ValueError("Opening suite contains a position invalid for the selected variant")
     tournament_id = create_tournament(connection, f"{hero.name} {hero.version} · {preset['name']}"[:160], config)
+    from cope.db import get_tournament
+
+    validate_rating_list_variant(connection, preset["rating_list_id"], get_tournament(connection, tournament_id).config)
     for engine in engines:
         connection.execute(
             "INSERT INTO control_tournament_builds(tournament_id, engine_version_id, build_hash, engine_spec) VALUES (?, ?, ?, ?)",

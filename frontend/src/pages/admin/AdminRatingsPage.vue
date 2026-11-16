@@ -36,7 +36,7 @@ const orderedLists = ref<RatingList[] | null>(null)
 const name = ref('')
 const description = ref('')
 const variant = ref<Variant>('standard')
-const hardwareScaled = ref(false)
+const hardwareScaled = ref(true)
 const monthlyRefresh = ref(false)
 
 const totalRatedEngines = computed(() => (data.value?.rating_lists ?? []).reduce((sum, item) => sum + item.engine_versions, 0))
@@ -58,7 +58,7 @@ async function createList(): Promise<void> {
         name: name.value.trim(),
         description: description.value,
         variant: variant.value,
-        hardware_scaled: variant.value === 'standard' && hardwareScaled.value,
+        hardware_scaled: hardwareScaled.value,
         monthly_refresh: monthlyRefresh.value,
       },
     })
@@ -112,7 +112,7 @@ onMounted(load)
       <label><span>List name</span><input v-model="name" class="input" maxlength="120" autofocus placeholder="e.g. Classical" /></label>
       <label><span>Description</span><input v-model="description" class="input" maxlength="2000" /></label>
       <label><span>Variant</span><VariantPicker v-model="variant" /></label>
-      <label v-if="variant === 'standard'"><span>Clock mode</span><select v-model="hardwareScaled" class="input"><option :value="false">Fixed</option><option :value="true">Hardware-scaled</option></select></label>
+      <label ><span>Clock mode</span><select v-model="hardwareScaled" class="input"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true">Hardware-scaled only</option></select></label>
       <label><span>Results window</span><select v-model="monthlyRefresh" class="input"><option :value="false">Cumulative</option><option :value="true">Latest monthly edition</option></select></label>
       <div><button class="button button--ghost" type="button" @click="showCreate = false">Cancel</button><button class="button button--primary" :disabled="pending">{{ pending ? 'Creating…' : 'Create list' }}</button></div>
     </form>

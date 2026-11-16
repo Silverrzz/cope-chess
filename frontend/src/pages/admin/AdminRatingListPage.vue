@@ -66,7 +66,7 @@ async function saveDetails() {
         description: description.value,
         ...(!rulesLocked.value && {
           variant: listVariant.value === data.value?.rating_list.variant ? undefined : listVariant.value,
-          hardware_scaled: listVariant.value === 'standard' && hardwareScaled.value,
+          hardware_scaled: hardwareScaled.value,
           monthly_refresh: monthlyRefresh.value,
         }),
       },
@@ -104,7 +104,7 @@ onMounted(load)
       </div>
       <label class="field"><span>List name</span><input v-model="listName" class="input" maxlength="120" required /></label>
       <label class="field"><span>Variant</span><VariantPicker v-model="listVariant" :disabled="rulesLocked || !!pending" /></label>
-      <label v-if="listVariant === 'standard'" class="field"><span>Clock mode</span><select v-model="hardwareScaled" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Fixed</option><option :value="true">Hardware-scaled</option></select></label>
+      <label class="field"><span>Clock mode</span><select v-model="hardwareScaled" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true">Hardware-scaled only</option></select></label>
       <label class="field"><span>Results window</span><select v-model="monthlyRefresh" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Cumulative</option><option :value="true">Latest monthly edition</option></select></label>
       <label class="field description-field"><span>Public description</span><textarea v-model="description" class="input" maxlength="2000" rows="3" /></label>
       <div class="details-actions"><button class="button button--secondary" :disabled="!!pending || !listName.trim()">{{ pending === 'details' ? 'Saving…' : 'Save details' }}</button></div>

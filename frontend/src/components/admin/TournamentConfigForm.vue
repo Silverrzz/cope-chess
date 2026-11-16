@@ -36,7 +36,6 @@ const clockReference = computed({
     config.value = {
       ...config.value,
       clock_reference_hardware_key: value,
-      lag_compensation_ms: value ? 0 : props.seed.config.lag_compensation_ms || 50,
     }
   },
 })
@@ -99,9 +98,8 @@ function validate(): string {
 
   const control = config.value.time_control
   if (config.value.clock_reference_hardware_key && (
-    config.value.variant !== 'standard' || control.category !== 'increment'
-    || config.value.engine_threads !== 1 || config.value.lag_compensation_ms !== 0
-  )) return 'Hardware-scaled clocks require standard chess, an increment time control, one thread, and zero lag compensation.'
+    control.category === 'movenodes'
+  )) return 'Hardware-scaled clocks require a time-based control.'
   if (config.value.clock_reference_hardware_key && props.seed.engine_options.some((engine) =>
     config.value.participants.includes(engine.id) && engine.distribution === 'worker_local'
   )) return 'Hardware-scaled clocks require managed builds for every participant.'
@@ -160,12 +158,12 @@ function submit(): void {
         <label class="field">
           <span class="field__label">Clock calibration</span>
           <select v-model="clockReference" class="input">
-            <option :value="null">Fixed clocks</option>
+            <option :value="null">{{ seed.is_new && config.rated ? 'Automatic shared reference' : 'Fixed clocks' }}</option>
             <option v-for="profile in seed.clock_reference_profiles ?? []" :key="profile.hardware_key" :value="profile.hardware_key">
               {{ profile.hw.cpu_model }} · {{ profile.hw.physical_cores }} cores · {{ profile.hardware_key.slice(0, 8) }}
             </option>
           </select>
-          <small v-if="config.clock_reference_hardware_key">Every engine must be benchmarked on this reference and on each worker that plays scaled games.</small>
+          <small v-if="config.clock_reference_hardware_key || (seed.is_new && config.rated)">New rated tournaments use hardware-scaled clocks. Workers measure the matching benchmark locally; the allowance is unchanged.</small>
         </label>
       </section>
 

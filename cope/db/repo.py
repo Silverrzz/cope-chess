@@ -1124,8 +1124,8 @@ def validate_rating_list_variant(connection, rating_list_id: int, config: Tourna
     rating = _rating_list_from_row(row)
     if (rating.variant, rating.rules_revision) != (config.variant, config.rules_revision):
         raise ValueError(f"Rating list {rating.name} ({rating.variant}/{rating.rules_revision}) is incompatible with {config.variant}/{config.rules_revision}")
-    if rating.hardware_scaled != (config.clock_reference_hardware_key is not None):
-        raise ValueError("The tournament and rating list must use the same hardware clock mode")
+    if rating.hardware_scaled and config.clock_reference_hardware_key is None:
+        raise ValueError("This rating list requires hardware-scaled clocks")
 
 
 def create_tournament(
@@ -1136,6 +1136,16 @@ def create_tournament(
     status: str = "draft",
     scheduled_start_at: str | None = None,
 ) -> int:
+    if status != "finished" and config.rated and config.time_control.category != "movenodes" and config.clock_reference_hardware_key is None:
+        from cope.db.benchmarks import get_common_benchmark_reference
+
+        engines = tuple(get_engine(connection, engine_id) for engine_id in config.participants)
+        if any(engine is None or engine.distribution != "managed" or engine.artifact is None for engine in engines):
+            raise ValueError("New rated tournaments require managed builds with reference benchmarks for hardware-scaled clocks")
+        reference = get_common_benchmark_reference(connection, engines)
+        if reference is None:
+            raise ValueError("Participants need artifact-verified benchmarks on a shared reference CPU for hardware-scaled clocks")
+        config = TournamentConfig.model_validate({**config.model_dump(), "clock_reference_hardware_key": reference.hardware_key})
     validate_tournament_variant(connection, config)
     if status == "scheduled" and scheduled_start_at is None:
         raise ValueError("scheduled tournaments require a start time")
@@ -5013,7 +5023,7 @@ def request_tournament_rating_commit(
         rating_list_ids = (
             item.id for item in list_rating_lists(connection)
             if (item.variant, item.rules_revision) == (tournament.config.variant, tournament.config.rules_revision)
-            and item.hardware_scaled == (tournament.config.clock_reference_hardware_key is not None)
+            and (not item.hardware_scaled or tournament.config.clock_reference_hardware_key is not None)
         )
     selected = tuple(sorted(set(int(value) for value in rating_list_ids)))
     if not selected or any(value <= 0 for value in selected):
@@ -5094,8 +5104,6 @@ def create_rating_list(
     hardware_scaled: bool = False, monthly_refresh: bool = False, description: str = "",
 ) -> int:
     definition = get_variant(variant)
-    if hardware_scaled and variant != "standard":
-        raise ValueError("Hardware-scaled rating lists require standard chess")
     cursor = connection.execute(
         """INSERT INTO rating_lists (name, created_at, variant, rules_revision, hardware_scaled, monthly_refresh, description)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -5109,8 +5117,6 @@ def set_rating_list_variant(connection, rating_list_id: int, variant: str) -> No
     row = connection.execute("SELECT hardware_scaled FROM rating_lists WHERE id = ? FOR UPDATE", (rating_list_id,)).fetchone()
     if row is None:
         raise ValueError("Rating list does not exist")
-    if row["hardware_scaled"] and variant != "standard":
-        raise ValueError("Hardware-scaled rating lists require standard chess")
     for row in connection.execute("SELECT tournament_id FROM tournament_rating_list_commits WHERE rating_list_id = ? AND status IN ('pending', 'claimed', 'applied')", (rating_list_id,)):
         tournament = get_tournament(connection, row["tournament_id"])
         if tournament is not None and (tournament.config.variant, tournament.config.rules_revision) != (variant, definition.rules_revision):
@@ -5132,8 +5138,6 @@ def update_rating_list(
     hardware_scaled = row["hardware_scaled"] if hardware_scaled is None else hardware_scaled
     monthly_refresh = row["monthly_refresh"] if monthly_refresh is None else monthly_refresh
     rules_revision = row["rules_revision"] if variant == row["variant"] else get_variant(variant).rules_revision
-    if hardware_scaled and variant != "standard":
-        raise ValueError("Hardware-scaled rating lists require standard chess")
     if (row["variant"], row["rules_revision"], row["hardware_scaled"], row["monthly_refresh"]) != (
         variant, rules_revision, hardware_scaled, monthly_refresh,
     ) and connection.execute(
@@ -5342,6 +5346,7 @@ def _chat_message_from_row(row: sqlite3.Row) -> ChatMessageRecord:
 
 def _tournament_from_row(row: sqlite3.Row) -> TournamentRecord:
     config_data = json.loads(row["config"])
+    config_data.setdefault("lag_compensation_ms", 50)
     config = TournamentConfig.model_validate(config_data)
     return TournamentRecord(
         id=row["id"],

@@ -67,7 +67,7 @@ export function defaultSettings(): TournamentSettings {
     opening_suite_id: null,
     adjudication: { draw: null, resign: null, max_moves: null },
     rated: true,
-    lag_compensation_ms: 50,
+    lag_compensation_ms: 250,
   }
 }
 

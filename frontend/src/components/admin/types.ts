@@ -208,6 +208,7 @@ export interface WorkerRow {
 }
 
 export interface FormSeed {
+  is_new?: boolean
   name: string
   config: TournamentConfig
   engine_options: Engine[]

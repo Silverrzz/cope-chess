@@ -228,7 +228,7 @@ class TournamentConfig(StrictModel):
     opening_suite_id: int | None = Field(default=None, gt=0)
     adjudication: AdjudicationConfig
     rated: bool = True
-    lag_compensation_ms: int = Field(default=50, ge=0)
+    lag_compensation_ms: int = Field(default=250, ge=0)
     engine_threads: int = Field(default=1, gt=0)
     engine_hash_mb: int = Field(default=16, gt=0)
     uci_options: dict[str, UciOptionValue] = Field(default_factory=dict)
@@ -261,14 +261,12 @@ class TournamentConfig(StrictModel):
     @model_validator(mode="after")
     def validate_format_options(self) -> TournamentConfig:
         if self.clock_reference_hardware_key is not None and (
-            self.variant != "standard"
-            or not isinstance(self.time_control, IncrementTimeControl)
-            or self.engine_threads != 1
-            or self.lag_compensation_ms != 0
+            isinstance(self.time_control, MoveNodesTimeControl)
         ):
-            raise ValueError("Hardware-scaled clocks require standard chess, an increment time control, one thread, and zero lag compensation.")
+            raise ValueError("Hardware-scaled clocks require a time-based control.")
         if self.clock_reference_hardware_key is not None and (
-            self.time_control.initial_ms > 86_400_000 or self.time_control.increment_ms > 600_000
+            getattr(self.time_control, "initial_ms", getattr(self.time_control, "move_time_ms", 0)) > 86_400_000
+            or getattr(self.time_control, "increment_ms", 0) > 600_000
         ):
             raise ValueError("Hardware-scaled clocks support up to 24 hours initial time and 10 minutes increment.")
         variant = get_variant(self.variant)

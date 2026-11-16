@@ -71,7 +71,7 @@ def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
             "max_moves": None,
         },
         "rated": True,
-        "lag_compensation_ms": 50,
+        "lag_compensation_ms": 250,
         "engine_threads": 1,
         "engine_hash_mb": 16,
     }
@@ -171,6 +171,7 @@ def _tournament_form_payload(
     ]
     return {
         "name": name,
+        "is_new": tournament is None,
         "config": config,
         "participants": participants,
         "engine_options": engines,

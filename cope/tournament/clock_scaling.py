@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
-from cope.core.models import IncrementTimeControl
+from cope.core.models import IncrementTimeControl, MoveTimeControl, MovesToGoTimeControl
 
 
 @dataclass(frozen=True)
 class SideClock:
     reference_nps: int
     worker_nps: int
-    control: IncrementTimeControl
+    control: IncrementTimeControl | MoveTimeControl | MovesToGoTimeControl
 
 
 @dataclass(frozen=True)
@@ -100,11 +100,18 @@ def calibrate_game(connection, tournament, game, worker, engines, hardware_score
         if score is None or score.benchmark_nps != reference_nps or score.worker_nps <= 0:
             return None
         worker_nps = score.worker_nps
-        initial = _scaled_ms(base.initial_ms, reference_nps, worker_nps)
-        increment = _scaled_ms(base.increment_ms, reference_nps, worker_nps)
-        if initial <= 0 or (base.increment_ms and increment <= 0):
+        initial = _scaled_ms(getattr(base, "initial_ms", getattr(base, "move_time_ms", 0)), reference_nps, worker_nps)
+        base_increment = getattr(base, "increment_ms", 0)
+        increment = _scaled_ms(base_increment, reference_nps, worker_nps)
+        if initial <= 0 or (base_increment and increment <= 0):
             return None
-        sides.append(SideClock(reference_nps, worker_nps, IncrementTimeControl(initial_ms=initial, increment_ms=increment)))
+        if isinstance(base, MoveTimeControl):
+            control = MoveTimeControl(move_time_ms=initial)
+        elif isinstance(base, MovesToGoTimeControl):
+            control = MovesToGoTimeControl(initial_ms=initial, moves_to_go=base.moves_to_go)
+        else:
+            control = IncrementTimeControl(initial_ms=initial, increment_ms=increment)
+        sides.append(SideClock(reference_nps, worker_nps, control))
     white, black = sides
     return GameClockCalibration(reference_key, worker_key, white, black)
 
@@ -121,7 +128,9 @@ def save_game_calibration(connection, game_id, assignment_key, calibration: Game
         (
             game_id, assignment_key, calibration.reference_key, calibration.worker_key,
             white.reference_nps, black.reference_nps, white.worker_nps, black.worker_nps,
-            white.control.initial_ms, black.control.initial_ms, white.control.increment_ms, black.control.increment_ms,
+            getattr(white.control, "initial_ms", getattr(white.control, "move_time_ms", 0)),
+            getattr(black.control, "initial_ms", getattr(black.control, "move_time_ms", 0)),
+            getattr(white.control, "increment_ms", 0), getattr(black.control, "increment_ms", 0),
         ),
     )
 
@@ -133,7 +142,11 @@ def game_calibration(connection, game_id, assignment_key):
     ).fetchone()
 
 
-def applied_clock(calibration, side):
+def applied_clock(calibration, side, base=None):
+    if isinstance(base, MoveTimeControl):
+        return MoveTimeControl(move_time_ms=calibration[f"{side}_initial_ms"])
+    if isinstance(base, MovesToGoTimeControl):
+        return MovesToGoTimeControl(initial_ms=calibration[f"{side}_initial_ms"], moves_to_go=base.moves_to_go)
     return IncrementTimeControl(
         initial_ms=calibration[f"{side}_initial_ms"],
         increment_ms=calibration[f"{side}_increment_ms"],
@@ -143,10 +156,11 @@ def applied_clock(calibration, side):
 def restore_scaled_clock(clock_state, previous_worker_nps, current_worker_nps):
     if not isinstance(previous_worker_nps, int) or previous_worker_nps <= 0:
         raise RuntimeError("Paused hardware-scaled game is missing its clock calibration.")
-    remaining = clock_state.get("remaining_time")
+    field = "remaining_time" if clock_state.get("remaining_time") is not None else "remaining_move_time"
+    remaining = clock_state.get(field)
     if not isinstance(remaining, int) or remaining <= 0:
         raise RuntimeError("Paused hardware-scaled game has an invalid clock.")
     return {
         **clock_state,
-        "remaining_time": max(1, _scaled_ms(remaining, previous_worker_nps, current_worker_nps)),
+        field: max(1, _scaled_ms(remaining, previous_worker_nps, current_worker_nps)),
     }

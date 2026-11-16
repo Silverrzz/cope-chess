@@ -679,8 +679,8 @@ def run_worker_assignment_game(
         connection.commit()
         if calibration is None or calibration["reference_hardware_key"] != tournament.config.clock_reference_hardware_key:
             raise RuntimeError("Hardware-scaled assignment is missing its pinned clocks")
-        white_control = _runtime_time_control(applied_clock(calibration, "white"))
-        black_control = _runtime_time_control(applied_clock(calibration, "black"))
+        white_control = _runtime_time_control(applied_clock(calibration, "white", tournament.config.time_control))
+        black_control = _runtime_time_control(applied_clock(calibration, "black", tournament.config.time_control))
         progress(
             "benchmark", "clock_calibration", "completed", "Applied pinned hardware-scaled clocks",
             metadata={key: value for key, value in calibration.items() if key not in {"game_id", "assignment_key"}},
