@@ -3,6 +3,8 @@ import { ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ballotTool, downloadJson, errorText, type VoterProof } from '@/api/ballots'
 import { generateVoterProof } from '@/api/ballot-protocol'
+import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 
@@ -43,22 +45,20 @@ async function copy() {
 </script>
 
 <template>
-  <div class="ballot-shell page-container">
-    <RouterLink class="ballot-back" to="/forms"><AppIcon name="arrow-left" :size="16" /> Forms</RouterLink>
-    <header class="ballot-hero">
-      <div><h1>Get a voter proof</h1><p>Enrollment for <strong>{{ slug }}</strong></p></div>
-    </header>
-    <section class="ballot-panel ballot-narrow">
-      <div class="ballot-section-heading"><AppIcon name="key" /><h2>Register your eligibility</h2></div>
+  <div class="page-container page-container--narrow page-stack">
+    <nav class="toolbar" aria-label="Breadcrumb"><RouterLink to="/forms">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page" class="muted">Voter proof</span></nav>
+    <PageHeader title="Get a voter proof" :description="'Enrollment for ' + slug" />
+    <section class="panel panel__body section-stack">
+      <div class="toolbar"><AppIcon name="key" /><h2>Register your eligibility</h2></div>
       <p>Generate a file on this device. Give the organizer the public enrollment code so they can register you before voting opens. Keep the downloaded file private and bring it back to cast your ballot.</p>
-      <p v-if="error" class="ballot-message ballot-message--error" role="alert">{{ error }}</p>
-      <div v-if="!proof" class="ballot-actions">
+      <InlineFeedback :message="error" />
+      <div v-if="!proof" class="button-row">
         <BaseButton variant="primary" :loading="busy" @click="create">Generate and download proof</BaseButton>
         <BaseButton :href="ballotTool">Use the offline tool</BaseButton>
       </div>
-      <div v-else class="ballot-stack">
-        <label class="ballot-field">Public enrollment code<input class="input ballot-code" :value="proof.public" readonly @focus="($event.target as HTMLInputElement).select()"></label>
-        <div class="ballot-actions">
+      <div v-else class="section-stack">
+        <label class="field">Public enrollment code<input class="input input--mono" :value="proof.public" readonly @focus="($event.target as HTMLInputElement).select()"></label>
+        <div class="button-row">
           <BaseButton variant="primary" @click="copy">
             <template #icon><AppIcon name="copy" :size="16" /></template>
             {{ copied ? 'Copied' : 'Copy enrollment code' }}

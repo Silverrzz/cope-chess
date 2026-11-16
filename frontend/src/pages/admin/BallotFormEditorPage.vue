@@ -6,6 +6,9 @@ import {
   type AdminDetail, type BallotSettings, type Trustee,
 } from '@/api/ballots'
 import api from '@/api/client'
+import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import BallotResults from '@/components/forms/BallotResults.vue'
 import BallotStatus from '@/components/forms/BallotStatus.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -193,50 +196,48 @@ function importShare(event: Event) {
 </script>
 
 <template>
-  <div class="ballot-shell">
-    <RouterLink class="ballot-back" to="/admin/forms"><AppIcon name="arrow-left" :size="16" /> Forms</RouterLink>
-    <header class="ballot-hero">
-      <div>
-        <BallotStatus v-if="model" :status="model.status" />
-        <h1>{{ model?.title ?? (slug ? 'Ballot form' : 'New ballot form') }}</h1>
-        <p v-if="!slug">Create a draft, then enroll voters and register the independent trustees.</p>
-        <p v-else-if="model">{{ model.ballot_count }} accepted · {{ model.settings.roster.length }} eligible voters</p>
-      </div>
-      <BaseButton v-if="slug && model?.manifest_digest" :to="{ name: 'secret-ballot', params: { slug } }">
-        <template #icon><AppIcon name="external-link" :size="16" /></template>
-        View public form
-      </BaseButton>
-    </header>
+  <div class="admin-page page-stack">
+    <nav class="toolbar" aria-label="Breadcrumb"><RouterLink to="/admin/forms">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page" class="muted">Ballot form</span></nav>
+    <AdminPageHeader :title="model?.title ?? (slug ? 'Ballot form' : 'New ballot form')"
+      :description="model ? model.ballot_count + ' accepted · ' + model.settings.roster.length + ' eligible voters' : ''">
+      <template v-if="model" #actions>
+        <BallotStatus :status="model.status" />
+        <BaseButton v-if="slug && model.manifest_digest" :to="{ name: 'secret-ballot', params: { slug } }">
+          <template #icon><AppIcon name="external-link" :size="16" /></template>
+          View public form
+        </BaseButton>
+      </template>
+    </AdminPageHeader>
 
-    <p v-if="busy === 'load'" role="status">Loading ballot form…</p>
-    <p v-if="error" class="ballot-message ballot-message--error" role="alert">{{ error }}</p>
-    <p v-if="message" class="ballot-message" role="status">{{ message }}</p>
+    <p v-if="busy === 'load'" class="panel panel__body muted" role="status">Loading ballot form…</p>
+    <InlineFeedback :message="error" />
+    <InlineFeedback :message="message" tone="info" />
 
-    <div v-if="!slug || model" class="ballot-columns">
-      <div class="ballot-stack">
+    <div v-if="!slug || model" class="form-workspace">
+      <div class="form-stack">
         <template v-if="canEdit">
-          <nav v-if="slug" class="ballot-tabs" aria-label="Ballot setup">
+          <nav v-if="slug" class="form-tabs" aria-label="Ballot setup">
             <button type="button" :aria-current="tab === 'questions' ? 'step' : undefined" @click="tab = 'questions'">Questions</button>
             <button type="button" :aria-current="tab === 'voters' ? 'step' : undefined" @click="tab = 'voters'">Voters <span>{{ rosterKeys.length }}</span></button>
             <button type="button" :aria-current="tab === 'trustees' ? 'step' : undefined" @click="tab = 'trustees'">Trustees <span>{{ trustees.length }}/2</span></button>
           </nav>
-          <form class="ballot-stack" @submit.prevent="save">
-            <fieldset class="ballot-editor-fieldset ballot-stack" :disabled="Boolean(busy)">
+          <form class="form-stack" @submit.prevent="save">
+            <fieldset class="editor-fields form-stack" :disabled="Boolean(busy)">
               <template v-if="tab === 'questions'">
-                <section class="ballot-panel ballot-stack">
+                <section class="panel panel__body section-stack">
                   <h2>Form details</h2>
-                  <label class="ballot-field">Title<input v-model="title" class="input" maxlength="200" placeholder="Community rules vote"></label>
-                  <label v-if="!slug" class="ballot-field">URL name<input v-model="slugInput" class="input" maxlength="80" placeholder="community-rules" required></label>
-                  <label class="ballot-field">Description<textarea v-model="description" rows="3" class="input" maxlength="3000"></textarea></label>
+                  <label class="field">Title<input v-model="title" class="input" maxlength="200" placeholder="Community rules vote"></label>
+                  <label v-if="!slug" class="field">URL name<input v-model="slugInput" class="input" maxlength="80" placeholder="community-rules" required></label>
+                  <label class="field">Description<textarea v-model="description" rows="3" class="textarea" maxlength="3000"></textarea></label>
                 </section>
-                <section v-for="(question, index) in questions" :key="index" class="ballot-panel ballot-stack">
-                  <div class="ballot-section-heading ballot-section-heading--split">
+                <section v-for="(question, index) in questions" :key="index" class="panel panel__body section-stack">
+                  <div class="toolbar toolbar--between">
                     <h2>Question {{ index + 1 }}</h2>
                     <BaseButton v-if="questions.length > 1" size="small" variant="ghost" @click="questions.splice(index, 1)" :aria-label="'Remove question ' + (index + 1)">Remove</BaseButton>
                   </div>
-                  <label class="ballot-field">Question text<input v-model="question.title" class="input" maxlength="200"></label>
-                  <div v-for="(_, optionIndex) in question.options" :key="optionIndex" class="ballot-option-editor">
-                    <label class="ballot-field">Option {{ optionIndex + 1 }}<input v-model="question.options[optionIndex]" class="input" maxlength="200"></label>
+                  <label class="field">Question text<input v-model="question.title" class="input" maxlength="200"></label>
+                  <div v-for="(_, optionIndex) in question.options" :key="optionIndex" class="option-editor">
+                    <label class="field">Option {{ optionIndex + 1 }}<input v-model="question.options[optionIndex]" class="input" maxlength="200"></label>
                     <BaseButton v-if="question.options.length > 2" size="small" variant="ghost" icon-only @click="question.options.splice(optionIndex, 1)">
                       <template #icon><AppIcon name="trash" :size="16" /></template>
                       Remove option {{ optionIndex + 1 }}
@@ -249,62 +250,63 @@ function importShare(event: Event) {
                   Add question
                 </BaseButton>
               </template>
-              <section v-else-if="tab === 'voters'" class="ballot-panel ballot-stack">
+              <section v-else-if="tab === 'voters'" class="panel panel__body section-stack">
                 <h2>Voter roster</h2>
                 <p>Share the enrollment link with eligible voters. Each voter sends you their public enrollment code. Keep a separate record of who is eligible and enroll one code per voter.</p>
-                <div class="ballot-actions">
+                <div class="button-row">
                   <BaseButton :to="enrollmentPage">Open enrollment page</BaseButton>
                   <BaseButton @click="copyEnrollment">Copy enrollment link</BaseButton>
                 </div>
-                <label class="ballot-field">Public enrollment codes<textarea v-model="roster" class="input ballot-code" rows="9" maxlength="14000" spellcheck="false" placeholder="Paste one enrollment code per line"></textarea></label>
+                <label class="field">Public enrollment codes<textarea v-model="roster" class="textarea input--mono" rows="9" maxlength="14000" spellcheck="false" placeholder="Paste one enrollment code per line"></textarea></label>
                 <p>{{ rosterKeys.length }} enrollment {{ rosterKeys.length === 1 ? 'code' : 'codes' }}</p>
-                <label class="ballot-field">Minimum ballots to publish results<input v-model.number="minimum" class="input" type="number" min="3" max="200" step="1"></label>
+                <label class="field">Minimum ballots to publish results<input v-model.number="minimum" class="input" type="number" min="3" max="200" step="1"></label>
                 <p>Closing below this minimum keeps results sealed.</p>
               </section>
-              <section v-else class="ballot-panel ballot-stack">
+              <section v-else class="panel panel__body section-stack">
                 <h2>Trustee keys</h2>
                 <p>Ask two people to generate separate keys offline. Each trustee keeps their private key and sends you only their public registration file.</p>
-                <a :href="ballotTool">Download offline voting tool <AppIcon name="download" :size="15" /></a>
+                <a :href="ballotTool">Download offline voting tool</a>
                 <p>Each trustee runs this command with Python 3.11+ and <code>cryptography</code> 43 or newer.</p>
-                <pre class="ballot-command">python cope_ballot.py trustee {{ slug }} trustee-private.json trustee-public.json</pre>
-                <ul v-if="trustees.length" class="ballot-admin-list">
+                <pre class="form-command">python cope_ballot.py trustee {{ slug }} trustee-private.json trustee-public.json</pre>
+                <ul v-if="trustees.length" class="setup-list section-stack">
                   <li v-for="(trustee, index) in trustees" :key="trustee.public">
-                    <div><strong>Trustee {{ index + 1 }}</strong><small class="ballot-code">{{ trustee.public.slice(0, 18) }}…</small></div>
+                    <div><strong>Trustee {{ index + 1 }}</strong> <small class="muted">{{ trustee.public.slice(0, 18) }}…</small></div>
                     <BaseButton size="small" variant="ghost" @click="trustees.splice(index, 1)">Remove</BaseButton>
                   </li>
                 </ul>
-                <label v-if="trustees.length < 2" class="ballot-field ballot-file">Add public trustee registration<input type="file" accept=".json,application/json" @change="addTrustee"></label>
+                <label v-if="trustees.length < 2" class="field">Add public trustee registration<input class="input" type="file" accept=".json,application/json" @change="addTrustee"></label>
               </section>
             </fieldset>
-            <div class="ballot-actions">
+            <div class="button-row">
               <BaseButton type="submit" variant="primary" :loading="busy === 'save'" :disabled="Boolean(busy) || Boolean(slug && !dirty)">
                 {{ slug ? 'Save draft' : 'Create draft' }}
               </BaseButton>
-              <span v-if="slug && dirty" class="ballot-muted">Unsaved edits</span>
+              <span v-if="slug && dirty" class="muted">Unsaved edits</span>
             </div>
           </form>
         </template>
 
         <template v-else-if="model">
-          <section class="ballot-panel ballot-stack">
+          <BallotResults v-if="model.results" :questions="model.settings.questions" :results="model.results" :total="model.ballot_count" />
+          <section v-else class="panel panel__body section-stack">
             <h2>Published questions</h2>
-            <p v-if="model.description" class="ballot-description">{{ model.description }}</p>
-            <div v-for="(question, index) in model.settings.questions" :key="index" class="ballot-published-question">
+            <p v-if="model.description" class="muted">{{ model.description }}</p>
+            <div v-for="(question, index) in model.settings.questions" :key="index" class="section-stack published-question">
               <h3>{{ question.title }}</h3>
               <ul><li v-for="option in question.options" :key="option">{{ option }}</li></ul>
             </div>
           </section>
-          <section v-if="model.board_digest" class="ballot-panel ballot-stack">
+          <section v-if="model.board_digest" class="panel panel__body section-stack">
             <h2>Closed ballot board</h2>
-            <a :href="publicEndpoint + '/audit'">Download encrypted audit archive <AppIcon name="download" :size="15" /></a>
-            <dl class="ballot-fingerprints">
+            <a :href="publicEndpoint + '/audit'">Download encrypted audit archive</a>
+            <dl class="form-fingerprints">
               <dt>Closed board fingerprint</dt><dd>{{ model.board_digest }}</dd>
             </dl>
             <template v-if="model.status === 'tallying'">
               <p>Have both trustees compare the closed board fingerprint with each other and with voters, then verify the archive against the manifest fingerprint saved when voting opened. Each trustee sends one public share.</p>
-              <pre class="ballot-command">python cope_ballot.py share {{ slug }}-audit.json MANIFEST_FINGERPRINT BOARD_FINGERPRINT trustee-private.json trustee-share.json</pre>
+              <pre class="form-command">python cope_ballot.py share {{ slug }}-audit.json MANIFEST_FINGERPRINT BOARD_FINGERPRINT trustee-private.json trustee-share.json</pre>
               <p>{{ model.trustees_submitted.length }} of 2 verified shares received. Results publish automatically after both shares pass verification.</p>
-              <label class="ballot-field ballot-file">Import public tally share<input type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="importShare"></label>
+              <label class="field">Import public tally share<input class="input" type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="importShare"></label>
             </template>
             <p v-else-if="model.status === 'sealed'">Turnout was below the minimum of {{ model.settings.minimum }}. The board remains encrypted.</p>
             <p v-else>Both trustee shares verified. The audit archive includes the proofs and published totals.</p>
@@ -312,11 +314,11 @@ function importShare(event: Event) {
         </template>
       </div>
 
-      <aside v-if="model" class="ballot-stack ballot-aside">
-        <section class="ballot-panel ballot-stack">
+      <aside v-if="model" class="section-stack">
+        <section class="panel panel__body section-stack">
           <h2>Voting</h2>
           <template v-if="canEdit">
-            <ul class="ballot-checklist">
+            <ul class="setup-list section-stack">
               <li><AppIcon :name="rosterKeys.length >= minimum ? 'check-circle' : 'clock'" :size="16" />{{ rosterKeys.length }} enrolled · {{ minimum }} minimum</li>
               <li><AppIcon :name="trustees.length === 2 ? 'check-circle' : 'clock'" :size="16" />{{ trustees.length }} of 2 trustees added</li>
               <li><AppIcon :name="dirty ? 'clock' : 'check-circle'" :size="16" />{{ dirty ? 'Save your draft' : 'Draft saved' }}</li>
@@ -324,18 +326,18 @@ function importShare(event: Event) {
             <BaseButton variant="primary" :disabled="dirty || !ready || Boolean(busy)" :loading="busy === 'open'" @click="openVoting">Open voting</BaseButton>
           </template>
           <template v-else>
-            <dl class="ballot-fingerprints"><dt>Manifest fingerprint</dt><dd>{{ model.manifest_digest }}</dd></dl>
-            <a :href="publicEndpoint + '/manifest?download=true'">Download ballot manifest <AppIcon name="download" :size="15" /></a>
+            <dl class="form-fingerprints"><dt>Manifest fingerprint</dt><dd>{{ model.manifest_digest }}</dd></dl>
+            <a :href="publicEndpoint + '/manifest?download=true'">Download ballot manifest</a>
             <p v-if="model.status === 'open'">Share the manifest fingerprint with voters and both trustees so they can save it independently.</p>
-            <div v-if="model.status === 'open'" class="ballot-actions">
+            <div v-if="model.status === 'open'" class="button-row">
               <BaseButton :disabled="Boolean(busy)" :loading="busy === 'refresh'" @click="action('refresh', async () => apply(await api.get<AdminDetail>(endpoint)))">Refresh turnout</BaseButton>
               <BaseButton variant="danger" :disabled="Boolean(busy)" :loading="busy === 'close'" @click="closeVoting">Close voting</BaseButton>
             </div>
           </template>
         </section>
-        <section class="ballot-panel ballot-stack">
+        <section class="panel panel__body section-stack">
           <h2>Directory visibility</h2>
-          <label class="ballot-toggle">
+          <label class="switch-row">
             <input type="checkbox" :checked="model.listed" :disabled="Boolean(busy)" @change="setListing(($event.target as HTMLInputElement).checked)">
             Show on the public Forms page
           </label>
@@ -345,3 +347,34 @@ function importShare(event: Event) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.editor-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.option-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-2);
+}
+
+.setup-list {
+  list-style: none;
+}
+
+.setup-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.published-question ul {
+  padding-inline-start: var(--space-6);
+}
+</style>

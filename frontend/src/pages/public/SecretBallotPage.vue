@@ -7,7 +7,11 @@ import {
   type BallotOpening, type Detail, type Envelope, type Manifest, type Receipt, type VoterProof,
 } from '@/api/ballots'
 import { digest, verifyReceipt, voterProof } from '@/api/ballot-protocol'
+import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import BallotResults from '@/components/forms/BallotResults.vue'
 import BallotStatus from '@/components/forms/BallotStatus.vue'
+import ContentState from '@/components/public/ContentState.vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { useSessionStore } from '@/stores/session'
@@ -222,54 +226,37 @@ function clearPrepared() {
   actionError.value = ''
 }
 
-function percentage(count: number, total: number): string {
-  return (total ? 100 * count / total : 0).toFixed(1).replace(/\.0$/, '')
-}
 </script>
 
 <template>
-  <div class="ballot-shell page-container">
-    <RouterLink class="ballot-back" to="/forms"><AppIcon name="arrow-left" :size="16" /> Forms</RouterLink>
-    <p v-if="loading" role="status">Loading form…</p>
-    <p v-else-if="error" class="ballot-message ballot-message--error" role="alert">{{ error }}</p>
+  <div class="page-container page-stack">
+    <nav class="toolbar" aria-label="Breadcrumb"><RouterLink to="/forms">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page" class="muted">{{ form?.title ?? 'Ballot' }}</span></nav>
+    <ContentState v-if="loading" kind="loading" compact title="Loading form" />
+    <ContentState v-else-if="error" kind="error" compact :message="error" />
     <template v-else-if="form">
-      <header class="ballot-hero">
-        <div>
+      <PageHeader :title="form.title" :description="form.description">
+        <template #actions>
           <BallotStatus :status="form.status" />
-          <h1>{{ form.title }}</h1>
-          <p v-if="form.description" class="ballot-description">{{ form.description }}</p>
-        </div>
-        <div class="ballot-actions ballot-turnout">
-          <span class="ballot-count"><strong>{{ form.ballot_count }}</strong> {{ form.ballot_count === 1 ? 'ballot' : 'ballots' }} accepted</span>
+          <small class="muted">{{ form.ballot_count }} {{ form.ballot_count === 1 ? 'ballot' : 'ballots' }} accepted</small>
           <BaseButton v-if="form.status === 'open' || form.status === 'tallying'" size="small" variant="ghost" icon-only
             :disabled="Boolean(busy)" :loading="busy === 'refresh'"
             @click="refresh">
             <template #icon><AppIcon name="refresh" :size="16" /></template>
             Refresh form
           </BaseButton>
-        </div>
-      </header>
-      <div class="ballot-columns">
-        <div class="ballot-stack">
-          <template v-if="form.results">
-            <section v-for="(question, index) in form.questions" :key="index" class="ballot-panel ballot-results">
-              <h2>{{ question.title }}</h2>
-              <div v-for="(option, optionIndex) in question.options" :key="option" class="ballot-result">
-                <div><strong>{{ option }}</strong><span>{{ form.results[index]?.[optionIndex] ?? 0 }} votes · {{ percentage(form.results[index]?.[optionIndex] ?? 0, form.ballot_count) }}%</span></div>
-                <div class="ballot-meter" aria-hidden="true"><span :style="{ width: percentage(form.results[index]?.[optionIndex] ?? 0, form.ballot_count) + '%' }" /></div>
-              </div>
-            </section>
-          </template>
-          <section v-else-if="form.status !== 'open'" class="ballot-panel ballot-empty">
-            <AppIcon :name="form.status === 'sealed' ? 'archive' : 'clock'" :size="25" />
-            <h2>{{ form.status === 'sealed' ? 'Results are sealed' : 'Results are being tallied' }}</h2>
-            <p>{{ form.status === 'sealed' ? 'This form received fewer than ' + form.minimum + ' ballots, its minimum for publishing results.' : 'Voting is closed. The aggregate will be published when both trustees submit a verified tally share.' }}</p>
-          </section>
+        </template>
+      </PageHeader>
+      <div class="form-workspace">
+        <div class="section-stack">
+          <BallotResults v-if="form.results" :questions="form.questions" :results="form.results" :total="form.ballot_count" />
+          <ContentState v-else-if="form.status !== 'open'" kind="empty" compact
+            :title="form.status === 'sealed' ? 'Results are sealed' : 'Results are being tallied'"
+            :message="form.status === 'sealed' ? 'This form received fewer than ' + form.minimum + ' ballots, its minimum for publishing results.' : 'Voting is closed. The aggregate will be published when both trustees submit a verified tally share.'" />
 
-          <form v-else-if="eligible && !envelope && !receipt && !offline" class="ballot-stack" @submit.prevent="seal">
-            <fieldset v-for="(question, index) in form.questions" :key="index" class="ballot-panel ballot-question" :disabled="Boolean(busy)">
+          <form v-else-if="eligible && !envelope && !receipt && !offline" class="section-stack" @submit.prevent="seal">
+            <fieldset v-for="(question, index) in form.questions" :key="index" class="panel panel__body section-stack ballot-question" :disabled="Boolean(busy)">
               <legend>{{ question.title }}</legend>
-              <label v-for="(option, optionIndex) in question.options" :key="option" class="ballot-option">
+              <label v-for="(option, optionIndex) in question.options" :key="option" class="switch-row">
                 <input v-model="choices[index]" type="radio" :name="'question-' + index" :value="optionIndex" required>
                 <span>{{ option }}</span>
               </label>
@@ -278,24 +265,24 @@ function percentage(count: number, total: number): string {
               {{ busy === 'seal' ? 'Encrypting on this device…' : 'Prepare encrypted ballot' }}
             </BaseButton>
           </form>
-          <section v-else-if="!receipt && !envelope" class="ballot-panel ballot-stack">
-            <div class="ballot-section-heading"><AppIcon name="key" /><h2>Cast a ballot</h2></div>
+          <section v-else-if="!receipt && !envelope" class="panel panel__body section-stack">
+            <div class="toolbar"><AppIcon name="key" /><h2>Cast a ballot</h2></div>
             <template v-if="!offline">
               <p>Select your registered voter proof from this device. Your browser uses it locally to sign one encrypted ballot.</p>
-              <label class="ballot-field ballot-file">Voter proof<input type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="attachProof"></label>
+              <label class="field">Voter proof<input class="input" type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="attachProof"></label>
               <BaseButton variant="ghost" :disabled="Boolean(busy)" @click="offline = true">Use an offline ballot</BaseButton>
             </template>
             <template v-else>
               <p>Choose an encrypted ballot prepared by the offline tool. Keep the private opening on your device.</p>
-              <label class="ballot-field ballot-file">Encrypted ballot<input type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="attachEnvelope"></label>
+              <label class="field">Encrypted ballot<input class="input" type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="attachEnvelope"></label>
               <BaseButton variant="ghost" :disabled="Boolean(busy)" @click="offline = false">Use a voter proof</BaseButton>
             </template>
           </section>
 
-          <section v-if="envelope" class="ballot-panel ballot-stack">
-            <div class="ballot-section-heading"><AppIcon name="check-circle" /><h2>Encrypted ballot ready</h2></div>
+          <section v-if="envelope" class="panel panel__body section-stack">
+            <div class="toolbar"><AppIcon name="check-circle" /><h2>Encrypted ballot ready</h2></div>
             <p>One ballot can be accepted per enrollment code. Save the encrypted file to retry if the connection drops.</p>
-            <div class="ballot-actions">
+            <div class="button-row">
               <BaseButton variant="primary" :loading="busy === 'submit'" :disabled="Boolean(busy)" @click="submit">
                 {{ attempted ? 'Retry the same ballot' : 'Submit encrypted ballot' }}
               </BaseButton>
@@ -304,42 +291,42 @@ function percentage(count: number, total: number): string {
               <BaseButton v-if="!attempted" variant="ghost" :disabled="Boolean(busy)" @click="clearPrepared">Start over</BaseButton>
             </div>
           </section>
-          <section v-if="receipt" class="ballot-panel ballot-stack">
-            <div class="ballot-section-heading"><AppIcon name="check-circle" /><h2>{{ verified ? 'Receipt verified' : 'Ballot accepted' }}</h2></div>
+          <section v-if="receipt" class="panel panel__body section-stack">
+            <div class="toolbar"><AppIcon name="check-circle" /><h2>{{ verified ? 'Receipt verified' : 'Ballot accepted' }}</h2></div>
             <p v-if="verified" role="status">{{ verified }}</p>
-            <div class="ballot-receipts">
-              <div>
+            <div class="content-grid">
+              <div class="section-stack">
                 <h3>Inclusion receipt</h3>
                 <p>Use this signed receipt to check that your encrypted ballot appears on the board. It contains no choices.</p>
                 <BaseButton @click="downloadJson(slug + '-inclusion-receipt', receipt)">Download inclusion receipt</BaseButton>
               </div>
-              <div v-if="opening">
+              <div v-if="opening" class="section-stack">
                 <h3>Private choice proof</h3>
                 <p>This file reveals your choices. Share it only when you want to prove how this enrollment code voted.</p>
                 <BaseButton @click="saveOpening">Download private choice proof</BaseButton>
               </div>
             </div>
           </section>
-          <p v-if="actionError" class="ballot-message ballot-message--error" role="alert">{{ actionError }}</p>
+          <InlineFeedback :message="actionError" />
         </div>
 
-        <aside class="ballot-stack ballot-aside">
-          <section class="ballot-panel ballot-stack">
-            <div class="ballot-section-heading"><AppIcon name="book-open" /><h2>Verify this form</h2></div>
+        <aside class="section-stack">
+          <section class="panel panel__body section-stack">
+            <div class="toolbar"><AppIcon name="book-open" /><h2>Verify this form</h2></div>
             <p>Each ballot has a zero-knowledge proof that it contains one valid choice per question. The trustees release aggregate totals after voting closes.</p>
-            <a :href="path + '/manifest?download=true'">Download ballot manifest <AppIcon name="download" :size="15" /></a>
-            <a v-if="form.board_digest" :href="path + '/audit'">Download audit archive <AppIcon name="download" :size="15" /></a>
-            <a :href="ballotTool">Download offline voting tool <AppIcon name="download" :size="15" /></a>
-            <label class="ballot-field ballot-file">Check an inclusion receipt or encrypted ballot<input type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="checkReceipt"></label>
+            <a :href="path + '/manifest?download=true'">Download ballot manifest</a>
+            <a v-if="form.board_digest" :href="path + '/audit'">Download audit archive</a>
+            <a :href="ballotTool">Download offline voting tool</a>
+            <label class="field">Check an inclusion receipt or encrypted ballot<input class="input" type="file" accept=".json,application/json" :disabled="Boolean(busy)" @change="checkReceipt"></label>
             <details>
               <summary>Fingerprints and verification</summary>
-              <dl class="ballot-fingerprints">
+              <dl class="form-fingerprints section-stack">
                 <dt>Manifest fingerprint</dt><dd>{{ form.manifest_digest }}</dd>
                 <template v-if="form.board_digest"><dt>Closed board fingerprint</dt><dd>{{ form.board_digest }}</dd></template>
               </dl>
               <p>Save the manifest fingerprint when voting opens. Compare the closed board fingerprint with other voters when it closes. The offline tool can verify the archive, signed receipts and disclosed choices using those fingerprints.</p>
               <p>The tool requires Python 3.11+ and <code>cryptography</code> 43 or newer. Use <code>--help</code> for usage.</p>
-              <pre v-if="form.board_digest" class="ballot-command">python cope_ballot.py verify {{ slug }}-audit.json MANIFEST_FINGERPRINT BOARD_FINGERPRINT</pre>
+              <pre v-if="form.board_digest" class="form-command">python cope_ballot.py verify {{ slug }}-audit.json MANIFEST_FINGERPRINT BOARD_FINGERPRINT</pre>
             </details>
           </section>
         </aside>
@@ -347,3 +334,16 @@ function percentage(count: number, total: number): string {
     </template>
   </div>
 </template>
+
+<style scoped>
+.ballot-question {
+  min-width: 0;
+  margin: 0;
+}
+
+.ballot-question legend {
+  padding-inline: var(--space-2);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+</style>

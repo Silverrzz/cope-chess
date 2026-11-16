@@ -121,12 +121,23 @@ const router = createRouter({
       meta: { requiresAdmin: true },
       children: [
         { path: "activity", name: "admin-activity", component: () => import("@/pages/admin/ActivityPage.vue"), meta: { title: "Activity" } },
-        { path: "forms", name: "admin-forms", component: () => import("@/pages/admin/BallotFormsPage.vue"), meta: { title: "Forms" } },
+        {
+          path: "forms",
+          name: "admin-forms",
+          component: () => import("@/pages/admin/BallotFormsPage.vue"),
+          beforeEnter: () => useSessionStore().user?.role === "manager" ? { name: "admin-form-collections" } : true,
+          meta: { title: "Forms" },
+        },
         { path: "forms/collections", name: "admin-form-collections", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Response collections" } },
         { path: "forms/new-ballot", name: "admin-new-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), meta: { title: "New ballot form" } },
         { path: "forms/ballots/:slug", name: "admin-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), props: true, meta: { title: "Manage ballot form" } },
         { path: "forms/:id", name: "admin-form-editor", component: () => import("@/pages/admin/FormEditorPage.vue"), props: true, meta: { title: "Form editor" } },
-        { path: "form-responses", name: "admin-form-responses", component: () => import("@/pages/admin/FormResponsesPage.vue"), meta: { title: "Response inbox" } },
+        {
+          path: "form-responses",
+          redirect: (to) => typeof to.query.form === "string" && to.query.form
+            ? { name: "admin-form-editor", params: { id: to.query.form }, query: { view: "responses" } }
+            : { name: "admin-form-collections", query: {} },
+        },
         { path: "form-responses/:id", name: "admin-form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Review response" } },
         {
           path: "",

@@ -172,7 +172,7 @@ def admin_detail(connection, principal, slug: str) -> dict:
         **summary(row, count_ballots(connection, slug)),
         "settings": row["settings"], "revision": row["revision"], "listed": row["listed"],
         "manifest_digest": row["manifest_digest"], "board_digest": row["board_digest"],
-        "trustees_submitted": [entry["trustee"] for entry in shares],
+        "trustees_submitted": [entry["trustee"] for entry in shares], "results": row["results"],
     }
 
 

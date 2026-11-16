@@ -23,7 +23,23 @@ export async function formResponse(id: string, token = ''): Promise<FormResponse
   const result = await api.get<{ data: FormResponse }>(`/api/forms/responses/${encodeURIComponent(id)}`, { headers: claimHeaders(token) })
   return result.data
 }
-export async function formResponses(formId?: string, cursor?: string | null): Promise<Page<FormResponse & { form_title: string }>> {
-  const result = await api.get<{ data: Page<FormResponse & { form_title: string }> }>('/api/forms/responses', { query: { form_id: formId, cursor, limit: 30 } })
+export type FormResponseRow = Pick<FormResponse, 'id' | 'form_id' | 'state' | 'revision' | 'created_at'> & {
+  form_title: string
+  release_number: number
+}
+
+export interface ResponseCollection {
+  id: string
+  label: string
+  response_count: number
+}
+
+export async function formResponses(formId: string, cursor?: string | null): Promise<Page<FormResponseRow>> {
+  const result = await api.get<{ data: Page<FormResponseRow> }>('/api/forms/responses', { query: { form_id: formId, cursor, limit: 30 } })
+  return result.data
+}
+
+export async function responseCollections(cursor?: string | null): Promise<Page<ResponseCollection>> {
+  const result = await api.get<{ data: Page<ResponseCollection> }>('/api/forms/responses/collections', { query: { cursor, limit: 30 } })
   return result.data
 }

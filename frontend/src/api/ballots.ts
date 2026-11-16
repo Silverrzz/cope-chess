@@ -66,6 +66,7 @@ export interface AdminDetail extends AdminSummary {
   manifest_digest: string | null
   board_digest: string | null
   trustees_submitted: string[]
+  results: number[][] | null
 }
 
 export interface Manifest extends BallotSettings {
