@@ -3,6 +3,23 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 
+def test_queue_sort_key(row):
+    name = row["rating_list_name"].casefold()
+    duration = row["duration_ms"]
+    if not duration:
+        duration = next(
+            (value for category, value in (("bullet", 216000), ("blitz", 680000), ("rapid", 2160000), ("classical", 7200000)) if category in name),
+            float("inf"),
+        )
+    return (
+        0 if row["rating_variant"] == "standard" else 1,
+        duration,
+        row["submitted_at"] or datetime.min.replace(tzinfo=UTC),
+        row["position"],
+        row["id"],
+    )
+
+
 def replace_queues(connection, payload):
     state = connection.execute("SELECT revision FROM control_queue_state WHERE id = 1 FOR UPDATE").fetchone()
     if state["revision"] != payload.revision:
@@ -67,9 +84,9 @@ def replace_queues(connection, payload):
 def dispatch_tournaments(connection, tournaments):
     priorities = {}
     for row in connection.execute(
-        "SELECT tournament_id, priority_group, duration_ms, submitted_at, position, id FROM engine_waiting_test_queue WHERE tournament_id IS NOT NULL"
+        """SELECT queue.*, rating.name AS rating_list_name, rating.variant AS rating_variant
+           FROM engine_waiting_test_queue queue JOIN rating_lists rating ON rating.id = queue.rating_list_id
+           WHERE queue.tournament_id IS NOT NULL"""
     ):
-        priorities[row["tournament_id"]] = (
-            row["priority_group"], row["duration_ms"], row["submitted_at"] or datetime.min.replace(tzinfo=UTC), row["position"], row["id"],
-        )
+        priorities[row["tournament_id"]] = test_queue_sort_key(row)
     return sorted(tournaments, key=lambda item: priorities.get(item.id, (-1, 0, datetime.min.replace(tzinfo=UTC), 0, -item.id)))

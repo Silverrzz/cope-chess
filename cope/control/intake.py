@@ -21,6 +21,7 @@ from cope.engine_dockerfiles import engine_build_hash
 from .operations import Plan, Step, audit, dump
 from .registry import Input, Waiting, action
 from .repository import Recipe
+from .queues import test_queue_sort_key
 
 
 class Preset(Input):
@@ -114,13 +115,14 @@ def queue_snapshot(connection):
     waiting = [
         {**dict(row), "config": json.loads(row["config"]) if row["config"] else None}
         for row in connection.execute(
-            """SELECT queue.*, engine.name AS engine_name, version.version AS engine_version, rating.name AS rating_list_name, tournament.status AS tournament_status
+            """SELECT queue.*, engine.name AS engine_name, version.version AS engine_version, rating.name AS rating_list_name, rating.variant AS rating_variant, tournament.status AS tournament_status
                FROM engine_waiting_test_queue queue JOIN engine_versions version ON version.id = queue.engine_version_id
                JOIN engines engine ON engine.id = version.engine_id JOIN rating_lists rating ON rating.id = queue.rating_list_id
                LEFT JOIN tournaments tournament ON tournament.id = queue.tournament_id
                ORDER BY queue.priority_group, queue.duration_ms, queue.submitted_at NULLS FIRST, queue.position, queue.id"""
         )
     ]
+    waiting.sort(key=test_queue_sort_key)
     return {"revision": revision, "acknowledged": acknowledged, "waiting_for_test": waiting}
 
 
@@ -323,7 +325,7 @@ def queue_plans(context, payload):
         config = preset["config"]
         clock = config["time_control"]
         duration = 2 * (clock["initial_ms"] + 80 * clock["increment_ms"])
-        priority = 1 if preset["variant"] == "dfrc" else 0
+        priority = 0 if preset["variant"] == "standard" else 1
         plan = {"preset": preset, "assessment": {"top20": payload.engine.top20, "estimated_elo": payload.engine.estimated_elo,
                 "evidence": payload.engine.strength_evidence, "reference_list_id": payload.top20_rating_list_id},
                 "dfrc": payload.engine.variant_capabilities.get("dfrc", payload.engine.dfrc),
