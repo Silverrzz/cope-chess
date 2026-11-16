@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api, setCsrfToken } from '@/api/client'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
@@ -28,6 +28,25 @@ interface PlatformSettings {
   privatise_platform: boolean
 }
 
+const discordLabels = {
+  not_configured: 'Awaiting bot token',
+  disabled: 'Disabled',
+  starting: 'Starting',
+  connecting: 'Connecting to Discord',
+  online: 'Connected',
+  invalid_token: 'Invalid bot token',
+  server_access_error: 'Discord server access required',
+  credential_error: 'Replace the saved bot token',
+  connection_error: 'Connection failed',
+} as const
+
+interface DiscordSettings {
+  guild_id: string | null
+  enabled: boolean
+  token_configured: boolean
+  state: keyof typeof discordLabels
+}
+
 type AccessTokenRole = 'admin' | 'manager'
 
 const toast = useToast()
@@ -43,6 +62,12 @@ const buildPending = ref(false)
 const copeBuild = reactive<CopeBuildSettings>({ repository_url: '', update_ref: 'main' })
 const platformPending = ref(false)
 const platform = reactive<PlatformSettings>({ privatise_platform: false })
+const discord = ref<DiscordSettings | null>(null)
+const discordForm = reactive({ guild_id: '', token: '', enabled: false, remove_token: false })
+const discordPending = ref(false)
+const discordError = ref('')
+let discordPoll: number | undefined
+let discordLoading = false
 const showNewHost = ref(false)
 const newHost = reactive<GitHost>({
   id: 0,
@@ -60,6 +85,7 @@ async function load(): Promise<void> {
   try {
     const response = await api.get<{ can_manage_tokens: boolean; cope_build: CopeBuildSettings; platform: PlatformSettings; git_hosts: GitHost[] }>('/api/admin/settings')
     canManageTokens.value = response.can_manage_tokens
+    if (canManageTokens.value && !discord.value) void refreshDiscord()
     Object.assign(copeBuild, response.cope_build)
     Object.assign(platform, response.platform)
     hosts.value = response.git_hosts.map((host) => ({ ...host, access_token: '', clear_access_token: false }))
@@ -67,6 +93,49 @@ async function load(): Promise<void> {
     error.value = errorText(cause)
   } finally {
     loading.value = false
+  }
+}
+
+async function refreshDiscord(): Promise<void> {
+  if (!canManageTokens.value || discordPending.value || discordLoading) return
+  discordLoading = true
+  try {
+    const current = await api.get<DiscordSettings>('/api/admin/settings/discord')
+    if (discordPending.value) return
+    if (!discord.value) {
+      discordForm.guild_id = current.guild_id ?? ''
+      discordForm.enabled = current.enabled
+      discordError.value = ''
+    }
+    discord.value = current
+  } catch (cause) {
+    if (!discord.value) discordError.value = errorText(cause)
+  } finally {
+    discordLoading = false
+  }
+}
+
+async function saveDiscord(): Promise<void> {
+  discordPending.value = true
+  discordError.value = ''
+  try {
+    const saved = await api.put<DiscordSettings>('/api/admin/settings/discord', {
+      body: {
+        guild_id: discordForm.guild_id.trim(),
+        token: discordForm.token.trim(),
+        enabled: discordForm.enabled,
+        remove_token: discordForm.remove_token,
+      },
+    })
+    discord.value = saved
+    Object.assign(discordForm, {
+      guild_id: saved.guild_id ?? '', enabled: saved.enabled, token: '', remove_token: false,
+    })
+    toast.success('Discord settings saved.')
+  } catch (cause) {
+    discordError.value = errorText(cause)
+  } finally {
+    discordPending.value = false
   }
 }
 
@@ -228,7 +297,13 @@ function applyProviderDefaults(host: GitHost): void {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  discordPoll = window.setInterval(refreshDiscord, 5000)
+})
+onBeforeUnmount(() => {
+  if (discordPoll !== undefined) window.clearInterval(discordPoll)
+})
 </script>
 
 <template>
@@ -255,6 +330,29 @@ onMounted(load)
           <label class="privacy-toggle"><input v-model="platform.privatise_platform" type="checkbox"><span><strong>Privatise platform</strong><small>Require an admin or manager login before anyone can access a public page.</small></span></label>
           <div class="form-actions"><button class="button button--primary" type="submit" :disabled="platformPending">{{ platformPending ? 'Saving…' : 'Save platform access' }}</button></div>
         </form>
+      </section>
+      <section v-if="canManageTokens" id="discord-notifications" class="platform-section">
+        <div class="section-heading"><div><h2>Discord notifications</h2><p>Send engine alerts by DM to people who follow them with the Cope bot.</p></div></div>
+        <InlineFeedback :message="discordError" />
+        <form v-if="discord" class="panel settings-card" @submit.prevent="saveDiscord">
+          <div class="card-heading">
+            <div>
+              <h3>Bot connection</h3>
+              <p v-if="platform.privatise_platform">Discord alerts are paused while the platform is private.</p>
+              <p v-else-if="discord.state === 'server_access_error'">Check that the app is installed in this Discord server with slash commands enabled.</p>
+              <p v-else>Cope registers <code>/cope</code> in the Discord server below.</p>
+            </div>
+            <span :class="['auth-status', { configured: discord.state === 'online' }]" aria-live="polite">{{ discordLabels[discord.state] }}</span>
+          </div>
+          <div class="form-grid">
+            <label class="field"><span>Discord server ID</span><input v-model="discordForm.guild_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"></label>
+            <label class="field"><span>Bot token</span><input v-model="discordForm.token" class="input" type="password" autocomplete="new-password" maxlength="512" :disabled="discordForm.remove_token" :placeholder="discord.token_configured ? 'Leave blank to keep the saved token' : 'Paste the token from the Discord Developer Portal'"><small>{{ discord.token_configured ? 'A token is saved.' : 'The saved token is encrypted.' }}</small></label>
+            <label class="switch-row"><input v-model="discordForm.enabled" type="checkbox" :disabled="discordForm.remove_token"><span><strong>Enable Discord notifications</strong></span></label>
+            <label v-if="discord.token_configured" class="switch-row"><input v-model="discordForm.remove_token" type="checkbox" :disabled="Boolean(discordForm.token)"><span><strong>Remove saved token</strong></span></label>
+          </div>
+          <div class="form-actions"><button class="button button--primary" type="submit" :disabled="discordPending">{{ discordPending ? 'Saving…' : 'Save Discord settings' }}</button></div>
+        </form>
+        <div v-else-if="!discordError" class="panel loading-card">Loading Discord settings…</div>
       </section>
       <section v-if="canManageTokens" class="token-section">
         <div class="section-heading"><div><h2>Access tokens</h2></div></div>
