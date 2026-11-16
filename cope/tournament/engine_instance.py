@@ -190,11 +190,34 @@ class EngineInstance:
             begin_search = getattr(self._host, "begin_engine_search", None)
             if callable(begin_search):
                 begin_search(int(self._name))
+            submit_search = getattr(self._host, "submit_engine_search", None)
+            if callable(submit_search):
+                self._ensure_engine_started()
+                self._search_future = submit_search(
+                    int(self._name),
+                    position_command(board),
+                    go_command_arg,
+                    self._record_info_line,
+                    lambda output: self._complete_remote_search(board, output),
+                )
+                return
         self._search_future = self._search_executor.submit(
             self.get_search_result,
             board,
             go_command_arg,
         )
+
+    def _complete_remote_search(self, board, output):
+        result = _parse_search_result(
+            output.lines,
+            board,
+            self._name,
+            command_elapsed_ms=output.elapsed_ms,
+            initial_info=self._current_search_info,
+            initial_info_line=self._current_info_line,
+        )
+        self._last_search_result = result
+        return result
 
     def get_last_search_result(self) -> EngineSearchResult | None:
         return self._captured_search_result or self._last_search_result
