@@ -31,7 +31,6 @@ interface NavItem {
   label: string;
   to: string;
   icon: IconName;
-  adminOnly?: boolean;
 }
 
 const navGroups: { label: string; items: NavItem[] }[] = [
@@ -58,8 +57,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
       { label: "Workers", to: "/admin/workers", icon: "server" },
       { label: "Activity", to: "/admin/activity", icon: "gauge" },
       { label: "Cope Control", to: "/admin/control", icon: "wrench" },
-      { label: "Forms", to: "/admin/forms", icon: "message-square", adminOnly: true },
-      { label: "Response inbox", to: "/admin/form-responses", icon: "message-square" },
+      { label: "Forms", to: "/admin/forms", icon: "message-square" },
       { label: "Tools", to: "/admin/tools", icon: "wrench" },
       { label: "Updates", to: "/admin/updates", icon: "refresh" },
       { label: "Chat", to: "/admin/chat", icon: "message-square" },
@@ -140,7 +138,6 @@ async function signOut(): Promise<void> {
           <h2 class="admin-nav__label">{{ group.label }}</h2>
           <template v-for="item in group.items" :key="item.to">
             <RouterLink
-              v-if="!item.adminOnly || session.user?.role === 'admin'"
               class="admin-nav__link"
               :class="{ 'admin-nav__link--active': navActive(item.to) }"
               :to="item.to"

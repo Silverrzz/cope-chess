@@ -186,11 +186,45 @@ def list_forms(connection, principal, target, payload: PageInput) -> dict:
     return finish_page(row["items"], row["total"], cut, scope, payload.limit)
 
 
+RESPONSE_VISIBILITY = """(r.owner_actor = %s OR %s OR f.owner_actor = %s OR EXISTS (
+    SELECT 1 FROM form_permissions p WHERE p.form_id = f.id AND p.actor = %s
+        AND p.permission IN ('responses', 'review')))"""
+
+
+def response_visibility_parameters(principal) -> tuple:
+    return principal.actor, "*" in principal.scopes, principal.actor, principal.actor
+
+
+def list_response_collections(connection, principal, target, payload: PageInput) -> dict:
+    if payload.form_id is not None:
+        raise ApplicationError("invalid_query_input", "The collection list does not accept a form filter.", 422)
+    cut, after, scope = page_basis(connection, principal, payload, "response-collections")
+    where = "" if after is None else "WHERE (created_at, id) < (%s, %s::uuid)"
+    parameters = [cut, *response_visibility_parameters(principal)]
+    if after:
+        parameters.extend(after)
+    parameters.append(payload.limit + 1)
+    row = connection.execute(
+        f"""WITH visible AS MATERIALIZED (
+          SELECT DISTINCT ON (f.id) f.id, release.definition->>'title' AS label,
+                 r.created_at, count(*) OVER (PARTITION BY f.id) AS response_count
+          FROM form_responses r
+          JOIN form_definitions f ON f.id = r.form_id
+          JOIN form_releases release ON release.id = r.release_id
+          WHERE r.created_at <= %s AND {RESPONSE_VISIBILITY}
+          ORDER BY f.id, r.created_at DESC, r.id DESC
+        ), page AS (SELECT * FROM visible {where} ORDER BY created_at DESC, id DESC LIMIT %s)
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY created_at DESC, id DESC) FROM page), '[]'::jsonb) AS items,
+               (SELECT count(*) FROM visible) AS total""", parameters,
+    ).fetchone()
+    return finish_page(row["items"], row["total"], cut, scope, payload.limit)
+
+
 def list_responses(connection, principal, target, payload: PageInput) -> dict:
     cut, after, scope = page_basis(connection, principal, payload, "responses")
     parent = "" if payload.form_id is None else "AND r.form_id = %s"
     where = "" if after is None else "WHERE (created_at, id) < (%s, %s::uuid)"
-    parameters = [cut, principal.actor, "*" in principal.scopes, principal.actor, principal.actor]
+    parameters = [cut, *response_visibility_parameters(principal)]
     if payload.form_id is not None:
         parameters.append(identity(payload.form_id))
     if after:
@@ -199,15 +233,14 @@ def list_responses(connection, principal, target, payload: PageInput) -> dict:
     row = connection.execute(
         f"""WITH visible AS MATERIALIZED (
           SELECT r.id, r.form_id, f.slug, release.definition->>'title' AS form_title,
-                 r.current_revision AS revision, r.created_at,
+                 release.number AS release_number, r.current_revision AS revision, r.created_at,
                  CASE WHEN r.withdrawn_at IS NOT NULL THEN 'withdrawn' ELSE COALESCE(review.decision, 'awaiting_review') END AS state
           FROM form_responses r JOIN form_definitions f ON f.id = r.form_id
           JOIN form_releases release ON release.id = r.release_id
           JOIN form_response_revisions v ON v.response_id = r.id AND v.revision = r.current_revision
           LEFT JOIN LATERAL (SELECT decision FROM form_reviews WHERE response_id = r.id AND response_revision = r.current_revision
             AND subject_digest = v.subject_digest ORDER BY created_at DESC, id DESC LIMIT 1) review ON TRUE
-          WHERE r.created_at <= %s AND (r.owner_actor = %s OR %s OR f.owner_actor = %s OR EXISTS (
-            SELECT 1 FROM form_permissions p WHERE p.form_id = f.id AND p.actor = %s AND p.permission IN ('responses','review'))) {parent}
+          WHERE r.created_at <= %s AND {RESPONSE_VISIBILITY} {parent}
         ), page AS (SELECT * FROM visible {where} ORDER BY created_at DESC, id DESC LIMIT %s)
         SELECT COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY created_at DESC, id DESC) FROM page), '[]'::jsonb) AS items,
                (SELECT count(*) FROM visible) AS total""", parameters,
@@ -281,6 +314,7 @@ def queries() -> tuple[Query, ...]:
         Query("forms.preview.check.v1", "forms:write", PreviewResponseInput, PreviewResponseOutput, check_preview),
         Query("forms.list.v1", "forms:read", PageInput, PageOutput, list_forms),
         Query("forms.responses.list.v1", "forms:responses:read", PageInput, PageOutput, list_responses),
+        Query("forms.responses.collections.v1", "forms:responses:read", PageInput, PageOutput, list_response_collections),
         Query("forms.detail.v1", "forms:write", Empty, DataOutput, form_detail, True),
         Query("forms.drafts.detail.v1", "forms:write", Empty, DataOutput, draft_detail, True),
         Query("forms.responses.detail.v1", "forms:responses:read", Empty, DataOutput, response_detail, True),

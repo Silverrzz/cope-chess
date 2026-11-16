@@ -313,3 +313,36 @@ input[type="radio"] {
     width: 100%;
   }
 }
+
+.data-table--list {
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+.data-table--list :is(th, td) {
+  padding: var(--space-3) var(--space-4);
+  text-align: start;
+}
+
+.data-table--list thead th {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.data-table--list tbody tr {
+  border-top: 1px solid var(--color-border);
+}
+
+.data-table--list tbody tr:hover {
+  background: var(--color-surface-hover);
+}
+
+.data-table--list tbody th {
+  color: var(--color-text);
+  font-weight: 640;
+}
+
+.data-table--list :is(td, th):last-child {
+  text-align: end;
+}
