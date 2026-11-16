@@ -23,6 +23,7 @@ from cope.db import (
     claim_deployment_job,
     connect_database,
     database_schema_version,
+    defer_offline_deployment_workers,
     fail_interrupted_deployment_jobs,
     fail_interrupted_dockerfile_pull_jobs,
     get_benchmarker,
@@ -330,7 +331,6 @@ def _run_deployment(
             _set_job_status(config, job_id, "migrating")
             _compose(config, source_dir, "run", "--rm", "migrate")
             _set_job_status(config, job_id, "updating_workers")
-            _prepare_worker_targets(config, job_id)
             _wait_for_workers(config, job_id)
             _prepare_benchmarker_targets(config, job_id)
             _activate_benchmarker_targets(config, job_id)
@@ -561,38 +561,13 @@ def _resolve_target_commit(source_dir: Path, requested_ref: str) -> str:
     raise RuntimeError(f"could not resolve deployment ref {requested_ref!r}")
 
 
-def _prepare_worker_targets(config: UpdaterConfig, job_id: int) -> None:
-    connection = connect_database(config.db_path)
-    try:
-        for target in list_deployment_targets(connection, job_id):
-            if target.target_kind != "worker" or target.target_id is None:
-                continue
-            worker = get_worker(connection, target.target_id)
-            if worker is None or worker.status == "revoked":
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    detail="Worker is unavailable and will update on its next connection.",
-                )
-            elif worker.status not in {"connected", "downloading", "ready", "busy"}:
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    current_commit=worker.app_commit,
-                    detail="Worker is offline and will update before accepting new work.",
-                )
-        connection.commit()
-    finally:
-        connection.close()
-
-
 def _wait_for_workers(config: UpdaterConfig, job_id: int) -> None:
     deadline = time.monotonic() + max(config.worker_wait_s, 1.0)
     while True:
         connection = connect_database(config.db_path)
         try:
+            defer_offline_deployment_workers(connection, job_id)
+            connection.commit()
             targets = [
                 target
                 for target in list_deployment_targets(connection, job_id)

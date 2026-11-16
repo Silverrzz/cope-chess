@@ -4757,6 +4757,32 @@ def update_deployment_target_status(
     )
 
 
+def defer_offline_deployment_workers(connection: sqlite3.Connection, job_id: int) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets AS target
+        SET status = 'deferred',
+            current_commit = COALESCE(offline.app_commit, target.current_commit),
+            detail = CASE
+                WHEN offline.worker_status IS NULL OR offline.worker_status = 'revoked'
+                THEN 'Worker is unavailable and will update on its next connection.'
+                ELSE 'Worker is offline and will update before accepting new work.'
+            END,
+            updated_at = ?
+        FROM (
+            SELECT active.id, worker.app_commit, worker.status AS worker_status
+            FROM deployment_targets AS active
+            LEFT JOIN workers AS worker ON worker.id = active.target_id
+            WHERE active.job_id = ? AND active.target_kind = 'worker'
+              AND active.status IN ('pending', 'waiting', 'updating')
+              AND (worker.id IS NULL OR worker.status NOT IN ('connected', 'downloading', 'ready', 'busy'))
+        ) AS offline
+        WHERE target.id = offline.id AND target.status IN ('pending', 'waiting', 'updating')
+        """,
+        (utc_now(), job_id),
+    )
+
+
 def update_server_deployment_target(
     connection: sqlite3.Connection,
     job_id: int,
