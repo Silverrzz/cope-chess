@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from cope.db import connect_database
 
-from .bot import CopeBot
+from .bot import CopeBot, NotificationChannelError
 from .store import Store
 
 
@@ -42,43 +42,48 @@ class DiscordRuntime:
     def read_settings(self) -> dict:
         with closing(connect_database(self.database_url)) as connection:
             return connection.execute(f"""
-                SELECT guild_id, encrypted_token, enabled, revision
+                SELECT guild_id, channel_id, encrypted_token, enabled, revision
                 FROM {SETTINGS} WHERE singleton
             """).fetchone()
 
-    def save_settings(self, *, guild_id: str | None, enabled: bool, token: str | None, remove: bool) -> dict:
+    def save_settings(
+        self, *, guild_id: str | None, channel_id: str | None, enabled: bool, token: str | None, remove: bool,
+    ) -> dict:
         if (enabled or token) and (self.cipher is None or not self.origin):
             raise ValueError("Cope needs a configured domain and bootstrap admin secret to enable Discord.")
         replacement = self.cipher.encrypt(token.encode()) if token and self.cipher else None
         with closing(connect_database(self.database_url)) as connection:
             existing = connection.execute(f"SELECT * FROM {SETTINGS} WHERE singleton FOR UPDATE").fetchone()
             encrypted = None if remove else replacement or existing["encrypted_token"]
-            if enabled and (not guild_id or not encrypted):
-                raise ValueError("Enter a Discord server ID and bot token before enabling notifications.")
+            if enabled and (not guild_id or not channel_id or not encrypted):
+                raise ValueError("Enter a Discord server ID, notifications channel ID and bot token before enabling notifications.")
             row = connection.execute(f"""
                 UPDATE {SETTINGS}
-                SET guild_id = ?, enabled = ?, encrypted_token = ?, revision = revision + 1,
-                    active_since = CASE WHEN guild_id IS DISTINCT FROM ? OR enabled IS DISTINCT FROM ?
-                        THEN clock_timestamp() ELSE active_since END
+                SET guild_id = ?, channel_id = ?, enabled = ?, encrypted_token = ?, revision = revision + 1,
+                    active_since = CASE WHEN guild_id IS DISTINCT FROM ? OR channel_id IS DISTINCT FROM ?
+                        OR enabled IS DISTINCT FROM ? THEN clock_timestamp() ELSE active_since END
                 WHERE singleton
-                RETURNING guild_id, encrypted_token, enabled, revision
-            """, (guild_id, enabled, encrypted, guild_id, enabled)).fetchone()
+                RETURNING guild_id, channel_id, encrypted_token, enabled, revision
+            """, (guild_id, channel_id, enabled, encrypted, guild_id, channel_id, enabled)).fetchone()
             connection.commit()
             return row
 
     def status(self, row: dict) -> dict:
         if not row["encrypted_token"]:
             state = "not_configured"
+        elif not row["channel_id"]:
+            state = "awaiting_channel"
         elif not row["enabled"]:
             state = "disabled"
         elif self.revision != row["revision"]:
             state = "starting"
         elif self.client is not None and self.client.is_ready():
-            state = "online"
+            state = "channel_access_error" if self.client.channel_error else "online"
         else:
             state = self.state
         return {
             "guild_id": row["guild_id"],
+            "channel_id": row["channel_id"],
             "enabled": row["enabled"],
             "token_configured": bool(row["encrypted_token"]),
             "state": state,
@@ -121,7 +126,7 @@ class DiscordRuntime:
             self.retry_at = float("inf")
             return
         self.state = "connecting"
-        self.client = CopeBot(Store(self.database_url), self.origin, int(row["guild_id"]))
+        self.client = CopeBot(Store(self.database_url), self.origin, int(row["guild_id"]), int(row["channel_id"]))
         self.session = asyncio.create_task(self.serve(self.client, token), name="discord-gateway")
 
     async def serve(self, client: CopeBot, token: str) -> None:
@@ -131,6 +136,9 @@ class DiscordRuntime:
         except discord.LoginFailure:
             self.state = "invalid_token"
             self.retry_at = float("inf")
+        except NotificationChannelError:
+            self.state = "channel_access_error"
+            self.retry_at = monotonic() + 30
         except (discord.Forbidden, discord.NotFound):
             self.state = "server_access_error"
             self.retry_at = monotonic() + 30

@@ -30,18 +30,21 @@ interface PlatformSettings {
 
 const discordLabels = {
   not_configured: 'Awaiting bot token',
+  awaiting_channel: 'Awaiting channel ID',
   disabled: 'Disabled',
   starting: 'Starting',
   connecting: 'Connecting to Discord',
   online: 'Connected',
   invalid_token: 'Invalid bot token',
   server_access_error: 'Discord server access required',
+  channel_access_error: 'Notifications channel access required',
   credential_error: 'Replace the saved bot token',
   connection_error: 'Connection failed',
 } as const
 
 interface DiscordSettings {
   guild_id: string | null
+  channel_id: string | null
   enabled: boolean
   token_configured: boolean
   state: keyof typeof discordLabels
@@ -63,7 +66,7 @@ const copeBuild = reactive<CopeBuildSettings>({ repository_url: '', update_ref: 
 const platformPending = ref(false)
 const platform = reactive<PlatformSettings>({ privatise_platform: false })
 const discord = ref<DiscordSettings | null>(null)
-const discordForm = reactive({ guild_id: '', token: '', enabled: false, remove_token: false })
+const discordForm = reactive({ guild_id: '', channel_id: '', token: '', enabled: false, remove_token: false })
 const discordPending = ref(false)
 const discordError = ref('')
 let discordPoll: number | undefined
@@ -104,6 +107,7 @@ async function refreshDiscord(): Promise<void> {
     if (discordPending.value) return
     if (!discord.value) {
       discordForm.guild_id = current.guild_id ?? ''
+      discordForm.channel_id = current.channel_id ?? ''
       discordForm.enabled = current.enabled
       discordError.value = ''
     }
@@ -122,6 +126,7 @@ async function saveDiscord(): Promise<void> {
     const saved = await api.put<DiscordSettings>('/api/admin/settings/discord', {
       body: {
         guild_id: discordForm.guild_id.trim(),
+        channel_id: discordForm.channel_id.trim(),
         token: discordForm.token.trim(),
         enabled: discordForm.enabled,
         remove_token: discordForm.remove_token,
@@ -129,7 +134,7 @@ async function saveDiscord(): Promise<void> {
     })
     discord.value = saved
     Object.assign(discordForm, {
-      guild_id: saved.guild_id ?? '', enabled: saved.enabled, token: '', remove_token: false,
+      guild_id: saved.guild_id ?? '', channel_id: saved.channel_id ?? '', enabled: saved.enabled, token: '', remove_token: false,
     })
     toast.success('Discord settings saved.')
   } catch (cause) {
@@ -332,20 +337,22 @@ onBeforeUnmount(() => {
         </form>
       </section>
       <section v-if="canManageTokens" id="discord-notifications" class="platform-section">
-        <div class="section-heading"><div><h2>Discord notifications</h2><p>Send engine alerts by DM to people who follow them with the Cope bot.</p></div></div>
+        <div class="section-heading"><div><h2>Discord notifications</h2><p>Post engine alerts in a Discord channel and mention the users who follow them.</p></div></div>
         <InlineFeedback :message="discordError" />
         <form v-if="discord" class="panel settings-card" @submit.prevent="saveDiscord">
           <div class="card-heading">
             <div>
               <h3>Bot connection</h3>
-              <p v-if="platform.privatise_platform">Discord alerts are paused while the platform is private.</p>
+              <p v-if="discord.state === 'channel_access_error'">Choose a text channel in this server and give the bot View Channel and Send Messages permissions.</p>
               <p v-else-if="discord.state === 'server_access_error'">Check that the app is installed in this Discord server with slash commands enabled.</p>
+              <p v-else-if="platform.privatise_platform">Discord alerts are paused while the platform is private.</p>
               <p v-else>Cope registers <code>/cope</code> in the Discord server below.</p>
             </div>
             <span :class="['auth-status', { configured: discord.state === 'online' }]" aria-live="polite">{{ discordLabels[discord.state] }}</span>
           </div>
           <div class="form-grid">
             <label class="field"><span>Discord server ID</span><input v-model="discordForm.guild_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"></label>
+            <label class="field"><span>Notifications channel ID</span><input v-model="discordForm.channel_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"><small>Allow the bot to view the channel, send messages and embed links for link previews.</small></label>
             <label class="field"><span>Bot token</span><input v-model="discordForm.token" class="input" type="password" autocomplete="new-password" maxlength="512" :disabled="discordForm.remove_token" :placeholder="discord.token_configured ? 'Leave blank to keep the saved token' : 'Paste the token from the Discord Developer Portal'"><small>{{ discord.token_configured ? 'A token is saved.' : 'The saved token is encrypted.' }}</small></label>
             <label class="switch-row"><input v-model="discordForm.enabled" type="checkbox" :disabled="discordForm.remove_token"><span><strong>Enable Discord notifications</strong></span></label>
             <label v-if="discord.token_configured" class="switch-row"><input v-model="discordForm.remove_token" type="checkbox" :disabled="Boolean(discordForm.token)"><span><strong>Remove saved token</strong></span></label>

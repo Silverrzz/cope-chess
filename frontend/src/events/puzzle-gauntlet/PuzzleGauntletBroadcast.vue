@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 
 import { api } from "@/api/client";
 import ChessBoard from "@/components/chess/ChessBoard.vue";
@@ -60,6 +60,7 @@ const props = defineProps<{
 }>();
 
 const { confettiEnabled, eventMusicEnabled, setEventMusicEnabled } = useViewerSettings();
+const route = useRoute();
 const router = useRouter();
 const payload = computed(() => props.detail.custom as GauntletPayload);
 const focusedId = ref<number | null>(null);
@@ -108,6 +109,16 @@ const isLive = computed(() => {
   );
 });
 const activeEntries = computed(() => payload.value.entries.filter((entry) => entry.status === "active"));
+const linkedEntryId = computed(() => {
+  const gameId = route.query.game_id;
+  if (typeof gameId !== "string") return null;
+  return activeEntries.value.find((entry) => String(entry.attempt?.game_id) === gameId)?.id ?? null;
+});
+watch(linkedEntryId, (entryId) => {
+  if (entryId === null) return;
+  selectedRoundId.value = null;
+  focusedId.value = entryId;
+}, { immediate: true });
 const winners = computed(() => payload.value.entries.filter((entry) => entry.winner));
 const showConfettiButtons = computed(() => (!isLive.value && !isComplete.value) || (isComplete.value && winners.value.length > 0));
 const selectedRound = computed(() => payload.value.rounds.find((round) => round.puzzle_id === selectedRoundId.value) ?? null);
