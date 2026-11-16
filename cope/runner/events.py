@@ -5,6 +5,7 @@ import logging
 import queue
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -136,9 +137,10 @@ def publish_stream_event(
 class StreamEventPublisher:
     def __init__(self) -> None:
         self._queue: queue.Queue[StreamEnvelope] = queue.Queue(maxsize=PUBLISHER_QUEUE_SIZE)
-        self._control_queue: queue.Queue[StreamEnvelope] = queue.Queue(
-            maxsize=CONTROL_PUBLISHER_QUEUE_SIZE
-        )
+        self._control_events: OrderedDict[tuple, StreamEnvelope] = OrderedDict()
+        self._telemetry_events: OrderedDict[tuple, StreamEnvelope] = OrderedDict()
+        self._events_lock = threading.Lock()
+        self._next_lane = 0
         self._started = False
         self._start_lock = threading.Lock()
 
@@ -156,14 +158,26 @@ class StreamEventPublisher:
 
     def publish(self, event: StreamEnvelope) -> None:
         self.start()
-        target = (
-            self._control_queue
-            if event.topic == "workers" or event.type == "tournament.changed"
-            else self._queue
-        )
+        control = event.topic == "workers" or event.type == "tournament.changed"
+        telemetry = event.type in {"engine.info", "clock.sync"}
+        if control or telemetry:
+            key = (event.topic, event.type)
+            if telemetry:
+                key += (event.data.get("game_id"), event.data.get("engine_id"), event.data.get("side"))
+            with self._events_lock:
+                target = self._control_events if control else self._telemetry_events
+                target[key] = event
+                limit = CONTROL_PUBLISHER_QUEUE_SIZE if control else PUBLISHER_QUEUE_SIZE
+                if len(target) > limit:
+                    target.popitem(last=False)
+            return
         try:
-            target.put_nowait(event)
+            self._queue.put_nowait(event)
         except queue.Full:
+            if event.topic.startswith("tournament."):
+                self.publish(make_stream_event(event.topic, "tournament.changed", {
+                    "tournament_id": event.data.get("tournament_id"),
+                }, source="runner"))
             _log_publish_failure(_event_publisher_config(), RuntimeError("stream queue full"))
 
     def _run_thread(self) -> None:
@@ -216,6 +230,8 @@ class StreamEventPublisher:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _send_loop(self, websocket) -> None:
+        reported_at = time.monotonic()
+        sent = 0
         while True:
             event = await self._next_event()
             try:
@@ -229,18 +245,32 @@ class StreamEventPublisher:
             except ConnectionClosed:
                 self.publish(event)
                 raise
+            sent += 1
+            if time.monotonic() - reported_at >= 60:
+                with self._events_lock:
+                    control = len(self._control_events)
+                    telemetry = len(self._telemetry_events)
+                LOG.info("stream publisher sent=%s queued=%s control=%s telemetry=%s",
+                         sent, self._queue.qsize(), control, telemetry)
+                reported_at = time.monotonic()
+                sent = 0
             await asyncio.sleep(0)
 
     async def _next_event(self) -> StreamEnvelope:
         while True:
-            try:
-                return self._control_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                return self._queue.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.05)
+            for _ in range(3):
+                lane = self._next_lane
+                self._next_lane = (lane + 1) % 3
+                if lane == 1:
+                    try:
+                        return self._queue.get_nowait()
+                    except queue.Empty:
+                        continue
+                with self._events_lock:
+                    target = self._control_events if lane == 0 else self._telemetry_events
+                    if target:
+                        return target.popitem(last=False)[1]
+            await asyncio.sleep(0.05)
 
     async def _recv_loop(self, websocket) -> None:
         while True:

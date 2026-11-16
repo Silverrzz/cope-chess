@@ -1545,8 +1545,7 @@ class WorkerHandshakeServer:
                 await cancellation_task
             return game_task.result()
         await transport.withdraw()
-        game_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        with contextlib.suppress(Exception):
             await game_task
         raise AssignmentWithdrawn("assignment was removed")
 
@@ -2664,6 +2663,25 @@ class WorkerEngineTransport:
         if sample is None:
             return None
         return sample[0]
+
+    def submit_engine_search(self, engine_id, position, command, info_handler, parse_result):
+        async def search():
+            await self._execute_engine_command(engine_id, position, None)
+            output = await self._execute_engine_command(engine_id, command, info_handler)
+            return parse_result(output)
+
+        with self._pending_lock:
+            if self._closed.is_set():
+                raise RuntimeError("worker transport closed")
+            future = asyncio.run_coroutine_threadsafe(search(), self._loop)
+            self._pending.add(future)
+
+        def completed(done):
+            with self._pending_lock:
+                self._pending.discard(done)
+
+        future.add_done_callback(completed)
+        return future
 
     def begin_engine_search(self, engine_id: int) -> None:
         with self._clock_lock:
