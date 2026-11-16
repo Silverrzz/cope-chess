@@ -1605,6 +1605,7 @@ async def _receive_internal_stream(websocket: WebSocket, hub: StreamHub) -> None
     while True:
         event = decode_stream_event(await websocket.receive_text())
         await _dispatch_internal_stream_event(websocket.app, event)
+        await asyncio.sleep(0)
 
 
 async def _send_internal_stream(

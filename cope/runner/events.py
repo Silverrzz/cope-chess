@@ -201,14 +201,19 @@ class StreamEventPublisher:
             _notify_wake(make_stream_event("internal", "stream.connected", source="web"))
             sender = asyncio.create_task(self._send_loop(websocket))
             receiver = asyncio.create_task(self._recv_loop(websocket))
-            done, pending = await asyncio.wait(
-                {sender, receiver},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            for task in done:
-                task.result()
+            tasks = {sender, receiver}
+            try:
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    task.result()
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _send_loop(self, websocket) -> None:
         while True:
@@ -224,6 +229,7 @@ class StreamEventPublisher:
             except ConnectionClosed:
                 self.publish(event)
                 raise
+            await asyncio.sleep(0)
 
     async def _next_event(self) -> StreamEnvelope:
         while True:
