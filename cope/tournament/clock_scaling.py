@@ -43,11 +43,11 @@ def _profile(connection, tournament, key, engines):
     return {row["version_id"]: row["nps"] for row in rows}
 
 
-def _pin_verified_profile(connection, tournament, key, rows):
-    if len(rows) != len(tournament.config.participants):
+def _pin_verified_profile(connection, tournament, key, rows, expected_count):
+    if len(rows) != expected_count:
         return False
     for row in rows:
-        if row["elapsed_ms"] <= 0:
+        if row["elapsed_ms"] <= 0 or row["nps"] <= 0:
             return False
         if row["output"] and parse_benchmark_nps(row["output"], summary_only=True) != row["nps"]:
             return False
@@ -64,6 +64,21 @@ def _pin_verified_profile(connection, tournament, key, rows):
 def pin_clock_profile(connection, tournament, key, engines):
     if any(engine is None or engine.distribution != "managed" or engine.artifact is None for engine in engines.values()):
         return None
+    pinned = connection.execute(
+        """SELECT version_id, build_hash, artifact_sha256, nps FROM tournament_clock_profiles
+           WHERE tournament_id = ? AND hardware_key = ? AND version_id = ANY(?)""",
+        (tournament.id, key, list(engines)),
+    ).fetchall()
+    missing = dict(engines)
+    for row in pinned:
+        engine = engines[row["version_id"]]
+        if row["nps"] <= 0 or (row["build_hash"], row["artifact_sha256"]) != (
+            engine.build_hash, engine.artifact.sha256,
+        ):
+            return None
+        missing.pop(row["version_id"])
+    if not missing:
+        return _profile(connection, tournament, key, engines)
     rows = connection.execute(
         """SELECT build.id AS version_id, build.build_hash, build.artifact_sha256,
                   benchmark.nps, benchmark.output, benchmark.elapsed_ms
@@ -71,10 +86,10 @@ def pin_clock_profile(connection, tournament, key, engines):
            JOIN engine_benchmarks benchmark
              ON benchmark.build_hash = build.build_hash AND benchmark.artifact_sha256 = build.artifact_sha256
            WHERE benchmark.hardware_key = ?""",
-        (list(engines), [engine.build_hash for engine in engines.values()],
-         [engine.artifact.sha256 for engine in engines.values()], key),
+        (list(missing), [engine.build_hash for engine in missing.values()],
+         [engine.artifact.sha256 for engine in missing.values()], key),
     ).fetchall()
-    if not _pin_verified_profile(connection, tournament, key, rows):
+    if not _pin_verified_profile(connection, tournament, key, rows, len(missing)):
         return None
     return _profile(connection, tournament, key, engines)
 
