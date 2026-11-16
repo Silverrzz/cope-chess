@@ -1,4 +1,3 @@
-import re
 from urllib.parse import urlencode
 
 import discord
@@ -14,32 +13,10 @@ ALERTS = {
     "rating_updated": "Rating updates",
 }
 DEFAULT_ALERTS = ["tournament_started", "event_started", "rating_placed", "rating_updated"]
-RATING_CATEGORY = re.compile(
-    r"\b(?:\d+CPU\s+)?(?:(?:All[- ]Round|Top[- ]Class)\s+)?(?:Bullet|Blitz|Rapid|Classical)\b",
-    re.IGNORECASE,
-)
-VARIANTS = {"duck": "Duck-Chess", "duck960": "Duck960", "dfrc": "DFRC"}
-FORMATS = {"round_robin": "Round Robin", "swiss": "Swiss", "knockout": "Knockout", "gauntlet": "Gauntlet"}
 
 
 def safe(text: str, limit: int = 200) -> str:
     return discord.utils.escape_markdown(" ".join(text.split())[:limit])
-
-
-def time_control(control: dict | None) -> str:
-    if not control:
-        return ""
-    match control["category"]:
-        case "increment":
-            return f'{control["initial_ms"] / 1000:g}+{control["increment_ms"] / 1000:g}'
-        case "movetime":
-            return f'{control["move_time_ms"] / 1000:g}s per move'
-        case "movestogo":
-            return f'{control["moves_to_go"]} moves in {control["initial_ms"] / 1000:g}s'
-        case "movenodes":
-            return f'{control["nodes"]:,} nodes per move'
-        case _:
-            return ""
 
 
 def game_url(game: dict, origin: str) -> str:
@@ -76,13 +53,11 @@ def notification_text(fact: dict, origin: str) -> str:
         url = game_url(fact, origin)
         content = f"{engine} is playing in {title}"
     else:
-        if not engine:
+        if engine:
+            content = f"{engine} started a game in {title}"
+        else:
             white = safe(" / ".join(data["white"] or []), 78)
             black = safe(" / ".join(data["black"] or []), 78)
-            engine = f"{white} vs {black}"
-        category = RATING_CATEGORY.search(data["title"])
-        pace = category.group().title().replace("Cpu", "CPU") if category else time_control(data.get("time_control"))
-        details = [VARIANTS.get(data.get("variant"), ""), pace, FORMATS.get(data.get("format"), "")]
-        content = " ".join([engine, *filter(None, details)]) if any(details) else f"{engine} in {title}"
+            content = f"{white} vs {black} started in {title}"
         url = game_url(fact, origin)
     return f"{mentions} {content}: {url}"
