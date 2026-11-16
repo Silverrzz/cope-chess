@@ -1768,7 +1768,13 @@ def _workers_snapshot_payload(
     worker_limit: int | None = None,
     worker_offset: int = 0,
 ) -> dict[str, Any]:
-    workers = list(list_workers(connection))
+    workers = sorted(
+        list_workers(connection),
+        key=lambda worker: (
+            _worker_effective_status(worker) not in CONNECTED_WORKER_STATUSES,
+            worker.id,
+        ),
+    )
     benchmarkers = list(list_benchmarkers(connection))
     visible_workers = workers[worker_offset:]
     if worker_limit is not None:
