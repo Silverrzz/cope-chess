@@ -72,6 +72,19 @@ watch(
             <template #icon><AppIcon name="github" :size="18" /></template>
             GitHub
           </BaseButton>
+          <BaseButton
+            variant="ghost"
+            size="small"
+            icon-only
+            href="https://discord.gg/4Wpd9pJHdq"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Discord"
+            aria-label="Join COPE Chess on Discord"
+          >
+            <template #icon><AppIcon name="discord" :size="18" /></template>
+            Discord
+          </BaseButton>
           <SettingsDrawer />
           <BaseButton class="public-header__admin" variant="ghost" size="small" to="/admin">
             Admin

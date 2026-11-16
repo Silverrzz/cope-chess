@@ -14,6 +14,7 @@ export type IconName =
   | "clock"
   | "close"
   | "copy"
+  | "discord"
   | "download"
   | "edit"
   | "engine"
