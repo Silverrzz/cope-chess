@@ -624,6 +624,7 @@ def run_worker_assignment_game(
         if pause_requested is None or not pause_requested():
             return False
         current = get_tournament(connection, tournament.id)
+        connection.commit()
         return current is not None and current.status == "paused"
 
     opening = get_opening_position(connection, game_record.opening_id)
@@ -675,6 +676,7 @@ def run_worker_assignment_game(
     calibration = None
     if tournament.config.clock_reference_hardware_key is not None:
         calibration = game_calibration(connection, game_record.id, assignment.assignment.assignment_key)
+        connection.commit()
         if calibration is None or calibration["reference_hardware_key"] != tournament.config.clock_reference_hardware_key:
             raise RuntimeError("Hardware-scaled assignment is missing its pinned clocks")
         white_control = _runtime_time_control(applied_clock(calibration, "white"))
@@ -1157,6 +1159,7 @@ def run_worker_assignment_game(
         )
         return False
     _validated_assignment_record(connection, assignment)
+    connection.commit()
     progress(
         "play",
         "game_complete",

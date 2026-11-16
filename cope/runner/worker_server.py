@@ -2208,7 +2208,8 @@ class WorkerHandshakeServer:
             connection.commit()
             return completed
         except Exception:
-            connection.rollback()
+            with contextlib.suppress(Exception):
+                connection.rollback()
             raise
         finally:
             connection.close()
