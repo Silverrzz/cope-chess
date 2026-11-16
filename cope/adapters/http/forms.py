@@ -154,6 +154,12 @@ def register_form_routes(app):
         request = QueryRequest(query="forms.responses.list.v1", input={"limit": limit, "cursor": cursor, "form_id": form_id})
         return application_result(connection, identity, execute_query, request)
 
+    @router.get("/responses/collections")
+    def response_collections(limit: int = QueryParameter(default=30, ge=1, le=100), cursor: str | None = None,
+                             identity=Depends(form_principal), connection=Depends(database)):
+        request = QueryRequest(query="forms.responses.collections.v1", input={"limit": limit, "cursor": cursor})
+        return application_result(connection, identity, execute_query, request)
+
     @router.get("/responses/{response_id}")
     def response(response_id: str, identity=Depends(form_principal), connection=Depends(database)):
         return application_result(connection, identity, execute_query, QueryRequest(query="forms.responses.detail.v1", target=response_id))

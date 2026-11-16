@@ -8,23 +8,48 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
 import { formatDate } from '@/components/admin/format'
+import CollectionResponses from '@/components/forms/CollectionResponses.vue'
 import FormAccessEditor from '@/components/forms/FormAccessEditor.vue'
 import FormDefinitionEditor, { type BindingDescription } from '@/components/forms/FormDefinitionEditor.vue'
 import FormExperience from '@/components/forms/FormExperience.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
 import { useConfirm } from '@/composables/useConfirm'
+import FormResponsePage from '@/pages/public/FormResponsePage.vue'
+import { useSessionStore } from '@/stores/session'
 import { canonicalAnswers, contentKinds, initialAnswers, type FormAnswers, type FormDefinition, type FormDetail, type FormErrors, type FormWorkingCopy } from '@/types/forms'
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
 const router = useRouter()
+const session = useSessionStore()
 const mutation = useApplicationMutation()
 const { confirm } = useConfirm()
 type View = 'published' | 'draft' | 'preview' | 'settings'
 type Draft = FormDetail['copies'][number]
 
 const view = ref<View>('published')
+const canEdit = computed(() => session.user?.role === 'admin')
+const viewingResponses = computed(() => !canEdit.value || route.query.view === 'responses')
+const responseId = computed(() => typeof route.query.response === 'string' ? route.query.response : '')
+const responseTitle = ref('')
+
+function showResponses(): void {
+  const query = { ...route.query }
+  query.view = 'responses'
+  delete query.response
+  void router.push({ query })
+}
+
+function selectView(next: View): void {
+  view.value = next
+  if (route.query.view === 'responses') {
+    const query = { ...route.query }
+    delete query.view
+    delete query.response
+    void router.push({ query })
+  }
+}
 const previewSource = ref<'published' | 'draft'>('published')
 const form = ref<FormDetail | null>(null)
 const copy = ref<FormWorkingCopy | null>(null)
@@ -67,8 +92,10 @@ function clear(): void {
   errors.value = {}
 }
 
-async function refreshForm(): Promise<void> {
-  form.value = await applicationQuery<FormDetail>('forms.detail.v1', {}, props.id)
+async function refreshForm(): Promise<FormDetail> {
+  const updated = await applicationQuery<FormDetail>('forms.detail.v1', {}, props.id)
+  form.value = updated
+  return updated
 }
 
 async function replaceCopyQuery(id?: string): Promise<void> {
@@ -114,16 +141,22 @@ async function load(): Promise<void> {
   clear()
   copy.value = null
   olderLink.value = null
+  form.value = null
+  responseTitle.value = ''
   view.value = 'published'
+  if (!canEdit.value) {
+    loading.value = false
+    return
+  }
   try {
-    const [catalogue] = await Promise.all([
+    const [catalogue, updated] = await Promise.all([
       applicationQuery<{ items: BindingDescription[] }>('forms.bindings.v1', {}),
       refreshForm(),
     ])
     bindings.value = catalogue.items
     const requested = typeof route.query.copy === 'string' ? route.query.copy : ''
     const selected = activeDrafts.value.find(item => item.id === requested)
-    if (selected && (!live.value || selected.basis_version === form.value?.content_revision)) {
+    if (selected && (!live.value || selected.basis_version === updated.content_revision)) {
       await openCopy(selected.id)
     } else if (live.value) {
       if (selected) olderLink.value = selected
@@ -141,7 +174,7 @@ async function editCurrent(): Promise<void> {
   if (!form.value) return
   clear()
   if (copy.value && !stale.value) {
-    view.value = 'draft'
+    selectView('draft')
     return
   }
   if (dirty.value && !mutation.uncertain.value && !await confirm({
@@ -156,6 +189,7 @@ async function editCurrent(): Promise<void> {
       await createDraft(null)
     }
     olderLink.value = null
+    selectView('draft')
   } catch (cause) { failure(cause) }
 }
 
@@ -206,7 +240,7 @@ function showPreview(source: 'draft' | 'published'): void {
   previewAnswers.value = initialAnswers(definition.fields)
   previewErrors.value = {}
   previewStatus.value = ''
-  view.value = 'preview'
+  selectView('preview')
 }
 
 async function validatePreview(): Promise<void> {
@@ -291,10 +325,9 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
 
 <template>
   <div class="admin-page page-stack form-editor-page" :aria-busy="loading || opening">
-    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink to="/admin/forms">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? 'Form' }}</span></nav>
-    <AdminPageHeader :title="live?.definition.title ?? form?.label ?? 'Form editor'">
+    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink to="/admin/forms/collections">Response collections</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? (responseTitle || 'Form') }}</span></nav>
+    <AdminPageHeader :title="live?.definition.title ?? form?.label ?? (responseTitle || 'Form responses')">
       <template v-if="form" #actions>
-        <BaseButton :to="`/admin/form-responses?form=${form.id}`" variant="secondary">Responses</BaseButton>
         <BaseButton v-if="live" :to="`/forms/${form.slug}`" variant="secondary">Open live form</BaseButton>
       </template>
     </AdminPageHeader>
@@ -303,15 +336,21 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
     <InlineFeedback v-if="mutation.uncertain.value" message="Retry the same action to recover its receipt." tone="info" />
     <ul v-if="Object.keys(errors).length" class="form-errors"><li v-for="(messages, path) in errors" :key="path">{{ messages.join(' ') }}</li></ul>
     <div v-if="loading" class="panel panel__body" role="status">Loading form…</div>
-    <template v-else-if="form">
-      <nav class="form-tabs" aria-label="Form workspace">
-        <button type="button" :aria-current="view === 'published' ? 'page' : undefined" :disabled="blocked" @click="view = 'published'">Published</button>
-        <button type="button" :aria-current="view === 'draft' ? 'page' : undefined" :disabled="blocked" @click="editCurrent">Edit</button>
-        <button type="button" :aria-current="view === 'preview' ? 'page' : undefined" :disabled="blocked || (!live && !copy)" @click="showPreview(!live || (view === 'draft' && copy) ? 'draft' : 'published')">Preview</button>
-        <button type="button" :aria-current="view === 'settings' ? 'page' : undefined" :disabled="blocked" @click="view = 'settings'">Settings</button>
+    <template v-else-if="form || !canEdit">
+      <nav v-if="form" class="form-tabs" aria-label="Form workspace">
+        <button type="button" :aria-current="!viewingResponses && view === 'published' ? 'page' : undefined" :disabled="blocked" @click="selectView('published')">Published</button>
+        <button type="button" :aria-current="!viewingResponses && view === 'draft' ? 'page' : undefined" :disabled="blocked" @click="editCurrent">Edit</button>
+        <button type="button" :aria-current="!viewingResponses && view === 'preview' ? 'page' : undefined" :disabled="blocked || (!live && !copy)" @click="showPreview(!live || (view === 'draft' && copy) ? 'draft' : 'published')">Preview</button>
+        <button type="button" :aria-current="viewingResponses ? 'page' : undefined" :disabled="blocked" @click="showResponses">Responses</button>
+        <button type="button" :aria-current="!viewingResponses && view === 'settings' ? 'page' : undefined" :disabled="blocked" @click="selectView('settings')">Settings</button>
       </nav>
 
-      <template v-if="view === 'published'">
+      <template v-if="viewingResponses">
+        <FormResponsePage v-if="responseId" :id="responseId" :key="id + ':' + responseId" :form-id="id" embedded @title="responseTitle = $event" />
+        <CollectionResponses v-else :key="id" :form-id="id" @title="responseTitle = $event" />
+      </template>
+
+      <template v-else-if="view === 'published' && form">
         <div v-if="olderLink" class="panel panel__body form-panel linked-draft">
           <div><strong>This link opened an older draft</strong><p>You’re viewing the current published form. The older draft is still available in your drafts.</p></div>
           <BaseButton size="small" variant="secondary" :disabled="blocked" @click="selectDraft(olderLink.id)">Open older draft</BaseButton>
@@ -386,7 +425,7 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
         </div>
       </section>
 
-      <template v-else-if="view === 'settings'">
+      <template v-else-if="view === 'settings' && form">
         <section v-if="live" class="panel panel__body form-panel">
           <header class="form-panel-heading">
             <div><h2>Submissions</h2><p>{{ form.closed ? 'This form is closed.' : 'The live form is accepting responses.' }}</p></div>
@@ -418,12 +457,8 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
 </template>
 
 <style scoped>
-.form-breadcrumbs, .form-tabs, .form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.form-breadcrumbs, .form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
 .form-breadcrumbs { color: var(--color-text-muted); font-size: .85rem; }
-.form-tabs { gap: .25rem; border-bottom: 1px solid var(--color-border); }
-.form-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font: inherit; padding: .65rem .85rem; }
-.form-tabs button[aria-current] { border-color: var(--color-accent); color: var(--color-text); font-weight: 650; }
-.form-tabs button:disabled { opacity: .55; cursor: default; }
 .form-panel { display: grid; gap: 1rem; }
 .form-panel h2 { font-size: 1.1rem; margin: 0; }
 .form-panel p { margin: .25rem 0 0; color: var(--color-text-muted); }

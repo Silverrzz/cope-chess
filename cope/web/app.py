@@ -1205,6 +1205,9 @@ def create_app(
     from cope.adapters.http.forms import register_form_routes
 
     register_form_routes(app)
+    from cope.adapters.http.ballots import register_ballot_routes
+
+    register_ballot_routes(app)
     from cope.adapters.http.artifacts import register_artifact_routes
 
     register_artifact_routes(app)

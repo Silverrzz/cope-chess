@@ -6,7 +6,7 @@ import { formatDate, humanize } from '@/components/admin/format'
 import FormAnswerSummary from '@/components/forms/FormAnswerSummary.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { RouterLink, onBeforeRouteLeave, useRoute } from 'vue-router'
+import { RouterLink, onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
 import { ApiError } from '@/api/client'
 import { claimHeaders, formResponse, rememberClaim, storedClaim, type FormClaim } from '@/api/forms'
 import { createFormUploader, downloadAttachment } from '@/api/form-uploads'
@@ -16,10 +16,11 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useSessionStore } from '@/stores/session'
 import { canonicalAnswers, initialAnswers, type FormAnswers, type FormErrors, type FormField, type FormResponse } from '@/types/forms'
 
-const props = defineProps<{ id: string }>()
+const props = defineProps<{ id: string; formId?: string; embedded?: boolean }>()
+const emit = defineEmits<{ title: [value: string] }>()
 const route = useRoute()
 const { confirm } = useConfirm()
-const adminView = computed(() => route.name === 'admin-form-response')
+const adminView = computed(() => props.embedded || route.name === 'admin-form-response')
 const editing = ref(false)
 const session = useSessionStore()
 const response = ref<FormResponse | null>(null)
@@ -40,7 +41,16 @@ const uploading = ref(0)
 const dirty = computed(() => JSON.stringify(answers.value) !== saved.value && !!response.value)
 const busy = computed(() => mutation.busy.value || reviewMutation.busy.value || uploading.value > 0)
 const uncertain = computed(() => mutation.uncertain.value || reviewMutation.uncertain.value)
-const inboxLink = computed(() => response.value ? `/admin/form-responses?form=${response.value.form_id}` : '/admin/form-responses')
+const collectionLink = computed(() => {
+  if (props.embedded) {
+    const query = { ...route.query }
+    delete query.response
+    return { query }
+  }
+  return response.value
+    ? { name: 'admin-form-editor', params: { id: response.value.form_id }, query: { view: 'responses' } }
+    : { name: 'admin-form-collections' }
+})
 const publicTitle = computed(() => response.value ? 'Your response' : 'Open your response')
 const guestExtensions = computed(() => claim.value ? response.value?.attachment_policy.guest_extensions : undefined)
 const maxUpload = computed(() => {
@@ -66,7 +76,9 @@ async function load(preserve = false): Promise<void> {
   loading.value = true
   try {
     const loaded = await formResponse(props.id, claim.value?.token)
+    if (props.formId && loaded.form_id !== props.formId.toLowerCase()) throw new Error('This response belongs to a different form.')
     response.value = loaded
+    emit('title', loaded.definition.title)
     if (!preserve) answers.value = initialAnswers(loaded.definition.fields, structuredClone(loaded.answers))
     saved.value = JSON.stringify(initialAnswers(loaded.definition.fields, loaded.answers))
     error.value = ''; errors.value = {}
@@ -146,13 +158,19 @@ onMounted(() => {
   window.addEventListener('beforeunload', beforeUnload); void load()
 })
 onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
-onBeforeRouteLeave(() => !(dirty.value || uncertain.value) || window.confirm('Leave this response? Unsaved edits or an unconfirmed action may remain.'))
+const allowLeave = () => !(dirty.value || uncertain.value) || window.confirm('Leave this response? Unsaved edits or an unconfirmed action may remain.')
+onBeforeRouteLeave(allowLeave)
+onBeforeRouteUpdate((to, from) => !props.embedded ||
+  (to.params.id === from.params.id && to.query.response === from.query.response) || allowLeave())
 </script>
 
 <template>
   <div class="page-stack response-page" :class="adminView ? 'admin-page' : 'response-page--public'" :aria-busy="loading">
-    <template v-if="adminView">
-      <nav class="response-breadcrumbs" aria-label="Breadcrumb"><RouterLink :to="inboxLink">Responses</RouterLink><span aria-hidden="true">/</span><span aria-current="page">Review response</span></nav>
+    <div v-if="embedded" class="button-row">
+      <BaseButton :to="collectionLink" variant="ghost" size="small">Back to responses</BaseButton>
+    </div>
+    <template v-else-if="adminView">
+      <nav class="response-breadcrumbs" aria-label="Breadcrumb"><RouterLink :to="collectionLink">Responses</RouterLink><span aria-hidden="true">/</span><span aria-current="page">Review response</span></nav>
       <AdminPageHeader :title="response?.definition.title ?? 'Review response'">
         <template v-if="response" #actions><BaseButton :to="`/forms/${response.slug}`" variant="secondary">Open form</BaseButton></template>
       </AdminPageHeader>
@@ -223,7 +241,7 @@ onBeforeRouteLeave(() => !(dirty.value || uncertain.value) || window.confirm('Le
           <BaseButton variant="secondary" @click="download">Download receipt</BaseButton>
           <BaseButton :to="`/forms/${response.slug}`" variant="ghost">Back to form</BaseButton>
           <BaseButton v-if="response.can_withdraw && !editing" variant="ghost" :disabled="mutation.unavailable('forms.withdraw.v1')" @click="withdraw">Withdraw response</BaseButton>
-          <BaseButton v-if="response.can_review" :to="`/admin/form-responses/${response.id}`" variant="ghost">Open admin review</BaseButton>
+          <BaseButton v-if="response.can_review" :to="{ name: 'admin-form-editor', params: { id: response.form_id }, query: { view: 'responses', response: response.id } }" variant="ghost">Open admin review</BaseButton>
         </div>
       </section>
 
