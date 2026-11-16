@@ -18,8 +18,7 @@ class Target:
 
 @dataclass(frozen=True)
 class Batch:
-    user_id: int
-    fact_ids: list[int]
+    fact_id: int
     nonce: str
     token: str
     attempts: int
@@ -42,7 +41,7 @@ class Store:
 
     def check_schema(self) -> None:
         with self.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM eligible_deliveries LIMIT 0")
+            cursor.execute("SELECT 1 FROM eligible_mentions LIMIT 0")
 
     def catalog_is_public(self) -> bool:
         with self.cursor() as cursor:
@@ -89,6 +88,15 @@ class Store:
             rows = cursor.fetchall()
             return Target(**rows[0]) if len(rows) == 1 else None
 
+    def live_game(self, target: Target) -> dict | None:
+        with self.cursor() as cursor:
+            cursor.execute("""
+                SELECT game_id, tournament_id, tournament_slug, event_slug, title, engine
+                FROM live_games WHERE family_id = %s AND (%s = 0 OR version_id = %s)
+                ORDER BY started_at DESC, game_id DESC, version_id DESC LIMIT 1
+            """, (target.family_id, target.version_id, target.version_id))
+            return cursor.fetchone()
+
     def rating_choices(self, search: str) -> list[dict]:
         with self.cursor() as cursor:
             cursor.execute("""
@@ -112,7 +120,10 @@ class Store:
     def subscriber(self, user_id: int) -> dict | None:
         with self.cursor() as cursor:
             cursor.execute(
-                "SELECT paused, dm_blocked FROM subscribers WHERE discord_id = %s",
+                """
+                SELECT paused, all_tournament_games_since IS NOT NULL AS all_tournament_games
+                FROM subscribers WHERE discord_id = %s
+                """,
                 (str(user_id),),
             )
             return cursor.fetchone()
@@ -132,13 +143,13 @@ class Store:
 
     def save_follow(
         self, user_id: int, target: Target, kinds: list[str],
-        rating_list_id: int | None, blocked: bool,
+        rating_list_id: int | None,
     ) -> bool:
         with self.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO subscribers (discord_id, dm_blocked) VALUES (%s, %s)
+                INSERT INTO subscribers (discord_id) VALUES (%s)
                 ON CONFLICT DO NOTHING
-            """, (str(user_id), blocked))
+            """, (str(user_id),))
             cursor.execute("SELECT 1 FROM subscribers WHERE discord_id = %s FOR UPDATE", (str(user_id),))
             cursor.execute("""
                 INSERT INTO subscriptions (discord_id, family_id, version_id, kinds, rating_list_id)
@@ -195,10 +206,29 @@ class Store:
 
     def remove_empty_subscriber(self, cursor, user_id: int) -> None:
         cursor.execute("""
-            DELETE FROM subscribers subscriber WHERE discord_id = %s AND NOT EXISTS (
+            DELETE FROM subscribers subscriber
+            WHERE discord_id = %s AND all_tournament_games_since IS NULL AND NOT EXISTS (
                 SELECT 1 FROM subscriptions WHERE discord_id = subscriber.discord_id
             )
         """, (str(user_id),))
+
+    def set_all_tournament_games(self, user_id: int, enabled: bool) -> dict | None:
+        with self.cursor() as cursor:
+            if enabled:
+                cursor.execute("""
+                    INSERT INTO subscribers (discord_id, all_tournament_games_since)
+                    VALUES (%s, clock_timestamp())
+                    ON CONFLICT (discord_id) DO UPDATE
+                    SET all_tournament_games_since = COALESCE(subscribers.all_tournament_games_since, EXCLUDED.all_tournament_games_since)
+                    RETURNING paused
+                """, (str(user_id),))
+                return cursor.fetchone()
+            cursor.execute(
+                "UPDATE subscribers SET all_tournament_games_since = NULL WHERE discord_id = %s",
+                (str(user_id),),
+            )
+            self.remove_empty_subscriber(cursor, user_id)
+            return None
 
     def pause(self, user_id: int) -> bool:
         with self.cursor() as cursor:
@@ -208,25 +238,23 @@ class Store:
     def resume(self, user_id: int) -> None:
         with self.cursor() as cursor:
             cursor.execute("""
-                UPDATE subscribers SET paused = false, dm_blocked = false, active_since = clock_timestamp()
-                WHERE discord_id = %s AND (paused OR dm_blocked)
+                UPDATE subscribers SET paused = false, active_since = clock_timestamp()
+                WHERE discord_id = %s AND paused
             """, (str(user_id),))
 
     def project(self) -> None:
         with self.cursor() as cursor:
             cursor.execute("""
                 WITH pending AS MATERIALIZED (
-                    SELECT id, kind FROM facts
+                    SELECT id FROM facts
                     WHERE NOT projected AND occurred_at <= clock_timestamp() AND expires_at > clock_timestamp()
                     ORDER BY occurred_at, id
                     LIMIT 250
                     FOR UPDATE SKIP LOCKED
                 ), queued AS (
-                    INSERT INTO deliveries (discord_id, fact_id, ready_at)
-                    SELECT delivery.discord_id, pending.id, clock_timestamp() +
-                           CASE WHEN pending.kind IN ('game_started', 'event_game_started')
-                                THEN interval '5 seconds' ELSE interval '0 seconds' END
-                    FROM pending JOIN eligible_deliveries delivery ON delivery.fact_id = pending.id
+                    INSERT INTO deliveries (discord_id, fact_id, version_id)
+                    SELECT delivery.discord_id, pending.id, delivery.version_id
+                    FROM pending JOIN eligible_mentions delivery ON delivery.fact_id = pending.id
                     ON CONFLICT DO NOTHING
                 )
                 UPDATE facts SET projected = true FROM pending WHERE facts.id = pending.id
@@ -241,16 +269,16 @@ class Store:
                 )
             """)
 
-    def claim(self) -> Batch | None:
+    def claim(self, channel_id: int) -> Batch | None:
         with self.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(684392719406)")
             cursor.execute("""
-                SELECT delivery.discord_id, delivery.fact_id, delivery.nonce, fact.kind
-                FROM deliveries delivery JOIN facts fact ON fact.id = delivery.fact_id
-                WHERE delivery.outcome IS NULL AND delivery.ready_at <= clock_timestamp()
-                ORDER BY delivery.ready_at, delivery.fact_id
+                SELECT fact_id, version_id, nonce FROM deliveries
+                WHERE outcome IS NULL AND ready_at <= clock_timestamp()
+                  AND EXISTS (SELECT 1 FROM discord_destination WHERE channel_id = %s)
+                ORDER BY ready_at, fact_id, version_id
                 LIMIT 1
-            """)
+            """, (str(channel_id),))
             row = cursor.fetchone()
             if row is None:
                 return None
@@ -259,68 +287,57 @@ class Store:
             token = str(uuid4())
             cursor.execute("""
                 WITH candidates AS (
-                    SELECT delivery.fact_id
-                    FROM deliveries delivery JOIN facts fact ON fact.id = delivery.fact_id
-                    WHERE delivery.discord_id = %s AND delivery.outcome IS NULL AND (
-                        (delivery.nonce = %s AND delivery.ready_at <= clock_timestamp())
-                        OR (%s AND delivery.nonce IS NULL AND (
-                            delivery.fact_id = %s OR (
-                                %s IN ('game_started', 'event_game_started') AND fact.kind = %s
-                                AND delivery.ready_at <= clock_timestamp() + interval '3 seconds'
-                            )
-                        ))
-                    )
-                    ORDER BY (delivery.fact_id <> %s), delivery.ready_at, delivery.fact_id
-                    LIMIT 5
+                    SELECT discord_id FROM deliveries
+                    WHERE fact_id = %s AND version_id = %s AND outcome IS NULL
+                      AND ready_at <= clock_timestamp() AND nonce IS NOT DISTINCT FROM %s::text
+                    ORDER BY discord_id LIMIT 35
                 )
                 UPDATE deliveries delivery
                 SET nonce = %s, claim_token = %s, attempts = attempts + 1,
                     first_attempt_at = COALESCE(first_attempt_at, clock_timestamp()),
                     ready_at = clock_timestamp() + interval '60 seconds'
-                FROM candidates WHERE delivery.discord_id = %s AND delivery.fact_id = candidates.fact_id
-                RETURNING delivery.fact_id, delivery.attempts, delivery.first_attempt_at
+                FROM candidates WHERE delivery.discord_id = candidates.discord_id AND delivery.fact_id = %s
+                RETURNING delivery.attempts, delivery.first_attempt_at
             """, (
-                row["discord_id"], nonce, row["nonce"] is None, row["fact_id"],
-                row["kind"], row["kind"], row["fact_id"], nonce, token, row["discord_id"],
+                row["fact_id"], row["version_id"], row["nonce"], nonce, token, row["fact_id"],
             ))
             claimed = cursor.fetchall()
             if not claimed:
                 return None
             return Batch(
-                int(row["discord_id"]), sorted(item["fact_id"] for item in claimed),
-                nonce, token,
+                row["fact_id"], nonce, token,
                 max(item["attempts"] for item in claimed),
                 min(item["first_attempt_at"] for item in claimed),
             )
 
-    def eligible(self, batch: Batch) -> list[dict]:
+    def eligible(self, batch: Batch, channel_id: int) -> dict | None:
         with self.cursor() as cursor:
             cursor.execute("""
-                SELECT fact.* FROM public_facts fact
-                JOIN eligible_deliveries eligible ON eligible.fact_id = fact.id
-                JOIN deliveries delivery USING (discord_id, fact_id)
-                WHERE eligible.discord_id = %s AND delivery.claim_token = %s AND fact.id = ANY(%s)
-                ORDER BY fact.occurred_at, fact.id
-            """, (str(batch.user_id), batch.token, batch.fact_ids))
-            return cursor.fetchall()
+                SELECT fact.*, matching.discord_ids, matching.engine FROM public_facts fact
+                JOIN LATERAL (
+                    SELECT array_agg(eligible.discord_id ORDER BY eligible.discord_id) AS discord_ids,
+                           min(eligible.engine) AS engine
+                    FROM eligible_mentions eligible
+                    JOIN deliveries delivery USING (discord_id, fact_id, version_id)
+                    WHERE eligible.fact_id = fact.id AND delivery.claim_token = %s
+                    HAVING count(*) > 0
+                ) matching ON true
+                WHERE fact.id = %s AND EXISTS (SELECT 1 FROM discord_destination WHERE channel_id = %s)
+            """, (batch.token, batch.fact_id, str(channel_id)))
+            return cursor.fetchone()
 
     def finish(
-        self, batch: Batch, eligible_ids: list[int], outcome: str,
+        self, batch: Batch, eligible_ids: list[str], outcome: str,
         message_id: str | None = None, retry_after: float = 0,
     ) -> None:
         with self.cursor() as cursor:
             cursor.execute("""
                 UPDATE deliveries
-                SET outcome = CASE WHEN fact_id <> ALL(%s) THEN 'suppressed' ELSE %s END,
-                    message_id = CASE WHEN fact_id = ANY(%s) THEN %s ELSE NULL END,
+                SET outcome = CASE WHEN discord_id <> ALL(%s::text[]) THEN 'suppressed' ELSE %s END,
+                    message_id = CASE WHEN discord_id = ANY(%s::text[]) THEN %s ELSE NULL END,
                     ready_at = clock_timestamp() + (%s * interval '1 second'), claim_token = NULL
-                WHERE discord_id = %s AND claim_token = %s AND fact_id = ANY(%s)
+                WHERE claim_token = %s AND fact_id = %s
             """, (
                 eligible_ids, None if retry_after else outcome, eligible_ids, message_id,
-                retry_after, str(batch.user_id), batch.token, batch.fact_ids,
+                retry_after, batch.token, batch.fact_id,
             ))
-            if cursor.rowcount and outcome == "blocked":
-                cursor.execute(
-                    "UPDATE subscribers SET dm_blocked = true WHERE discord_id = %s",
-                    (str(batch.user_id),),
-                )

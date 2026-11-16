@@ -31,14 +31,16 @@ def register_discord_settings(app: FastAPI, session_role: Callable[[Request], st
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Invalid Discord settings.")
         guild_id = payload.get("guild_id") or None
+        channel_id = payload.get("channel_id") or None
         enabled = payload.get("enabled")
         token = payload.get("token") or None
         remove = payload.get("remove_token", False)
-        if guild_id is not None and (
-            not isinstance(guild_id, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", guild_id)
-            or int(guild_id) >= 2**64
-        ):
-            raise HTTPException(status_code=400, detail="Enter a valid Discord server ID.")
+        for value, label in ((guild_id, "server"), (channel_id, "channel")):
+            if value is not None and (
+                not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", value)
+                or int(value) >= 2**64
+            ):
+                raise HTTPException(status_code=400, detail=f"Enter a valid Discord {label} ID.")
         if token is not None and (
             not isinstance(token, str) or not re.fullmatch(r"[!-~]{16,512}", token)
         ):
@@ -49,7 +51,8 @@ def register_discord_settings(app: FastAPI, session_role: Callable[[Request], st
         runtime = app.state.discord_runtime
         try:
             saved = await run_in_threadpool(
-                runtime.save_settings, guild_id=guild_id, enabled=enabled and not remove, token=token, remove=remove,
+                runtime.save_settings, guild_id=guild_id, channel_id=channel_id,
+                enabled=enabled and not remove, token=token, remove=remove,
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from None
