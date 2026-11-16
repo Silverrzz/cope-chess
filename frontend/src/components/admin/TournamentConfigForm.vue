@@ -68,7 +68,7 @@ function validate(): string {
   if (!name.value.trim()) return 'Enter a tournament name.'
   if (config.value.participants.length < 2) return 'Select at least two participating engines.'
   if (new Set(config.value.participants).size !== config.value.participants.length) return 'Each participant can only be selected once.'
-  if (!Number.isInteger(config.value.concurrency) || config.value.concurrency < 1) return 'Concurrent games must be a whole number of at least 1.'
+  if (!Number.isInteger(config.value.concurrency) || config.value.concurrency < 0) return 'Concurrent games must be a whole number of at least 0 (unlimited).'
   if (!Number.isInteger(config.value.engine_threads) || config.value.engine_threads < 1) return 'Engine threads must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_hash_mb) || config.value.engine_hash_mb < 1) return 'Engine hash must be a whole number of at least 1 MB.'
   if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash', 'uci_variant', 'uci_chess960', 'duck960'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
@@ -212,8 +212,8 @@ function submit(): void {
         <div><dt>Format</dt><dd>{{ humanize(config.format) }}</dd></div>
         <div><dt>Time control</dt><dd>{{ formatTimeControl(config.time_control) }}</dd></div>
         <div><dt>Opening suite</dt><dd>{{ selectedOpening?.name ?? 'None' }}</dd></div>
-        <div><dt>Concurrent games</dt><dd>{{ config.concurrency }}</dd></div>
-        <div><dt>Estimated waves</dt><dd>{{ waves.toLocaleString() }}</dd></div>
+        <div><dt>Concurrent games</dt><dd>{{ config.concurrency || 'Unlimited' }}</dd></div>
+        <div><dt>Estimated waves</dt><dd>{{ config.concurrency ? waves.toLocaleString() : 'Automatic' }}</dd></div>
         <div><dt>Engine threads</dt><dd>{{ config.engine_threads }}</dd></div>
         <div><dt>Hash per engine</dt><dd>{{ config.engine_hash_mb.toLocaleString() }} MB</dd></div>
         <div><dt>Ratings</dt><dd>{{ config.rated ? 'Eligible to commit' : 'Unrated' }}</dd></div>

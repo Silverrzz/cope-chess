@@ -4036,7 +4036,7 @@ def _tournament_summaries(
                     - game_summary["abandoned"],
                 ),
                 projected_total_games=game_summary["total"],
-                concurrency=max(1, tournament.config.concurrency),
+                concurrency=tournament.config.concurrency,
                 confidence="unavailable",
                 basis="unavailable",
                 state="paused" if tournament.status == "paused" else "unavailable",
@@ -4174,7 +4174,7 @@ def _settings_view(
 
     rows.extend(
         [
-            ("Concurrent games", str(config.concurrency)),
+            ("Concurrent games", str(config.concurrency) if config.concurrency else "Unlimited"),
             ("Threads per engine", str(config.engine_threads)),
             ("Hash per engine", f"{config.engine_hash_mb}MB"),
             ("Worker hash required", f"{config.engine_hash_mb * 2}MB"),
