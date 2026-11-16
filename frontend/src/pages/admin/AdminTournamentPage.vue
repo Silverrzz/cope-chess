@@ -84,7 +84,7 @@ const error = ref('')
 const pending = ref('')
 const copyingDetails = ref(false)
 const detailsCopied = ref(false)
-const concurrency = ref(1)
+const concurrency = ref(0)
 const tournamentName = ref('')
 const showCommit = ref(false)
 const showSchedule = ref(false)
@@ -327,8 +327,8 @@ async function unschedule(): Promise<void> {
 
 async function saveConcurrency(): Promise<void> {
   if (!data.value || !['running', 'paused'].includes(data.value.tournament.status)) return
-  if (!Number.isInteger(concurrency.value) || concurrency.value < 1) {
-    error.value = 'Concurrent games must be a whole number of at least 1.'
+  if (!Number.isInteger(concurrency.value) || concurrency.value < 0) {
+    error.value = 'Concurrent games must be a whole number of at least 0 (unlimited).'
     return
   }
   pending.value = 'concurrency'
@@ -565,7 +565,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <form v-if="['running', 'paused'].includes(data.tournament.status)" class="concurrency-form" @submit.prevent="saveConcurrency">
-            <label for="tournament-concurrency">Concurrency</label><input id="tournament-concurrency" v-model.number="concurrency" class="input" type="number" min="1" step="1" required>
+            <label for="tournament-concurrency">Concurrency (0 = unlimited)</label><input id="tournament-concurrency" v-model.number="concurrency" class="input" type="number" min="0" title="0 = unlimited" step="1" required>
             <button v-if="concurrency !== data.tournament.config.concurrency" class="button button--primary button--small" type="submit" :disabled="!!pending">{{ pending === 'concurrency' ? 'Saving…' : 'Save' }}</button>
           </form>
         </div>
@@ -640,7 +640,7 @@ onBeforeUnmount(() => {
           <div><dt>Format</dt><dd>{{ data.tournament.historical ? 'Historical results' : humanize(data.tournament.config.format) }}</dd></div>
           <div><dt>Time control</dt><dd>{{ formatTimeControl(data.tournament.config.time_control) }}<template v-if="data.tournament.config.clock_reference_hardware_key"> · Hardware-scaled</template></dd></div>
           <div><dt>Participants</dt><dd>{{ data.tournament.config.participants.length }}</dd></div>
-          <div><dt>Concurrency</dt><dd>{{ data.tournament.config.concurrency }}</dd></div>
+          <div><dt>Concurrency</dt><dd>{{ data.tournament.config.concurrency || 'Unlimited' }}</dd></div>
           <div><dt>Engine threads</dt><dd>{{ data.tournament.config.engine_threads }}</dd></div>
           <div><dt>Hash per engine</dt><dd>{{ data.tournament.config.engine_hash_mb }} MB</dd></div>
           <div><dt>Ratings</dt><dd>{{ data.tournament.config.rated ? 'Rated' : 'Unrated' }}</dd></div>

@@ -63,7 +63,7 @@ export function defaultSettings(): TournamentSettings {
     format: 'round_robin',
     format_options: { cycles: 1 },
     time_control: { category: 'increment', initial_ms: 60_000, increment_ms: 1_000 },
-    concurrency: 1,
+    concurrency: 0,
     opening_suite_id: null,
     adjudication: { draw: null, resign: null, max_moves: null },
     rated: true,

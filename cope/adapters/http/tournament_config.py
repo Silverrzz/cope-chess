@@ -63,7 +63,7 @@ def _category_settings(value: dict[str, Any]) -> dict[str, Any]:
             "initial_ms": 60_000,
             "increment_ms": 1_000,
         },
-        "concurrency": 1,
+        "concurrency": 0,
         "opening_suite_id": None,
         "adjudication": {
             "draw": None,

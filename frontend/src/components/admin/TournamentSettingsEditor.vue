@@ -279,7 +279,8 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
       <div class="field-grid field-grid--wide">
         <label v-if="allowConcurrency" class="field">
           <span class="field__label">Concurrent games</span>
-          <input class="input" type="number" min="1" step="1" :value="model.concurrency" @input="patch({ concurrency: Number(($event.target as HTMLInputElement).value) })">
+          <input class="input" type="number" min="0" step="1" :value="model.concurrency" @input="patch({ concurrency: Number(($event.target as HTMLInputElement).value) })">
+          <small>0 means unlimited; workers share their available cores and memory automatically.</small>
         </label>
         <label v-if="allowOpeningSuite" class="field">
           <span class="field__label">Opening suite</span>

@@ -309,7 +309,10 @@ def next_worker_assignment(
         if worker.tournament_scope == "all"
         else frozenset(list_worker_tournament_ids(connection, worker.id))
     )
-    for tournament in list_tournaments(connection):
+    tournaments = list_tournaments(connection)
+    if worker.tournament_scope == "all":
+        tournaments = _fair_worker_tournaments(connection, worker.id, tournaments, available_resources)
+    for tournament in tournaments:
         if tournament.status != "running":
             continue
         claimed_worker = event_fixture_worker(connection, tournament.id)
@@ -339,6 +342,51 @@ def next_worker_assignment(
     return None
 
 
+def _fair_worker_tournaments(
+    connection: sqlite3.Connection,
+    worker_id: int,
+    tournaments: tuple[TournamentRecord, ...],
+    available_resources: tuple[int, int, int],
+) -> list[TournamentRecord]:
+    tournaments = [
+        tournament for tournament in tournaments
+        if tournament.status == "running" and not tournament.config.exclude_from_all_workers
+    ]
+    if not tournaments:
+        return []
+    active = {
+        int(row["tournament_id"]): int(row["games"])
+        for row in connection.execute(
+            """
+            SELECT games.tournament_id, COUNT(*) AS games
+            FROM game_assignments
+            JOIN games ON games.id = game_assignments.game_id
+            WHERE game_assignments.worker_id = ?
+              AND game_assignments.status IN ('assigned', 'acked', 'live')
+              AND games.status IN ('assigned', 'live')
+            GROUP BY games.tournament_id
+            """,
+            (worker_id,),
+        )
+    }
+    resources = {
+        tournament.id: _tournament_required_resources(connection, tournament)
+        for tournament in tournaments
+    }
+    cheapest_per_thread = min(resource.hash_mb / resource.threads for resource in resources.values())
+    available_threads, available_memory, physical_threads = available_resources
+
+    def allocation_order(tournament):
+        resource = resources[tournament.id]
+        threads = physical_threads if tournament.config.clock_reference_hardware_key else available_threads
+        remaining_threads = max(0, threads - resource.threads)
+        remaining_memory = max(0, available_memory - resource.hash_mb)
+        stranded_threads = max(0, remaining_threads - int(remaining_memory / cheapest_per_thread))
+        return stranded_threads, active.get(tournament.id, 0) * resource.threads
+
+    return sorted(tournaments, key=allocation_order)
+
+
 def _next_tournament_worker_assignment(
     connection: sqlite3.Connection,
     worker: WorkerRecord,
@@ -357,7 +405,10 @@ def _next_tournament_worker_assignment(
         or tournament.id not in list_worker_tournament_ids(connection, worker.id)
     ):
         return None
-    if _active_game_count(connection, tournament.id) >= tournament.config.concurrency:
+    if (
+        tournament.config.concurrency > 0
+        and _active_game_count(connection, tournament.id) >= tournament.config.concurrency
+    ):
         return None
     if worker.hw is None:
         return None

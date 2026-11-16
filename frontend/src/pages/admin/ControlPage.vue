@@ -53,7 +53,7 @@ const requestKey = ref(crypto.randomUUID())
 const tokenLabel = ref("")
 const newToken = ref("")
 const origin = window.location.origin
-const preset = ref({ key: "", name: "", rating_list_id: 0, category: "bullet", variant: "standard", seconds: 60, increment: 1, threads: 1, hash: 64, opponents: 9, cycles: 1, concurrency: 8, opening_suite_id: 0 })
+const preset = ref({ key: "", name: "", rating_list_id: 0, category: "bullet", variant: "standard", seconds: 60, increment: 1, threads: 1, hash: 64, opponents: 9, cycles: 1, concurrency: 0, opening_suite_id: 0 })
 watch(() => preset.value.variant, () => { preset.value.rating_list_id = 0; preset.value.opening_suite_id = 0 })
 const owner = computed(() => context.value?.scopes.includes("*") ?? false)
 let timer: number | undefined
@@ -247,7 +247,7 @@ onBeforeUnmount(() => { active = false; window.clearInterval(timer) })
           <label>Opening suite<select v-model="preset.opening_suite_id"><option :value="0">Standard starting position</option><option v-for="suite in context?.opening_suites.filter(item => !item.variant || item.variant === preset.variant || item.variant === 'legacy' && !preset.variant.startsWith('duck'))" :key="suite.id" :value="suite.id">{{ suite.name }}</option></select></label>
           <label>Initial seconds<input v-model.number="preset.seconds" type="number" min="1" required></label><label>Increment seconds<input v-model.number="preset.increment" type="number" min="0" step="0.1" required></label>
           <label>Engine threads<input v-model.number="preset.threads" type="number" min="1" :disabled="preset.category === 'classical'"></label><label>Hash per engine, MB<input v-model.number="preset.hash" type="number" min="1" required></label>
-          <label>Opponents<input v-model.number="preset.opponents" type="number" min="1" max="499" required></label><label>Cycles<input v-model.number="preset.cycles" type="number" min="1" required></label><label>Concurrent games<input v-model.number="preset.concurrency" type="number" min="1" required></label>
+          <label>Opponents<input v-model.number="preset.opponents" type="number" min="1" max="499" required></label><label>Cycles<input v-model.number="preset.cycles" type="number" min="1" required></label><label>Concurrent games (0 = unlimited)<input v-model.number="preset.concurrency" type="number" min="0" required></label>
         </div>
         <button class="button button--primary" :disabled="busy">Save preset revision</button>
       </form>
