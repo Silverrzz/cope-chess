@@ -74,6 +74,8 @@ def add_running_tournament_participant(
         raise ValueError("engine is already participating in this tournament")
     participants = [*tournament.config.participants, engine_id]
     updated = set_tournament_participants(connection, tournament, participants)
+    if not _prepare_clock_reference(connection, updated):
+        raise ValueError("The added participant needs an artifact-verified benchmark on the tournament's reference hardware")
     if updated.config.format == TournamentFormat.ROUND_ROBIN:
         scheduled_games = _generate_round_robin_participant_games(
             connection,
@@ -145,8 +147,6 @@ def _lock_live_roster_tournament(
         raise ValueError("Duck vs Fish odds participants cannot change")
     if tournament.status not in {"running", "paused"}:
         raise ValueError("participants can only be changed while the tournament is running or paused")
-    if tournament.config.clock_reference_hardware_key is not None:
-        raise ValueError("The roster of a hardware-scaled tournament is fixed once it starts")
     options = tournament.config.format_options
     if isinstance(options, RoundRobinFormatOptions) and options.games_per_engine is not None:
         raise ValueError("The roster of a round robin with an exact game count is fixed once it starts")
