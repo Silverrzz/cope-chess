@@ -14,6 +14,7 @@ const props = withDefaults(defineProps<{
   label?: string
   arrows?: BoardArrow[]
   rings?: string[]
+  finished?: boolean
 }>(), {
   opening: null,
   moves: () => [],
@@ -99,6 +100,7 @@ function fallbackCopy(value: string): void {
       :label="label"
       :arrows="arrows"
       :rings="rings"
+      :finished="finished"
       @update:model-value="selectPly"
       @position="currentFen = $event.fen; emit('position', $event)"
     />

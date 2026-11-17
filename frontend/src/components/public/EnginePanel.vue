@@ -4,8 +4,9 @@ import { computed } from 'vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
+import TakMoveText from '@/components/chess/TakMoveText.vue'
 import { isTurn, type Variant } from '@/components/chess/chess'
-import { takMovePath } from '@/components/chess/tak'
+import { parseTakPosition, takMovePath, type TakSide } from '@/components/chess/tak'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
@@ -52,10 +53,20 @@ const pvMoves = computed(() => (props.analysis?.pv || '')
   .map((move) => props.variant === 'tak' ? move : move.toLowerCase())
   .filter((move) => props.variant === 'tak' ? takMovePath(move).length > 0 : isTurn(move)))
 const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen || 'startpos')
+const takPv = computed(() => {
+  if (props.variant !== 'tak') return []
+  const root = parseTakPosition(pvRootFen.value)
+  const rootPly = (root.fullmove - 1) * 2 + Number(root.turn === 'b')
+  return pvMoves.value.map((move, index) => {
+    const ply = rootPly + index
+    const side: TakSide = (ply % 2 === 0) !== (ply < 2) ? 'white' : 'black'
+    return { move, side }
+  })
+})
 </script>
 
 <template>
-  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
+  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading, 'engine-panel--tak': variant === 'tak' }]">
     <div v-if="loading" class="engine-panel__loading">
       <strong>
         <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
@@ -96,7 +107,10 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
           <div class="analysis-line">
             <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-            <p :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
+            <p v-if="takPv.length" class="analysis-line__tak-pv" aria-label="Principal variation moves">
+              <TakMoveText v-for="(entry, index) in takPv" :key="index" :move="entry.move" :side="entry.side" chip />
+            </p>
+            <p v-else :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
           </div>
         </div>
 
@@ -308,6 +322,8 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   padding-inline-start: 0;
   border-inline-start: 0;
 }
+.engine-panel--tak .engine-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: .3rem; }
+.engine-panel--tak .engine-stats div:nth-child(odd) { padding-inline-start: 0; border-inline-start: 0; }
 
 .engine-stats dd {
   overflow: hidden;
@@ -337,6 +353,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+.analysis-line__tak-pv { display: flex; flex-wrap: wrap; gap: .24rem; }
 
 .pv-preview {
   display: grid;

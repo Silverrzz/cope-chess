@@ -13,7 +13,8 @@ import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 import TakBoard from './TakBoard.vue'
-import { buildTakPositions, takPositionText, takReserves } from './tak'
+import TakOverview from './TakOverview.vue'
+import { buildTakPositions, takPositionText, takReserves, takRoads } from './tak'
 
 import {
   buildPositions,
@@ -49,6 +50,7 @@ const props = withDefaults(defineProps<{
   arrows?: BoardArrow[]
   rings?: string[]
   lastMove?: string
+  finished?: boolean
   editMode?: 'move' | 'place' | 'disabled'
 }>(), {
   fen: 'startpos',
@@ -85,6 +87,8 @@ const positions = computed(() => buildPositions(props.fen, props.moves, props.va
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
 const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
+const roads = computed(() => takPosition.value ? takRoads(takPosition.value) : null)
+const showRoads = ref(true)
 const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
 const keyboardSquareDescription = computed(() => {
   const square = keyboardSquare.value
@@ -404,12 +408,13 @@ defineExpose({ selectPly, focusBoard })
   <section
     ref="viewer"
     class="chess-viewer"
-    :class="{ 'chess-viewer--compact': compact }"
+    :class="{ 'chess-viewer--compact': compact, 'chess-viewer--tak': takPosition }"
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
+    <TakOverview v-if="takPosition && roads && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roads.winner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
-      <TakBoard v-if="takPosition" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :label="label" />
+      <TakBoard v-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
       <div
         v-else
         ref="board"
@@ -453,7 +458,7 @@ defineExpose({ selectPly, focusBoard })
         </button>
       </div>
       <p class="board-controls__status" aria-live="polite">{{ status }}</p>
-      <p class="material" :title="`White ${material.white}, Black ${material.black}`">{{ material.label }}</p>
+      <p v-if="!takPosition" class="material" :title="`White ${material.white}, Black ${material.black}`">{{ material.label }}</p>
     </div>
 
     <p class="sr-only">{{ positionDescription }}</p>
@@ -562,6 +567,8 @@ defineExpose({ selectPly, focusBoard })
 .board-controls__status {
   text-align: center;
 }
+.chess-viewer--tak .board-controls { grid-template-columns: auto minmax(0, 1fr); }
+.chess-viewer--tak .board-controls__status { grid-column: auto; grid-row: auto; text-align: end; }
 
 .material {
   white-space: nowrap;

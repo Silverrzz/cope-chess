@@ -405,7 +405,10 @@ async function fitArenaToViewport(): Promise<void> {
   const arenaWidth = arena.clientWidth
   const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
   const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
-  const widthLimit = window.innerWidth > 1152
+  const widthLimit = isTak.value
+    ? arenaWidth - (window.matchMedia('(min-width: 76rem)').matches ? 34 * rootFontSize + gap * 2
+      : window.matchMedia('(min-width: 58.01rem)').matches ? 17 * rootFontSize + gap : 0)
+    : window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
   const fittedBoardSize = (chromeHeight: number) => Math.max(
@@ -1261,7 +1264,7 @@ function forgetManualFollowPauseGame(): void {
 
       <TournamentCrossTable v-if="viewerMode === 'cross'" :variant="data.tournament.config?.variant" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
 
-      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer, 'arena--tak': isTak }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
             v-for="side in (['black', 'white']) as ('white' | 'black')[]"
@@ -1285,6 +1288,7 @@ function forgetManualFollowPauseGame(): void {
             :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
             :moves="isPreparing ? [] : moves"
+            :finished="viewerGame.status === 'finished'"
             :model-value="isPreparing ? 0 : selectedPly"
             :arrows="isPreparing ? [] : suggestedMoves"
             :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
@@ -1857,6 +1861,30 @@ function forgetManualFollowPauseGame(): void {
   .empty-arena { grid-template-columns: 1fr; height: auto; }
   .empty-chat { height: min(36rem, calc(100dvh - 8rem)); }
   .settings-list { grid-template-columns: 1fr; }
+}
+
+@media (58rem < width < 76rem) {
+  .arena--tak { grid-template-columns: minmax(17rem, 1fr) var(--arena-board-size); }
+}
+
+@media (max-width: 58rem) {
+  .arena--tak .activity-column { display: contents; }
+  .arena--tak .arena-moves { grid-row: 2; height: min(16rem, 40dvh); }
+  .arena--tak .engine-column { grid-row: 3; }
+  .arena--tak .arena-chat { grid-row: 4; height: min(24rem, 55dvh); }
+}
+
+@media (min-width: 76rem) {
+  .arena--tak { grid-template-columns: 18rem minmax(0, var(--arena-board-size)) minmax(16rem, 1fr); height: var(--arena-content-height); }
+  .arena--tak .engine-column { grid-column: 1; grid-row: 1; }
+  .arena--tak .board-column { grid-column: 2; grid-row: 1; }
+  .arena--tak .activity-column {
+    grid-column: 3;
+    grid-row: 1;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.5fr) minmax(0, 1fr);
+    height: var(--arena-content-height);
+  }
 }
 </style>
 

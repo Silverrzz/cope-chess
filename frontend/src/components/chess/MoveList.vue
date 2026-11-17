@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import { parseFen, type Variant } from './chess'
 import { parseTakPosition } from './tak'
+import TakMoveText from './TakMoveText.vue'
 
 interface MoveCell {
   ply: number
@@ -94,11 +95,14 @@ function scrollCurrentMoveIntoView(): void {
 </script>
 
 <template>
-  <section class="move-list" aria-labelledby="move-list-title">
+  <section class="move-list" :class="{ 'move-list--tak': variant === 'tak' }" aria-labelledby="move-list-title">
     <header class="move-list__header">
       <h2 id="move-list-title">{{ title }}</h2>
       <span>{{ moves.length }} plies<template v-if="bookPlies"> / {{ bookPlies }} book</template></span>
     </header>
+    <div v-if="variant === 'tak' && rows.length" class="tak-move-headings" aria-hidden="true">
+      <span></span><span>White</span><span>Black</span>
+    </div>
     <div v-if="rows.length" ref="list" class="move-list__scroll" tabindex="0">
       <ol class="move-list__rows">
         <li v-for="row in rows" :key="`${row.number}-${row.white?.ply || row.black?.ply}`" class="move-row">
@@ -111,7 +115,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.white.isBook || undefined"
             :title="row.white.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.white.ply)"
-          ><span>{{ row.white.label }}</span><small v-if="row.white.annotation" :style="{ color: row.white.annotation.color }">{{ row.white.annotation.label }}</small></button>
+          ><TakMoveText v-if="variant === 'tak'" :move="row.white.label" :side="row.number === 1 ? 'black' : 'white'" /><span v-else>{{ row.white.label }}</span><small v-if="row.white.annotation" :style="{ color: row.white.annotation.color }">{{ row.white.annotation.label }}</small></button>
           <span v-else class="move-placeholder">...</span>
           <button
             v-if="row.black"
@@ -121,7 +125,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.black.isBook || undefined"
             :title="row.black.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.black.ply)"
-          ><span>{{ row.black.label }}</span><small v-if="row.black.annotation" :style="{ color: row.black.annotation.color }">{{ row.black.annotation.label }}</small></button>
+          ><TakMoveText v-if="variant === 'tak'" :move="row.black.label" :side="row.number === 1 ? 'white' : 'black'" /><span v-else>{{ row.black.label }}</span><small v-if="row.black.annotation" :style="{ color: row.black.annotation.color }">{{ row.black.annotation.label }}</small></button>
           <span v-else class="move-placeholder"></span>
         </li>
       </ol>
@@ -261,4 +265,17 @@ function scrollCurrentMoveIntoView(): void {
   font-size: 0.85rem;
   text-align: center;
 }
+
+.tak-move-headings {
+  display: grid;
+  grid-template-columns: 2.25rem repeat(2, minmax(0, 1fr));
+  padding: .42rem .35rem .22rem;
+  color: var(--color-text-muted, #607080);
+  font-size: .66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.tak-move-headings span { padding-inline: .5rem; }
+.move-list--tak .move-row { padding-block: .08rem; }
+.move-list--tak .move-row button { margin-inline-end: .22rem; padding-block: .3rem; }
 </style>
