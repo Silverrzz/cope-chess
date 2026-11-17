@@ -458,9 +458,18 @@ def _parse_puzzle_suite_block(value: str) -> list[dict[str, Any]]:
         raise ValueError("a puzzle suite can contain at most 5,000 puzzles")
     puzzles: list[dict[str, Any]] = []
     for number, line in lines:
-        if line.count("|") != 1:
-            raise ValueError(f"line {number} must use fen|solution")
-        fen, solution_text = (part.strip() for part in line.split("|", 1))
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) not in {2, 3}:
+            raise ValueError(f"line {number} must use fen|solution or fen|solution|elo")
+        fen, solution_text = parts[:2]
+        difficulty_elo = None
+        if len(parts) == 3:
+            try:
+                difficulty_elo = float(parts[2])
+            except ValueError as exc:
+                raise ValueError(f"line {number} has an invalid puzzle Elo") from exc
+            if not math.isfinite(difficulty_elo):
+                raise ValueError(f"line {number} has an invalid puzzle Elo")
         raw_solutions = [part.strip() for part in re.split(r"[,/]+", solution_text) if part.strip()]
         if not fen:
             raise ValueError(f"line {number} is missing a FEN")
@@ -485,7 +494,7 @@ def _parse_puzzle_suite_block(value: str) -> list[dict[str, Any]]:
                 raise ValueError(f"line {number}: {raw!r} is not a legal solution move") from exc
             if move.uci() not in solutions:
                 solutions.append(move.uci())
-        puzzles.append({"fen": board.fen(), "solutions": solutions, "title": ""})
+        puzzles.append({"fen": board.fen(), "solutions": solutions, "difficulty_elo": difficulty_elo})
     return puzzles
 
 

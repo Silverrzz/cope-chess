@@ -6,7 +6,7 @@ import secrets
 import sqlite3
 from io import StringIO
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 import chess
 import chess.pgn
@@ -45,6 +45,7 @@ from .registry import EventDeletion, EventModule, register_event_module
 
 
 MODULE_KEY = "puzzle-gauntlet"
+SEQUEL_MODULE_KEY = "puzzle-gauntlet-2"
 MODULE_VERSION = 1
 PUZZLE_GAUNTLET_TRANSITION_MS = 2000
 _UCI_MOVE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$", re.IGNORECASE)
@@ -129,9 +130,17 @@ class GauntletCheerPayload(BaseModel):
     side: Literal["left", "right"]
 
 
+def _is_gauntlet(event: EventRecord | None) -> TypeGuard[EventRecord]:
+    return (
+        event is not None
+        and event.handler_key in {MODULE_KEY, SEQUEL_MODULE_KEY}
+        and event.handler_version == MODULE_VERSION
+    )
+
+
 def _required_event(connection: sqlite3.Connection, event_id: int, *, lock: bool = False) -> EventRecord:
     event = get_event(connection, event_id, lock=lock)
-    if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
+    if not _is_gauntlet(event):
         raise HTTPException(status_code=404, detail="Puzzle Gauntlet event not found.")
     return event
 
@@ -839,7 +848,7 @@ def _register_api(app: FastAPI) -> None:
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         event = get_event_by_slug(connection, slug)
-        if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
+        if not _is_gauntlet(event):
             raise HTTPException(status_code=404, detail="Puzzle Gauntlet event not found.")
         if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
             raise HTTPException(status_code=401, detail="Admin session required.")
@@ -869,7 +878,7 @@ def _register_api(app: FastAPI) -> None:
         ):
             raise HTTPException(status_code=429, detail="Cheer rate limit exceeded.")
         event = get_event_by_slug(connection, slug)
-        if event is None or event.handler_key != MODULE_KEY or event.handler_version != MODULE_VERSION:
+        if not _is_gauntlet(event):
             raise HTTPException(status_code=404, detail="Puzzle Gauntlet event not found.")
         if not web_app._event_is_public(event) and not web_app._admin_request_authenticated(request):
             raise HTTPException(status_code=401, detail="Admin session required.")
@@ -1273,32 +1282,34 @@ def _register_api(app: FastAPI) -> None:
         return _json({"status": payload.action, "message": f"Gauntlet {payload.action} applied."})
 
 
-def _provision(connection: sqlite3.Connection) -> int:
+def _provision(connection: sqlite3.Connection, *, sequel: bool = False) -> int:
+    key = SEQUEL_MODULE_KEY if sequel else MODULE_KEY
+    title = "Puzzle Gauntlet 2" if sequel else "Puzzle Gauntlet"
     event_id = create_event(
         connection,
-        slug="puzzle-gauntlet",
-        handler_key=MODULE_KEY,
+        slug=key,
+        handler_key=key,
         handler_version=MODULE_VERSION,
-        title="Puzzle Gauntlet",
-        subtitle="",
-        summary="",
+        title=title,
+        subtitle="Engine survival, one puzzle at a time" if sequel else "",
+        summary="Engines face the August filtered suite in order of estimated puzzle difficulty." if sequel else "",
         description="",
         rules="Every active engine searches the same position independently. Engines that miss the accepted move are eliminated. If every engine misses, the round is void and everyone survives. A sole survivor wins immediately; if the puzzle list is exhausted, every remaining engine wins.",
         status="draft",
         featured=True,
         theme={
-            "primary": "#8b5cf6",
-            "accent": "#22d3ee",
-            "background": "#090713",
-            "surface": "#151126",
+            "primary": "#a78bfa" if sequel else "#8b5cf6",
+            "accent": "#fcb985" if sequel else "#22d3ee",
+            "background": "#130b21" if sequel else "#090713",
+            "surface": "#251435" if sequel else "#151126",
             "text": "#f8f4ff",
         },
-        config={"module": MODULE_KEY},
+        config={"module": key},
         state={"phase": "countdown", "rounds": [], "winner_ids": []},
     )
     suite_id = create_opening_suite(
         connection,
-        name=f"Puzzle Gauntlet #{event_id}",
+        name=f"{title} #{event_id}",
         description="Puzzle Gauntlet runtime positions",
     )
     connection.execute(
@@ -1325,6 +1336,19 @@ register_event_module(
         public_payload=_public_payload,
         admin_payload=_admin_payload,
         register_api=_register_api,
+        reset=reset_puzzle_gauntlet,
+        deletion_resources=_deletion_resources,
+    )
+)
+
+register_event_module(
+    EventModule(
+        key=SEQUEL_MODULE_KEY,
+        label="Puzzle Gauntlet 2",
+        version=MODULE_VERSION,
+        provision=lambda connection: _provision(connection, sequel=True),
+        public_payload=_public_payload,
+        admin_payload=_admin_payload,
         reset=reset_puzzle_gauntlet,
         deletion_resources=_deletion_resources,
     )

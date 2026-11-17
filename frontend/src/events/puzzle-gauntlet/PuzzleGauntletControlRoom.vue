@@ -246,7 +246,7 @@ function toLocalDateTime(value: string | null): string {
 <template>
   <div class="gauntlet-control">
     <section class="command-deck panel">
-      <div class="command-brand"><span class="puzzle-glyph"><i></i></span><div><small>Event module</small><strong>Puzzle Gauntlet</strong></div></div>
+      <div class="command-brand"><span class="puzzle-glyph"><i></i></span><div><small>Event module</small><strong>{{ detail.event.title }}</strong></div></div>
       <nav><button type="button" :class="{ active: tab === 'puzzles' }" @click="tab = 'puzzles'"><AppIcon name="book-open" :size="14" />Builder <span>{{ payload.puzzles.length }}</span></button><button type="button" :class="{ active: tab === 'field' }" @click="tab = 'field'"><AppIcon name="engine" :size="14" />Engine field <span>{{ payload.entries.length }}</span></button><button type="button" :class="{ active: tab === 'run' }" @click="tab = 'run'"><AppIcon name="radio" :size="14" />Run of show</button></nav>
       <form class="publish-control" @submit.prevent="saveVisibility"><label><input v-model="visibility.published" type="checkbox"><span>{{ visibility.published ? "Public" : "Private" }}</span></label><button class="button button--secondary button--small" type="submit" :disabled="!!pending">{{ pending === "visibility" ? "Saving…" : "Save" }}</button></form>
     </section>

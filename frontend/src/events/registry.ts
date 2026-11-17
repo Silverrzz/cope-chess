@@ -47,12 +47,15 @@ registerEventComponents("engine-relay-finale", 1, {
   admin: EngineRelayControlRoom,
 });
 
-registerEventComponents("puzzle-gauntlet", 1, {
+const puzzleGauntletViews = {
   public: PuzzleGauntletBroadcast,
   publicPresentation: "immersive",
   archive: PuzzleGauntletArchiveHero,
   admin: PuzzleGauntletControlRoom,
-});
+} satisfies EventComponents;
+
+registerEventComponents("puzzle-gauntlet", 1, puzzleGauntletViews);
+registerEventComponents("puzzle-gauntlet-2", 1, puzzleGauntletViews);
 
 registerEventComponents("duck-vs-fish", 1, {
   public: DuckVsFishBroadcast,

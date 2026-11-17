@@ -391,7 +391,7 @@ onBeforeUnmount(() => {
           <div class="card-heading"><span class="step-mark"><AppIcon name="upload" :size="19" /></span><div><span class="eyebrow">Import</span><h2>Create a puzzle suite</h2><p>Uses the Puzzle Gauntlet format and move validation.</p></div></div>
           <form @submit.prevent="createSuite">
             <label>Suite name<input v-model="importForm.name" maxlength="120" required placeholder="Tactical candidates · September" /></label>
-            <label>Puzzle block<span class="format-chip">fen|solution</span><textarea v-model="importForm.puzzles" rows="18" required placeholder="r1bq1rk1/pp3ppp/2n1pn2/2bp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9|Nxd5" /></label>
+            <label>Puzzle block<span class="format-chip">fen|solution or fen|solution|elo</span><textarea v-model="importForm.puzzles" rows="18" required placeholder="r1bq1rk1/pp3ppp/2n1pn2/2bp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9|Nxd5" /></label>
             <div class="form-footer"><span>{{ formatNumber(importLineCount) }} non-empty lines</span><BaseButton variant="primary" type="submit" :loading="pending === 'import'" :disabled="!importForm.name.trim() || !importLineCount"><template #icon><AppIcon name="upload" :size="16" /></template>Import suite</BaseButton></div>
           </form>
         </section>
