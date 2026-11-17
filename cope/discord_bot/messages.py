@@ -39,9 +39,15 @@ def notification_text(fact: dict, origin: str) -> str:
         if data["uncertainty"] is not None:
             rating += f' +/- {data["uncertainty"]}'
         placement = f'#{data["rank"]}'
-        if data.get("version_delta") is not None:
+        label = "elo"
+        if kind == "rating_updated":
+            label = "elo adjusted"
+            previous_elo = data.get("previous_elo")
+            if previous_elo is not None:
+                placement += f', {data["elo"] - previous_elo:+d}'
+        elif data.get("version_delta") is not None:
             placement += f', {data["version_delta"]:+d}'
-        return f"{mentions} {engine} {title} elo: {rating} ({placement})"
+        return f"{mentions} {engine} {title} {label}: {rating} ({placement})"
     if kind == "event_started":
         url = f'{origin}/events/{fact["event_slug"]}'
         content = f"{engine} is included in {title}"
