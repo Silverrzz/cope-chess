@@ -13,6 +13,7 @@ import type { ChatMessage } from "@/components/public/types";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventDetailResponse } from "@/types/events";
+import PuzzlePair from "./PuzzlePair.vue";
 
 import type { GauntletEngineInfo, GauntletEntry, GauntletPayload, GauntletPuzzle, GauntletRound } from "./types";
 
@@ -836,6 +837,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 <template>
   <main class="gauntlet" :class="[`gauntlet--${view === 'arena' ? 'live' : isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`, { 'gauntlet--sequel': sequel }]">
     <div class="puzzle-pattern" aria-hidden="true"></div>
+    <PuzzlePair v-if="sequel && view === 'event' && !isLive && !isComplete" class="countdown-puzzle-pair" animated />
     <div v-if="confettiEnabled" class="confetti-layer" aria-hidden="true">
       <span v-for="burst in confettiBursts" :key="burst.id" class="confetti-burst" :class="`confetti-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%` }">
         <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--confetti-start-x': `${piece.startX}rem`, '--confetti-start-y': `${piece.startY}rem`, '--confetti-end-x': `${piece.endX}rem`, '--confetti-end-y': `${piece.endY}rem`, '--confetti-rotation': `${piece.rotation}deg`, '--confetti-delay': `${piece.delay}ms`, '--confetti-duration': `${piece.duration}ms`, '--confetti-size': `${piece.size}rem` }"></i>
@@ -870,7 +872,6 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
       <div class="countdown-copy">
         <h1 v-if="sequel"><span>Puzzle</span> Gauntlet <em>2</em></h1>
         <h1 v-else><span>Puzzle</span> Gauntlet</h1>
-        <p v-if="sequel" class="sequel-intro">{{ payload.puzzle_count }} tactical positions, ordered by puzzle Elo.</p>
       </div>
       <div v-if="countdownVisible" class="countdown-clock" aria-live="polite">
         <div v-for="part in countdown" :key="part.label">
@@ -1282,31 +1283,21 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
   background-image: radial-gradient(ellipse at 72% 40%, #5c31786b, transparent 65%), conic-gradient(from 90deg, #c1a3ff12 25%, transparent 0 50%, #c1a3ff12 0 75%, transparent 0);
   background-size: auto, 5rem 5rem;
 }
-.gauntlet--sequel .countdown-stage {
-  width: min(78rem, calc(100% - 3rem));
-  justify-content: stretch;
-  justify-items: start;
-  text-align: left;
-}
-.gauntlet--sequel .countdown-copy h1 {
-  max-width: 11ch;
-  font-size: clamp(3.1rem, 9vw, 8rem);
-  line-height: .94;
-}
 .gauntlet--sequel .countdown-copy h1 em { color: var(--cyan); font-style: normal; }
-.sequel-intro { margin: 1.25rem 0 .35rem; color: #dfd1eb; font-size: clamp(.9rem, 2vw, 1.2rem); }
 .gauntlet--sequel .countdown-schedule { color: #cbbad6; }
-.gauntlet--sequel .countdown-clock {
-  width: min(100%, 36rem);
-  gap: 0;
-  border: 1px solid #c1a3ff45;
-  border-radius: .8rem;
-  background: #1f132dd9;
+.countdown-puzzle-pair {
+  --pair-primary: var(--violet);
+  --pair-accent: var(--cyan);
+  --pair-surface: transparent;
+  position: absolute;
+  inset: 12% clamp(-3.5rem, 4vw, 6rem) auto auto;
+  width: clamp(12rem, 35vw, 31rem);
+  opacity: .18;
+  pointer-events: none;
+  transform: rotate(-14deg);
 }
-.gauntlet--sequel .countdown-clock div + div { border-left: 1px solid #c1a3ff30; }
-.gauntlet--sequel .countdown-clock strong { font-size: clamp(1.6rem, 6vw, 3.4rem); }
-.gauntlet--sequel .countdown-clock div span { font-size: clamp(.46rem, 1.5vw, .69rem); }
 @media (max-width: 36rem) {
-  .gauntlet--sequel .countdown-stage { width: calc(100% - 2.5rem); }
+  .countdown-puzzle-pair { inset: 8% -2rem auto auto; opacity: .12; }
+  .gauntlet--sequel .countdown-copy h1 { font-size: clamp(2.8rem, 10vw, 3.7rem); }
 }
 </style>

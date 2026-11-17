@@ -4,6 +4,7 @@ import { RouterLink } from "vue-router";
 
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
+import PuzzlePair from "./PuzzlePair.vue";
 
 const props = defineProps<{ summary: EventSummary; current?: boolean; nowMs: number }>();
 
@@ -48,7 +49,7 @@ function themeColor(key: string, fallback: string): string {
 <template>
   <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current, 'gauntlet-archive--sequel': sequel }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <div class="puzzle-field" aria-hidden="true"></div>
-    <div v-if="sequel" class="gauntlet-edition" aria-hidden="true"><span>2</span></div>
+    <PuzzlePair v-if="sequel" class="gauntlet-pair" />
     <div v-else class="gauntlet-mark" aria-hidden="true">
       <span></span><i></i>
       <svg class="gauntlet-puzzle" width="clamp(7rem, 13vw, 12rem)" height="clamp(7rem, 13vw, 12rem)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
@@ -58,7 +59,6 @@ function themeColor(key: string, fallback: string): string {
     <div class="gauntlet-copy">
       <span class="gauntlet-kicker"><AppIcon name="trophy" :size="16" />{{ current ? isLive ? "Live" : "Upcoming" : "Completed" }}</span>
       <h2>{{ event.title }}</h2>
-      <p v-if="sequel && event.subtitle" class="gauntlet-subtitle">{{ event.subtitle }}</p>
       <div v-if="current && remainingMs > 0" class="gauntlet-countdown" aria-label="Time until event">
         <span v-for="part in countdown" :key="part.label"><strong>{{ String(part.value).padStart(2, "0") }}</strong><small>{{ part.label }}</small></span>
       </div>
@@ -98,36 +98,24 @@ function themeColor(key: string, fallback: string): string {
   background: radial-gradient(ellipse at 77% 50%, color-mix(in srgb, var(--archive-primary) 26%, transparent), transparent 61%), var(--archive-background);
 }
 .gauntlet-archive--sequel .puzzle-field {
-  background-image: conic-gradient(from 90deg, #a78bfa20 25%, transparent 0 50%, #a78bfa20 0 75%, transparent 0);
+  background-image: conic-gradient(from 90deg, #a78bfa11 25%, transparent 0 50%, #a78bfa11 0 75%, transparent 0);
   background-size: 5rem 5rem;
   mask-image: linear-gradient(90deg, transparent 18%, black);
 }
 .gauntlet-archive--sequel .gauntlet-copy h2 { line-height: .92; }
-.gauntlet-subtitle { margin: 1.15rem 0 0; color: #ded0e9; font-size: clamp(.9rem, 2vw, 1.15rem); }
 .gauntlet-archive--sequel .gauntlet-kicker, .gauntlet-archive--sequel .gauntlet-meta strong { color: var(--archive-accent); }
 .gauntlet-archive--sequel .gauntlet-meta { color: #cbbad6; }
-.gauntlet-edition {
+.gauntlet-pair {
+  --pair-primary: var(--archive-primary);
+  --pair-accent: var(--archive-accent);
+  --pair-surface: var(--archive-surface);
   position: absolute;
   inset: 50% clamp(2rem, 10vw, 12rem) auto auto;
-  display: grid;
-  width: clamp(17rem, 31vw, 34rem);
-  aspect-ratio: 1;
-  place-items: center;
-  border: 1px solid #fcb98565;
-  border-radius: 16%;
-  background: linear-gradient(145deg, #a78bfa25, #25143590 45%, #fcb98520);
-  box-shadow: -1rem 1rem 0 #a78bfa15, -1rem 1rem 0 1px #a78bfa40, 0 2rem 6rem #090713a0;
-  transform: translateY(-50%) rotate(-12deg);
+  width: clamp(12rem, 29vw, 28rem);
+  transform: translateY(-50%) rotate(-8deg);
 }
-.gauntlet-edition span {
-  color: var(--archive-accent);
-  font-size: clamp(12rem, 25vw, 27rem);
-  font-weight: 900;
-  line-height: .85;
-  text-shadow: 0 0 2rem #fcb98535;
-}
-@media (max-width: 58rem) {
-  .gauntlet-archive--sequel { align-items: end; }
-  .gauntlet-edition { top: 37%; right: -4rem; opacity: .42; }
+@media (max-width: 46rem) {
+  .gauntlet-archive--sequel { align-content: center; gap: 1.25rem; }
+  .gauntlet-pair { position: static; width: clamp(8rem, 29vw, 13rem); margin-left: auto; transform: rotate(-8deg); }
 }
 </style>
