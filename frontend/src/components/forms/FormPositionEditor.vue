@@ -9,7 +9,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import type { ChessPositionAnswer } from '@/types/forms'
 
 const props = defineProps<{ modelValue?: unknown; id: string; disabled?: boolean | undefined }>()
-const emit = defineEmits<{ 'update:modelValue': [value: ChessPositionAnswer | undefined] }>()
+const emit = defineEmits<{ 'update:modelValue': [value: ChessPositionAnswer] }>()
 
 const EMPTY_FEN = '8/8/8/8/8/8/8/8 w - - 0 1'
 const pieces = [
@@ -37,12 +37,11 @@ const castlingRows = [
 
 const fen = ref(START_FEN)
 const fenInput = ref(START_FEN)
-const pgn = ref('')
 const tool = ref<Piece | 'move' | 'erase'>('move')
-const pending = ref<'fen' | 'pgn' | null>(null)
+const pending = ref(false)
 const error = ref('')
 const position = computed(() => parseFen(fen.value))
-const inactive = computed(() => props.disabled || pending.value !== null)
+const inactive = computed(() => props.disabled || pending.value)
 const editMode = computed(() => inactive.value ? 'disabled' : tool.value === 'move' ? 'move' : 'place')
 
 watch(() => props.modelValue, value => showPosition(value as ChessPositionAnswer | undefined), { immediate: true })
@@ -50,11 +49,10 @@ watch(() => props.modelValue, value => showPosition(value as ChessPositionAnswer
 function showPosition(value?: ChessPositionAnswer) {
   fen.value = value?.fen || START_FEN
   fenInput.value = fen.value
-  pgn.value = value?.pgn ?? ''
   error.value = ''
 }
 
-function setPosition(value?: ChessPositionAnswer) {
+function setPosition(value: ChessPositionAnswer) {
   showPosition(value)
   emit('update:modelValue', value)
 }
@@ -109,21 +107,21 @@ function setCastling(right: typeof castling[number]['right'], checked: boolean) 
   setPosition({ fen: positionFen(board) })
 }
 
-async function apply(kind: 'fen' | 'pgn') {
+async function importFen() {
   if (inactive.value) return
-  const input = (kind === 'fen' ? fenInput.value : pgn.value).trim()
+  const input = fenInput.value.trim()
   if (!input) {
-    error.value = kind === 'fen' ? 'Enter a FEN.' : 'Enter a PGN.'
+    error.value = 'Enter a FEN.'
     return
   }
-  pending.value = kind
+  pending.value = true
   error.value = ''
   try {
-    setPosition(await api.post<ChessPositionAnswer>('/api/forms/resources/position', { body: { [kind]: input } }))
+    setPosition(await api.post<ChessPositionAnswer>('/api/forms/resources/position', { body: { fen: input } }))
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not import the position.'
   } finally {
-    pending.value = null
+    pending.value = false
   }
 }
 </script>
@@ -184,28 +182,16 @@ async function apply(kind: 'fen' | 'pgn') {
         <div class="button-row">
           <BaseButton size="small" :disabled="inactive" @click="setPosition({ fen: START_FEN })">Starting position</BaseButton>
           <BaseButton size="small" :disabled="inactive" @click="setPosition({ fen: EMPTY_FEN })">Empty board</BaseButton>
-          <BaseButton v-if="modelValue" size="small" variant="ghost" :disabled="inactive" @click="setPosition()">Clear answer</BaseButton>
         </div>
 
         <div class="position-import">
           <label class="field">
             <span>FEN</span>
             <input :id="id" v-model="fenInput" class="input input--mono" type="text" maxlength="120" :disabled="inactive"
-              spellcheck="false" autocapitalize="off" @keydown.enter.prevent="apply('fen')">
+              spellcheck="false" autocapitalize="off" @keydown.enter.prevent="importFen">
           </label>
-          <BaseButton size="small" :disabled="inactive" :loading="pending === 'fen'" @click="apply('fen')">Import FEN</BaseButton>
+          <BaseButton size="small" :disabled="disabled" :loading="pending" @click="importFen">Import FEN</BaseButton>
         </div>
-
-        <details class="position-pgn">
-          <summary>Import PGN</summary>
-          <div class="position-import">
-            <label class="field">
-              <span>PGN game</span>
-              <textarea v-model="pgn" class="textarea input--mono" rows="4" maxlength="32000" :disabled="inactive" />
-            </label>
-            <BaseButton size="small" :disabled="inactive" :loading="pending === 'pgn'" @click="apply('pgn')">Use final position</BaseButton>
-          </div>
-        </details>
 
         <InlineFeedback :message="error" />
       </div>
@@ -290,15 +276,6 @@ async function apply(kind: 'fen' | 'pgn') {
 
 .position-import .field {
   width: 100%;
-}
-
-.position-pgn summary {
-  cursor: pointer;
-  font-size: 0.8125rem;
-}
-
-.position-pgn .position-import {
-  margin-top: var(--space-2);
 }
 
 @container (min-width: 34rem) {
