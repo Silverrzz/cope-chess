@@ -33,11 +33,18 @@ const loadError = ref('')
 const error = ref('')
 let refreshTimer: ReturnType<typeof setTimeout> | undefined
 let publicationTimer: ReturnType<typeof setTimeout> | undefined
+let loadSequence = 0
+let publicationSequence = 0
+let disposed = false
 const receipt = ref('')
 const manifest = computed(() => packet.value?.manifest)
 const endpoint = computed(() => '/api/quorum/ballots/' + encodeURIComponent(String(route.params.id)))
 const signedCount = computed(() => publications.value?.witnesses.filter(witness => witness.signed_at).length ?? 0)
 const open = computed(() => packet.value?.status === 'open')
+const fullTurnout = computed(() => {
+  const result = packet.value?.result
+  return Boolean(result && result.total === result.electorate)
+})
 const credential = computed(() => {
   const unlocked = unlockedCredential.value
   return unlocked && packet.value?.roster.members.includes(unlocked.commitment) ? unlocked : null
@@ -57,36 +64,41 @@ const dates = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyl
 
 async function load() {
   loadError.value = ''
+  clearTimeout(refreshTimer)
+  const sequence = ++loadSequence
   const path = endpoint.value
   try {
     const next = await api.get<BallotPackage>(path)
-    if (path !== endpoint.value) return
+    if (disposed || sequence !== loadSequence) return
+    const previousStatus = packet.value?.status
     verified.value = false
     packet.value = next
-    clearTimeout(refreshTimer)
     if (next.status !== 'completed') {
       const boundary = next.status === 'scheduled' ? next.manifest.opens_at : next.manifest.closes_at
-      refreshTimer = setTimeout(load, Math.min(2147483647, Math.max(1000, Date.parse(boundary) - Date.now() + 250)))
+      refreshTimer = setTimeout(load, Math.min(15000, Math.max(1000, Date.parse(boundary) - Date.now() + 250)))
     }
-    if (next.status === 'completed' || next.manifest.witnesses?.length) void loadPublications()
+    if (previousStatus !== next.status && (next.status === 'completed' || next.manifest.witnesses?.length)) void loadPublications()
   } catch (cause) {
-    if (path === endpoint.value) loadError.value = (cause as Error).message
+    if (disposed || sequence !== loadSequence) return
+    if (packet.value) refreshTimer = setTimeout(load, 15000)
+    else loadError.value = (cause as Error).message
   } finally {
-    if (path === endpoint.value) loading.value = false
+    if (!disposed && sequence === loadSequence) loading.value = false
   }
 }
 
 async function loadPublications() {
   clearTimeout(publicationTimer)
+  const sequence = ++publicationSequence
   const path = endpoint.value
   try {
     const data = await api.get<Publications>(path + '/publications')
-    if (path !== endpoint.value) return
+    if (disposed || path !== endpoint.value || sequence !== publicationSequence) return
     publications.value = data
     publicationError.value = ''
     if (packet.value?.result && data.witnesses.length && !data.certified) publicationTimer = setTimeout(loadPublications, 30000)
   } catch (cause) {
-    if (path === endpoint.value) publicationError.value = (cause as Error).message
+    if (!disposed && path === endpoint.value && sequence === publicationSequence) publicationError.value = (cause as Error).message
   }
 }
 
@@ -101,7 +113,11 @@ watch(endpoint, () => {
   loading.value = true
   void load()
 }, { immediate: true })
-onBeforeUnmount(() => { clearTimeout(refreshTimer); clearTimeout(publicationTimer) })
+onBeforeUnmount(() => {
+  disposed = true
+  clearTimeout(refreshTimer)
+  clearTimeout(publicationTimer)
+})
 
 async function audit() {
   const evidence = packet.value
@@ -133,8 +149,9 @@ async function cast() {
     const result = await response.json()
     if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : result.detail?.message ?? 'Could not submit the vote.')
     localStorage.setItem(quorumReceiptKey(evidence.manifest.id), result.nullifier)
-    if (path === endpoint.value) {
+    if (!disposed && path === endpoint.value) {
       receipt.value = result.nullifier
+      void load()
     }
   } catch (cause) {
     error.value = (cause as Error).message
@@ -155,7 +172,8 @@ async function cast() {
             <StatusBadge :tone="open ? 'success' : 'neutral'" :dot="open">
               {{ open ? 'Open' : packet.status === 'scheduled' ? 'Scheduled' : 'Completed' }}
             </StatusBadge>
-            <time :datetime="packet.status === 'scheduled' ? manifest.opens_at : manifest.closes_at" class="muted">
+            <span v-if="fullTurnout" class="muted">All voters voted</span>
+            <time v-else :datetime="packet.status === 'scheduled' ? manifest.opens_at : manifest.closes_at" class="muted">
               {{ packet.status === 'scheduled' ? 'Opens' : packet.result ? 'Closed' : 'Closes' }}
               {{ dates.format(new Date(packet.status === 'scheduled' ? manifest.opens_at : manifest.closes_at)) }}
             </time>
@@ -165,6 +183,10 @@ async function cast() {
         <h1 id="quorum-ballot-title">{{ manifest.title }}</h1>
         <p class="ballot-sheet__rationale">{{ manifest.rationale }}</p>
       </header>
+
+      <div v-if="open && packet.live_tally" class="ballot-sheet__section">
+        <QuorumTally :result="packet.live_tally" :poll="manifest.rule === 'report_only'" live />
+      </div>
 
       <section v-if="packet.result" class="ballot-sheet__section section-stack" aria-labelledby="quorum-results-title">
         <div class="ballot-sheet__toolbar">

@@ -1,25 +1,30 @@
 <script setup lang="ts">
-import type { BallotResult } from '@/quorum'
+import type { BallotResult, VoteTally } from '@/quorum'
 
-defineProps<{ result: BallotResult }>()
+const props = defineProps<{ result: BallotResult | VoteTally; live?: boolean; poll?: boolean }>()
 
 const motionColors = ['success', 'danger', 'text-muted']
 const pollColors = ['accent', 'success', 'warning', 'danger', 'text-muted']
 
-function voteColor(result: BallotResult, index: number) {
-  const colors = result.outcome === 'report_only' ? pollColors : motionColors
+function voteColor(index: number) {
+  const poll = props.poll || ('outcome' in props.result && props.result.outcome === 'report_only')
+  const colors = poll ? pollColors : motionColors
   return 'var(--color-' + colors[index % colors.length] + ')'
 }
 </script>
 
 <template>
-  <div class="ballot-result">
+  <div class="ballot-result" :class="{ 'ballot-result--live': live }">
+    <div v-if="live" class="ballot-result__caption">
+      <span>Live tally</span>
+      <span>{{ result.total }} of {{ result.electorate }} voted</span>
+    </div>
     <div class="ballot-result__bar" aria-hidden="true">
       <span v-for="(count, index) in result.counts" v-show="count > 0" :key="index"
-        :style="{ flexGrow: count, backgroundColor: voteColor(result, index) }" />
+        :style="{ flexGrow: count, backgroundColor: voteColor(index) }" />
     </div>
     <dl class="ballot-result__counts">
-      <div v-for="(option, index) in result.options" :key="index" :style="{ '--vote-color': voteColor(result, index) }">
+      <div v-for="(option, index) in result.options" :key="index" :style="{ '--vote-color': voteColor(index) }">
         <dt>{{ option }}</dt>
         <dd>{{ result.counts[index] }}</dd>
       </div>
@@ -64,4 +69,18 @@ function voteColor(result: BallotResult, index: number) {
   content: '';
 }
 .ballot-result__counts dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ballot-result--live { gap: var(--space-2); }
+.ballot-result__caption {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  color: var(--color-text-muted);
+  font-size: .8125rem;
+}
+.ballot-result__caption > :last-child { font-variant-numeric: tabular-nums; }
+.ballot-result--live .ballot-result__bar { height: .375rem; }
+.ballot-result--live .ballot-result__counts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+.ballot-result--live .ballot-result__counts > div { padding: 0; background: transparent; }
+.ballot-result--live dt, .ballot-result--live dd { font-size: .8125rem; }
 </style>

@@ -29,11 +29,14 @@ export interface Manifest {
   witnesses?: Witness[]
 }
 
-export interface BallotResult {
+export interface VoteTally {
   options: string[]
   counts: number[]
   total: number
   electorate: number
+}
+
+export interface BallotResult extends VoteTally {
   outcome: 'report_only' | 'quorum_not_met' | 'passed' | 'rejected'
 }
 
@@ -44,6 +47,7 @@ export interface BallotPackage {
   votes: SemaphoreProof[]
   status: 'scheduled' | 'open' | 'completed'
   result: BallotResult | null
+  live_tally?: VoteTally
 }
 
 export interface VoteEvidence {
@@ -113,7 +117,6 @@ async function verifyBallotContext(manifest: Manifest, roster: Roster) {
     && options.length >= 2 && options.length <= 20 && new Set(options).size === options.length
     && options.every(option => typeof option === 'string' && option.trim().length > 0 && Array.from(option).length <= 100),
   'Invalid ballot manifest.')
-  requireValid(Date.now() >= Date.parse(manifest.closes_at), 'Verification is available after voting closes.')
   return { options, scope: await ballotScope(manifest) }
 }
 
@@ -134,6 +137,8 @@ export async function verifyBallot(packet: BallotPackage) {
     'Results are available after voting closes.')
   const { options, scope } = await verifyBallotContext(manifest, roster)
   requireValid(Array.isArray(votes) && votes.length <= roster.members.length, 'Invalid ballot vote list.')
+  requireValid(votes.length === roster.members.length || Date.now() >= Date.parse(manifest.closes_at),
+    'Verification is available after voting closes.')
   const seen = new Set<string>()
   const counts = options.map(() => 0)
   for (const proof of votes) {
@@ -155,7 +160,7 @@ export async function verifyBallot(packet: BallotPackage) {
     'The published tally differs from the vote proofs.')
 }
 
-export async function verifyEvidence(value: unknown) {
+export async function verifyEvidence(value: unknown, loadBallot?: (id: string) => Promise<BallotPackage>) {
   requireValid(value && typeof value === 'object' && 'version' in value, 'Choose a Quorum ballot or vote proof JSON file.')
   if (value.version === 'cope-quorum-evidence/1') {
     const ballot = value as BallotPackage
@@ -165,6 +170,13 @@ export async function verifyEvidence(value: unknown) {
   if (value.version === 'cope-quorum-vote/1') {
     const vote = value as VoteEvidence
     const { options, scope } = await verifyBallotContext(vote.manifest, vote.roster)
+    if (Date.now() < Date.parse(vote.manifest.closes_at)) {
+      requireValid(loadBallot, 'Load the closed ballot to verify this proof before the scheduled deadline.')
+      const ballot = await loadBallot(vote.manifest.id)
+      requireValid(ballot.status === 'completed' && await ballotScope(ballot.manifest) === scope,
+        'Verification is available after voting closes.')
+      await verifyBallot(ballot)
+    }
     const choice = await verifyVote(vote.proof, vote.roster, options, scope)
     return { kind: 'vote' as const, title: vote.manifest.title, option: options[choice] }
   }

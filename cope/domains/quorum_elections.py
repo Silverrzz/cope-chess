@@ -197,21 +197,45 @@ def ballot_package(connection, ballot_id):
 
 
 def build_evidence(connection, row, now):
-    closed = now >= row["closes_at"]
-    votes = proof_rows(connection, row["id"]) if closed else []
+    manifest = row["manifest"]
     roster = row["roster"]
-    return {
+    electorate = len(roster["members"])
+    closed = now >= row["closes_at"]
+    live_tally = None
+    if not closed and now >= row["opens_at"]:
+        live_tally = current_tally(connection, row["id"], ballot_options(manifest), electorate)
+        closed = live_tally["total"] == electorate
+    votes = proof_rows(connection, row["id"]) if closed else []
+    evidence = {
         "version": "cope-quorum-evidence/1",
-        "manifest": row["manifest"],
+        "manifest": manifest,
         "roster": roster,
         "votes": votes,
         "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
-        "result": tally(row["manifest"], votes, len(roster["members"])) if closed else None,
+        "result": tally(manifest, votes, electorate) if closed else None,
     }
+    if live_tally is not None and not closed:
+        evidence["live_tally"] = live_tally
+    return evidence
+
+
+def ballot_options(manifest):
+    return manifest["options"] if manifest["rule"] == "report_only" else ["Support", "Oppose", "Abstain"]
+
+
+def current_tally(connection, ballot_id, options, electorate):
+    counts = [0] * len(options)
+    for row in connection.execute(
+        """SELECT proof->>'message' AS choice, count(*) AS total
+           FROM cope_quorum.votes WHERE ballot_id = ?::uuid GROUP BY choice""",
+        (str(ballot_id),),
+    ):
+        counts[int(row["choice"])] = row["total"]
+    return {"options": options, "counts": counts, "total": sum(counts), "electorate": electorate}
 
 
 def tally(manifest, votes, electorate):
-    options = manifest["options"] if manifest["rule"] == "report_only" else ["Support", "Oppose", "Abstain"]
+    options = ballot_options(manifest)
     counts = [0] * len(options)
     for proof in votes:
         counts[int(proof["message"])] += 1
@@ -253,7 +277,7 @@ def directory(connection):
     for row in connection.execute("SELECT * FROM cope_quorum.ballots ORDER BY opens_at DESC FOR SHARE"):
         evidence = build_evidence(connection, row, now)
         entries.append({**evidence["manifest"], "status": evidence["status"], "result": evidence["result"],
-                        "witnesses": witness_status(connection, evidence)})
+                        "live_tally": evidence.get("live_tally"), "witnesses": witness_status(connection, evidence)})
     return entries
 
 
@@ -271,7 +295,7 @@ def cast_vote(connection, ballot_id, proof):
         if accepted and accepted["proof"] == proof.model_dump():
             return {"position": accepted["position"], "nullifier": proof.nullifier}
         fail("quorum_voting_closed", "This ballot has closed.")
-    if int(proof.message) >= (len(manifest["options"]) if manifest["rule"] == "report_only" else 3):
+    if int(proof.message) >= len(ballot_options(manifest)):
         fail("quorum_invalid_option", "This option is outside the frozen ballot.", 422)
     connection.commit()
     if not proof_worker(row["roster"]["members"], proof, scope(["cope-quorum-ballot/1", manifest]))["valid"]:
@@ -291,6 +315,8 @@ def cast_vote(connection, ballot_id, proof):
         "SELECT coalesce(max(position), 0) + 1 AS position FROM cope_quorum.votes WHERE ballot_id = ?::uuid",
         (str(ballot_id),),
     ).fetchone()["position"]
+    if next_position > len(row["roster"]["members"]):
+        fail("quorum_voting_closed", "This ballot has closed.")
     connection.execute(
         """INSERT INTO cope_quorum.votes (ballot_id, position, nullifier, proof)
            VALUES (?::uuid, ?, ?, ?::jsonb)""",

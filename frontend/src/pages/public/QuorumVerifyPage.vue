@@ -39,11 +39,15 @@ async function verify() {
     } catch {
       throw new Error('This file contains invalid JSON.')
     }
-    const verified = await verifyEvidence(evidence)
+    let official: BallotPackage | undefined
+    const verified = await verifyEvidence(evidence, async id => {
+      official = await api.get<BallotPackage>('/api/quorum/ballots/' + id)
+      return official
+    })
     const fileEvidence = evidence as BallotPackage | VoteEvidence
     result.value = verified
     try {
-      const official = await api.get<BallotPackage>('/api/quorum/ballots/' + fileEvidence.manifest.id)
+      official ??= await api.get<BallotPackage>('/api/quorum/ballots/' + fileEvidence.manifest.id)
       ballotId.value = official.manifest.id
       if (official.status !== 'completed') {
         recordCheck.value = 'The COPE ballot is still open.'

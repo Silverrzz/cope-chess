@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
@@ -9,7 +9,7 @@ import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import type { BallotResult } from '@/quorum'
+import type { BallotResult, Manifest, VoteTally } from '@/quorum'
 import { resultLabels, resultTones, type WitnessStatus } from '@/quorum-results'
 import { readQuorumReceipt } from '@/quorum-voter'
 
@@ -19,7 +19,9 @@ interface BallotSummary {
   opens_at: string
   closes_at: string
   status: 'scheduled' | 'open' | 'completed'
+  rule: Manifest['rule']
   result: BallotResult | null
+  live_tally: VoteTally | null
   witnesses: WitnessStatus[]
 }
 
@@ -32,6 +34,8 @@ const loading = ref(true)
 const error = ref('')
 const dialog = ref<HTMLDialogElement>()
 const managingCredential = ref(false)
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const sections = computed(() => [
   { id: 'active', title: 'Active votes', ballots: ballots.value.filter(ballot => ballot.status !== 'completed'), empty: 'No active votes.' },
   { id: 'completed', title: 'Completed votes', ballots: ballots.value.filter(ballot => ballot.status === 'completed'), empty: 'No completed votes yet.' },
@@ -51,10 +55,11 @@ function openCredential() {
 }
 
 async function load() {
-  loading.value = true
+  loading.value = ballots.value.length === 0
   error.value = ''
   try {
     const directory = await api.get<{ ballots: BallotSummary[]; eligibility_check_available: boolean }>('/api/quorum')
+    if (disposed) return
     submittedBallots.value = new Set(directory.ballots
       .filter(ballot => ballot.status === 'open' && readQuorumReceipt(ballot.id))
       .map(ballot => ballot.id))
@@ -67,12 +72,17 @@ async function load() {
       await router.replace({ query })
     }
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not load Quorum.'
+    if (!ballots.value.length) error.value = cause instanceof Error ? cause.message : 'Could not load Quorum.'
   } finally {
     loading.value = false
+    if (!disposed && ballots.value.some(ballot => ballot.status !== 'completed')) refreshTimer = setTimeout(load, 15000)
   }
 }
 onMounted(load)
+onBeforeUnmount(() => {
+  disposed = true
+  clearTimeout(refreshTimer)
+})
 </script>
 
 <template>
@@ -101,9 +111,11 @@ onMounted(load)
               </StatusBadge>
             </header>
             <QuorumTally v-if="ballot.result" :result="ballot.result" />
+            <QuorumTally v-else-if="ballot.live_tally" :result="ballot.live_tally" :poll="ballot.rule === 'report_only'" live />
             <footer class="ballot-card__footer">
               <div class="ballot-card__meta muted">
-                <time :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
+                <time v-if="!ballot.result || ballot.result.total !== ballot.result.electorate"
+                  :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
                   {{ ballot.status === 'scheduled' ? 'Opens' : ballot.status === 'open' ? 'Closes' : 'Closed' }}
                   {{ dates.format(new Date(ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at)) }}
                 </time>
