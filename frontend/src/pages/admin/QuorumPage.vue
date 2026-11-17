@@ -4,6 +4,8 @@ import api from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import { fingerprint, type Founding } from '@/quorum'
+import { downloadQuorumFile } from '@/quorum-voter'
 
 type Subject = 'engine' | 'member' | 'poll'
 type Rule = 'majority' | 'unanimous_electorate' | 'unanimous_decisive' | 'report_only'
@@ -29,6 +31,11 @@ interface Setup {
 }
 
 const setup = ref<Setup>()
+type ElectionStatus = { genesis: Founding['genesis'] | null; signatures: Founding['signatures']; enrolled: number; published: string[] }
+const election = ref<ElectionStatus>()
+const foundingFingerprint = ref('')
+const foundingApproved = computed(() => Boolean(election.value?.genesis && Object.keys(election.value.signatures).length >= election.value.genesis.threshold))
+const isPublished = computed(() => election.value?.published.includes(selected.value) ?? false)
 const selected = ref('')
 interface DiscordUser { id: string; username: string; display_name: string }
 const role = ref('')
@@ -136,7 +143,7 @@ watch(witnessQuery, (value, _, cleanup) => {
 })
 
 function nominateUser(user: DiscordUser) {
-  if (nominees.value.length >= 12 || nominees.value.some(item => item.id === user.id)) return
+  if (nominees.value.length >= 4 || nominees.value.some(item => item.id === user.id)) return
   nominees.value.push({ id: user.id, label: user.display_name })
   witnessQuery.value = ''
 }
@@ -167,9 +174,35 @@ function createDraft() {
   }
 }
 
+async function loadElection() {
+  election.value = await api.get<ElectionStatus>('/api/admin/quorum/status')
+  foundingFingerprint.value = election.value.genesis ? await fingerprint(election.value.genesis) : ''
+}
+
+async function advance(action: 'freeze' | 'publish') {
+  busy.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    if (action === 'freeze') {
+      await api.post('/api/admin/quorum/founding')
+      notice.value = 'Roster frozen. Send the founding evidence to the independent witnesses for approval.'
+    } else {
+      await api.post('/api/admin/quorum/publish', { body: { draft_id: selected.value } })
+      notice.value = 'Ballot published for witness review. It appears in the public directory after three opening signatures.'
+    }
+    await loadElection()
+  } catch (cause) {
+    error.value = (cause as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
 async function load() {
   error.value = ''
   try {
+    await loadElection()
     setup.value = await api.get<Setup>('/api/admin/quorum')
     role.value = setup.value.enrollment_role_id ?? ''
     nominees.value = setup.value.witness_user_ids.map((id, index) => ({ id, label: setup.value?.witness_labels[id] ?? ("Witness " + (index + 1)) }))
@@ -192,7 +225,9 @@ async function save() {
       witness_user_ids: nominees.value.map(item => item.id),
       witness_labels: Object.fromEntries(nominees.value.map(item => [item.id, item.label])),
     } })
-    notice.value = 'Quorum setup saved.'
+    await loadElection()
+    await loadWitnesses()
+    notice.value = 'Quorum settings saved.'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not save Quorum setup.'
   } finally {
@@ -205,11 +240,11 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
 
 <template>
   <div class="page-stack">
-    <AdminPageHeader title="Quorum" description="Configure founding eligibility and prepare ballot drafts." />
+    <AdminPageHeader title="Quorum" description="Manage Discord enrollment, independent witnesses, and ballots." />
     <InlineFeedback :message="error" />
     <InlineFeedback :message="notice" tone="info" />
     <form v-if="setup" class="section-stack" @submit.prevent="save">
-      <fieldset class="panel panel__body section-stack" :disabled="busy">
+      <fieldset class="panel panel__body section-stack" :disabled="busy || Boolean(election?.genesis)">
         <h2>Founding eligibility</h2>
         <label class="field"><span>Discord role</span><select v-model="role" class="select">
           <option value="">No enrollment role</option>
@@ -219,7 +254,7 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
         <InlineFeedback :message="roleError" />
         <div v-if="roleError" class="button-row"><BaseButton size="small" @click="loadRoles">Retry role list</BaseButton></div>
       </fieldset>
-      <fieldset class="panel panel__body section-stack" :disabled="busy">
+      <fieldset class="panel panel__body section-stack" :disabled="busy || Boolean(election?.genesis)">
         <div class="toolbar toolbar--between">
           <h2>Independent witnesses</h2>
           <BaseButton size="small" variant="ghost" :to="{ name: 'quorum-witness' }">Witness registration page</BaseButton>
@@ -232,7 +267,7 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
         <ul v-if="foundUsers.length" class="witness-list">
           <li v-for="user in foundUsers" :key="user.id" class="toolbar toolbar--between">
             <span><strong>{{ user.display_name }}</strong> <span class="muted">@{{ user.username }}</span></span>
-            <BaseButton size="small" :disabled="nominees.length >= 12 || nominees.some(item => item.id === user.id)"
+            <BaseButton size="small" :disabled="nominees.length >= 4 || nominees.some(item => item.id === user.id)"
               @click="nominateUser(user)">Nominate</BaseButton>
           </li>
         </ul>
@@ -244,15 +279,40 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
         </ul>
         <p v-else class="muted">No nominees yet.</p>
       </fieldset>
+      <section v-if="election" class="panel panel__body section-stack">
+        <div class="toolbar toolbar--between">
+          <h2>Founding roster</h2>
+          <BaseButton size="small" :disabled="busy" @click="load()">Refresh status</BaseButton>
+        </div>
+        <p>{{ election.enrolled }} enrolled · {{ registered.length }} of 4 witness keys registered</p>
+        <div v-if="election.genesis" class="section-stack">
+          <p>{{ Object.keys(election.signatures).length }} of 3 required signatures</p>
+          <label class="field"><span>Proposed founding fingerprint</span><input class="input input--mono" :value="foundingFingerprint" readonly></label>
+          <div class="button-row">
+            <BaseButton @click="downloadQuorumFile('quorum-founding.json', JSON.stringify({ genesis: election.genesis, signatures: election.signatures }))">Download founding evidence</BaseButton>
+          </div>
+          <p class="muted">Each witness reviews the roster and shares the approved fingerprint through their own channel.</p>
+        </div>
+        <template v-else>
+          <p class="muted">Save the Discord role and four witness nominations. Freeze the roster once eligible voters have enrolled.</p>
+          <div class="button-row">
+            <BaseButton :disabled="busy || election.enrolled < 3 || registered.length !== 4" @click="advance('freeze')">Freeze founding roster</BaseButton>
+          </div>
+        </template>
+      </section>
       <fieldset class="panel panel__body section-stack" :disabled="busy">
         <div class="toolbar toolbar--between">
-          <h2>Ballot drafts</h2>
+          <h2>Ballots</h2>
           <BaseButton size="small" :disabled="setup.drafts.length >= 32" @click="createDraft">New draft</BaseButton>
         </div>
         <template v-if="draft">
           <label class="field"><span>Draft</span><select class="select" :value="selected" @change="switchDraft(($event.target as HTMLSelectElement).value)">
             <option v-for="item in setup.drafts" :key="item.id" :value="item.id">{{ item.title || 'Untitled draft' }}</option>
           </select></label>
+          <div v-if="isPublished" class="button-row">
+            <BaseButton :to="{ name: 'quorum-ballot', params: { id: selected } }">Open published ballot</BaseButton>
+          </div>
+          <template v-else>
           <label class="field"><span>Title</span><input v-model="draft.title" class="input" required maxlength="160"></label>
           <label class="field"><span>Rationale</span><textarea v-model="draft.rationale" class="textarea" required maxlength="4000" /></label>
           <div class="form-grid">
@@ -275,7 +335,11 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
             <label class="field"><span>Closes</span><input v-model="closing" class="input" type="datetime-local" required></label>
           </div>
           <label v-if="draft.subject === 'poll'" class="field"><span>Options, one per line</span><textarea v-model="options" class="textarea" required maxlength="2020" /></label>
-          <div class="button-row"><BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton></div>
+          <div class="button-row">
+            <BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton>
+            <BaseButton v-if="foundingApproved" size="small" :disabled="!draft.title" @click="advance('publish')">Publish saved draft</BaseButton>
+          </div>
+          </template>
         </template>
         <p v-else class="muted">No ballot drafts yet.</p>
       </fieldset>

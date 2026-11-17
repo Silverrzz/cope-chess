@@ -3,6 +3,7 @@ import binascii
 
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -16,16 +17,14 @@ from cope.application import ApplicationError
 from cope.application.contracts import Input
 from cope.adapters.http.forms import require_origin
 from cope.control.api import database
-from cope.db import get_platform_settings
-from cope.discord_bot.accounts import DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
+from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
+from cope.domains import quorum_elections as elections
 from cope.domains.quorum import Setup, connect_witness, read_setup, save_setup, witness_keys
 
 
-def require_access(request, connection):
+def require_secure(request):
     if not request_is_secure_or_local(request):
         raise HTTPException(403, "Quorum requires HTTPS.")
-    if get_platform_settings(connection).privatise_platform and not admin_session_role(request):
-        raise HTTPException(401, "Sign in to access Quorum on this private platform.")
 
 
 def require_admin(request):
@@ -75,7 +74,7 @@ class WitnessRegistration(Input):
 
 
 def witness_nominee(request, connection):
-    require_access(request, connection)
+    require_secure(request)
     account = request_account(request, connection)
     setup, _ = read_setup(connection)
     if not account or account.id not in setup.witness_user_ids:
@@ -90,44 +89,127 @@ def witness_statement(request, account_id):
     return f"cope-quorum-witness/1\n{origin}\n{account_id}\n"
 
 
+def check_role(request, connection):
+    require_secure(request)
+    account = request_account(request, connection)
+    if not account:
+        raise HTTPException(401, "Connect your Discord account to check eligibility.")
+    setup, _ = read_setup(connection)
+    if not setup.enrollment_role_id:
+        raise HTTPException(409, "An enrollment role has not been configured.")
+    runtime = request.app.state.discord_runtime
+    settings = runtime.read_settings()
+    connection.commit()
+    if setup.enrollment_role_id == settings["guild_id"]:
+        raise HTTPException(503, "Quorum requires a specific role other than @everyone.")
+    try:
+        require_guild_role(runtime, settings, account.id, setup.enrollment_role_id)
+    except ApplicationError as error:
+        message = ("Your Discord account does not have the Quorum enrollment role."
+                   if error.status == 403 else "Quorum’s Discord role check is temporarily unavailable.")
+        raise HTTPException(error.status, message) from error
+    current = request_account(request, connection)
+    latest, _ = read_setup(connection)
+    if not current or current.id != account.id:
+        raise HTTPException(401, "Your Discord session changed. Sign in again.")
+    if latest.enrollment_role_id != setup.enrollment_role_id or runtime.read_settings()["guild_id"] != settings["guild_id"]:
+        raise HTTPException(409, "Quorum’s enrollment settings changed. Check eligibility again.")
+    return account, setup.enrollment_role_id
+
+
+def election_call(operation, *args):
+    try:
+        return operation(*args)
+    except ApplicationError as error:
+        raise HTTPException(error.status, error.message) from error
+
+
 def register_quorum_routes(app):
     @app.get("/api/quorum")
     def public_directory(request: Request, connection=Depends(database)):
-        if not request_is_secure_or_local(request):
-            raise HTTPException(403, "Quorum requires HTTPS.")
+        require_secure(request)
         setup, _ = read_setup(connection)
         return {
-            "ballots": [],
+            "ballots": elections.directory(connection),
             "eligibility_check_available": setup.enrollment_role_id is not None,
         }
 
     @app.get("/api/quorum/eligibility")
     def check_eligibility(request: Request, connection=Depends(database)):
-        require_access(request, connection)
-        account = request_account(request, connection)
-        if not account:
-            raise HTTPException(401, "Connect your Discord account to check eligibility.")
-        setup, _ = read_setup(connection)
-        if not setup.enrollment_role_id:
-            raise HTTPException(409, "An enrollment role has not been configured.")
-        runtime = request.app.state.discord_runtime
-        settings = runtime.read_settings()
+        account, _ = check_role(request, connection)
+        origin = request.app.state.discord_runtime.origin
+        row = connection.execute(
+            "SELECT commitment FROM cope_quorum.credentials WHERE account_id = ?", (account.id,),
+        ).fetchone()
+        return JSONResponse({
+            "eligible": True,
+            "scope": elections.enrollment_scope(origin, request.cookies[COOKIE]),
+            "commitment": row["commitment"] if row else None,
+            "founding_open": elections.founding_state(connection)["genesis"] is None,
+        }, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/quorum/enroll")
+    def enroll_credential(payload: elections.Enrollment, request: Request, connection=Depends(database)):
+        require_origin(request)
+        account, role = check_role(request, connection)
+        if int(payload.commitment) >= elections.FIELD or payload.proof.message != "0":
+            raise HTTPException(422, "Invalid enrollment statement.")
+        origin = request.app.state.discord_runtime.origin
+        scope = elections.enrollment_scope(origin, request.cookies[COOKIE])
         connection.commit()
-        if setup.enrollment_role_id == settings["guild_id"]:
-            raise HTTPException(503, "Quorum requires a specific role other than @everyone.")
-        try:
-            require_guild_role(runtime, settings, account.id, setup.enrollment_role_id)
-        except ApplicationError as error:
-            message = ("Your Discord account does not have the Quorum enrollment role."
-                       if error.status == 403 else "Quorum’s Discord role check is temporarily unavailable.")
-            raise HTTPException(error.status, message) from error
-        current = request_account(request, connection)
-        latest, _ = read_setup(connection)
-        if not current or current.id != account.id:
-            raise HTTPException(401, "Your Discord session changed. Sign in again.")
-        if latest.enrollment_role_id != setup.enrollment_role_id or runtime.read_settings()["guild_id"] != settings["guild_id"]:
-            raise HTTPException(409, "Quorum’s enrollment settings changed. Check eligibility again.")
-        return JSONResponse({"eligible": True}, headers={"Cache-Control": "no-store"})
+        if not election_call(elections.proof_worker, [payload.commitment], payload.proof, scope)["valid"]:
+            raise HTTPException(422, "The credential possession proof is invalid.")
+        if request_account(request, connection) != account:
+            raise HTTPException(401, "The Discord session changed.")
+        election_call(elections.enroll, connection, account.id, payload.commitment, role)
+        return {"commitment": payload.commitment}
+
+    @app.get("/api/quorum/founding")
+    def founding(request: Request, connection=Depends(database)):
+        require_secure(request)
+        return elections.founding_state(connection)
+
+    @app.post("/api/admin/quorum/founding")
+    def freeze_founding(request: Request, connection=Depends(database)):
+        require_admin(request)
+        origin = request.app.state.discord_runtime.origin
+        if not origin:
+            raise HTTPException(503, "Configure Cope’s public origin first.")
+        return election_call(elections.freeze_genesis, connection, origin)
+
+    @app.post("/api/quorum/founding/endorse")
+    def sign_founding(payload: elections.Endorsement, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(elections.endorse_genesis, connection, payload)
+
+    @app.get("/api/quorum/ballots/{ballot_id}")
+    def ballot_package(ballot_id: UUID, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return election_call(elections.ballot_package, connection, ballot_id)
+
+    @app.get("/api/admin/quorum/status")
+    def election_status(request: Request, connection=Depends(database)):
+        require_admin(request)
+        return elections.admin_status(connection)
+
+    @app.post("/api/admin/quorum/publish")
+    def publish_ballot(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
+        require_admin(request)
+        return election_call(elections.publish, connection, payload.draft_id)
+
+    @app.post("/api/quorum/ballots/{ballot_id}/votes")
+    def cast(ballot_id: UUID, payload: elections.Proof, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(elections.cast_vote, connection, ballot_id, payload)
+
+    @app.post("/api/quorum/ballots/{ballot_id}/endorse")
+    def sign_checkpoint(ballot_id: UUID, payload: elections.Endorsement, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        election_call(elections.endorse_ballot, connection, ballot_id, payload)
+        return {"signed": True}
 
     @app.get("/api/admin/quorum")
     def get_setup(request: Request, connection=Depends(database)):
@@ -205,7 +287,7 @@ def register_quorum_routes(app):
         guild = request.app.state.discord_runtime.read_settings()["guild_id"]
         if payload.enrollment_role_id and payload.enrollment_role_id == guild:
             raise HTTPException(422, "Select a specific Discord role other than @everyone.")
-        updated = save_setup(connection, payload)
+        updated = election_call(save_setup, connection, payload)
         if updated is None:
             raise HTTPException(409, "Quorum setup changed. Reload before saving.")
         return updated

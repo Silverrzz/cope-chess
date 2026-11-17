@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import api from '@/api/client'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
+import { downloadQuorumFile } from '@/quorum-voter'
 import { discordHeaders, discordLogin, useDiscordSession } from '@/stores/discord'
 
 const discord = useDiscordSession()
@@ -12,6 +13,40 @@ const publicKey = ref('')
 const signature = ref('')
 const error = ref('')
 const busy = ref(false)
+const evidence = ref<unknown>()
+const ballotId = ref('')
+const signedCheckpoint = ref('')
+const signingError = ref('')
+const signingNotice = ref('')
+const signing = ref(false)
+const evidencePath = computed(() => ballotId.value.trim() ? '/api/quorum/ballots/' + encodeURIComponent(ballotId.value.trim()) : '/api/quorum/founding')
+const evidenceUrl = computed(() => location.origin + evidencePath.value)
+
+async function downloadEvidence() {
+  signingError.value = ''
+  try {
+    evidence.value = await api.get(evidencePath.value)
+    downloadQuorumFile('quorum-evidence.json', JSON.stringify(evidence.value))
+  } catch (cause) { signingError.value = (cause as Error).message }
+}
+
+async function submitSignature() {
+  signing.value = true
+  signingError.value = ''
+  signingNotice.value = ''
+  try {
+    const response = await fetch(evidencePath.value + '/endorse', {
+      method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(JSON.parse(signedCheckpoint.value)),
+    })
+    if (!response.ok) {
+      const result = await response.json()
+      throw new Error(typeof result.detail === 'string' ? result.detail : result.detail?.message ?? 'The signature was rejected.')
+    }
+    signedCheckpoint.value = ''
+    signingNotice.value = 'Witness signature recorded.'
+  } catch (cause) { signingError.value = (cause as Error).message }
+  finally { signing.value = false }
+}
 
 async function load() {
   error.value = ''
@@ -53,7 +88,7 @@ onMounted(load)
 
 <template>
   <div class="page-container page-container--narrow page-stack">
-    <PageHeader title="Witness key registration" description="Register an Ed25519 key generated on your independent witness host." />
+    <PageHeader title="Quorum witness tools" description="Register your independent signing key and endorse the public record." />
     <InlineFeedback :message="error" />
     <section v-if="discord.loaded && !discord.account" class="panel panel__body section-stack">
       <p>Connect the Discord account nominated to operate a witness.</p>
@@ -65,7 +100,7 @@ onMounted(load)
     <section v-else-if="state?.public_key" class="panel panel__body section-stack">
       <h2>Signing key registered</h2>
       <code>{{ state.public_key }}</code>
-      <p class="muted">This key is registered for setup. Checkpoint signing is pending.</p>
+      <p class="muted">Use the matching private key on your independent host to sign the founding roster and ballot checkpoints.</p>
     </section>
     <form v-else-if="state" class="panel panel__body section-stack" @submit.prevent="register">
       <p>Download your enrollment statement and move it to your witness host. Generate a fresh key there and sign the statement exactly as downloaded.</p>
@@ -78,6 +113,27 @@ openssl pkeyutl -sign -rawin -inkey quorum-witness.pem -in quorum-witness.txt | 
       <label class="field"><span>Statement signature (base64)</span><input v-model="signature" class="input input--mono" maxlength="88" required></label>
       <div class="button-row"><BaseButton type="submit" variant="primary" :loading="busy">Register signing key</BaseButton></div>
     </form>
+    <section class="panel panel__body section-stack">
+      <h2>Sign evidence on your witness host</h2>
+      <p>Review the approved roster and fingerprint through your community’s independent channels. Keep your signing key and witness state on your own host.</p>
+      <label class="field"><span>Ballot UUID (leave blank for the founding roster)</span>
+        <input v-model="ballotId" class="input input--mono" maxlength="36" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="button-row"><BaseButton @click="downloadEvidence">Download evidence</BaseButton></div>
+      <p class="muted">Run these commands from the frontend directory of a trusted COPE checkout with Node 24 and its npm dependencies installed.</p>
+      <pre class="witness-commands">node quorum-witness.mjs inspect {{ evidenceUrl }}
+node quorum-witness.mjs {{ ballotId.trim() ? 'sign' : 'sign-genesis' }} {{ evidenceUrl }} TRUSTED_GENESIS_SHA quorum-witness.pem witness-state.json{{ ballotId.trim() ? ' APPROVED_MANIFEST_SHA' : '' }}</pre>
+      <p v-if="ballotId.trim()" class="muted">Sign the empty opening checkpoint first. Sign updates using the same state. Sign the final checkpoint after the deadline on your witness host.</p>
+      <p class="muted">Add <code>--submit</code> to send the signature directly from your service, or paste the signed JSON below.</p>
+      <form class="section-stack" @submit.prevent="submitSignature">
+        <label class="field"><span>Signed JSON from your witness host</span>
+          <textarea v-model="signedCheckpoint" class="textarea input--mono" maxlength="2048" required />
+        </label>
+        <div class="button-row"><BaseButton type="submit" variant="primary" :loading="signing">Submit witness signature</BaseButton></div>
+      </form>
+      <InlineFeedback :message="signingError" />
+      <InlineFeedback :message="signingNotice" tone="info" />
+    </section>
   </div>
 </template>
 

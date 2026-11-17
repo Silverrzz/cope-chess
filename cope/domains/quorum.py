@@ -8,6 +8,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from cope.application.contracts import Input
 from cope.discord_bot.accounts import snowflake
 
+STATE_LOCK = "SELECT pg_advisory_xact_lock(692784510936)"
 SETUP_KEY = "quorum.setup.v1"
 WITNESS_KEYS = "quorum.witness-keys.v1"
 
@@ -43,8 +44,8 @@ class BallotDraft(Input):
 class Setup(Input):
     revision: int = Field(default=0, strict=True, ge=0)
     enrollment_role_id: str | None = None
-    witness_user_ids: list[str] = Field(default_factory=list, max_length=12)
-    witness_labels: dict[str, str] = Field(default_factory=dict, max_length=12)
+    witness_user_ids: list[str] = Field(default_factory=list, max_length=4)
+    witness_labels: dict[str, str] = Field(default_factory=dict, max_length=4)
     drafts: list[BallotDraft] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
@@ -63,36 +64,42 @@ class Setup(Input):
 
 
 def read_setup(connection):
-    row = connection.execute("SELECT value FROM platform_settings WHERE key = ?", (SETUP_KEY,)).fetchone()
+    row = connection.execute("SELECT value FROM cope_quorum.settings WHERE key = ?", (SETUP_KEY,)).fetchone()
     raw = row["value"] if row else None
     return (Setup.model_validate_json(raw) if raw is not None else Setup()), raw
 
 
 def save_setup(connection, proposed: Setup):
-    connection.execute("SELECT pg_advisory_xact_lock(692784510936)")
-    current, raw = read_setup(connection)
+    connection.execute(STATE_LOCK)
+    current, _ = read_setup(connection)
     if proposed.revision != current.revision:
         return None
+    if proposed.enrollment_role_id != current.enrollment_role_id and connection.execute(
+            "SELECT 1 FROM cope_quorum.credentials LIMIT 1").fetchone():
+        raise ApplicationError("quorum_role_locked", "The enrollment role is fixed once a credential has enrolled.", 409)
+    if proposed.witness_user_ids != current.witness_user_ids and connection.execute(
+            "SELECT 1 FROM cope_quorum.settings WHERE key = 'quorum.genesis.v1'").fetchone():
+        raise ApplicationError("quorum_witnesses_locked", "The witness set is fixed after founding.", 409)
     updated = proposed.model_copy(update={"revision": current.revision + 1})
     row = connection.execute(
-        """INSERT INTO platform_settings (key, value) VALUES (?, ?)
+        """INSERT INTO cope_quorum.settings (key, value) VALUES (?, ?)
            ON CONFLICT (key) DO UPDATE SET value = excluded.value
-           WHERE platform_settings.value = ?
            RETURNING value""",
-        (SETUP_KEY, updated.model_dump_json(), raw),
+        (SETUP_KEY, updated.model_dump_json()),
     ).fetchone()
     if row is None:
         return None
     connection.commit()
     return updated
 
+
 def witness_keys(connection) -> dict[str, str]:
-    row = connection.execute("SELECT value FROM platform_settings WHERE key = ?", (WITNESS_KEYS,)).fetchone()
+    row = connection.execute("SELECT value FROM cope_quorum.settings WHERE key = ?", (WITNESS_KEYS,)).fetchone()
     return json.loads(row["value"]) if row else {}
 
 
 def connect_witness(connection, account_id: str, public_key: str) -> None:
-    connection.execute("SELECT pg_advisory_xact_lock(692784510936)")
+    connection.execute(STATE_LOCK)
     setup, _ = read_setup(connection)
     if account_id not in setup.witness_user_ids:
         raise ApplicationError("witness_nomination_required", "This account is not a witness nominee.", 403)
@@ -104,7 +111,7 @@ def connect_witness(connection, account_id: str, public_key: str) -> None:
         raise ApplicationError("witness_key_conflict", "This account or signing key is already registered.", 409)
     keys[account_id] = public_key
     connection.execute(
-        """INSERT INTO platform_settings (key, value) VALUES (?, ?)
+        """INSERT INTO cope_quorum.settings (key, value) VALUES (?, ?)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
         (WITNESS_KEYS, json.dumps(keys)),
     )

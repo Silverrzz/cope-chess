@@ -4,6 +4,9 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
+RUN npm prune --omit=dev --ignore-scripts
+
+FROM node:24-bookworm-slim AS quorum-node
 
 FROM docker:28-cli AS docker-tools
 
@@ -64,13 +67,19 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     printf '%s\n' 'deb [signed-by=/usr/share/keyrings/cope-postgresql.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/cope-postgresql.list \
     && apt-get update \
-    && apt-get install --no-install-recommends -y postgresql-client-17
+    && apt-get install --no-install-recommends -y libstdc++6 postgresql-client-17
 ARG COPE_BUILD_VERSION=0.1.0
 ENV COPE_BUILD_VERSION=${COPE_BUILD_VERSION}
 COPY pyproject.toml MANIFEST.in ./
 COPY cope/ ./cope/
 COPY data/engines/ ./data/engines/
 COPY --from=frontend-build /src/cope/web/frontend_dist/ ./cope/web/frontend_dist/
+COPY --from=quorum-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-build /src/frontend/node_modules/ /opt/quorum/node_modules/
+COPY frontend/quorum-verifier.mjs /opt/quorum/quorum-verifier.mjs
+ENV COPE_QUORUM_VERIFIER=/opt/quorum/quorum-verifier.mjs
+ADD --chmod=0644 --checksum=sha256:1e9e1e3ad9917164bc96c751e32fae724400b92063f5a2cfd22ca64674bf4f96 https://snark-artifacts.pse.dev/semaphore/4.13.0/semaphore-10.wasm /app/cope/web/frontend_dist/assets/quorum/semaphore-10.wasm
+ADD --chmod=0644 --checksum=sha256:f644af6753be9d48454d8f9bb74bf2e9a416dd7d1a704c3cf1d50e535969a19a https://snark-artifacts.pse.dev/semaphore/4.13.0/semaphore-10.zkey /app/cope/web/frontend_dist/assets/quorum/semaphore-10.zkey
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     printf '%s\n' "${COPE_BUILD_VERSION}" > cope/BUILD_VERSION \
     && python -m pip install ".[database,web,runner,worker]" \

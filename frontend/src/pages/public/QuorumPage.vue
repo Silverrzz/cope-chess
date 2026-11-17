@@ -9,7 +9,8 @@ interface BallotSummary {
   id: string
   title: string
   closes_at: string
-  status: 'open' | 'completed'
+  status: 'scheduled' | 'open' | 'awaiting_witnesses' | 'completed'
+  result: { total: number; electorate: number; outcome: string } | null
 }
 const ballots = ref<BallotSummary[]>([])
 const loading = ref(true)
@@ -41,10 +42,15 @@ onMounted(load)
     <div v-else class="content-grid">
       <section v-for="section in ['open', 'completed'] as const" :key="section" class="panel panel__body section-stack">
         <h2>{{ section === 'open' ? 'Active votes' : 'Completed votes' }}</h2>
-        <template v-if="ballots.some(ballot => ballot.status === section)">
-          <article v-for="ballot in ballots.filter(item => item.status === section)" :key="ballot.id">
-            <h3>{{ ballot.title }}</h3>
-            <p class="muted">{{ section === 'open' ? 'Closes' : 'Closed' }} {{ dates.format(new Date(ballot.closes_at)) }}</p>
+        <template v-if="ballots.some(ballot => (ballot.status === 'completed') === (section === 'completed'))">
+          <article v-for="ballot in ballots.filter(item => (item.status === 'completed') === (section === 'completed'))" :key="ballot.id">
+            <h3><RouterLink :to="{ name: 'quorum-ballot', params: { id: ballot.id } }">{{ ballot.title }}</RouterLink></h3>
+            <p class="muted">
+              {{ ballot.status === 'scheduled' ? 'Scheduled · Closes' : ballot.status === 'open' ? 'Closes' : 'Closed' }}
+              {{ dates.format(new Date(ballot.closes_at)) }}
+              <template v-if="ballot.result"> · {{ ballot.result.total }} of {{ ballot.result.electorate }} voted</template>
+              <template v-if="ballot.status === 'awaiting_witnesses'"> · Awaiting result signatures</template>
+            </p>
           </article>
         </template>
         <p v-else class="muted">{{ section === 'open' ? 'No active votes.' : 'No completed votes yet.' }}</p>
