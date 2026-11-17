@@ -122,7 +122,9 @@ watch(linkedEntryId, (entryId) => {
   focusedId.value = entryId;
 }, { immediate: true });
 const winners = computed(() => payload.value.entries.filter((entry) => entry.winner));
-const showConfettiButtons = computed(() => (!isLive.value && !isComplete.value) || (isComplete.value && winners.value.length > 0));
+const showConfettiButtons = computed(() => props.view !== "arena" && (
+  (!isLive.value && !isComplete.value) || (isComplete.value && winners.value.length > 0)
+));
 const selectedRound = computed(() => payload.value.rounds.find((round) => round.puzzle_id === selectedRoundId.value) ?? null);
 const viewingHistory = computed(() => selectedRound.value !== null);
 const viewedPuzzle = computed<GauntletPuzzle | null>(() => {
