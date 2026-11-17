@@ -162,7 +162,7 @@ async function save(publish = false) {
     notice.value = 'Quorum settings saved.'
     if (publish) {
       await api.post('/api/admin/quorum/publish', { body: { draft_id: selected.value, revision: setup.value.revision } })
-      notice.value = 'Ballot published. Voting follows the scheduled opening and closing times.'
+      notice.value = 'Ballot published.'
     }
     await loadElection()
   } catch (cause) {
@@ -177,7 +177,7 @@ onMounted(() => { void load(); void loadRoles() })
 
 <template>
   <div class="page-stack">
-    <AdminPageHeader title="Quorum" description="Manage Discord enrollment and ballots." />
+    <AdminPageHeader title="Quorum" />
     <InlineFeedback :message="error" />
     <InlineFeedback :message="notice" tone="info" />
     <form v-if="setup" ref="quorumForm" class="section-stack" @submit.prevent="save()">
@@ -234,7 +234,7 @@ onMounted(() => { void load(); void loadRoles() })
               <BaseButton variant="primary" :disabled="!draft.title" @click="save(true)">Save and publish ballot</BaseButton>
               <BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton>
             </div>
-            <p class="muted">Publishing locks the ballot and its voter list. At least three voters must be enrolled.</p>
+            <p v-if="election && election.enrolled < 3" class="muted">Publishing requires at least three enrolled voters.</p>
           </template>
         </template>
         <p v-else class="muted">No ballot drafts yet.</p>

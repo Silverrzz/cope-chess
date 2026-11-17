@@ -119,7 +119,7 @@ async function cast() {
 
       <section v-if="packet.result" class="panel panel__body section-stack">
         <h2>Results</h2>
-        <p>{{ resultLabels[packet.result.outcome] }}</p>
+        <p v-if="packet.result.outcome !== 'report_only'">{{ resultLabels[packet.result.outcome] }}</p>
         <ul class="section-stack">
           <li v-for="(option, index) in packet.result.options" :key="option">{{ option }} <strong>{{ packet.result.counts[index] }}</strong></li>
         </ul>
@@ -143,7 +143,6 @@ async function cast() {
             <option value="" disabled>Select an option</option>
             <option v-for="(option, index) in ballotOptions(manifest)" :key="option" :value="String(index)">{{ option }}</option>
           </select></label>
-            <p class="muted">You can vote once. Anonymous vote proofs are published after voting closes.</p>
           <div class="button-row"><BaseButton type="submit" variant="primary" :loading="busy">Cast vote</BaseButton></div>
         </form>
       </section>

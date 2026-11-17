@@ -36,10 +36,9 @@ onMounted(load)
 
 <template>
   <div class="page-container page-stack">
-    <PageHeader title="Quorum" description="Community decisions on engines and voting membership." />
+    <PageHeader title="Quorum" />
     <section v-if="enrollmentAvailable && !loading && !error" class="panel panel__body section-stack">
       <h2>Enroll to vote</h2>
-      <p class="muted">Enroll once to vote in future ballots. Discord checks eligibility, and your browser keeps your private voting credential.</p>
       <QuorumCredential />
     </section>
     <ContentState v-if="loading" kind="loading" compact title="Loading ballots" />

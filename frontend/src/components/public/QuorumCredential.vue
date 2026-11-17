@@ -13,8 +13,8 @@ const stored = ref(localStorage.getItem(credentialStorage))
 const backup = ref<File>()
 const restoring = ref(Boolean(props.members && !stored.value))
 const password = ref('')
+const passwordEditing = ref(false)
 const error = ref('')
-const notice = ref('')
 const busy = ref(false)
 const finished = ref(false)
 
@@ -24,9 +24,12 @@ onMounted(async () => {
 })
 
 async function continueWithCredential() {
+  if (busy.value || !password.value) return
+  const submittedPassword = password.value
+  password.value = ''
+  passwordEditing.value = false
   busy.value = true
   error.value = ''
-  notice.value = ''
   try {
     if (backup.value && backup.value.size > 4096) throw new Error('This credential backup is too large.')
     const encrypted = backup.value ? await backup.value.text() : stored.value
@@ -34,7 +37,7 @@ async function continueWithCredential() {
       '/api/quorum/eligibility', { headers: discordHeaders })
     if (!encrypted && (!eligibility || eligibility.commitment))
       throw new Error('Restore the encrypted backup for your enrolled credential.')
-    const credential = encrypted ? await unlockCredential(password.value, encrypted) : await createCredential(password.value)
+    const credential = encrypted ? await unlockCredential(submittedPassword, encrypted) : await createCredential(submittedPassword)
     stored.value = localStorage.getItem(credentialStorage)
     if (props.members && !props.members.includes(credential.commitment)) throw new Error('This credential was not enrolled when the ballot was published.')
     if (eligibility?.commitment && eligibility.commitment !== credential.commitment)
@@ -47,8 +50,6 @@ async function continueWithCredential() {
       localStorage.setItem(credentialStorage, encrypted)
       stored.value = encrypted
     }
-    password.value = ''
-    notice.value = props.members ? 'Credential unlocked.' : 'Credential enrolled. Save your encrypted backup for use on another device.'
     finished.value = true
     emit('unlocked', credential)
   } catch (cause) {
@@ -62,13 +63,12 @@ async function continueWithCredential() {
 <template>
   <div class="section-stack">
     <div v-if="!members && discord.loaded && !discord.account" class="section-stack">
-      <p class="muted">Connect Discord so COPE can confirm you hold the enrollment role.</p>
       <div v-if="discord.enabled" class="button-row">
         <BaseButton :href="discordLogin()" variant="primary">Connect Discord</BaseButton>
       </div>
       <p v-else class="muted">Discord sign-in is unavailable.</p>
     </div>
-    <form v-else-if="!finished && (members || discord.account)" class="section-stack" @submit.prevent="continueWithCredential">
+    <form v-else-if="!finished && (members || discord.account)" class="section-stack" autocomplete="off" @submit.prevent="continueWithCredential">
       <p v-if="members && !stored" class="muted">Restore the encrypted backup you saved when you enrolled.</p>
       <div v-if="!restoring" class="button-row">
         <BaseButton size="small" variant="ghost" @click="restoring = true">Restore a backup</BaseButton>
@@ -77,17 +77,18 @@ async function continueWithCredential() {
         <input type="file" accept=".json,application/json" :disabled="busy" @change="backup = ($event.target as HTMLInputElement).files?.[0]">
       </label>
       <label class="field"><span>{{ stored || backup || members ? 'Credential password' : 'Choose a credential password' }}</span>
-        <input v-model="password" class="input" type="password" :autocomplete="stored || backup || members ? 'current-password' : 'new-password'"
+        <input v-model="password" class="input" type="password" autocomplete="off"
+          data-1p-ignore data-lpignore="true" data-bwignore :readonly="!passwordEditing" @focus="passwordEditing = true"
           :minlength="stored || backup || members ? 1 : 12" maxlength="256" required :disabled="busy">
       </label>
       <div class="button-row">
-        <BaseButton type="submit" variant="primary" :loading="busy" :disabled="Boolean(members && !stored && !backup)">
+        <BaseButton type="submit" variant="primary" :loading="busy" :disabled="!password || Boolean(members && !stored && !backup)">
           {{ members ? 'Unlock credential' : 'Enroll credential' }}
         </BaseButton>
       </div>
     </form>
     <InlineFeedback :message="error" />
-    <InlineFeedback :message="notice" tone="info" />
+    <InlineFeedback v-if="finished && !members" message="Enrolled" tone="info" />
     <div v-if="stored" class="button-row">
       <BaseButton size="small" @click="downloadQuorumFile('quorum-credential.json', stored)">Download encrypted backup</BaseButton>
     </div>
