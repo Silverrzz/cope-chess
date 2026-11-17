@@ -15,9 +15,9 @@ const repositoryUrl = computed(() => session.session?.repository_url ?? "");
 
 const navItems = [
   { label: "Ratings", to: "/ratings" },
+  { label: "Events", to: "/events" },
   { label: "Tournaments", to: "/tournaments" },
   { label: "Engines", to: "/engines" },
-  { label: "Events", to: "/events" },
   { label: "Forms", to: "/forms" },
   { label: "Quorum", to: "/quorum" },
 ];
