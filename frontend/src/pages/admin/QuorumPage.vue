@@ -31,6 +31,7 @@ interface Setup {
 }
 
 const setup = ref<Setup>()
+const quorumForm = ref<HTMLFormElement>()
 type ElectionStatus = { genesis: Founding['genesis'] | null; signatures: Founding['signatures']; enrolled: number; published: string[] }
 const election = ref<ElectionStatus>()
 const foundingFingerprint = ref('')
@@ -179,19 +180,23 @@ async function loadElection() {
   foundingFingerprint.value = election.value.genesis ? await fingerprint(election.value.genesis) : ''
 }
 
-async function advance(action: 'freeze' | 'publish') {
+async function refreshStatus() {
+  error.value = ''
+  try {
+    await Promise.all([loadElection(), loadWitnesses()])
+  } catch (cause) {
+    error.value = (cause as Error).message
+  }
+}
+
+async function freezeRoster() {
   busy.value = true
   error.value = ''
   notice.value = ''
   try {
-    if (action === 'freeze') {
-      await api.post('/api/admin/quorum/founding')
-      notice.value = 'Roster frozen. Send the founding evidence to the independent witnesses for approval.'
-    } else {
-      await api.post('/api/admin/quorum/publish', { body: { draft_id: selected.value } })
-      notice.value = 'Ballot published for witness review. It appears in the public directory after three opening signatures.'
-    }
+    await api.post('/api/admin/quorum/founding')
     await loadElection()
+    notice.value = 'Roster frozen. Send the founding evidence to the independent witnesses for approval.'
   } catch (cause) {
     error.value = (cause as Error).message
   } finally {
@@ -212,8 +217,9 @@ async function load() {
   }
 }
 
-async function save() {
+async function save(publish = false) {
   if (!setup.value) return
+  if (publish && (!foundingApproved.value || isPublished.value || !quorumForm.value?.reportValidity())) return
   busy.value = true
   error.value = ''
   notice.value = ''
@@ -225,9 +231,13 @@ async function save() {
       witness_user_ids: nominees.value.map(item => item.id),
       witness_labels: Object.fromEntries(nominees.value.map(item => [item.id, item.label])),
     } })
+    notice.value = 'Quorum settings saved.'
+    if (publish) {
+      await api.post('/api/admin/quorum/publish', { body: { draft_id: selected.value } })
+      notice.value = 'Ballot sent for witness review. Share the ballot link with your witnesses for opening signatures.'
+    }
     await loadElection()
     await loadWitnesses()
-    notice.value = 'Quorum settings saved.'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not save Quorum setup.'
   } finally {
@@ -243,7 +253,7 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
     <AdminPageHeader title="Quorum" description="Manage Discord enrollment, independent witnesses, and ballots." />
     <InlineFeedback :message="error" />
     <InlineFeedback :message="notice" tone="info" />
-    <form v-if="setup" class="section-stack" @submit.prevent="save">
+    <form v-if="setup" ref="quorumForm" class="section-stack" @submit.prevent="save()">
       <fieldset class="panel panel__body section-stack" :disabled="busy || Boolean(election?.genesis)">
         <h2>Founding eligibility</h2>
         <label class="field"><span>Discord role</span><select v-model="role" class="select">
@@ -282,7 +292,7 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
       <section v-if="election" class="panel panel__body section-stack">
         <div class="toolbar toolbar--between">
           <h2>Founding roster</h2>
-          <BaseButton size="small" :disabled="busy" @click="load()">Refresh status</BaseButton>
+          <BaseButton size="small" :disabled="busy" @click="refreshStatus">Refresh status</BaseButton>
         </div>
         <p>{{ election.enrolled }} enrolled · {{ registered.length }} of 4 witness keys registered</p>
         <div v-if="election.genesis" class="section-stack">
@@ -294,9 +304,9 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
           <p class="muted">Each witness reviews the roster and shares the approved fingerprint through their own channel.</p>
         </div>
         <template v-else>
-          <p class="muted">Save the Discord role and four witness nominations. Freeze the roster once eligible voters have enrolled.</p>
+          <p class="muted">Freeze the roster once at least three voters have enrolled and all four witnesses have registered their keys.</p>
           <div class="button-row">
-            <BaseButton :disabled="busy || election.enrolled < 3 || registered.length !== 4" @click="advance('freeze')">Freeze founding roster</BaseButton>
+            <BaseButton :disabled="busy || election.enrolled < 3 || registered.length !== 4" @click="freezeRoster">Freeze founding roster</BaseButton>
           </div>
         </template>
       </section>
@@ -311,6 +321,7 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
           </select></label>
           <div v-if="isPublished" class="button-row">
             <BaseButton :to="{ name: 'quorum-ballot', params: { id: selected } }">Open published ballot</BaseButton>
+            <BaseButton :to="{ name: 'quorum-witness', query: { ballot: selected } }">Ballot signing link</BaseButton>
           </div>
           <template v-else>
           <label class="field"><span>Title</span><input v-model="draft.title" class="input" required maxlength="160"></label>
@@ -336,9 +347,14 @@ onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
           </div>
           <label v-if="draft.subject === 'poll'" class="field"><span>Options, one per line</span><textarea v-model="options" class="textarea" required maxlength="2020" /></label>
           <div class="button-row">
+            <BaseButton variant="primary" :disabled="!foundingApproved || !draft.title" @click="save(true)">Save and publish ballot</BaseButton>
             <BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton>
-            <BaseButton v-if="foundingApproved" size="small" :disabled="!draft.title" @click="advance('publish')">Publish saved draft</BaseButton>
           </div>
+          <p v-if="!election?.genesis" class="muted">Freeze the founding roster and collect three witness signatures before publishing.</p>
+          <p v-else-if="!foundingApproved" class="muted">
+            Publishing requires three founding roster signatures. {{ Object.keys(election.signatures).length }} of 3 received.
+          </p>
+          <p v-else class="muted">After publishing, collect three opening signatures. Voting opens at the scheduled time once those signatures are in.</p>
           </template>
         </template>
         <p v-else class="muted">No ballot drafts yet.</p>

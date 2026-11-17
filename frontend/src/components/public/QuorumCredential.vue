@@ -11,6 +11,7 @@ const emit = defineEmits<{ unlocked: [credential: Credential] }>()
 const discord = useDiscordSession()
 const stored = ref(localStorage.getItem(credentialStorage))
 const backup = ref<File>()
+const restoring = ref(Boolean(props.members && !stored.value))
 const password = ref('')
 const error = ref('')
 const notice = ref('')
@@ -70,7 +71,10 @@ async function continueWithCredential() {
     </div>
     <form v-else-if="!finished && (members || discord.account)" class="section-stack" @submit.prevent="continueWithCredential">
       <p v-if="members && !stored" class="muted">Restore the encrypted backup you saved when you enrolled.</p>
-      <label class="field"><span>Restore encrypted backup</span>
+      <div v-if="!restoring" class="button-row">
+        <BaseButton size="small" variant="ghost" @click="restoring = true">Restore a backup</BaseButton>
+      </div>
+      <label v-else class="field"><span>Restore encrypted backup</span>
         <input type="file" accept=".json,application/json" :disabled="busy" @change="backup = ($event.target as HTMLInputElement).files?.[0]">
       </label>
       <label class="field"><span>{{ stored || backup || members ? 'Credential password' : 'Choose a credential password' }}</span>

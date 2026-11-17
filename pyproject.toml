@@ -49,5 +49,6 @@ include = ["cope*"]
     "frontend_dist/*",
     "frontend_dist/assets/*",
     "frontend_dist/assets/engines/stockfish-19.0.1-lite/*",
+    "frontend_dist/assets/quorum/*",
     "frontend_dist/audio/*",
 ]

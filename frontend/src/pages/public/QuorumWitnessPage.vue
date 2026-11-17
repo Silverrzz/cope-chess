@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import api from '@/api/client'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -13,8 +14,11 @@ const publicKey = ref('')
 const signature = ref('')
 const error = ref('')
 const busy = ref(false)
-const evidence = ref<unknown>()
-const ballotId = ref('')
+const route = useRoute()
+const ballotId = computed(() => {
+  const id = route.query.ballot
+  return typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id) ? id : ''
+})
 const signedCheckpoint = ref('')
 const signingError = ref('')
 const signingNotice = ref('')
@@ -25,8 +29,8 @@ const evidenceUrl = computed(() => location.origin + evidencePath.value)
 async function downloadEvidence() {
   signingError.value = ''
   try {
-    evidence.value = await api.get(evidencePath.value)
-    downloadQuorumFile('quorum-evidence.json', JSON.stringify(evidence.value))
+    const evidence = await api.get(evidencePath.value)
+    downloadQuorumFile('quorum-evidence.json', JSON.stringify(evidence))
   } catch (cause) { signingError.value = (cause as Error).message }
 }
 
@@ -88,49 +92,62 @@ onMounted(load)
 
 <template>
   <div class="page-container page-container--narrow page-stack">
-    <PageHeader title="Quorum witness tools" description="Register your independent signing key and endorse the public record." />
+    <PageHeader title="Quorum witness signing" />
     <InlineFeedback :message="error" />
     <section v-if="discord.loaded && !discord.account" class="panel panel__body section-stack">
       <p>Connect the Discord account nominated to operate a witness.</p>
       <div v-if="discord.enabled" class="button-row">
-        <BaseButton :href="discordLogin('/quorum/witness')" variant="primary">Connect Discord</BaseButton>
+        <BaseButton :href="discordLogin()" variant="primary">Connect Discord</BaseButton>
       </div>
       <p v-else class="muted">Discord sign-in is unavailable.</p>
     </section>
     <section v-else-if="state?.public_key" class="panel panel__body section-stack">
       <h2>Signing key registered</h2>
-      <code>{{ state.public_key }}</code>
+      <details><summary>View public key</summary><code>{{ state.public_key }}</code></details>
       <p class="muted">Use the matching private key on your independent host to sign the founding roster and ballot checkpoints.</p>
     </section>
     <form v-else-if="state" class="panel panel__body section-stack" @submit.prevent="register">
+      <h2>Register your signing key</h2>
       <p>Download your enrollment statement and move it to your witness host. Generate a fresh key there and sign the statement exactly as downloaded.</p>
       <div class="button-row"><BaseButton @click="downloadStatement">Download statement</BaseButton></div>
       <pre class="witness-commands">openssl genpkey -algorithm ED25519 -out quorum-witness.pem
 openssl pkey -in quorum-witness.pem -pubout -out quorum-witness.pub
-openssl pkeyutl -sign -rawin -inkey quorum-witness.pem -in quorum-witness.txt | openssl base64 -A</pre>
+openssl pkeyutl -sign -rawin -inkey quorum-witness.pem -in quorum-witness.txt -out quorum-witness.sig
+openssl base64 -A -in quorum-witness.sig</pre>
       <p class="muted">Keep the private key on the witness host.</p>
-      <label class="field"><span>Public key PEM</span><textarea v-model="publicKey" class="textarea input--mono" maxlength="250" required /></label>
-      <label class="field"><span>Statement signature (base64)</span><input v-model="signature" class="input input--mono" maxlength="88" required></label>
+      <label class="field">
+        <span>Public key PEM</span>
+        <textarea v-model="publicKey" class="textarea input--mono" maxlength="250" spellcheck="false" required />
+        <small class="muted">Paste all of quorum-witness.pub, including the BEGIN PUBLIC KEY and END PUBLIC KEY lines.</small>
+      </label>
+      <label class="field">
+        <span>Statement signature (Base64)</span>
+        <input v-model="signature" class="input input--mono" maxlength="88" autocomplete="off" spellcheck="false" required>
+        <small class="muted">Paste the single line printed by the final OpenSSL command.</small>
+      </label>
       <div class="button-row"><BaseButton type="submit" variant="primary" :loading="busy">Register signing key</BaseButton></div>
     </form>
     <section class="panel panel__body section-stack">
-      <h2>Sign evidence on your witness host</h2>
-      <p>Review the approved roster and fingerprint through your community’s independent channels. Keep your signing key and witness state on your own host.</p>
-      <label class="field"><span>Ballot UUID (leave blank for the founding roster)</span>
-        <input v-model="ballotId" class="input input--mono" maxlength="36" autocomplete="off" spellcheck="false">
-      </label>
+      <div class="toolbar toolbar--between">
+        <h2>{{ ballotId ? 'Ballot checkpoint' : 'Founding roster' }}</h2>
+        <BaseButton v-if="ballotId" :to="{ name: 'quorum-ballot', params: { id: ballotId } }" size="small" variant="ghost">View ballot</BaseButton>
+      </div>
+      <p>Review the evidence and sign it on your independent witness host.</p>
       <div class="button-row"><BaseButton @click="downloadEvidence">Download evidence</BaseButton></div>
       <p class="muted">Run these commands from the frontend directory of a trusted COPE checkout with Node 24 and its npm dependencies installed.</p>
       <pre class="witness-commands">node quorum-witness.mjs inspect {{ evidenceUrl }}
 node quorum-witness.mjs {{ ballotId.trim() ? 'sign' : 'sign-genesis' }} {{ evidenceUrl }} TRUSTED_GENESIS_SHA quorum-witness.pem witness-state.json{{ ballotId.trim() ? ' APPROVED_MANIFEST_SHA' : '' }}</pre>
       <p v-if="ballotId.trim()" class="muted">Sign the empty opening checkpoint first. Sign updates using the same state. Sign the final checkpoint after the deadline on your witness host.</p>
       <p class="muted">Add <code>--submit</code> to send the signature directly from your service, or paste the signed JSON below.</p>
-      <form class="section-stack" @submit.prevent="submitSignature">
-        <label class="field"><span>Signed JSON from your witness host</span>
-          <textarea v-model="signedCheckpoint" class="textarea input--mono" maxlength="2048" required />
-        </label>
-        <div class="button-row"><BaseButton type="submit" variant="primary" :loading="signing">Submit witness signature</BaseButton></div>
-      </form>
+      <details class="section-stack">
+        <summary>Submit a signature manually</summary>
+        <form class="section-stack" @submit.prevent="submitSignature">
+          <label class="field"><span>Signed JSON from your witness host</span>
+            <textarea v-model="signedCheckpoint" class="textarea input--mono" maxlength="2048" required />
+          </label>
+          <div class="button-row"><BaseButton type="submit" variant="primary" :loading="signing">Submit witness signature</BaseButton></div>
+        </form>
+      </details>
       <InlineFeedback :message="signingError" />
       <InlineFeedback :message="signingNotice" tone="info" />
     </section>
@@ -138,6 +155,8 @@ node quorum-witness.mjs {{ ballotId.trim() ? 'sign' : 'sign-genesis' }} {{ evide
 </template>
 
 <style scoped>
+summary { cursor: pointer; }
+details[open] > summary { margin-bottom: var(--space-3); }
 .witness-commands {
   overflow-x: auto;
   border-radius: var(--radius-md);

@@ -11,6 +11,7 @@ self.onmessage = async ({ data }) => {
       })
     self.postMessage({ proof })
   } catch (error) {
-    self.postMessage({ error: error instanceof Error ? error.message : 'Could not generate a vote proof.' })
+    const message = error instanceof WebAssembly.CompileError ? 'Could not load the voting proof files. Refresh Quorum and try again.' : 'Could not generate your voting proof. Try again.'
+    self.postMessage({ error: message })
   }
 }

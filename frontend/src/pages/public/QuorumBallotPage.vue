@@ -155,7 +155,7 @@ async function cast() {
       </section>
       <section v-else-if="open" class="panel panel__body section-stack">
         <h2>Cast a vote</h2>
-        <p v-if="!verified" class="muted">Verify the ballot first. <RouterLink :to="{ name: 'quorum-tools' }">Enrollment and credential help</RouterLink></p>
+        <p v-if="!verified" class="muted">Verify the ballot first.</p>
         <QuorumCredential v-else-if="!credential" :members="packet.genesis.members" @unlocked="credential = $event" />
         <form v-else class="section-stack" @submit.prevent="cast">
           <label class="field"><span>Your choice</span><select v-model="choice" class="select" required :disabled="busy">
