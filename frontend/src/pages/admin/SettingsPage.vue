@@ -6,6 +6,7 @@ import { useToast } from '@/composables/useToast'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import { errorText } from '@/components/admin/format'
+import BaseButton from '@/components/ui/BaseButton.vue'
 
 interface GitHost {
   id: number
