@@ -6,7 +6,8 @@ import type { Config as ChessgroundConfig } from 'chessground/config'
 import type { DrawBrushes, DrawShape } from 'chessground/draw'
 import { read as readGroundFen } from 'chessground/fen'
 import type { Key, PiecesDiff, Role } from 'chessground/types'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { key2pos, pos2key } from 'chessground/util'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -46,7 +47,7 @@ const props = withDefaults(defineProps<{
   arrows?: BoardArrow[]
   rings?: string[]
   lastMove?: string
-  selectable?: boolean
+  editMode?: 'move' | 'place' | 'disabled'
 }>(), {
   fen: 'startpos',
   moves: () => [],
@@ -65,10 +66,13 @@ const emit = defineEmits<{
   'update:modelValue': [ply: number]
   position: [value: { ply: number; fen: string }]
   'select-square': [square: Key]
+  'move-piece': [from: Key, to: Key]
 }>()
 
 const viewer = ref<HTMLElement | null>(null)
 const board = ref<HTMLElement | null>(null)
+const keyboardSquare = ref<Key | null>(null)
+const keyboardHelpId = useId()
 const { boardAnnotationsEnabled } = useViewerSettings()
 let ground: ChessgroundApi | null = null
 let annotationDrag: { pointerId: number; orig: Key; dest: Key | undefined } | null = null
@@ -78,6 +82,12 @@ const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const currentFen = computed(() => positionFen(position.value))
+const keyboardSquareDescription = computed(() => {
+  const square = keyboardSquare.value
+  if (!square) return ''
+  const piece = readGroundFen(currentFen.value).get(square)
+  return `${square}, ${piece ? `${piece.color} ${piece.role}` : 'empty'}`
+})
 const material = computed(() => materialSummary(position.value))
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
@@ -126,10 +136,28 @@ watch(boardAnnotationsEnabled, (enabled) => {
   if (!enabled) clearAnnotations()
 })
 
+watch(() => props.editMode, () => ground?.cancelMove())
+
+watch(keyboardSquare, square => {
+  ground?.set({ highlight: { custom: new Map(square ? [[square, 'editor-keyboard-square']] : []) } })
+})
+
 onMounted(() => {
   if (board.value) {
+    const editing = props.editMode !== undefined
+    const editorConfig: ChessgroundConfig = editing ? {
+      autoCastle: false,
+      highlight: { lastMove: false, check: false },
+      movable: {
+        color: 'both',
+        free: true,
+        events: { after: (from, to) => emit('move-piece', from, to) },
+      },
+      premovable: { enabled: false },
+    } : {}
     ground = Chessground(board.value, {
-      viewOnly: true,
+      ...editorConfig,
+      viewOnly: !editing,
       coordinates: props.coordinates,
       animation: { enabled: !props.compact, duration: 150 },
       drawable: { enabled: false, brushes: arrowBrushes },
@@ -164,16 +192,43 @@ function boardSquare(event: MouseEvent): Key | undefined {
 }
 
 function handleBoardClick(event: MouseEvent): void {
-  if (!props.selectable) {
+  if (props.editMode === undefined) {
     clearAnnotations()
     return
   }
+  if (props.editMode !== 'place') return
   const square = boardSquare(event)
   if (square) emit('select-square', square)
 }
 
+function handleEditorKey(event: KeyboardEvent): void {
+  const square = keyboardSquare.value
+  if (!square || !ground || props.editMode === 'disabled') return
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    if (props.editMode === 'move') ground.selectSquare(square)
+    else emit('select-square', square)
+    return
+  }
+  if (event.key === 'Escape') {
+    ground.cancelMove()
+    return
+  }
+  const directions: Record<string, [number, number]> = {
+    ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1],
+  }
+  const direction = directions[event.key]
+  if (!direction) return
+  event.preventDefault()
+  const [file, rank] = key2pos(square)
+  const sign = props.orientation === 'white' ? 1 : -1
+  const nextFile = Math.max(0, Math.min(7, file + sign * direction[0]))
+  const nextRank = Math.max(0, Math.min(7, rank + sign * direction[1]))
+  keyboardSquare.value = pos2key([nextFile, nextRank])
+}
+
 function startAnnotation(event: PointerEvent): void {
-  if (props.selectable || !boardAnnotationsEnabled.value || event.button !== 2 || !board.value) return
+  if (props.editMode !== undefined || !boardAnnotationsEnabled.value || event.button !== 2 || !board.value) return
   const square = boardSquare(event)
   if (!square) return
   event.preventDefault()
@@ -250,6 +305,7 @@ function predictionShapes(arrow: BoardArrow, brush: string): DrawShape[] {
 
 function renderBoard(): void {
   if (!ground) return
+  if (props.editMode !== undefined) ground.cancelMove()
   const move = lastMove.value
   const lastMoveSquares = /^[a-h][1-8][a-h][1-8]/.test(move)
     ? [move.slice(0, 2) as Key, move.slice(2, 4) as Key]
@@ -342,12 +398,17 @@ defineExpose({ selectPly, focusBoard })
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
-    <div class="board-frame">
+    <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
       <div
         ref="board"
         class="board-mount"
-        role="img"
-        :aria-label="`${label}, ${positionDescription}`"
+        :role="editMode && editMode !== 'disabled' ? 'group' : 'img'"
+        :tabindex="editMode && editMode !== 'disabled' ? 0 : undefined"
+        :aria-label="editMode ? label : `${label}, ${positionDescription}`"
+        :aria-describedby="editMode && editMode !== 'disabled' ? keyboardHelpId : undefined"
+        @focus="editMode && (keyboardSquare = orientation === 'white' ? 'a8' : 'h1')"
+        @blur="keyboardSquare = null"
+        @keydown="handleEditorKey"
         @click="handleBoardClick"
         @pointerdown="startAnnotation"
         @pointermove="previewAnnotation"
@@ -356,6 +417,13 @@ defineExpose({ selectPly, focusBoard })
         @contextmenu="handleContextMenu"
       ></div>
     </div>
+
+    <template v-if="editMode && editMode !== 'disabled'">
+      <p :id="keyboardHelpId" class="sr-only">{{ editMode === 'move'
+        ? 'Use the arrow keys to navigate. Press Enter to pick up a piece and again to move it. Press Escape to cancel.'
+        : 'Use the arrow keys to navigate and press Enter to use the selected tool.' }}</p>
+      <p class="sr-only" aria-live="polite">{{ keyboardSquareDescription }}</p>
+    </template>
 
     <div v-if="controls" class="board-controls">
       <div class="board-controls__buttons" role="group" aria-label="Replay controls">
@@ -390,6 +458,17 @@ defineExpose({ selectPly, focusBoard })
 }
 .board-mount :deep(cg-board square.annotation-highlight) {
   background: rgb(204 36 36 / 68%);
+}
+.board-frame--placement .board-mount {
+  cursor: crosshair;
+}
+.board-frame--placement :deep(cg-board),
+.board-frame--inactive :deep(cg-board) {
+  pointer-events: none;
+}
+.board-mount:focus-visible :deep(cg-board square.editor-keyboard-square) {
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+  z-index: 3;
 }
 .chess-viewer {
   width: 100%;

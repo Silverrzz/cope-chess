@@ -220,7 +220,7 @@ function rankNumber(square: string): number {
   return Number.parseInt(square.charAt(1), 10)
 }
 
-function squareIndex(square: string): number {
+export function squareIndex(square: string): number {
   const file = fileIndex(square)
   const rank = rankNumber(square)
   return (8 - rank) * 8 + file

@@ -48,6 +48,7 @@ const paths: Record<IconName, readonly string[]> = {
   "message-square": ["M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"],
   moon: ["M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"],
   "more-vertical": ["M12 5h.01", "M12 12h.01", "M12 19h.01"],
+  move: ["M12 3v18M3 12h18", "m9 6 3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3"],
   pause: ["M8 5v14", "M16 5v14"],
   play: ["m7 4 13 8-13 8z"],
   plus: ["M12 5v14", "M5 12h14"],

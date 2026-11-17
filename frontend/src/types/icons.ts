@@ -33,6 +33,7 @@ export type IconName =
   | "message-square"
   | "moon"
   | "more-vertical"
+  | "move"
   | "pause"
   | "play"
   | "plus"
