@@ -7,12 +7,12 @@ import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import QuorumCredential from '@/components/public/QuorumCredential.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { ballotOptions, ballotScope, resultLabels, verifyBallot, type BallotPackage } from '@/quorum'
-import { downloadQuorumFile, generateQuorumProof, type Credential } from '@/quorum-voter'
+import { downloadQuorumFile, generateQuorumProof, unlockedCredential } from '@/quorum-voter'
 
 const route = useRoute()
 const packet = ref<BallotPackage>()
-const credential = ref<Credential>()
 const choice = ref('')
 const verified = ref(false)
 const verifying = ref(false)
@@ -25,6 +25,10 @@ const receipt = ref('')
 const manifest = computed(() => packet.value?.manifest)
 const endpoint = computed(() => '/api/quorum/ballots/' + encodeURIComponent(String(route.params.id)))
 const open = computed(() => packet.value?.status === 'open')
+const credential = computed(() => {
+  const unlocked = unlockedCredential.value
+  return unlocked && packet.value?.roster.members.includes(unlocked.commitment) ? unlocked : null
+})
 const receiptCovered = computed(() => Boolean(receipt.value && verified.value && packet.value?.votes
   .some(proof => proof.nullifier === receipt.value)))
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -52,7 +56,6 @@ async function load() {
 watch(endpoint, () => {
   clearTimeout(refreshTimer)
   packet.value = undefined
-  credential.value = undefined
   choice.value = ''
   receipt.value = localStorage.getItem('cope-quorum-receipt:' + route.params.id) ?? ''
   loading.value = true
@@ -79,7 +82,7 @@ async function audit() {
 async function cast() {
   const evidence = packet.value
   const path = endpoint.value
-  if (!evidence || !credential.value || !open.value || choice.value === '') return
+  if (busy.value || !evidence || !credential.value || !open.value || choice.value === '') return
   busy.value = true
   error.value = ''
   try {
@@ -92,7 +95,6 @@ async function cast() {
     localStorage.setItem('cope-quorum-receipt:' + evidence.manifest.id, result.nullifier)
     if (path === endpoint.value) {
       receipt.value = result.nullifier
-      credential.value = undefined
     }
   } catch (cause) {
     error.value = (cause as Error).message
@@ -111,7 +113,8 @@ async function cast() {
         <template #actions><BaseButton :to="{ name: 'quorum' }" size="small" variant="ghost">All votes</BaseButton></template>
       </PageHeader>
       <section class="panel panel__body section-stack">
-        <div class="toolbar toolbar--between"><strong>{{ packet.status === 'open' ? 'Open for voting' : packet.status === 'scheduled' ? 'Scheduled' : 'Completed' }}</strong>
+        <div class="toolbar toolbar--between">
+          <StatusBadge :tone="open ? 'success' : 'neutral'" :dot="open">{{ open ? 'Open' : packet.status === 'scheduled' ? 'Scheduled' : 'Completed' }}</StatusBadge>
           <span class="muted">{{ packet.status === 'scheduled' ? 'Opens' : 'Closes' }} {{ dates.format(new Date(packet.status === 'scheduled' ? manifest.opens_at : manifest.closes_at)) }}</span></div>
         <p class="quorum-rationale">{{ manifest.rationale }}</p>
         <p v-if="manifest.target" class="muted">{{ manifest.action === 'include' ? 'Add' : 'Remove' }} {{ manifest.target }}</p>
@@ -137,7 +140,7 @@ async function cast() {
       </section>
       <section v-else-if="open" class="panel panel__body section-stack">
         <h2>Cast a vote</h2>
-        <QuorumCredential v-if="!credential" :members="packet.roster.members" @unlocked="credential = $event" />
+        <QuorumCredential v-if="!credential" :members="packet.roster.members" />
         <form v-else class="section-stack" @submit.prevent="cast">
           <label class="field"><span>Your choice</span><select v-model="choice" class="select" required :disabled="busy">
             <option value="" disabled>Select an option</option>

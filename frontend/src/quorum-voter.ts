@@ -1,8 +1,33 @@
+import { shallowRef } from 'vue'
 import { Identity } from '@semaphore-protocol/identity'
 import type { SemaphoreProof } from '@semaphore-protocol/proof'
 
 export const credentialStorage = 'cope-quorum-credential-v1'
 export type Credential = { secret: string; commitment: string }
+
+const sessionKey = 'cope-quorum-unlocked-v1'
+
+function restoreSession(): Credential | null {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(sessionKey) ?? 'null')
+    if (typeof value?.secret === 'string' && typeof value.commitment === 'string') return value
+  } catch {
+    return null
+  }
+  return null
+}
+
+export const unlockedCredential = shallowRef<Credential | null>(restoreSession())
+
+export function rememberCredential(credential: Credential | null) {
+  unlockedCredential.value = credential
+  try {
+    if (credential) sessionStorage.setItem(sessionKey, JSON.stringify(credential))
+    else sessionStorage.removeItem(sessionKey)
+  } catch {
+    return
+  }
+}
 
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
 const decode = (value: string) => Uint8Array.from(atob(value), character => character.charCodeAt(0))
@@ -57,7 +82,13 @@ export function generateQuorumProof(credential: Credential, members: string[], m
       worker.terminate()
       reject(new Error('Could not start the local proof generator.'))
     }
-    worker.postMessage({ secret: credential.secret, members, message, scope })
+    try {
+      worker.postMessage({ secret: credential.secret, members: Array.from(members), message, scope })
+    } catch {
+      clearTimeout(timeout)
+      worker.terminate()
+      reject(new Error('Could not send the ballot to the local proof generator.'))
+    }
   })
 }
 
