@@ -171,6 +171,14 @@ function progress(item: TournamentSummary): number {
         <ContentState v-else kind="empty" compact title="No running tournaments" />
       </section>
 
+      <section class="panel panel__body section-heading" aria-labelledby="home-donors-title">
+        <div>
+          <h2 id="home-donors-title">Donors</h2>
+          <p>Hardware contributions to Cope’s engine testing.</p>
+        </div>
+        <RouterLink :to="{ name: 'donors' }">View donor rankings</RouterLink>
+      </section>
+
       <section class="engine-queues" aria-labelledby="engine-queues-title">
         <div class="section-heading queue-section-heading">
           <div>

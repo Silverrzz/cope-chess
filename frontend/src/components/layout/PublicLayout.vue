@@ -18,7 +18,6 @@ const navItems = [
   { label: "Tournaments", to: "/tournaments" },
   { label: "Engines", to: "/engines" },
   { label: "Events", to: "/events" },
-  { label: "Donors", to: "/donors" },
   { label: "Forms", to: "/forms" },
 ];
 
