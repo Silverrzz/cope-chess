@@ -99,8 +99,8 @@ def create_puzzle_suite(
     connection.executemany(
         """
         INSERT INTO puzzle_suite_puzzles (
-          suite_id, position, title, fen, solutions, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          suite_id, position, title, fen, solutions, difficulty_elo, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -109,6 +109,7 @@ def create_puzzle_suite(
                 str(puzzle.get("title") or ""),
                 str(puzzle["fen"]),
                 json.dumps(tuple(puzzle["solutions"])),
+                puzzle.get("difficulty_elo"),
                 now,
                 now,
             )

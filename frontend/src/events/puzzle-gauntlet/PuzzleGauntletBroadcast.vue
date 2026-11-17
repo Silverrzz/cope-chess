@@ -13,6 +13,7 @@ import type { ChatMessage } from "@/components/public/types";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventDetailResponse } from "@/types/events";
+import PuzzleMosaic from "./PuzzleMosaic.vue";
 
 import type { GauntletEngineInfo, GauntletEntry, GauntletPayload, GauntletPuzzle, GauntletRound } from "./types";
 
@@ -63,6 +64,7 @@ const { confettiEnabled, eventMusicEnabled, setEventMusicEnabled } = useViewerSe
 const route = useRoute();
 const router = useRouter();
 const payload = computed(() => props.detail.custom as GauntletPayload);
+const sequel = computed(() => props.detail.event.handler_key === "puzzle-gauntlet-2");
 const focusedId = ref<number | null>(null);
 const selectedRoundId = ref<number | null>(null);
 const now = ref(Date.now());
@@ -833,8 +835,13 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 </script>
 
 <template>
-  <main class="gauntlet" :class="[`gauntlet--${view === 'arena' ? 'live' : isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`]">
+  <main class="gauntlet" :class="[`gauntlet--${view === 'arena' ? 'live' : isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`, { 'gauntlet--sequel': sequel }]">
     <div class="puzzle-pattern" aria-hidden="true"></div>
+    <div v-if="sequel && view === 'event' && !isLive && !isComplete" class="countdown-puzzle-field" aria-hidden="true">
+      <PuzzleMosaic class="countdown-puzzle-field__top" animated />
+      <PuzzleMosaic class="countdown-puzzle-field__left" animated />
+      <PuzzleMosaic class="countdown-puzzle-field__right" animated />
+    </div>
     <div v-if="confettiEnabled" class="confetti-layer" aria-hidden="true">
       <span v-for="burst in confettiBursts" :key="burst.id" class="confetti-burst" :class="`confetti-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%` }">
         <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--confetti-start-x': `${piece.startX}rem`, '--confetti-start-y': `${piece.startY}rem`, '--confetti-end-x': `${piece.endX}rem`, '--confetti-end-y': `${piece.endY}rem`, '--confetti-rotation': `${piece.rotation}deg`, '--confetti-delay': `${piece.delay}ms`, '--confetti-duration': `${piece.duration}ms`, '--confetti-size': `${piece.size}rem` }"></i>
@@ -843,7 +850,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--left" aria-label="Celebrate from the left" @click="celebrate('left')">🎉</button>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--right" aria-label="Celebrate from the right" @click="celebrate('right')">🎉</button>
-    <button v-if="!isLive && !isComplete" type="button" class="rules-trigger" aria-controls="gauntlet-rules-panel" :aria-expanded="rulesOpen" aria-label="How Puzzle Gauntlet works" @click="rulesOpen = true" @keydown.esc="rulesOpen = false"><AppIcon name="info" :size="18" /></button>
+    <button v-if="!isLive && !isComplete" type="button" class="rules-trigger" aria-controls="gauntlet-rules-panel" :aria-expanded="rulesOpen" :aria-label="`How ${detail.event.title} works`" @click="rulesOpen = true" @keydown.esc="rulesOpen = false"><AppIcon name="info" :size="18" /></button>
 
     <Teleport to="body">
       <Transition name="rules-panel">
@@ -851,13 +858,13 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
           <button type="button" class="rules-backdrop" aria-label="Close event information" @click="rulesOpen = false"></button>
           <aside id="gauntlet-rules-panel" class="rules-panel" role="dialog" aria-modal="true" aria-labelledby="gauntlet-rules-title">
             <header>
-              <div><span>Puzzle Gauntlet</span><h2 id="gauntlet-rules-title">How it works</h2></div>
+              <div><span>{{ detail.event.title }}</span><h2 id="gauntlet-rules-title">How it works</h2></div>
               <button type="button" aria-label="Close event information" autofocus @click="rulesOpen = false"><AppIcon name="close" :size="19" /></button>
             </header>
             <div class="rules-panel__list">
-              <article><span>01</span><div><strong>Same position</strong><p>Every engine faces every puzzle.</p></div></article>
-              <article><span>02</span><div><strong>One life</strong><p>A wrong move means elimination.</p></div></article>
-              <article><span>03</span><div><strong>Shrinking clock</strong><p>{{ formatSeconds(payload.settings.start_time_ms) }} down to {{ formatSeconds(payload.settings.minimum_time_ms) }}.</p></div></article>
+              <article><span>01</span><div><strong>Same position</strong><p>Every remaining engine searches the same puzzle.</p></div></article>
+              <article><span>02</span><div><strong>One life</strong><p>A miss eliminates the engine. If everyone misses, the round is void.</p></div></article>
+              <article><span>03</span><div><strong>{{ payload.settings.decrement_ms ? "Shrinking clock" : "Shared time limit" }}</strong><p>{{ formatSeconds(payload.settings.start_time_ms) }}{{ payload.settings.decrement_ms ? ` down to ${formatSeconds(payload.settings.minimum_time_ms)}` : " per puzzle" }}.</p></div></article>
             </div>
           </aside>
         </div>
@@ -867,7 +874,8 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
     <section v-if="view === 'event' && !isLive && !isComplete" class="countdown-stage">
       <div class="stage-spectators"><span>Current spectators</span><SpectatorCount :count="detail.spectator_count ?? 0" /></div>
       <div class="countdown-copy">
-        <h1><span>Puzzle</span> Gauntlet</h1>
+        <h1 v-if="sequel"><span>Puzzle</span> Gauntlet <em>2</em></h1>
+        <h1 v-else><span>Puzzle</span> Gauntlet</h1>
       </div>
       <div v-if="countdownVisible" class="countdown-clock" aria-live="polite">
         <div v-for="part in countdown" :key="part.label">
@@ -876,8 +884,9 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
         </div>
       </div>
       <p v-if="countdownVisible" class="countdown-schedule"><AppIcon name="clock" :size="18" /> {{ scheduleLabel }}</p>
+      <p v-else-if="sequel && !detail.event.scheduled_start_at" class="countdown-schedule"><AppIcon name="clock" :size="18" /> Date to be announced</p>
       <button v-if="countdownVisible && !soundRequested && !soundPrimed && soundState !== 'playing' && soundState !== 'finished'" class="countdown-sound" type="button" @pointerdown.stop @click="enableCountdownSound(true)"><AppIcon name="radio" :size="16" />{{ soundState === "blocked" ? "Enable countdown sound" : "Arm countdown sound" }}</button>
-      <section class="starting-field" aria-labelledby="starting-field-title">
+      <section v-if="!sequel || payload.entries.length" class="starting-field" aria-labelledby="starting-field-title">
         <header><div><span>Competitors</span><h2 id="starting-field-title">Participating engines</h2></div><strong>{{ payload.entries.length }}</strong></header>
         <ul><li v-for="entry in payload.entries" :key="entry.id" :class="{ 'starting-engine--knocked-out': entry.status !== 'active' }"><i>{{ engineInitials(entry) }}</i><span><strong :title="entry.name">{{ entry.name }}</strong><small :title="entry.version">{{ entry.version }}</small></span></li></ul>
       </section>
@@ -921,7 +930,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
       </header>
 
       <div class="live-round-content">
-      <section ref="arenaElement" class="arena" aria-label="Puzzle Gauntlet arena">
+      <section ref="arenaElement" class="arena" :aria-label="`${detail.event.title} arena`">
         <div class="engine-column">
           <article class="viewer-card puzzle-card" :class="{ 'puzzle-card--urgent': searchUrgent }">
             <header>
@@ -1271,5 +1280,48 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
   .viewer-stage .engine-column { grid-template-columns: 1fr; }
   .viewer-stage .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(18rem, 24rem) minmax(24rem, 32rem); height: auto; }
   .focus-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.gauntlet--sequel { --gauntlet-purple: #c1a3ff; --cyan: #fcb985; }
+.gauntlet--sequel .puzzle-pattern {
+  background-color: #130b21;
+  background-image: radial-gradient(ellipse at 72% 40%, #5c31786b, transparent 65%), conic-gradient(from 90deg, #c1a3ff12 25%, transparent 0 50%, #c1a3ff12 0 75%, transparent 0);
+  background-size: auto, 5rem 5rem;
+}
+.gauntlet--sequel .countdown-copy h1 em { color: var(--cyan); font-style: normal; }
+.gauntlet--sequel .countdown-schedule { color: #cbbad6; }
+.countdown-puzzle-field {
+  --puzzle-ink: var(--violet);
+  --puzzle-accent: var(--cyan);
+  --puzzle-surface: transparent;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.countdown-puzzle-field > svg {
+  position: absolute;
+  opacity: .13;
+}
+.countdown-puzzle-field__top {
+  inset: -3rem 13% auto auto;
+  width: clamp(8rem, 17vw, 15rem);
+  transform: rotate(-14deg);
+}
+.countdown-puzzle-field__left {
+  --puzzle-delay: -4s;
+  inset: auto auto 8% -3rem;
+  width: clamp(12rem, 24vw, 23rem);
+  transform: rotate(13deg);
+}
+.countdown-puzzle-field__right {
+  --puzzle-delay: -7s;
+  inset: auto 4% 5% auto;
+  width: clamp(9rem, 20vw, 19rem);
+  transform: rotate(-9deg);
+}
+@media (max-width: 36rem) {
+  .countdown-puzzle-field > svg { opacity: .10; }
+  .countdown-puzzle-field__right { right: -2.5rem; }
+  .gauntlet--sequel .countdown-copy h1 { font-size: clamp(2.8rem, 10vw, 3.7rem); }
 }
 </style>

@@ -4,10 +4,12 @@ import { RouterLink } from "vue-router";
 
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
+import PuzzleMosaic from "./PuzzleMosaic.vue";
 
 const props = defineProps<{ summary: EventSummary; current?: boolean; nowMs: number }>();
 
 const event = computed(() => props.summary.record);
+const sequel = computed(() => event.value.handler_key === "puzzle-gauntlet-2");
 const isLive = computed(() => ["live", "intermission"].includes(event.value.status));
 const eventStyle = computed(() => ({
   "--archive-primary": themeColor("primary", "#8b5cf6"),
@@ -34,7 +36,7 @@ const countdown = computed(() => {
 });
 const dateLabel = computed(() => {
   const value = event.value.finished_at ?? event.value.scheduled_start_at;
-  if (!value) return "Date unavailable";
+  if (!value) return sequel.value && props.current ? "Date to be announced" : "Date unavailable";
   return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "long", year: "numeric" }).format(new Date(value));
 });
 
@@ -45,9 +47,10 @@ function themeColor(key: string, fallback: string): string {
 </script>
 
 <template>
-  <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
+  <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current, 'gauntlet-archive--sequel': sequel }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <div class="puzzle-field" aria-hidden="true"></div>
-    <div class="gauntlet-mark" aria-hidden="true">
+    <PuzzleMosaic v-if="sequel" class="gauntlet-mosaic" />
+    <div v-else class="gauntlet-mark" aria-hidden="true">
       <span></span><i></i>
       <svg class="gauntlet-puzzle" width="clamp(7rem, 13vw, 12rem)" height="clamp(7rem, 13vw, 12rem)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
         <path d="M19 4h-6v2.5a2.5 2.5 0 1 1-5 0V4H4v6h2.5a2.5 2.5 0 1 1 0 5H4v5h6v-2.5a2.5 2.5 0 1 1 5 0V20h4v-5h1.5a2.5 2.5 0 1 0 0-5H19V4Z" />
@@ -90,4 +93,30 @@ function themeColor(key: string, fallback: string): string {
 .gauntlet-archive:hover .gauntlet-meta strong { text-decoration: underline; text-underline-offset: .25rem; }
 .gauntlet-archive:focus-visible { outline: 3px solid #a78bfa; outline-offset: -3px; }
 @media (max-width: 58rem) { .gauntlet-archive { min-height: 31rem; padding: 2rem 1.25rem; }.gauntlet-copy { width: 100%; }.gauntlet-copy h2 { max-width: 11ch; }.gauntlet-mark { top: 34%; right: -6rem; opacity: .55; }.gauntlet-countdown span { min-width: 3.5rem; padding-inline: .55rem; } }
+.gauntlet-archive--sequel {
+  align-items: center;
+  background: radial-gradient(ellipse at 77% 50%, color-mix(in srgb, var(--archive-primary) 26%, transparent), transparent 61%), var(--archive-background);
+}
+.gauntlet-archive--sequel .puzzle-field {
+  background-image: conic-gradient(from 90deg, #a78bfa11 25%, transparent 0 50%, #a78bfa11 0 75%, transparent 0);
+  background-size: 5rem 5rem;
+  mask-image: linear-gradient(90deg, transparent 18%, black);
+}
+.gauntlet-archive--sequel .gauntlet-copy h2 { line-height: .92; }
+.gauntlet-archive--sequel .gauntlet-kicker, .gauntlet-archive--sequel .gauntlet-meta strong { color: var(--archive-accent); }
+.gauntlet-archive--sequel .gauntlet-meta { color: #cbbad6; }
+.gauntlet-mosaic {
+  --puzzle-ink: #c2a9f2;
+  --puzzle-accent: var(--archive-accent);
+  --puzzle-surface: var(--archive-surface);
+  position: absolute;
+  inset: 50% clamp(2rem, 10vw, 12rem) auto auto;
+  width: clamp(12rem, 23vw, 23rem);
+  transform: translateY(-50%) rotate(-8deg);
+  filter: drop-shadow(0 1rem 2rem #0c061db0);
+}
+@media (max-width: 46rem) {
+  .gauntlet-archive--sequel { align-content: center; gap: 1.25rem; }
+  .gauntlet-mosaic { position: static; width: clamp(8rem, 26vw, 12rem); margin-left: auto; transform: rotate(-8deg); }
+}
 </style>
