@@ -1208,6 +1208,9 @@ def create_app(
     from cope.adapters.http.forms import register_form_routes
 
     register_form_routes(app)
+    from cope.adapters.http.quorum import register_quorum_routes
+
+    register_quorum_routes(app)
     from cope.web.discord_oauth import register_discord_oauth
 
     register_discord_oauth(app)

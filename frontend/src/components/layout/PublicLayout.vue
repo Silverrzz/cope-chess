@@ -19,6 +19,7 @@ const navItems = [
   { label: "Engines", to: "/engines" },
   { label: "Events", to: "/events" },
   { label: "Forms", to: "/forms" },
+  { label: "Quorum", to: "/quorum" },
 ];
 
 function navActive(path: string): boolean {

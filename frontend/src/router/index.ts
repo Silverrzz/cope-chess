@@ -71,6 +71,7 @@ const router = createRouter({
           component: () => import("@/pages/public/RatingsPage.vue"),
           meta: { title: "Ratings" },
         },
+        { path: "quorum", name: "quorum", component: () => import("@/pages/public/QuorumPage.vue"), meta: { title: "Quorum" } },
         {
           path: "donors",
           name: "donors",
@@ -122,6 +123,7 @@ const router = createRouter({
       meta: { requiresAdmin: true },
       children: [
         { path: "activity", name: "admin-activity", component: () => import("@/pages/admin/ActivityPage.vue"), meta: { title: "Activity" } },
+        { path: "quorum", name: "admin-quorum", component: () => import("@/pages/admin/QuorumPage.vue"), meta: { title: "Quorum" } },
         { path: "forms", name: "admin-form-collections", alias: "forms/collections", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Forms" } },
         { path: "forms/new-ballot", redirect: { name: "admin-form-collections" } },
         { path: "forms/ballots/:slug", redirect: { name: "admin-form-collections" } },
