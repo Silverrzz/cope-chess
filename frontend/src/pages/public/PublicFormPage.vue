@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { RouterLink, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ApiError } from '@/api/client'
 import { publicForm, submitForm } from '@/api/forms'
 import { createFormUploader } from '@/api/form-uploads'
@@ -155,17 +155,23 @@ onBeforeRouteUpdate((to, from) => to.params.slug === from.params.slug || (!busy.
 </script>
 
 <template>
-  <div class="page-container page-container--narrow page-stack public-form" :aria-busy="loading">
-    <nav class="toolbar" aria-label="Breadcrumb"><RouterLink :to="{ name: 'forms' }">Forms</RouterLink></nav>
+  <div class="page-container page-container--narrow page-stack" :aria-busy="loading">
     <ContentState v-if="loading" kind="loading" compact title="Loading form" />
     <template v-else-if="form">
+      <PageHeader :title="form.definition.title">
+        <template v-if="form.definition.description" #description>
+          <FormMarkdown :source="form.definition.description" />
+        </template>
+      </PageHeader>
       <form v-if="submitFormVisible" novalidate @submit.prevent="submit">
         <FormExperience ref="fields" v-model="answers" :definition="form.definition" :errors="errors"
           :upload="form.definition.anonymous ? undefined : upload" :max-upload-bytes="form.attachment_policy.max_file_bytes" :disabled="busy">
           <template #context>
-            <p class="muted">{{ form.definition.anonymous ? 'Your answers are anonymous.' : 'Form admins can see which Discord account submitted your response.' }}</p>
-            <p v-if="form.definition.discord_role_id" class="muted">A Discord role in the Cope server is required to submit.</p>
-            <p v-if="form.definition.response_visibility === 'individual'" class="muted">Individual answers will be public after this form closes.</p>
+            <div class="form-notes muted">
+              <p>{{ form.definition.anonymous ? 'Your answers are anonymous.' : 'Form admins can see which Discord account submitted your response.' }}</p>
+              <p v-if="form.definition.discord_role_id">A Discord role in the Cope server is required to submit.</p>
+              <p v-if="form.definition.response_visibility === 'individual'">Individual answers will be public after this form closes.</p>
+            </div>
           </template>
           <template #before-fields>
             <div v-if="error" ref="errorSummary" class="panel panel__body section-stack" tabindex="-1" role="alert">
@@ -185,8 +191,6 @@ onBeforeRouteUpdate((to, from) => to.params.slug === from.params.slug || (!busy.
         </FormExperience>
       </form>
       <template v-else>
-        <PageHeader :title="form.definition.title" />
-        <FormMarkdown v-if="form.definition.description" :source="form.definition.description" />
         <section v-if="form.submitted" class="panel panel__body section-stack" role="status">
           <h2>Response submitted</h2>
           <div v-if="canStartAnother || form.my_response_id" class="button-row">
@@ -219,6 +223,12 @@ onBeforeRouteUpdate((to, from) => to.params.slug === from.params.slug || (!busy.
 </template>
 
 <style scoped>
+.form-notes {
+  display: grid;
+  gap: var(--space-1);
+  font-size: 0.875rem;
+}
+
 .form-issues {
   padding-inline-start: var(--space-6);
   gap: var(--space-1);

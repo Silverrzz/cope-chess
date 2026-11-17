@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
 import FormFields from './FormFields.vue'
 import FormMarkdown from './FormMarkdown.vue'
 import { requiredProgress } from './progress'
@@ -23,12 +24,15 @@ defineExpose({ focusField: (path: string) => fields.value?.focusField(path) })
 
 <template>
   <article class="form-experience">
-    <header class="section-stack">
-      <p v-if="preview" class="muted">Respondent preview</p>
-      <h1>{{ definition.title || 'Untitled form' }}</h1>
-      <FormMarkdown v-if="definition.description" :source="definition.description" />
-      <slot name="context" />
-    </header>
+    <div v-if="preview" class="section-stack">
+      <p class="muted">Respondent preview</p>
+      <PageHeader :title="definition.title || 'Untitled form'">
+        <template v-if="definition.description" #description>
+          <FormMarkdown :source="definition.description" />
+        </template>
+      </PageHeader>
+    </div>
+    <slot name="context" />
     <section v-if="progress.total" class="form-progress" aria-label="Required answers">
       <span>Required answers</span><strong>{{ progress.answered }} of {{ progress.total }}</strong>
       <progress :value="progress.answered" :max="progress.total" aria-label="Required answers completed" />
