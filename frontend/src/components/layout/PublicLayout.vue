@@ -59,6 +59,16 @@ watch(
 
         <div class="public-header__actions">
           <BaseButton
+            class="public-header__homelab"
+            variant="ghost"
+            size="small"
+            href="https://www.gofundme.com/f/cope-homelab"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span class="homelab-label">Homelab Project</span>
+          </BaseButton>
+          <BaseButton
             v-if="repositoryUrl"
             variant="ghost"
             size="small"
@@ -190,7 +200,41 @@ watch(
 .public-header__actions {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: var(--space-1);
+}
+
+.public-header__actions .public-header__homelab {
+  padding-inline: var(--space-2);
+  color: var(--color-warning);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  @supports (background-clip: text) and (color: color-mix(in srgb, white, black)) {
+    .homelab-label {
+      background-image: linear-gradient(
+        108deg,
+        var(--color-warning) 44%,
+        color-mix(in srgb, var(--color-warning) 92%, white) 50%,
+        var(--color-warning) 56%
+      );
+      background-size: 250% 100%;
+      background-clip: text;
+      color: transparent;
+      animation: homelab-glint 24s linear infinite;
+    }
+  }
+}
+
+@keyframes homelab-glint {
+  0%, 93% {
+    background-position: 100% 50%;
+  }
+
+  99%, 100% {
+    background-position: 0% 50%;
+  }
 }
 
 .public-header__menu {
@@ -215,8 +259,9 @@ watch(
   padding-block: 0;
 }
 
-@media (max-width: 53rem) {
+@media (max-width: 62rem) {
   .public-header__inner {
+    grid-template-columns: auto minmax(0, 1fr);
     gap: var(--space-3);
   }
 
@@ -259,5 +304,19 @@ watch(
     display: none;
   }
 
+}
+
+@media (max-width: 25rem) {
+  .public-header__inner {
+    column-gap: var(--space-2);
+  }
+
+  .brand__text {
+    display: none;
+  }
+
+  .public-header__actions {
+    gap: 0;
+  }
 }
 </style>
