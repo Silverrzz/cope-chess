@@ -198,11 +198,11 @@ onMounted(() => { void load(); void loadRoles() })
           <BaseButton size="small" :disabled="setup.witnesses.length >= 12"
             @click="setup.witnesses.push({ name: '', public_key: '', report_origin: '' })">Add witness</BaseButton>
         </div>
-        <p class="muted">New ballots use this witness list. Certification requires a signature from everyone on the list.</p>
+        <p class="muted">New ballots use this witness list. COPE hosts the signed reports.</p>
         <div v-for="(witness, index) in setup.witnesses" :key="index" class="section-stack">
           <div class="form-grid">
             <label class="field"><span>Name</span><input v-model.trim="witness.name" class="input" maxlength="80" required></label>
-            <label class="field"><span>Report server URL</span><input v-model.trim="witness.report_origin" class="input" type="url" maxlength="250" required></label>
+            <label class="field"><span>External report URL (optional)</span><input v-model.trim="witness.report_origin" class="input" type="url" maxlength="250"></label>
             <label class="field"><span>Signing public key</span><input v-model.trim="witness.public_key" class="input input--mono" pattern="[0-9a-f]{64}" maxlength="64" required></label>
           </div>
           <div class="button-row"><BaseButton size="small" variant="ghost" @click="setup.witnesses.splice(index, 1)">Remove witness</BaseButton></div>

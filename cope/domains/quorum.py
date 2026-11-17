@@ -52,11 +52,13 @@ class BallotDraft(Input):
 class Witness(Input):
     name: str = Field(min_length=1, max_length=80)
     public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
-    report_origin: str = Field(min_length=1, max_length=250)
+    report_origin: str = Field(default="", max_length=250)
 
     @field_validator("report_origin")
     @classmethod
     def validate_origin(cls, value):
+        if not value:
+            return value
         url = urlsplit(value)
         if (url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment
                 or url.path not in ("", "/") or "\\" in value or any(character.isspace() for character in value)):

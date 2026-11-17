@@ -55,6 +55,34 @@ def publications(connection, ballot_id):
             "witnesses": witnesses, "disclosures": disclosures}
 
 
+def signature_statement(origin, ballot_id, digest):
+    return ["cope-quorum-witness-result/1", origin, str(ballot_id), digest]
+
+
+def witness_report(connection, ballot_id, public_key, origin):
+    evidence = closed_evidence(connection, ballot_id)
+    witness = next((item for item in evidence["manifest"].get("witnesses", []) if item["public_key"] == public_key), None)
+    digest = elections.digest(evidence)
+    row = connection.execute(
+        """SELECT signature, signed_at FROM cope_quorum.witness_signatures
+           WHERE ballot_id = ?::uuid AND public_key = ? AND digest = ?""",
+        (str(ballot_id), public_key, digest),
+    ).fetchone()
+    if witness is None or row is None:
+        elections.fail("quorum_report_missing", "No signed report is available for this witness.", 404)
+    return {
+        "ballot_id": str(ballot_id),
+        "title": evidence["manifest"]["title"],
+        "witness": witness["name"],
+        "public_key": public_key,
+        "digest": digest,
+        "signature": row["signature"],
+        "signed_at": row["signed_at"],
+        "statement": signature_statement(origin, ballot_id, digest),
+        "result": evidence["result"],
+    }
+
+
 def record_signature(connection, ballot_id, origin, submitted):
     evidence = closed_evidence(connection, ballot_id)
     witnesses = evidence["manifest"].get("witnesses", [])
@@ -62,7 +90,7 @@ def record_signature(connection, ballot_id, origin, submitted):
         elections.fail("quorum_unknown_witness", "This witness was not assigned to the ballot.", 403)
     if elections.digest(evidence) != submitted.digest:
         elections.fail("quorum_witness_digest_mismatch", "The witness checked different ballot evidence.")
-    statement = elections.canonical(["cope-quorum-witness-result/1", origin, str(ballot_id), submitted.digest])
+    statement = elections.canonical(signature_statement(origin, ballot_id, submitted.digest))
     try:
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(submitted.public_key)).verify(bytes.fromhex(submitted.signature), statement)
     except (ValueError, InvalidSignature):

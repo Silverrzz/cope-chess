@@ -183,7 +183,7 @@ async function cast() {
         <ul class="section-stack">
           <li v-for="witness in publications.witnesses" :key="witness.public_key">
             <strong>{{ witness.name }}</strong> ·
-            <a v-if="witness.signed_at" :href="witness.report_origin + '/ballots/' + manifest.id" target="_blank" rel="noopener noreferrer">Signed report</a>
+            <a v-if="witness.signed_at" :href="witness.report_origin ? witness.report_origin + '/ballots/' + manifest.id : endpoint + '/witness-reports/' + witness.public_key" target="_blank" rel="noopener noreferrer">Signed report</a>
             <span v-else class="muted">Awaiting signature</span>
           </li>
         </ul>

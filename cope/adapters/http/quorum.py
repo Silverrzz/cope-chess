@@ -1,7 +1,7 @@
 from urllib.error import HTTPError, URLError
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 
 from cope.adapters.http.authentication import admin_session_role, request_is_secure_or_local
@@ -135,6 +135,17 @@ def register_quorum_routes(app):
     def ballot_publications(ballot_id: UUID, request: Request, connection=Depends(database)):
         require_secure(request)
         return election_call(published.publications, connection, ballot_id)
+
+    @app.get("/api/quorum/ballots/{ballot_id}/witness-reports/{public_key}")
+    def witness_report(
+        ballot_id: UUID,
+        request: Request,
+        public_key: str = Path(pattern=r"^[a-f0-9]{64}$"),
+        connection=Depends(database),
+    ):
+        require_secure(request)
+        origin = request.app.state.discord_runtime.origin
+        return election_call(published.witness_report, connection, ballot_id, public_key, origin)
 
     @app.post("/api/quorum/ballots/{ballot_id}/witness-signatures")
     def sign_ballot(ballot_id: UUID, payload: published.WitnessSignature, request: Request, connection=Depends(database)):

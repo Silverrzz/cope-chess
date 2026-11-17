@@ -31,6 +31,7 @@ try {
 }
 const privateKey = createPrivateKey(await readFile(keyFile))
 const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex')
+console.log('Witness public key: ' + publicKey)
 let lastScan = null
 
 async function fetchEvidence(path) {
