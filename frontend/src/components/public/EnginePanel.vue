@@ -66,7 +66,7 @@ const takPv = computed(() => {
 </script>
 
 <template>
-  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading, 'engine-panel--tak': variant === 'tak' }]">
+  <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
     <div v-if="loading" class="engine-panel__loading">
       <strong>
         <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
@@ -322,8 +322,6 @@ const takPv = computed(() => {
   padding-inline-start: 0;
   border-inline-start: 0;
 }
-.engine-panel--tak .engine-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: .3rem; }
-.engine-panel--tak .engine-stats div:nth-child(odd) { padding-inline-start: 0; border-inline-start: 0; }
 
 .engine-stats dd {
   overflow: hidden;
