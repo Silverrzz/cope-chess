@@ -42,18 +42,6 @@ async function archivedBallots() {
 }
 
 const appCommit = process.env.COPE_VERIFIER_BUILD_COMMIT
-const updateFile = process.env.COPE_VERIFIER_UPDATE_FILE
-const updateFailure = process.env.COPE_VERIFIER_UPDATE_FAILURE
-
-async function failedJob() {
-  if (!updateFailure) return null
-  try {
-    return JSON.parse(await readFile(updateFailure, 'utf8')).job_id ?? null
-  } catch (error) {
-    if (error.code === 'ENOENT') return null
-    throw error
-  }
-}
 
 async function checkIn() {
   try {
@@ -66,7 +54,7 @@ async function checkIn() {
     const statement = ['cope-quorum-verifier-checkin/1', origin.origin, publicKey, sent_at, last_scan, archived, errors, runtime]
     if (appCommit) {
       body.app_commit = appCommit
-      body.failed_job = await failedJob()
+      body.failed_job = null
       statement[0] = 'cope-quorum-verifier-checkin/2'
       statement.push(appCommit, body.failed_job)
     }
@@ -77,13 +65,6 @@ async function checkIn() {
       body: JSON.stringify(body),
     })
     if (!response.ok && response.status !== 403) throw new Error('COPE returned HTTP ' + response.status)
-    if (response.ok && updateFile) {
-      const { release } = await response.json()
-      if (release) {
-        await writeFile(updateFile + '.new', JSON.stringify(release), { mode: 0o600 })
-        await rename(updateFile + '.new', updateFile)
-      }
-    }
   } catch (error) {
     console.error('Verifier check-in failed: ' + error.message)
   } finally {

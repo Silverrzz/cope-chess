@@ -8,7 +8,6 @@ from cope.adapters.http.authentication import admin_session_role, request_is_sec
 from cope.application import ApplicationError
 from cope.adapters.http.forms import require_origin
 from cope.control.api import database
-from cope.version import app_version
 from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
 from cope.domains import quorum_elections as elections
 from cope.domains import quorum_publications as published
@@ -183,7 +182,7 @@ def register_quorum_routes(app):
     def verifier_checkin(payload: published.VerifierCheckin, request: Request, connection=Depends(database)):
         require_secure(request)
         require_origin(request)
-        return election_call(published.record_checkin, connection, request.app.state.discord_runtime.origin, payload, app_version())
+        return election_call(published.record_checkin, connection, request.app.state.discord_runtime.origin, payload)
 
     @app.get("/api/admin/quorum/witnesses")
     def verifier_directory(request: Request, connection=Depends(database)):
