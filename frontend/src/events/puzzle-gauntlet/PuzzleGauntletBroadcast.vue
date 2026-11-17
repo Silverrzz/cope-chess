@@ -852,9 +852,9 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
     <span v-if="finalMinuteActive" :key="countdownBeat" class="countdown-pulse-layer" aria-hidden="true"></span>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--left" aria-label="Celebrate from the left" @click="celebrate('left')">🎉</button>
     <button v-if="showConfettiButtons" type="button" class="tada-button tada-button--right" aria-label="Celebrate from the right" @click="celebrate('right')">🎉</button>
-    <button v-if="!isLive && !isComplete" type="button" class="rules-trigger" aria-controls="gauntlet-rules-panel" :aria-expanded="rulesOpen" :aria-label="`How ${detail.event.title} works`" @click="rulesOpen = true" @keydown.esc="rulesOpen = false"><AppIcon name="info" :size="18" /></button>
+    <button v-if="view !== 'arena' && !isLive && !isComplete" type="button" class="rules-trigger" aria-controls="gauntlet-rules-panel" :aria-expanded="rulesOpen" :aria-label="`How ${detail.event.title} works`" @click="rulesOpen = true" @keydown.esc="rulesOpen = false"><AppIcon name="info" :size="18" /></button>
 
-    <Teleport to="body">
+    <Teleport v-if="view !== 'arena'" to="body">
       <Transition name="rules-panel">
         <div v-if="rulesOpen" class="rules-overlay" @keydown.esc="rulesOpen = false">
           <button type="button" class="rules-backdrop" aria-label="Close event information" @click="rulesOpen = false"></button>
