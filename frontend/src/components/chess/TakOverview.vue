@@ -65,7 +65,7 @@ const toMove = computed(() => props.position.turn === 'w' ? 'white' : 'black')
   color: var(--color-text, #17202a);
 }
 .tak-seat--active { border-color: var(--color-primary, #3183c9); box-shadow: inset 0 -2px var(--color-primary, #3183c9); }
-.tak-seat--winner { border-color: #42aa88; box-shadow: inset 0 -2px #42aa88; }
+.tak-seat--winner { border-color: #739487; box-shadow: inset 0 -2px #739487; }
 .tak-seat__score, .tak-seat__reserves, .tak-seat__pile { display: inline-flex; align-items: center; gap: .32rem; }
 .tak-seat__score { flex-wrap: wrap; }
 .tak-seat__score strong { font-size: 1.03rem; font-variant-numeric: tabular-nums; }

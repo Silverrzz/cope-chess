@@ -111,6 +111,7 @@ const selectedPly = ref(0)
 const orientation = ref<'white' | 'black'>('white')
 const { kibitzerEnabled } = useViewerSettings()
 const isTak = computed(() => data.value?.tournament.config?.variant === 'tak')
+const takActivity = ref<'moves' | 'chat'>('moves')
 const supportsKibitzer = computed(() => !isTak.value && !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
 const currentPositionPly = ref(0)
@@ -406,7 +407,7 @@ async function fitArenaToViewport(): Promise<void> {
   const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
   const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
   const widthLimit = isTak.value
-    ? arenaWidth - (window.matchMedia('(min-width: 76rem)').matches ? 34 * rootFontSize + gap * 2
+    ? arenaWidth - (window.matchMedia('(min-width: 76rem)').matches ? 44 * rootFontSize + gap * 2
       : window.matchMedia('(min-width: 58.01rem)').matches ? 17 * rootFontSize + gap : 0)
     : window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
@@ -1298,7 +1299,11 @@ function forgetManualFollowPauseGame(): void {
           />
         </div>
 
-        <aside class="activity-column" aria-label="Game activity">
+        <aside class="activity-column" :data-tak-activity="isTak ? takActivity : undefined" aria-label="Game activity">
+          <div v-if="isTak" class="tak-activity-switcher" role="group" aria-label="Game activity panel">
+            <button type="button" :aria-pressed="takActivity === 'moves'" @click="takActivity = 'moves'">Moves</button>
+            <button type="button" :aria-pressed="takActivity === 'chat'" @click="takActivity = 'chat'">Chat</button>
+          </div>
           <MoveList
             class="arena-moves"
             :moves="moves.map((move) => move.san || move.uci)"
@@ -1868,23 +1873,52 @@ function forgetManualFollowPauseGame(): void {
 }
 
 @media (max-width: 58rem) {
-  .arena--tak .activity-column { display: contents; }
-  .arena--tak .arena-moves { grid-row: 2; height: min(16rem, 40dvh); }
+  .arena--tak .activity-column { grid-row: 2; grid-template-rows: minmax(0, 1fr); height: min(24rem, 56dvh); }
   .arena--tak .engine-column { grid-row: 3; }
-  .arena--tak .arena-chat { grid-row: 4; height: min(24rem, 55dvh); }
 }
 
 @media (min-width: 76rem) {
-  .arena--tak { grid-template-columns: 18rem minmax(0, var(--arena-board-size)) minmax(16rem, 1fr); height: var(--arena-content-height); }
+  .arena--tak { grid-template-columns: 18rem minmax(0, var(--arena-board-size)) minmax(26rem, 1fr); height: var(--arena-content-height); }
   .arena--tak .engine-column { grid-column: 1; grid-row: 1; }
   .arena--tak .board-column { grid-column: 2; grid-row: 1; }
   .arena--tak .activity-column {
     grid-column: 3;
     grid-row: 1;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1.5fr) minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
     height: var(--arena-content-height);
   }
+}
+
+.tak-activity-switcher { display: none; }
+@media (max-width: 40rem) {
+  .arena--tak .activity-column { grid-template-rows: auto minmax(0, 1fr); }
+  .tak-activity-switcher {
+    display: flex;
+    height: auto;
+    gap: .25rem;
+    padding: .23rem;
+    border: 1px solid var(--color-border, #d5dbe1);
+    border-radius: var(--radius-sm, .35rem);
+    background: var(--color-surface, #fff);
+  }
+  .tak-activity-switcher button {
+    flex: 1;
+    border: 0;
+    border-radius: var(--radius-sm, .35rem);
+    padding: .45rem;
+    background: transparent;
+    color: var(--color-text, #17202a);
+    font: inherit;
+    font-size: .78rem;
+    cursor: pointer;
+  }
+  .tak-activity-switcher button[aria-pressed='true'] {
+    background: color-mix(in srgb, var(--color-accent, #2f78c4) 16%, transparent);
+    font-weight: 700;
+  }
+  .arena--tak [data-tak-activity='moves'] .arena-chat,
+  .arena--tak [data-tak-activity='chat'] .arena-moves { display: none; }
 }
 </style>
 

@@ -73,21 +73,21 @@ function stackLabel(index: number): string {
   box-shadow: inset 0 0 0 1px #2336454d;
 }
 .tak-square--dark { --tak-tile: #3b5263; }
-.tak-square--last { --tak-tile: #416f91; }
-.tak-square--last::after { position: absolute; inset: 0; z-index: 2; border: 1px solid #98d4f7b3; pointer-events: none; content: ''; }
+.tak-square--last { --tak-tile: #456579; }
+.tak-square--last::after { position: absolute; inset: 0; z-index: 2; border: 1px solid #98b6c98c; pointer-events: none; content: ''; }
 .tak-square--origin::after { border-style: dashed; }
-.tak-square--winning { --tak-tile: #386f68; }
+.tak-square--winning { --tak-tile: #486465; }
 .tak-connections { position: absolute; inset: 0; pointer-events: none; }
 .tak-board--flipped .tak-connections { transform: rotate(180deg); }
-.tak-connection { --connection: #f4dfad53; position: absolute; display: block; background: var(--connection); }
-.tak-connection--black { --connection: #121c32a6; }
-.tak-connection--north, .tak-connection--south { width: 20%; height: 52%; left: 40%; }
+.tak-connection { --connection: #ded8bc36; position: absolute; display: block; background: var(--connection); }
+.tak-connection--black { --connection: #1f2c3e75; }
+.tak-connection--north, .tak-connection--south { width: 14%; height: 52%; left: 43%; }
 .tak-connection--north { top: 0; }
 .tak-connection--south { bottom: 0; }
-.tak-connection--east, .tak-connection--west { width: 52%; height: 20%; top: 40%; }
+.tak-connection--east, .tak-connection--west { width: 52%; height: 14%; top: 43%; }
 .tak-connection--east { right: 0; }
 .tak-connection--west { left: 0; }
-.tak-connection--winning { --connection: #7ff4cfe0; box-shadow: 0 0 10px #91ffdf5e; }
+.tak-connection--winning { --connection: #a5b8aa8c; }
 .tak-stack { position: absolute; inset: 0; --tak-stone-size: 54%; pointer-events: none; }
 .tak-stack .tak-stack__stone { position: absolute; left: 50%; transform: translate(-50%, -50%); }
 .tak-rank, .tak-file, .tak-count, .tak-drop {
