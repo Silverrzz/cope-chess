@@ -866,7 +866,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
             <div class="rules-panel__list">
               <article><span>01</span><div><strong>Same position</strong><p>Every remaining engine searches the same puzzle.</p></div></article>
               <article><span>02</span><div><strong>One life</strong><p>A miss eliminates the engine. If everyone misses, the round is void.</p></div></article>
-              <article><span>03</span><div><strong>{{ payload.settings.decrement_ms ? "Shrinking clock" : "Shared time limit" }}</strong><p>{{ formatSeconds(payload.settings.start_time_ms) }}{{ payload.settings.decrement_ms ? ` down to ${formatSeconds(payload.settings.minimum_time_ms)}` : " per puzzle" }}.</p></div></article>
+              <article><span>03</span><div><strong>{{ payload.settings.decrement_ms ? "Shrinking clock" : "Shared time limit" }}</strong><p>{{ formatSeconds(payload.settings.start_time_ms) }}{{ payload.settings.decrement_ms ? ` down to ${formatSeconds(payload.settings.minimum_time_ms)}` : "" }} per puzzle, {{ payload.settings.threads }} {{ payload.settings.threads === 1 ? "thread" : "threads" }}, {{ payload.settings.hash_mb }}mb hash.</p></div></article>
             </div>
           </aside>
         </div>
