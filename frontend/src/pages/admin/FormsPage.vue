@@ -26,6 +26,7 @@ const error = ref('')
 const label = ref('')
 const slug = ref('')
 const audience = ref<FormDefinition['audience']>('public')
+const allowMultipleSubmissions = ref(false)
 const purpose = ref<'response_collection.v1' | 'feedback.v1'>('response_collection.v1')
 async function load(more = false): Promise<void> {
   loading.value = true; error.value = ''
@@ -51,6 +52,7 @@ async function create(): Promise<void> {
         document: {
           title: label.value,
           audience: audience.value,
+          allow_multiple_submissions: allowMultipleSubmissions.value,
           anonymous: true,
           response_visibility: 'private',
           listed: false,
@@ -101,6 +103,10 @@ onMounted(() => load())
         <label class="field"><span>Public link name</span><input v-model="slug" class="input" required maxlength="100" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="event-feedback"><small>Lowercase words separated by hyphens.</small></label>
         <label class="field"><span>Who can respond?</span><select v-model="audience" class="select"><option value="public">Anyone signed in with Discord</option><option value="invited">Invited Discord accounts</option></select></label>
         <label class="field"><span>Response purpose</span><select v-model="purpose" class="select"><option value="response_collection.v1">Collect responses</option><option value="feedback.v1">Feedback</option></select></label>
+        <label class="switch-row form-span-full">
+          <input v-model="allowMultipleSubmissions" type="checkbox">
+          <span>Allow multiple submissions per Discord account</span>
+        </label>
       </fieldset>
       <div class="form-actions">
         <BaseButton type="submit" variant="primary" :loading="mutation.busy.value">{{ mutation.uncertain.value ? 'Retry creation' : 'Create private draft' }}</BaseButton>
