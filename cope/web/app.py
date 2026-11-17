@@ -1266,7 +1266,7 @@ def _is_spa_request(request: Request) -> bool:
 
 def _is_platform_access_request(request: Request) -> bool:
     path = request.url.path.rstrip("/") or "/"
-    if path in {"/quorum", "/quorum/tools", "/quorum/witness"} or re.fullmatch(r"/quorum/ballots/[a-f0-9-]{36}", path):
+    if path in {"/quorum", "/quorum/tools"} or re.fullmatch(r"/quorum/ballots/[a-f0-9-]{36}", path):
         return False
     if path == "/admin/login" or path.startswith("/admin/"):
         return False

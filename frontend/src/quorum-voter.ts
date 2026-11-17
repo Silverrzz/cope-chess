@@ -2,7 +2,6 @@ import { Identity } from '@semaphore-protocol/identity'
 import type { SemaphoreProof } from '@semaphore-protocol/proof'
 
 export const credentialStorage = 'cope-quorum-credential-v1'
-export const genesisStorage = 'cope-quorum-founding-v1'
 export type Credential = { secret: string; commitment: string }
 
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))

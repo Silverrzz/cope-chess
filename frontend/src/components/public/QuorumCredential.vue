@@ -30,17 +30,16 @@ async function continueWithCredential() {
   try {
     if (backup.value && backup.value.size > 4096) throw new Error('This credential backup is too large.')
     const encrypted = backup.value ? await backup.value.text() : stored.value
-    const eligibility = props.members ? null : await api.get<{ scope: string; commitment: string | null; founding_open: boolean }>(
+    const eligibility = props.members ? null : await api.get<{ scope: string; commitment: string | null }>(
       '/api/quorum/eligibility', { headers: discordHeaders })
-    if (!encrypted && (!eligibility?.founding_open || eligibility.commitment))
+    if (!encrypted && (!eligibility || eligibility.commitment))
       throw new Error('Restore the encrypted backup for your enrolled credential.')
     const credential = encrypted ? await unlockCredential(password.value, encrypted) : await createCredential(password.value)
     stored.value = localStorage.getItem(credentialStorage)
-    if (props.members && !props.members.includes(credential.commitment)) throw new Error('This credential is outside the founding roster.')
+    if (props.members && !props.members.includes(credential.commitment)) throw new Error('This credential was not enrolled when the ballot was published.')
     if (eligibility?.commitment && eligibility.commitment !== credential.commitment)
       throw new Error('Your Discord account already enrolled a different credential.')
     if (eligibility && !eligibility.commitment) {
-      if (!eligibility.founding_open) throw new Error('Founding enrollment is closed.')
       const proof = await generateQuorumProof(credential, [credential.commitment], '0', eligibility.scope)
       await api.post('/api/quorum/enroll', { headers: discordHeaders, body: { commitment: credential.commitment, proof } })
     }

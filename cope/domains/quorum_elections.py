@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -10,18 +9,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import BoundedSemaphore
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field, field_validator
 
 from cope.application.contracts import Input
 from cope.application.errors import ApplicationError
-from cope.domains.quorum import STATE_LOCK, read_setup, witness_keys
+from cope.domains.quorum import STATE_LOCK, read_setup
 
 FIELD = 21888242871839275222246405745257275088548364400416034343698204186575808495617
 CURVE_FIELD = 21888242871839275222246405745257275088696311157297823662689037894645226208583
-GENESIS_KEY = "quorum.genesis.v1"
-GENESIS_SIGNATURES_KEY = "quorum.genesis-signatures.v1"
 VERIFY_SLOTS = BoundedSemaphore(2)
 
 
@@ -57,16 +52,9 @@ class Enrollment(Input):
     proof: Proof
 
 
-class Endorsement(Input):
-    witness: str = Field(min_length=44, max_length=44)
-    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    signature: str = Field(min_length=88, max_length=88)
-    size: int = Field(default=0, strict=True, ge=0, le=1024)
-    final: bool = False
-
-
 class BallotPublication(Input):
     draft_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    revision: int = Field(strict=True, ge=0)
 
 
 def canonical(value):
@@ -79,19 +67,6 @@ def digest(value):
 
 def scope(value):
     return str(int(digest(value), 16))
-
-
-def read_setting(connection, key, default=None):
-    row = connection.execute("SELECT value FROM cope_quorum.settings WHERE key = ?", (key,)).fetchone()
-    return json.loads(row["value"]) if row else default
-
-
-def put_setting(connection, key, value):
-    connection.execute(
-        """INSERT INTO cope_quorum.settings (key, value) VALUES (?, ?)
-           ON CONFLICT (key) DO UPDATE SET value = excluded.value""",
-        (key, canonical(value).decode()),
-    )
 
 
 def proof_worker(members, proof=None, expected_scope=None):
@@ -119,7 +94,7 @@ def enrollment_scope(origin, session_token):
 
 def enroll(connection, account_id, commitment, expected_role):
     connection.execute(STATE_LOCK)
-    if read_setup(connection)[0].enrollment_role_id != expected_role:
+    if read_setup(connection).enrollment_role_id != expected_role:
         fail("quorum_role_changed", "The enrollment role changed. Check eligibility again.")
     existing = connection.execute(
         "SELECT commitment FROM cope_quorum.credentials WHERE account_id = ?", (account_id,),
@@ -129,11 +104,9 @@ def enroll(connection, account_id, commitment, expected_role):
             fail("quorum_credential_exists", "This account already has a credential. Import its backup.")
         connection.commit()
         return
-    if read_setting(connection, GENESIS_KEY):
-        fail("quorum_founding_closed", "Founding enrollment has closed.")
     total = connection.execute("SELECT count(*) AS total FROM cope_quorum.credentials").fetchone()["total"]
     if total >= 1024:
-        fail("quorum_roster_full", "The founding roster has reached its circuit limit.")
+        fail("quorum_roster_full", "Quorum has reached its 1,024-voter enrollment limit.")
     row = connection.execute(
         """INSERT INTO cope_quorum.credentials (account_id, commitment) VALUES (?, ?)
            ON CONFLICT DO NOTHING RETURNING commitment""", (account_id, commitment),
@@ -143,83 +116,36 @@ def enroll(connection, account_id, commitment, expected_role):
     connection.commit()
 
 
-def founding_state(connection):
-    genesis = read_setting(connection, GENESIS_KEY)
-    signatures = read_setting(connection, GENESIS_SIGNATURES_KEY, {})
-    return {"genesis": genesis, "signatures": signatures}
-
-
 def admin_status(connection):
     return {
-        **founding_state(connection),
         "enrolled": connection.execute("SELECT count(*) AS total FROM cope_quorum.credentials").fetchone()["total"],
         "published": [str(row["id"]) for row in connection.execute("SELECT id FROM cope_quorum.ballots")],
     }
 
 
-def freeze_genesis(connection, origin):
+def publish(connection, draft_id, revision):
     connection.execute(STATE_LOCK)
-    state = founding_state(connection)
-    if state["genesis"]:
-        return state
-    setup, _ = read_setup(connection)
-    keys = witness_keys(connection)
-    witnesses = sorted(keys[user] for user in setup.witness_user_ids if user in keys)
-    if not setup.enrollment_role_id:
-        fail("quorum_role_missing", "Choose the founding enrollment role before freezing the roster.")
-    members = [row["commitment"] for row in connection.execute(
-        "SELECT commitment FROM cope_quorum.credentials ORDER BY commitment",
-    )]
-    if len(witnesses) != 4 or len(members) < 3:
-        fail("quorum_founding_incomplete", "Founding requires at least three enrolled voters and exactly four registered witnesses.")
-    genesis = {"version": "cope-quorum/1", "community": origin, "members": members,
-               "root": proof_worker(members)["root"], "witnesses": witnesses, "threshold": 3,
-               "enrollment_role": setup.enrollment_role_id}
-    put_setting(connection, GENESIS_KEY, genesis)
-    connection.commit()
-    return {"genesis": genesis, "signatures": {}}
-
-
-def signature_for(witness, signature, fingerprint):
-    try:
-        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(witness, validate=True))
-        key.verify(base64.b64decode(signature, validate=True), bytes.fromhex(fingerprint))
-    except (ValueError, InvalidSignature) as error:
-        raise ApplicationError("quorum_bad_signature", "The witness signature is invalid.", 422) from error
-
-
-def endorse_genesis(connection, endorsement):
-    connection.execute(STATE_LOCK)
-    state = founding_state(connection)
-    genesis = state["genesis"]
-    if not genesis or endorsement.witness not in genesis["witnesses"]:
-        fail("quorum_untrusted_witness", "The witness key is not part of the founding document.", 403)
-    if digest(genesis) != endorsement.digest:
-        fail("quorum_genesis_mismatch", "The signature is for a different founding document.")
-    signature_for(endorsement.witness, endorsement.signature, endorsement.digest)
-    state["signatures"][endorsement.witness] = endorsement.signature
-    put_setting(connection, GENESIS_SIGNATURES_KEY, state["signatures"])
-    connection.commit()
-    return state
-
-
-def publish(connection, draft_id):
-    connection.execute(STATE_LOCK)
-    state = founding_state(connection)
-    genesis = state["genesis"]
-    if not genesis or len(state["signatures"]) < genesis["threshold"]:
-        fail("quorum_genesis_pending", "The founding document needs three independent witness signatures.")
-    setup, _ = read_setup(connection)
+    setup = read_setup(connection)
+    if setup.revision != revision:
+        fail("quorum_draft_changed", "Quorum settings changed. Reload the draft before publishing.")
     draft = next((item for item in setup.drafts if item.id == draft_id), None)
     if draft is None:
         fail("quorum_missing_draft", "This ballot draft does not exist.", 404)
+    if not setup.enrollment_role_id:
+        fail("quorum_role_missing", "Choose a Discord enrollment role before publishing.")
+    members = [row["commitment"] for row in connection.execute(
+        "SELECT commitment FROM cope_quorum.credentials ORDER BY commitment",
+    )]
+    if len(members) < 3:
+        fail("quorum_roster_too_small", "At least three voters must enroll before publishing.")
+    roster = {"members": members, "root": proof_worker(members)["root"]}
     if draft.closes_at <= datetime.now(UTC):
         fail("quorum_past_deadline", "Choose a closing date in the future.")
-    manifest = {**draft.model_dump(mode="json"), "genesis": digest(genesis)}
+    manifest = {**draft.model_dump(mode="json"), "roster": digest(roster)}
     row = connection.execute(
-        """INSERT INTO cope_quorum.ballots (id, manifest, opens_at, closes_at)
-           VALUES (?::uuid, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
-        (draft.id, canonical(manifest).decode(), draft.opens_at, draft.closes_at),
+        """INSERT INTO cope_quorum.ballots (id, manifest, roster, opens_at, closes_at)
+           VALUES (?::uuid, ?::jsonb, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
+        (draft.id, canonical(manifest).decode(), canonical(roster).decode(), draft.opens_at, draft.closes_at),
     ).fetchone()
     if row is None:
         fail("quorum_already_published", "This draft has already been published.")
@@ -227,9 +153,9 @@ def publish(connection, draft_id):
     return manifest
 
 
-def ballot(connection, ballot_id, *, lock=False):
+def ballot(connection, ballot_id, *, lock=""):
     row = connection.execute(
-        "SELECT * FROM cope_quorum.ballots WHERE id = ?::uuid" + (" FOR UPDATE" if lock else ""),
+        "SELECT * FROM cope_quorum.ballots WHERE id = ?::uuid" + lock,
         (str(ballot_id),),
     ).fetchone()
     if not row:
@@ -237,42 +163,27 @@ def ballot(connection, ballot_id, *, lock=False):
     return row
 
 
-def checkpoints(connection, ballot_id):
-    rows = connection.execute(
-        """SELECT size, final, digest, witness, signature FROM cope_quorum.endorsements
-           WHERE ballot_id = ?::uuid ORDER BY final DESC, size DESC""", (str(ballot_id),),
-    ).fetchall()
-    groups = {}
-    for row in rows:
-        key = (row["size"], row["final"], row["digest"])
-        group = groups.setdefault(key, {"size": key[0], "final": key[1], "digest": key[2], "signatures": {}})
-        group["signatures"][row["witness"]] = row["signature"]
-    return list(groups.values())
-
-
-def proof_rows(connection, ballot_id, limit=1024):
+def proof_rows(connection, ballot_id):
     return [row["proof"] for row in connection.execute(
         """SELECT proof FROM cope_quorum.votes WHERE ballot_id = ?::uuid
-           ORDER BY position LIMIT ?""", (str(ballot_id), limit),
+           ORDER BY position""", (str(ballot_id),),
     )]
 
 
-def snapshot(row, votes, final):
-    return {"version": "cope-quorum-checkpoint/1", "manifest": row["manifest"], "votes": votes, "final": final}
-
-
 def ballot_package(connection, ballot_id):
-    row = ballot(connection, ballot_id)
-    votes = proof_rows(connection, ballot_id)
+    row = ballot(connection, ballot_id, lock=" FOR SHARE")
+    now = datetime.now(UTC)
+    closed = now >= row["closes_at"]
+    votes = proof_rows(connection, ballot_id) if closed else []
+    roster = row["roster"]
     return {
-        **founding_state(connection),
-        "candidate": snapshot(row, votes, datetime.now(UTC) >= row["closes_at"]),
-        "checkpoints": checkpoints(connection, ballot_id),
+        "version": "cope-quorum-evidence/1",
+        "manifest": row["manifest"],
+        "roster": roster,
+        "votes": votes,
+        "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
+        "result": tally(row["manifest"], votes, len(roster["members"])) if closed else None,
     }
-
-
-def has_open_checkpoint(groups, threshold):
-    return any(not group["final"] and len(group["signatures"]) >= threshold for group in groups)
 
 
 def tally(manifest, votes, electorate):
@@ -298,29 +209,18 @@ def tally(manifest, votes, electorate):
 
 
 def directory(connection):
-    state = founding_state(connection)
-    if not state["genesis"]:
-        return []
-    genesis = state["genesis"]
+    now = datetime.now(UTC)
     entries = []
-    for row in connection.execute("SELECT * FROM cope_quorum.ballots ORDER BY opens_at DESC"):
-        ballot_id = str(row["id"])
-        groups = checkpoints(connection, ballot_id)
-        approved = [group for group in groups if len(group["signatures"]) >= genesis["threshold"]]
-        if not approved:
-            continue
-        signed = approved[0]
-        result = tally(row["manifest"], proof_rows(connection, ballot_id, signed["size"]), len(genesis["members"]))
-        now = datetime.now(UTC)
-        state_name = ("completed" if signed["final"] else "scheduled" if now < row["opens_at"] else
-                      "awaiting_witnesses" if now >= row["closes_at"] else "open")
-        entries.append({**row["manifest"], "status": state_name, "result": result if signed["final"] else None})
+    for row in connection.execute("SELECT * FROM cope_quorum.ballots ORDER BY opens_at DESC FOR SHARE"):
+        closed = now >= row["closes_at"]
+        result = tally(row["manifest"], proof_rows(connection, row["id"]), len(row["roster"]["members"])) if closed else None
+        entries.append({**row["manifest"], "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
+                        "result": result})
     return entries
 
 
 def cast_vote(connection, ballot_id, proof):
     row = ballot(connection, ballot_id)
-    genesis = founding_state(connection)["genesis"]
     manifest = row["manifest"]
     now = datetime.now(UTC)
     if now < row["opens_at"]:
@@ -333,14 +233,12 @@ def cast_vote(connection, ballot_id, proof):
         if accepted and accepted["proof"] == proof.model_dump():
             return {"position": accepted["position"], "nullifier": proof.nullifier}
         fail("quorum_voting_closed", "This ballot has closed.")
-    if not has_open_checkpoint(checkpoints(connection, ballot_id), genesis["threshold"]):
-        fail("quorum_ballot_pending", "This ballot is awaiting independent witness signatures.")
     if int(proof.message) >= (len(manifest["options"]) if manifest["rule"] == "report_only" else 3):
         fail("quorum_invalid_option", "This option is outside the frozen ballot.", 422)
     connection.commit()
-    if not proof_worker(genesis["members"], proof, scope(["cope-quorum-ballot/1", manifest]))["valid"]:
+    if not proof_worker(row["roster"]["members"], proof, scope(["cope-quorum-ballot/1", manifest]))["valid"]:
         fail("quorum_invalid_vote", "The anonymous vote proof is invalid.", 422)
-    row = ballot(connection, ballot_id, lock=True)
+    row = ballot(connection, ballot_id, lock=" FOR UPDATE")
     accepted = connection.execute(
         "SELECT position, proof FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?",
         (str(ballot_id), proof.nullifier),
@@ -362,24 +260,3 @@ def cast_vote(connection, ballot_id, proof):
     )
     connection.commit()
     return {"position": next_position, "nullifier": proof.nullifier}
-
-
-def endorse_ballot(connection, ballot_id, endorsement):
-    row = ballot(connection, ballot_id, lock=True)
-    genesis = founding_state(connection)["genesis"]
-    if endorsement.witness not in genesis["witnesses"]:
-        fail("quorum_untrusted_witness", "This key is outside the founding witness set.", 403)
-    votes = proof_rows(connection, ballot_id)
-    if endorsement.size > len(votes) or (endorsement.final and (
-            datetime.now(UTC) < row["closes_at"] or endorsement.size != len(votes))):
-        fail("quorum_checkpoint_mismatch", "This checkpoint does not match the current ballot boundary.")
-    expected = digest(snapshot(row, votes[:endorsement.size], endorsement.final))
-    if expected != endorsement.digest:
-        fail("quorum_checkpoint_mismatch", "The signed checkpoint does not match this vote prefix.")
-    signature_for(endorsement.witness, endorsement.signature, expected)
-    connection.execute(
-        """INSERT INTO cope_quorum.endorsements (ballot_id, size, final, digest, witness, signature)
-           VALUES (?::uuid, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING""",
-        (str(ballot_id), endorsement.size, endorsement.final, expected, endorsement.witness, endorsement.signature),
-    )
-    connection.commit()
