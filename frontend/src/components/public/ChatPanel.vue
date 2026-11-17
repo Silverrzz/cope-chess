@@ -531,6 +531,7 @@ function scrollToLatest(): void {
   display: inline-flex;
   position: relative;
   align-items: center;
+  align-self: center;
   color: var(--color-info);
 }
 
