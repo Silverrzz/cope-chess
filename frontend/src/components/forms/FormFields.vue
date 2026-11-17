@@ -4,7 +4,7 @@ import { nextTick, reactive, ref, useId } from 'vue'
 import FormDateTime from './FormDateTime.vue'
 import FormMarkdown from './FormMarkdown.vue'
 import FormResourcePicker from './FormResourcePicker.vue'
-import FormPositionEditor from './FormPositionEditor.vue'
+import FormPositionField from './FormPositionField.vue'
 import { contentKinds, fieldActive, initialAnswers, type FormAnswers, type FormChoice, type FormErrors, type FormField } from '@/types/forms'
 
 const props = withDefaults(defineProps<{
@@ -227,8 +227,9 @@ async function findReferences(field: FormField, search: string): Promise<void> {
             </div>
             <small v-if="transfers[key(field)]" role="status">Uploading {{ transfers[key(field)] }}…</small><div v-else-if="modelValue[field.id]" class="attachment-receipt"><span>Attachment received</span><BaseButton v-if="download" type="button" variant="ghost" size="small" @click="downloadFile(field)">Download attachment</BaseButton><BaseButton type="button" class="button button--ghost button--small" :disabled="disabled" @click="update(field, undefined)" variant="ghost" size="small">Remove</BaseButton></div><small v-else-if="!upload">Attachment selection is unavailable here.</small>
           </template>
-          <FormPositionEditor v-else-if="field.kind === 'chess_position'" :id="elementId(field)" :model-value="modelValue[field.id]"
-            :disabled="disabled" @update:model-value="update(field, $event)" />
+          <FormPositionField v-else-if="field.kind === 'chess_position'" :id="elementId(field)" :model-value="modelValue[field.id]"
+            :disabled="disabled" :required="!!field.required" :invalid="!!errors(field).length" :described-by="descriptions(field)"
+            @update:model-value="update(field, $event)" />
           <FormResourcePicker v-else-if="field.kind === 'chess_game' || field.kind === 'rating_list' || field.kind === 'engine'" :id="elementId(field)"
             :kind="field.kind === 'chess_game' ? 'game' : field.kind" :model-value="display(field)" :described-by="descriptions(field)"
             :disabled="disabled" @update:model-value="update(field, $event)" />

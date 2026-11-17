@@ -163,7 +163,7 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: 
         from .resources import chess_position
 
         if type(value) is not dict or set(value) - {"fen", "pgn"}:
-            invalid("invalid_position", "Set up a board or import a game.")
+            invalid("invalid_position", "Enter a FEN or use the position editor.")
         try:
             return chess_position(value.get("fen", ""), value.get("pgn", ""))
         except ApplicationError as error:

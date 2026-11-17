@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import api from '@/api/client'
 import ChessBoard from '@/components/chess/ChessBoard.vue'
 import { parseFen, positionFen, squareIndex, START_FEN, type Piece, type Position } from '@/components/chess/chess'
@@ -8,8 +8,8 @@ import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import type { ChessPositionAnswer } from '@/types/forms'
 
-const props = defineProps<{ modelValue?: unknown; id: string; disabled?: boolean | undefined }>()
-const emit = defineEmits<{ 'update:modelValue': [value: ChessPositionAnswer] }>()
+const props = defineProps<{ initialFen: string }>()
+const emit = defineEmits<{ apply: [value: ChessPositionAnswer] }>()
 
 const EMPTY_FEN = '8/8/8/8/8/8/8/8 w - - 0 1'
 const pieces = [
@@ -36,25 +36,24 @@ const castlingRows = [
 ]
 
 const fen = ref(START_FEN)
-const fenInput = ref(START_FEN)
+const fenInput = ref(props.initialFen.trim() || START_FEN)
 const tool = ref<Piece | 'move' | 'erase'>('move')
-const pending = ref(false)
+const pending = ref<'import' | 'apply' | null>(null)
 const error = ref('')
+const controller = new AbortController()
 const position = computed(() => parseFen(fen.value))
-const inactive = computed(() => props.disabled || pending.value)
+const inactive = computed(() => pending.value !== null)
 const editMode = computed(() => inactive.value ? 'disabled' : tool.value === 'move' ? 'move' : 'place')
 
-watch(() => props.modelValue, value => showPosition(value as ChessPositionAnswer | undefined), { immediate: true })
+onMounted(() => {
+  if (fenInput.value !== START_FEN) void validateFen('import')
+})
+onBeforeUnmount(() => controller.abort())
 
-function showPosition(value?: ChessPositionAnswer) {
-  fen.value = value?.fen || START_FEN
-  fenInput.value = fen.value
+function setPosition(value: string) {
+  fen.value = value
+  fenInput.value = value
   error.value = ''
-}
-
-function setPosition(value: ChessPositionAnswer) {
-  showPosition(value)
-  emit('update:modelValue', value)
 }
 
 function hasCastlingPieces(board: Position, option: typeof castling[number]) {
@@ -68,7 +67,7 @@ function updatePieces(board: Position) {
     .map(option => option.right).join('') || '-'
   board.enPassant = '-'
   board.halfmove = 0
-  setPosition({ fen: positionFen(board) })
+  setPosition(positionFen(board))
 }
 
 function place(square: string) {
@@ -97,37 +96,41 @@ function setTurn(event: Event) {
   const board = parseFen(fen.value)
   board.turn = (event.target as HTMLSelectElement).value === 'b' ? 'b' : 'w'
   board.enPassant = '-'
-  setPosition({ fen: positionFen(board) })
+  setPosition(positionFen(board))
 }
 
 function setCastling(right: typeof castling[number]['right'], checked: boolean) {
   const board = parseFen(fen.value)
   board.castling = castling.filter(option => option.right === right ? checked : board.castling.includes(option.right))
     .map(option => option.right).join('') || '-'
-  setPosition({ fen: positionFen(board) })
+  setPosition(positionFen(board))
 }
 
-async function importFen() {
+async function validateFen(action: 'import' | 'apply') {
   if (inactive.value) return
   const input = fenInput.value.trim()
   if (!input) {
     error.value = 'Enter a FEN.'
     return
   }
-  pending.value = true
+  pending.value = action
   error.value = ''
   try {
-    setPosition(await api.post<ChessPositionAnswer>('/api/forms/resources/position', { body: { fen: input } }))
+    const answer = await api.post<ChessPositionAnswer>('/api/forms/resources/position', {
+      body: { fen: input }, signal: controller.signal,
+    })
+    if (action === 'apply') emit('apply', answer)
+    else setPosition(answer.fen)
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : 'Could not import the position.'
+    if (!controller.signal.aborted) error.value = cause instanceof Error ? cause.message : 'Could not validate the position.'
   } finally {
-    pending.value = false
+    pending.value = null
   }
 }
 </script>
 
 <template>
-  <div class="position-editor">
+  <div class="section-stack position-editor">
     <div class="position-layout">
       <ChessBoard :fen="fen" :controls="false" :edit-mode="editMode" compact label="Editable chess position"
         @select-square="place" @move-piece="movePiece" />
@@ -180,21 +183,24 @@ async function importFen() {
         </fieldset>
 
         <div class="button-row">
-          <BaseButton size="small" :disabled="inactive" @click="setPosition({ fen: START_FEN })">Starting position</BaseButton>
-          <BaseButton size="small" :disabled="inactive" @click="setPosition({ fen: EMPTY_FEN })">Empty board</BaseButton>
+          <BaseButton size="small" :disabled="inactive" @click="setPosition(START_FEN)">Starting position</BaseButton>
+          <BaseButton size="small" :disabled="inactive" @click="setPosition(EMPTY_FEN)">Empty board</BaseButton>
         </div>
 
         <div class="position-import">
           <label class="field">
             <span>FEN</span>
-            <input :id="id" v-model="fenInput" class="input input--mono" type="text" maxlength="120" :disabled="inactive"
-              spellcheck="false" autocapitalize="off" @keydown.enter.prevent="importFen">
+            <input v-model="fenInput" class="input input--mono" type="text" maxlength="120" :disabled="inactive"
+              spellcheck="false" autocapitalize="off" @keydown.enter.prevent="validateFen('import')">
           </label>
-          <BaseButton size="small" :disabled="disabled" :loading="pending" @click="importFen">Import FEN</BaseButton>
+          <BaseButton size="small" :disabled="inactive" :loading="pending === 'import'" @click="validateFen('import')">Import FEN</BaseButton>
         </div>
 
         <InlineFeedback :message="error" />
       </div>
+    </div>
+    <div class="button-row position-apply">
+      <BaseButton variant="primary" :disabled="inactive" :loading="pending === 'apply'" @click="validateFen('apply')">Use position</BaseButton>
     </div>
   </div>
 </template>
@@ -276,6 +282,10 @@ async function importFen() {
 
 .position-import .field {
   width: 100%;
+}
+
+.position-apply {
+  justify-content: flex-end;
 }
 
 @container (min-width: 34rem) {

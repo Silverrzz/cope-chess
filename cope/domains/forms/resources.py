@@ -158,4 +158,5 @@ def chess_position(fen: str, pgn: str) -> dict:
             raise ValueError("Invalid board")
         return {"fen": board.fen(), **({"pgn": pgn} if pgn else {})}
     except (ValueError, RecursionError) as exc:
-        raise ApplicationError("invalid_position", "Enter a valid standard-chess FEN or a single legal PGN.", 422) from exc
+        message = "Enter a single legal PGN." if pgn else "Enter a valid standard-chess FEN."
+        raise ApplicationError("invalid_position", message, 422) from exc

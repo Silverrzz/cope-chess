@@ -12,7 +12,7 @@ const groups: { label: string; fields: [FormKind, string][] }[] = [
   { label: 'Text and contact', fields: [['text', 'Short text'], ['long_text', 'Paragraph'], ['email', 'Email'], ['url', 'Website'], ['phone', 'Phone number']] },
   { label: 'Choices and feedback', fields: [['choice', 'Single choice'], ['dropdown', 'Dropdown'], ['multiple_choice', 'Multiple choices'], ['yes_no', 'Yes or no'], ['checkbox', 'Checkbox'], ['consent', 'Consent'], ['rating', 'Rating'], ['scale', 'Number scale'], ['ranking', 'Ranking'], ['matrix', 'Choice grid']] },
   { label: 'Numbers and dates', fields: [['integer', 'Whole number'], ['decimal', 'Decimal number'], ['date', 'Date'], ['time', 'Time'], ['datetime', 'Date and time']] },
-  { label: 'Files and Cope resources', fields: [['attachment', 'File upload'], ['chess_game', 'Tournament game'], ['chess_position', 'Chess board editor'], ['engine', 'Engine dropdown'], ['rating_list', 'Rating list'], ['reference', 'Internal object'], ['group', 'Repeatable group']] },
+  { label: 'Files and Cope resources', fields: [['attachment', 'File upload'], ['chess_game', 'Tournament game'], ['chess_position', 'Chess position'], ['engine', 'Engine dropdown'], ['rating_list', 'Rating list'], ['reference', 'Internal object'], ['group', 'Repeatable group']] },
   { label: 'Layout and content', fields: [['section', 'Section heading'], ['markdown', 'Rich content']] },
 ]
 const labels = new Map(groups.flatMap(group => group.fields))
