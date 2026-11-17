@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { tournamentPath } from '@/router/publicUrls'
 import { engineVersionLabel } from '@/components/public/format'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { api } from '@/api/client'
 import ChessBoard from '@/components/chess/ChessBoard.vue'
@@ -13,8 +13,6 @@ import SpectatorCount from '@/components/public/SpectatorCount.vue'
 import StatusPill from '@/components/public/StatusPill.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import type { GameRecord, MoveRecord, OpeningRecord, TournamentSummary } from '@/components/public/types'
-import AppIcon from '@/components/ui/AppIcon.vue'
-import BaseButton from '@/components/ui/BaseButton.vue'
 import { useTournamentSpectators } from '@/composables/useTournamentSpectators'
 
 interface GamePreview {
@@ -78,49 +76,6 @@ const loading = ref(true)
 const loadError = ref('')
 let controller: AbortController | null = null
 
-const UPCOMING_PREVIEW_COUNT = 4
-const RESULTS_PREVIEW_COUNT = 6
-const count = new Intl.NumberFormat()
-const showAllUpcoming = ref(false)
-const showAllResults = ref(false)
-
-const upcomingGames = computed(() => {
-  const rows = data.value?.upcoming_rows ?? []
-  return showAllUpcoming.value ? rows : rows.slice(0, UPCOMING_PREVIEW_COUNT)
-})
-const recentGames = computed(() => {
-  const games = data.value?.recent_games ?? []
-  return showAllResults.value ? games : games.slice(0, RESULTS_PREVIEW_COUNT)
-})
-const queueGroups = computed(() => {
-  const queues = data.value?.engine_queues
-  if (!queues) return []
-  return [
-    {
-      title: 'Waiting for test',
-      open: true,
-      empty: 'No engine tests are currently waiting.',
-      items: queues.waiting_for_test.map(item => ({
-        id: item.id,
-        name: item.engine_name,
-        version: engineVersionLabel(item.engine_version),
-        ratingList: item.rating_list_name,
-      })),
-    },
-    {
-      title: 'Recognised engines',
-      open: !queues.waiting_for_test.length,
-      empty: 'No engines are currently queued for acknowledgement.',
-      items: queues.acknowledged.map(item => ({
-        id: item.id,
-        name: item.name,
-        version: engineVersionLabel(item.version),
-        ratingList: '',
-      })),
-    },
-  ]
-})
-
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
 
@@ -148,175 +103,156 @@ function progress(item: TournamentSummary): number {
 
 <template>
   <div class="page-container home-page">
-    <header class="home-heading">
-      <h1>COPE Chess</h1>
-      <dl v-if="data" class="home-stats panel" aria-label="Platform activity">
-        <div><dt>Live games</dt><dd>{{ count.format(data.live_games) }}</dd></div>
-        <div><dt>Workers</dt><dd>{{ count.format(data.connected_workers) }}</dd></div>
-        <div><dt>Cores</dt><dd>{{ count.format(data.connected_cores) }}</dd></div>
-      </dl>
-    </header>
-
-    <ContentState v-if="loading" kind="loading" compact title="Loading tournament activity" />
-    <ContentState v-else-if="loadError" kind="error" compact :message="loadError" action-label="Try again" @action="load" />
+    <ContentState v-if="loading" kind="loading" title="Loading tournament activity" />
+    <ContentState v-else-if="loadError" kind="error" :message="loadError" action-label="Try again" @action="load" />
 
     <template v-else-if="data">
-      <div class="home-dashboard">
-        <div class="home-column">
-          <section class="section-stack" aria-labelledby="running-tournaments-title">
-            <header class="home-section-heading">
-              <h2 id="running-tournaments-title">Running tournaments</h2>
-              <RouterLink class="home-section-link" to="/tournaments">All tournaments</RouterLink>
-            </header>
+      <section class="home-heading">
+        <div>
+          <h1>COPE Chess</h1>
+          <p>{{ data.connected_workers }} workers connected, totalling {{ data.connected_cores }} cores and {{ data.live_games }} currently live games</p>
+        </div>
+      </section>
 
-            <div v-if="data.running_tournaments.length" class="home-tournaments">
-              <article
-                v-for="item in data.running_tournaments" :key="item.tournament.record.id"
-                class="panel panel__body live-card" :class="{ 'live-card--preview': item.preview }"
-              >
-                <div v-if="item.preview" class="live-card__board">
-                  <ChessBoard
-                    :variant="item.tournament.record.config?.variant"
-                    :fen="item.preview.opening?.fen || 'startpos'"
-                    :moves="item.preview.moves.map((move) => move.uci)"
-                    :controls="false"
-                    :coordinates="false"
-                    compact
-                    :label="`${item.preview.white_name} versus ${item.preview.black_name} position`"
-                  />
-                </div>
-
-                <div class="live-card__body">
-                  <header class="live-card__heading">
-                    <div>
-                      <h3><RouterLink :to="tournamentPath(item.tournament.record.id)">{{ item.tournament.record.name }}</RouterLink></h3>
-                      <p class="muted">{{ item.tournament.format || 'Tournament' }} · {{ item.tournament.time_control || 'Time control not set' }}</p>
-                    </div>
-                    <div class="live-card__status">
-                      <StatusPill :status="item.tournament.record.status" />
-                      <SpectatorCount :count="spectatorCount(item.tournament.record.id, item.tournament.spectator_count)" />
-                    </div>
-                  </header>
-
-                  <div v-if="item.preview" class="live-card__match">
-                    <p>{{ item.preview.white_name }} <span class="muted">vs</span> {{ item.preview.black_name }}</p>
-                    <small v-if="item.preview.game.round != null" class="muted">Round {{ item.preview.game.round }}</small>
-                  </div>
-                  <p v-else class="muted">Waiting for the next game to start.</p>
-
-                  <ProgressBar :value="progress(item.tournament)" :label="`${count.format(item.tournament.summary.finished || 0)} of ${count.format(item.tournament.summary.total)} games finished`" />
-
-                  <footer class="live-card__footer">
-                    <p class="muted">
-                      {{ count.format(item.tournament.summary.live || 0) }} live · {{ count.format(item.tournament.summary.pairs || 0) }} pairs
-                      <template v-if="item.preview?.last_move?.san"> · Last move {{ item.preview.last_move.san }}</template>
-                      <template v-else-if="!item.preview && item.tournament.record.current_round"> · Round {{ item.tournament.record.current_round }}</template>
-                    </p>
-                    <BaseButton
-                      size="small"
-                      :to="item.preview
-                        ? tournamentPath(item.tournament.record.id, { gameId: item.preview.game.id })
-                        : tournamentPath(item.tournament.record.id)"
-                    >
-                      {{ item.preview ? 'Watch game' : 'Open tournament' }}
-                      <template #trailing><AppIcon name="arrow-right" :size="14" /></template>
-                    </BaseButton>
-                  </footer>
-                </div>
-              </article>
-            </div>
-            <p v-else class="panel panel__body home-empty muted">No tournaments are running right now.</p>
-          </section>
-
-          <section class="panel home-panel" aria-labelledby="home-donors-title">
-            <header class="home-section-heading home-panel__header">
-              <div>
-                <h2 id="home-donors-title">Donors</h2>
-                <p class="muted home-caption">Ranked by estimated CPU hours</p>
-              </div>
-            </header>
-            <DonorRankings compact />
-          </section>
+      <section class="section-stack" aria-labelledby="running-tournaments-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="running-tournaments-title">Running tournaments</h2>
+          </div>
+          <RouterLink to="/tournaments">All tournaments</RouterLink>
         </div>
 
-        <div class="home-column">
-          <section class="panel home-panel" aria-labelledby="upcoming-title">
-            <header class="home-section-heading home-panel__header">
-              <h2 id="upcoming-title">Upcoming games</h2>
-            </header>
-            <div v-if="data.upcoming_rows.length" id="home-upcoming-list">
-              <RouterLink v-for="row in upcomingGames" :key="row.game_id" :to="row.href" class="upcoming-row">
+        <div v-if="data.running_tournaments.length" class="live-grid">
+          <article v-for="item in data.running_tournaments" :key="item.tournament.record.id" class="live-card" :class="{ 'live-card--without-preview': !item.preview }">
+            <div v-if="item.preview" class="live-card__board" aria-hidden="true">
+              <ChessBoard
+                :variant="item.tournament.record.config?.variant"
+                :fen="item.preview.opening?.fen || 'startpos'"
+                :moves="item.preview.moves.map((move) => move.uci)"
+                :controls="false"
+                :coordinates="false"
+                compact
+                :label="`${item.preview.white_name} versus ${item.preview.black_name} position`"
+              />
+            </div>
+            <div class="live-card__body">
+              <header>
                 <div>
-                  <strong>{{ row.white }} <span class="muted">vs</span> {{ row.black }}</strong>
-                  <small class="muted">
-                    {{ row.tournament }} ·
-                    {{ row.status === 'scheduled' && row.scheduled_start_at ? formatDate(row.scheduled_start_at, true) : `Round ${row.round}` }}
-                  </small>
+                  <h3><RouterLink :to="tournamentPath(item.tournament.record.id)">{{ item.tournament.record.name }}</RouterLink></h3>
+                  <p>{{ item.tournament.format || 'Tournament' }} / {{ item.tournament.time_control || 'Time control not set' }}</p>
                 </div>
-                <StatusPill :status="row.status" />
-                <AppIcon class="muted" name="chevron-right" :size="15" />
-              </RouterLink>
+                <div class="live-card__status">
+                  <SpectatorCount :count="spectatorCount(item.tournament.record.id, item.tournament.spectator_count)" />
+                  <StatusPill :status="item.tournament.record.status" />
+                </div>
+              </header>
+
+              <div v-if="item.preview" class="live-card__preview-heading">
+                <span>Live game</span>
+                <RouterLink :to="tournamentPath(item.tournament.record.id)">
+                  {{ item.preview.white_name }} <span>vs</span> {{ item.preview.black_name }}
+                </RouterLink>
+                <small>Round {{ item.preview.game.round ?? '-' }}</small>
+              </div>
+              <p v-else class="live-card__meta">Waiting for the next game to start.</p>
+
+              <ProgressBar :value="progress(item.tournament)" :label="`${item.tournament.summary.finished || 0} of ${item.tournament.summary.total} tournament games finished`" />
+              <dl class="live-card__facts">
+                <div><dt>Games</dt><dd>{{ item.tournament.summary.finished || 0 }} / {{ item.tournament.summary.total }}</dd></div>
+                <div><dt>Game pairs</dt><dd>{{ item.tournament.summary.pairs || 0 }}</dd></div>
+                <div><dt>Live</dt><dd>{{ item.tournament.summary.live || 0 }}</dd></div>
+                <div v-if="item.tournament.record.current_round"><dt>Round</dt><dd>{{ item.tournament.record.current_round }}</dd></div>
+                <div v-if="item.preview"><dt>Preview plies</dt><dd>{{ item.preview.moves.length }}</dd></div>
+                <div v-if="item.preview"><dt>Last move</dt><dd>{{ item.preview.last_move?.san || '-' }}</dd></div>
+              </dl>
+              <RouterLink class="tournament-link" :to="tournamentPath(item.tournament.record.id)">Open tournament</RouterLink>
             </div>
-            <p v-else class="home-empty muted">No upcoming games.</p>
-            <footer v-if="data.upcoming_rows.length > UPCOMING_PREVIEW_COUNT" class="home-panel__footer">
-              <BaseButton
-                size="small" variant="ghost" :aria-expanded="showAllUpcoming" aria-controls="home-upcoming-list"
-                @click="showAllUpcoming = !showAllUpcoming"
-              >
-                {{ showAllUpcoming ? 'Show fewer games' : `Show all ${data.upcoming_rows.length} upcoming games` }}
-              </BaseButton>
-            </footer>
-          </section>
-
-          <section class="panel home-panel" aria-labelledby="engine-queues-title">
-            <header class="home-section-heading home-panel__header">
-              <h2 id="engine-queues-title">Engine queues</h2>
-            </header>
-            <details v-for="queue in queueGroups" :key="queue.title" class="queue-group" :open="queue.open">
-              <summary>
-                <span>{{ queue.title }}</span>
-                <span class="queue-group__count">{{ count.format(queue.items.length) }}</span>
-                <AppIcon name="chevron-down" :size="15" />
-              </summary>
-              <ol v-if="queue.items.length" class="queue-group__list">
-                <li v-for="item in queue.items" :key="item.id">
-                  <strong>{{ item.name }}<span v-if="item.version" class="muted">{{ item.version }}</span></strong>
-                  <small v-if="item.ratingList" class="muted">{{ item.ratingList }}</small>
-                </li>
-              </ol>
-              <p v-else class="queue-group__empty muted">{{ queue.empty }}</p>
-            </details>
-            <details class="queue-policy">
-              <summary>Queue policy</summary>
-              <p>Engine code and data must be original and human-written. The recognised engine queue shows planned additions, and its order may change.</p>
-              <p>Engines are tested in every rating list they qualify for. Lower-priority lists and engines with frequent releases may take longer. For hardware donations and faster testing, contact <strong>@silverrzz</strong> on Discord.</p>
-            </details>
-          </section>
+          </article>
         </div>
-      </div>
+        <ContentState v-else kind="empty" compact title="No running tournaments" />
+      </section>
 
-      <section class="panel home-panel" aria-labelledby="recent-title">
-        <header class="home-section-heading home-panel__header">
-          <h2 id="recent-title">Recent results</h2>
-        </header>
-        <GameTable
-          v-if="data.recent_games.length" id="home-recent-results"
-          :games="recentGames"
-          :engines="data.engines"
-          :tournament-names="data.tournament_names"
-          show-tournament
-          show-round
-          caption="Recent tournament results"
-        />
-        <p v-else class="home-empty muted">No recent results.</p>
-        <footer v-if="data.recent_games.length > RESULTS_PREVIEW_COUNT" class="home-panel__footer">
-          <BaseButton
-            size="small" variant="ghost" :aria-expanded="showAllResults" aria-controls="home-recent-results"
-            @click="showAllResults = !showAllResults"
-          >
-            {{ showAllResults ? 'Show fewer results' : `Show all ${data.recent_games.length} results` }}
-          </BaseButton>
-        </footer>
+      <section class="section-stack" aria-labelledby="home-donors-title">
+        <div class="section-heading">
+          <h2 id="home-donors-title">Donors</h2>
+        </div>
+        <DonorRankings class="panel data-panel" compact />
+      </section>
+
+      <section class="engine-queues" aria-labelledby="engine-queues-title">
+        <div class="section-heading queue-section-heading">
+          <div>
+            <h2 id="engine-queues-title">Engine queues</h2>
+            <p>Engines planned for addition and testing across COPE.</p>
+          </div>
+        </div>
+
+        <div class="queue-public-grid">
+          <article class="panel public-queue">
+            <header><div><span>Acknowledged</span><h3>Recognised engines</h3></div><strong>{{ data.engine_queues.acknowledged.length }}</strong></header>
+            <p>All engines must be fully original in their data and codebase, and human-written. This queue contains engines recognised by COPE that are planned to be added. Its order may be subject to change.</p>
+            <ol v-if="data.engine_queues.acknowledged.length">
+              <li v-for="(item, index) in data.engine_queues.acknowledged" :key="item.id">
+                <b>{{ String(index + 1).padStart(2, '0') }}</b>
+                <span><strong>{{ item.name }}</strong><small v-if="engineVersionLabel(item.version)">{{ engineVersionLabel(item.version) }}</small></span>
+              </li>
+            </ol>
+            <div v-else class="public-queue__empty">No engines are currently queued for acknowledgement.</div>
+          </article>
+
+          <article class="panel public-queue public-queue--waiting">
+            <header><div><span>Waiting for test</span><h3>Planned test runs</h3></div><strong>{{ data.engine_queues.waiting_for_test.length }}</strong></header>
+            <p>Test order can vary. Every engine will eventually be tested in all lists it qualifies for, but lower-priority lists may take time. Authors who release new versions at excessive speeds may wait longer for each version to be tested. To fast-track engine testing, contact <strong>@silverrzz</strong> on Discord to learn how to donate your hardware.</p>
+            <ol v-if="data.engine_queues.waiting_for_test.length">
+              <li v-for="(item, index) in data.engine_queues.waiting_for_test" :key="item.id">
+                <b>{{ String(index + 1).padStart(2, '0') }}</b>
+                <span><strong>{{ item.engine_name }} {{ engineVersionLabel(item.engine_version) }}</strong><small>{{ item.rating_list_name }}</small></span>
+              </li>
+            </ol>
+            <div v-else class="public-queue__empty">No engine tests are currently waiting.</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="home-tables">
+        <section class="panel data-panel" aria-labelledby="upcoming-title">
+          <div class="data-panel__header">
+            <div>
+              <h2 id="upcoming-title">Upcoming</h2>
+            </div>
+          </div>
+          <div v-if="data.upcoming_rows.length" class="upcoming-list">
+            <RouterLink v-for="row in data.upcoming_rows" :key="row.game_id" :to="row.href" class="upcoming-row">
+              <div>
+                <strong>{{ row.tournament }}</strong>
+                <span v-if="row.status === 'scheduled' && row.scheduled_start_at">Starts {{ formatDate(row.scheduled_start_at, true) }}</span>
+                <span v-else>Round {{ row.round }}</span>
+              </div>
+              <p>{{ row.white }} <span aria-hidden="true">vs</span><span class="sr-only">versus</span> {{ row.black }}</p>
+              <StatusPill :status="row.status" />
+              <span class="row-arrow" aria-hidden="true">&gt;</span>
+            </RouterLink>
+          </div>
+          <p v-else class="panel-empty">No upcoming games.</p>
+        </section>
+
+        <section class="panel data-panel" aria-labelledby="recent-title">
+          <div class="data-panel__header">
+            <div>
+              <h2 id="recent-title">Recent results</h2>
+            </div>
+          </div>
+          <GameTable
+            v-if="data.recent_games.length"
+            :games="data.recent_games"
+            :engines="data.engines"
+            :tournament-names="data.tournament_names"
+            :show-tournament="true"
+            :show-round="true"
+            caption="Recent tournament results"
+          />
+          <p v-else class="panel-empty">No recent results.</p>
+        </section>
       </section>
     </template>
   </div>
@@ -325,326 +261,417 @@ function progress(item: TournamentSummary): number {
 <style scoped>
 .home-page {
   display: grid;
-  gap: var(--space-8);
+  gap: clamp(1.5rem, 3vw, 2.5rem);
+  padding-block: clamp(1.2rem, 2.5vw, 2.25rem) 3rem;
 }
 
 .home-heading {
   display: flex;
-  align-items: end;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: var(--space-4);
+  gap: var(--space-xl, 2rem);
+  padding-block-end: var(--space-lg, 1.5rem);
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.home-heading h1,
+.home-heading p,
+.section-heading h2,
+.section-heading p,
+.data-panel h2,
+.data-panel p {
+  margin: 0;
 }
 
 .home-heading h1 {
-  font-size: clamp(2rem, 4.5vw, 3.4rem);
+  font-size: clamp(2rem, 5vw, 4rem);
+  letter-spacing: -0.045em;
+  line-height: 0.98;
 }
 
-.home-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  min-width: min(100%, 24rem);
+.home-heading p {
+  margin-block-start: 0.65rem;
+  color: var(--color-text-muted, #607080);
+  font-size: clamp(0.8rem, 1.5vw, 0.95rem);
 }
 
-.home-stats > div {
+.section-heading,
+.data-panel__header {
   display: flex;
-  flex-direction: column-reverse;
-  gap: var(--space-1);
-  padding: var(--space-3) var(--space-4);
-}
-
-.home-stats > div + div {
-  border-inline-start: 1px solid var(--color-border);
-}
-
-.home-stats dt {
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-}
-
-.home-stats dd {
-  font-size: clamp(1.25rem, 3vw, 1.75rem);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-}
-
-.home-dashboard {
-  display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
-  align-items: start;
-  gap: var(--space-6);
-}
-
-.home-column {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-6);
-}
-
-.home-panel {
-  min-width: 0;
-}
-
-.home-section-heading {
-  display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--space-md, 1rem);
 }
 
-.home-section-heading h2 {
-  font-size: 1.16rem;
-  text-wrap: wrap;
+.section-heading h2,
+.data-panel h2 {
+  font-size: 1.05rem;
 }
 
-.home-section-link {
-  color: var(--color-accent);
-  font-size: 0.85rem;
-  font-weight: 650;
+.section-heading p,
+.data-panel__header p {
+  margin-block-start: 0.2rem;
+  color: var(--color-text-muted, #607080);
+  font-size: 0.76rem;
+}
+
+.section-heading a,
+.data-panel__header a {
+  color: var(--color-accent, #2f78c4);
+  font-size: 0.78rem;
+  font-weight: 700;
   text-decoration: none;
-  text-align: end;
+  white-space: nowrap;
 }
 
-.home-section-link:hover {
-  text-decoration: underline;
-}
-
-.home-panel__header,
-.home-panel__footer {
-  padding: var(--space-4);
-}
-
-.home-panel__header {
-  border-block-end: 1px solid var(--color-border);
-}
-
-.home-panel__footer {
-  display: flex;
-  justify-content: center;
-  padding-block: var(--space-2);
-  border-block-start: 1px solid var(--color-border);
-}
-
-.home-caption {
-  margin-block-start: var(--space-1);
-  font-size: 0.8rem;
-}
-
-.home-tournaments {
+.live-grid {
   display: grid;
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr));
+  gap: var(--space-md, 1rem);
 }
 
 .live-card {
   display: grid;
-  align-items: center;
-  gap: var(--space-5);
-}
-
-.live-card--preview {
-  grid-template-columns: minmax(7rem, 0.8fr) minmax(0, 1.45fr);
+  grid-template-columns: minmax(9rem, 0.72fr) minmax(0, 1.4fr);
+  gap: var(--space-md, 1rem);
+  padding: var(--space-md, 1rem);
+  border: 1px solid var(--color-border, #d5dbe1);
+  border-radius: var(--radius-lg, 0.75rem);
+  background: var(--color-surface, #fff);
 }
 
 .live-card__board {
-  width: min(100%, 14rem);
-  justify-self: center;
+  align-self: center;
+  min-width: 0;
 }
 
 .live-card__body {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-3);
-  overflow-wrap: anywhere;
-}
-
-.live-card__heading,
-.live-card__footer {
   display: flex;
-  align-items: start;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.live-card--without-preview {
+  grid-template-columns: 1fr;
+}
+
+.live-card header {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-4);
-}
-
-.live-card__heading h3 {
-  font-size: clamp(1.06rem, 1.6vw, 1.32rem);
-  text-wrap: wrap;
-}
-
-.live-card__heading h3 a {
-  text-decoration: none;
-}
-
-.live-card__heading h3 a:hover {
-  color: var(--color-accent);
-}
-
-.live-card__heading p {
-  margin-block-start: var(--space-1);
+  gap: 0.75rem;
 }
 
 .live-card__status {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-sm, 0.5rem);
 }
 
-.live-card__body > p,
-.live-card__heading p,
-.live-card__footer p {
+.live-card h3,
+.live-card p,
+.live-card dl {
+  margin: 0;
+}
+
+.live-card h3 {
+  font-size: 0.92rem;
+  line-height: 1.3;
+}
+
+.live-card h3 a,
+.live-card header p a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.live-card h3 a:hover,
+.live-card header p a:hover {
+  color: var(--color-accent, #2f78c4);
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
+.live-card h3 span,
+.live-card header p,
+.live-card__meta {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.live-card__preview-heading {
+  display: grid;
+  gap: 0.14rem;
+}
+
+.live-card__preview-heading > span,
+.live-card__preview-heading small {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.64rem;
+}
+
+.live-card__preview-heading > span {
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.live-card__preview-heading a {
+  color: inherit;
+  font-size: 0.82rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.live-card__preview-heading a:hover {
+  color: var(--color-accent, #2f78c4);
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
+.live-card__preview-heading a span {
+  color: var(--color-text-muted, #607080);
+  font-weight: 500;
+}
+
+.live-card dl {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.live-card dt {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.61rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.live-card dd {
+  margin: 0.12rem 0 0;
   font-size: 0.8rem;
+  font-weight: 700;
 }
 
-.live-card__match p {
-  font-size: 0.94rem;
-  font-weight: 650;
+.tournament-link {
+  align-self: flex-start;
+  margin-block-start: auto;
+  color: var(--color-accent, #2f78c4);
+  font-size: 0.76rem;
+  font-weight: 750;
+  text-decoration: none;
 }
 
-.live-card__footer {
+.home-tables {
+  display: grid;
+  grid-template-columns: minmax(20rem, 0.75fr) minmax(30rem, 1.25fr);
+  gap: var(--space-md, 1rem);
+  align-items: start;
+}
+
+.engine-queues {
+  display: grid;
+  gap: var(--space-md, 1rem);
+}
+
+.queue-section-heading {
   align-items: center;
+}
+
+.queue-public-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md, 1rem);
+}
+
+.public-queue {
+  overflow: hidden;
+  padding: 0;
+}
+
+.public-queue > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue > header span {
+  color: var(--color-accent, #2f78c4);
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.public-queue > header h3 {
+  margin: .16rem 0 0;
+  font-size: 1rem;
+}
+
+.public-queue > header > strong {
+  display: grid;
+  min-width: 1.85rem;
+  height: 1.85rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: .72rem;
+}
+
+.public-queue > p {
+  min-height: 6.2rem;
+  margin: 0;
+  padding: .9rem 1rem;
+  color: var(--color-text-muted, #607080);
+  font-size: .72rem;
+  line-height: 1.55;
+}
+
+.public-queue > p strong {
+  color: var(--color-text);
+}
+
+.public-queue ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-block-start: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: center;
+  gap: .65rem;
+  padding: .68rem 1rem;
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.public-queue li:last-child {
+  border-block-end: 0;
+}
+
+.public-queue li > b {
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  font-size: .65rem;
+}
+
+.public-queue li > span {
+  display: grid;
+  min-width: 0;
+  gap: .12rem;
+}
+
+.public-queue li strong {
+  overflow: hidden;
+  font-size: .78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.public-queue li small {
+  color: var(--color-text-muted, #607080);
+  font-size: .66rem;
+}
+
+.public-queue__empty {
+  padding: 1.4rem 1rem;
+  border-block-start: 1px solid var(--color-border, #d5dbe1);
+  color: var(--color-text-muted, #607080);
+  font-size: .75rem;
+  text-align: center;
+}
+
+.data-panel {
+  overflow: hidden;
+  padding: 0;
+}
+
+.data-panel__header {
+  padding: var(--space-md, 1rem);
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+}
+
+.upcoming-list {
+  display: grid;
 }
 
 .upcoming-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(8rem, 0.75fr) minmax(10rem, 1.25fr) auto auto;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
+  gap: 0.65rem;
+  padding: 0.72rem 1rem;
+  border-block-end: 1px solid var(--color-border, #d5dbe1);
+  color: inherit;
+  font-size: 0.76rem;
   text-decoration: none;
-  overflow-wrap: anywhere;
 }
 
-.upcoming-row + .upcoming-row {
-  border-block-start: 1px solid var(--color-border);
+.upcoming-row:last-child {
+  border-block-end: 0;
 }
 
-.upcoming-row:hover,
-.upcoming-row:focus-visible {
-  background: var(--color-surface-hover);
+.upcoming-row:hover {
+  background: color-mix(in srgb, var(--color-accent, #2f78c4) 5%, transparent);
 }
 
-.upcoming-row:focus-visible {
-  outline-offset: -3px;
+.upcoming-row > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
 }
 
 .upcoming-row strong,
-.upcoming-row small {
-  display: block;
-  font-size: 0.84rem;
+.upcoming-row p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.upcoming-row small {
-  font-size: 0.75rem;
+.upcoming-row > div span,
+.row-arrow {
+  color: var(--color-text-muted, #607080);
+  font-size: 0.66rem;
 }
 
-.queue-group,
-.queue-policy {
-  border-block-end: 1px solid var(--color-border);
-  font-size: 0.85rem;
+.row-arrow {
+  font-size: 1rem;
 }
 
-.queue-group summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.queue-group summary:hover {
-  background: var(--color-surface-hover);
-}
-
-.queue-group summary::-webkit-details-marker {
-  display: none;
-}
-
-.queue-group summary svg {
-  color: var(--color-text-muted);
-}
-
-.queue-group[open] summary svg {
-  transform: rotate(180deg);
-}
-
-.queue-group__count {
-  min-width: 2ch;
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-  text-align: end;
-}
-
-.queue-group__list {
-  padding: 0 var(--space-4) var(--space-3) var(--space-10);
-  overflow-wrap: anywhere;
-}
-
-.queue-group__list li {
-  padding-block: var(--space-1);
-}
-
-.queue-group__list li::marker {
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.queue-group__list strong > span {
-  margin-inline-start: var(--space-1);
-  font-weight: 500;
-}
-
-.queue-group__list small {
-  display: block;
-}
-
-.queue-group__empty {
-  padding: 0 var(--space-4) var(--space-3);
-  font-size: 0.8rem;
-}
-
-.queue-policy {
-  border-block-end: 0;
-  padding: var(--space-3) var(--space-4);
-  color: var(--color-text-muted);
-  font-size: 0.8rem;
-}
-
-.queue-policy summary {
-  cursor: pointer;
-}
-
-.queue-policy p {
-  margin-block-start: var(--space-2);
-}
-
-.home-empty {
-  padding: var(--space-6) var(--space-4);
+.panel-empty {
+  padding: 2.5rem 1rem;
+  color: var(--color-text-muted, #607080);
+  font-size: 0.82rem;
   text-align: center;
-  font-size: 0.88rem;
 }
 
-@media (max-width: 56rem) {
-  .home-dashboard {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .home-page {
-    gap: var(--space-6);
-  }
+@media (max-width: 68rem) {
+  .home-tables { grid-template-columns: 1fr; }
+  .queue-public-grid { grid-template-columns: 1fr; }
+  .public-queue > p { min-height: 0; }
 }
 
-@media (max-width: 36rem) {
-  .home-heading {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
+@media (max-width: 42rem) {
+  .home-heading { align-items: stretch; flex-direction: column; }
+  .live-card { grid-template-columns: 7rem minmax(0, 1fr); }
+  .live-card dl { flex-wrap: wrap; }
+  .upcoming-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .upcoming-row > p { grid-column: 1; }
+  .upcoming-row :deep(.status-pill) { grid-column: 2; grid-row: 1; }
+  .row-arrow { grid-column: 2; grid-row: 2; }
 }
 
-@media (max-width: 28rem) {
-  .live-card--preview {
-    grid-template-columns: minmax(0, 1fr);
-  }
+@media (max-width: 30rem) {
+  .live-card { grid-template-columns: 1fr; }
+  .live-card__board { width: min(11rem, 100%); }
 }
 </style>
