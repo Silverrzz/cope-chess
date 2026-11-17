@@ -104,7 +104,7 @@ from cope.tournament.clock_scaling import (
 from cope.version import app_version
 from cope.tournament.game_state import GameState
 from cope.tournament.time_control import RuntimeTimeControl, TimeControlCategory
-from cope.pgn import PgnGame, render_annotated_pgn
+from cope.pgn import PgnGame, render_annotated_pgn, render_ptn
 from cope.tournament.tournament import Game
 
 
@@ -384,7 +384,7 @@ def _fair_worker_tournaments(
         stranded_threads = max(0, remaining_threads - int(remaining_memory / cheapest_per_thread))
         return stranded_threads, active.get(tournament.id, 0) * resource.threads
 
-    return sorted(tournaments, key=allocation_order)
+    return sorted(tournaments, key=lambda tournament: (tournament.config.variant == "tak", *allocation_order(tournament)))
 
 
 def _next_tournament_worker_assignment(
@@ -447,6 +447,14 @@ def _next_tournament_worker_assignment(
         connection,
         worker.id,
         tuple(compatibility_engines.values()),
+    ):
+        return None
+    if tournament.config.variant == "tak" and any(
+        connection.execute(
+            "SELECT 1 FROM engine_variant_capabilities WHERE build_hash = ? AND variant = 'tak' AND status = 'supported'",
+            (engine.build_hash,),
+        ).fetchone() is None
+        for engine in runtime_engines.values()
     ):
         return None
     required_resources = _tournament_required_resources(
@@ -757,6 +765,7 @@ def run_worker_assignment_game(
             engine_id,
             transport,
             options=_engine_options(assignment, engine_id),
+            protocol=get_variant(assignment.variant).engine_protocol,
         )
         for engine_id in runtime_engine_ids
     }
@@ -1244,7 +1253,7 @@ def run_worker_assignment_game(
         "conclude",
         "pgn",
         "running",
-        f"Building PGN for {len(moves)} recorded plies",
+        f"Building {'PTN' if assignment.variant == 'tak' else 'PGN'} for {len(moves)} recorded plies",
         current=len(moves),
         total=max(len(moves), 1),
     )
@@ -2210,7 +2219,7 @@ def _max_moves_result(
     tournament: TournamentRecord,
     moves: Sequence[MoveRecord],
 ) -> tuple[str, str]:
-    if get_variant(tournament.config.variant).duck:
+    if get_variant(tournament.config.variant).duck or tournament.config.variant == "tak":
         return "1/2-1/2", "max moves"
     score = _latest_white_relative_score(moves)
     if score is None:
@@ -2300,7 +2309,8 @@ def _build_pgn(
             "WhiteRelay": ", ".join(str(member.engine_id) for member in white_team.members),
             "BlackRelay": ", ".join(str(member.engine_id) for member in black_team.members),
         }
-    return render_annotated_pgn(
+    render = render_ptn if tournament.config.variant == "tak" else render_annotated_pgn
+    return render(
         PgnGame(
             id=game.id,
             tournament_id=tournament.id,

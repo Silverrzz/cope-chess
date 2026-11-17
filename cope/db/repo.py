@@ -1106,6 +1106,16 @@ def list_engines(connection: sqlite3.Connection, *, active_only: bool = False) -
 
 
 def validate_tournament_variant(connection, config: TournamentConfig) -> None:
+    if config.variant == "tak":
+        rows = connection.execute(
+            """SELECT version.id FROM engine_versions version
+               JOIN engine_variant_capabilities capability ON capability.build_hash = version.build_hash
+               WHERE version.id = ANY(?) AND capability.variant = 'tak' AND capability.status = 'supported'""",
+            (config.participants,),
+        ).fetchall()
+        missing = set(config.participants) - {row["id"] for row in rows}
+        if missing:
+            raise ValueError(f"Tak requires TEI capability evidence for engine versions {sorted(missing)}")
     if config.opening_suite_id is None:
         return
     suite = get_opening_suite(connection, config.opening_suite_id)

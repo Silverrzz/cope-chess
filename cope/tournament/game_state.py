@@ -1,5 +1,6 @@
 import chess
 from cope.variants import DuckBoard, Position, Turn
+from cope.variants.tak import TakBoard
 from enum import Enum
 
 
@@ -17,6 +18,9 @@ class GameTermination(Enum):
     VARIANT_END = "variant end"
     KING_CAPTURE = "king capture"
     NO_LEGAL_MOVE = "no legal move"
+    TAK_ROAD = "road"
+    TAK_FLAT_COUNT = "flat count"
+    TAK_NO_PROGRESS = "no progress"
     UNKNOWN = "unknown"
 
 
@@ -55,6 +59,18 @@ class GameState():
         return self._result != "*"
 
     def update_from_board(self):
+        if isinstance(self._board, TakBoard):
+            outcome = self._board.result()
+            if outcome is not None:
+                winner, termination = outcome
+                if winner is None:
+                    self._result = "1/2-1/2"
+                    self._winner = None
+                    self._termination = GameTermination(termination)
+                    self._details = termination
+                else:
+                    self._set_decisive_result(winner, GameTermination(termination))
+            return
         self._record_position()
         outcome = self._current_outcome()
 
@@ -95,6 +111,8 @@ class GameState():
         return None
 
     def _reset_position_counts(self) -> None:
+        if isinstance(self._board, TakBoard):
+            return
         replay = self._board.root()
         self._position_counts = {self._position_key(replay): 1}
         for move in self._board.move_stack:
@@ -120,7 +138,7 @@ class GameState():
 
     def record_timeout(self, loser: chess.Color):
         winner = not loser
-        if self._board.has_insufficient_material(winner):
+        if not isinstance(self._board, TakBoard) and self._board.has_insufficient_material(winner):
             self._winner = None
             self._termination = GameTermination.INSUFFICIENT_MATERIAL
             self._result = "1/2-1/2"

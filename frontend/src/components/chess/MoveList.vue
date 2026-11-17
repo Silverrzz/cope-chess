@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 
-import { parseFen } from './chess'
+import { parseFen, type Variant } from './chess'
+import { parseTakPosition } from './tak'
 
 interface MoveCell {
   ply: number
@@ -20,6 +21,7 @@ const props = withDefaults(defineProps<{
   moves?: string[]
   uciMoves?: string[]
   fen?: string | null
+  variant?: Variant | undefined
   bookPlies?: number
   modelValue?: number
   title?: string
@@ -40,7 +42,7 @@ const emit = defineEmits<{
 
 const list = ref<HTMLElement | null>(null)
 const rows = computed<MoveRow[]>(() => {
-  const start = parseFen(props.fen)
+  const start = props.variant === 'tak' ? parseTakPosition(props.fen) : parseFen(props.fen)
   const result: MoveRow[] = []
   let number = start.fullmove
   let side = start.turn

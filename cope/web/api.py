@@ -1883,6 +1883,7 @@ def register_api_routes(app: FastAPI) -> None:
         )
 
     @app.get("/api/pgn")
+    @app.get("/api/ptn")
     def public_pgn_export(
         request: Request,
         game_id: int | None = Query(default=None, gt=0),
@@ -1894,6 +1895,8 @@ def register_api_routes(app: FastAPI) -> None:
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        ptn = request.url.path.endswith("/ptn")
+        extension = "ptn" if ptn else "pgn"
         try:
             filters = PgnExportFilters(
                 game_id=game_id,
@@ -1903,6 +1906,7 @@ def register_api_routes(app: FastAPI) -> None:
                 opponent_engine_id=opponent_id,
                 color=side,
                 result=result,
+                ptn=ptn,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1939,11 +1943,11 @@ def register_api_routes(app: FastAPI) -> None:
         if not pgn_export_exists(connection, filters):
             raise HTTPException(
                 status_code=409,
-                detail="No completed games match these PGN filters.",
+                detail=f"No completed games match these {extension.upper()} filters.",
             )
 
         if game is not None:
-            filename = f"cope-game-{game.id}.pgn"
+            filename = f"cope-game-{game.id}.{extension}"
         else:
             filename_parts = []
             if tournament is not None:
@@ -1963,6 +1967,7 @@ def register_api_routes(app: FastAPI) -> None:
             filename = safe_pgn_filename(
                 "-".join(filename_parts) if filename_parts else "cope-all-games",
                 "cope-games",
+                extension=extension,
             )
 
         database_url = request.app.state.db_path
@@ -1976,7 +1981,7 @@ def register_api_routes(app: FastAPI) -> None:
 
         return StreamingResponse(
             content(),
-            media_type="application/x-chess-pgn; charset=utf-8",
+            media_type="text/plain; charset=utf-8" if ptn else "application/x-chess-pgn; charset=utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Cache-Control": "no-store",

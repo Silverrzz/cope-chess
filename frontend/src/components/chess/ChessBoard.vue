@@ -12,6 +12,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
+import TakBoard from './TakBoard.vue'
+import { buildTakPositions, takPositionText, takReserves } from './tak'
 
 import {
   buildPositions,
@@ -81,14 +83,21 @@ const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
 const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
-const currentFen = computed(() => positionFen(position.value))
+const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
+const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
+const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
 const keyboardSquareDescription = computed(() => {
   const square = keyboardSquare.value
   if (!square) return ''
   const piece = readGroundFen(currentFen.value).get(square)
   return `${square}, ${piece ? `${piece.color} ${piece.role}` : 'empty'}`
 })
-const material = computed(() => materialSummary(position.value))
+const material = computed(() => {
+  if (!takPosition.value) return materialSummary(position.value)
+  const { white, black } = takReserves(takPosition.value)
+  return { white: `${white.flats} flats, ${white.caps} capstones`, black: `${black.flats} flats, ${black.caps} capstones`,
+    label: `Reserves ${white.flats}+${white.caps} / ${black.flats}+${black.caps}` }
+})
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
   if (!props.moves.length) return props.lastMove ? 'Current position' : 'Start position'
@@ -98,6 +107,7 @@ const status = computed(() => {
 })
 
 const positionDescription = computed(() => {
+  if (takPosition.value) return `${status.value}. ${takPosition.value.turn === 'w' ? 'White' : 'Black'} to move. ${material.value.label}.`
   const side = position.value.turn === 'w' ? 'White' : 'Black'
   const duck = position.value.duckSquare
   const duckLabel = duck === null ? '' : ` Neutral duck on ${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}.`
@@ -399,7 +409,9 @@ defineExpose({ selectPly, focusBoard })
     :tabindex="controls ? 0 : undefined"
   >
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
+      <TakBoard v-if="takPosition" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :label="label" />
       <div
+        v-else
         ref="board"
         class="board-mount"
         :role="editMode && editMode !== 'disabled' ? 'group' : 'img'"

@@ -1,5 +1,6 @@
 import chess
 from cope.variants import Position
+from cope.variants.tak import TAK_START, TakBoard
 
 
 def setoption_command(name: str, value: str | int | bool) -> str:
@@ -12,7 +13,10 @@ def position_command(board: Position) -> str:
     root = board.root()
     moves = " ".join(move.uci() for move in board.move_stack)
 
-    if root.fen() == chess.STARTING_FEN:
+    if isinstance(root, TakBoard):
+        tps = root.fen()
+        command = "position startpos" if tps == TAK_START else f"position tps {tps}"
+    elif root.fen() == chess.STARTING_FEN:
         command = "position startpos"
     else:
         command = f"position fen {root.fen(shredder=board.chess960)}"

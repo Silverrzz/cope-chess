@@ -2342,13 +2342,13 @@ def _command_progress(
     *,
     play_started: bool,
 ) -> tuple[str, str, str]:
-    if command == "uci":
-        return "startup", "uci_handshake", f"Negotiating UCI with {engine_name}"
+    if command in {"uci", "tei"}:
+        return "startup", "uci_handshake", f"Negotiating {command.upper()} with {engine_name}"
     if command.startswith("setoption"):
         return "startup", "configure_option", f"Configuring {engine_name}: {command}"
     if command == "isready":
         return "startup", "readiness_check", f"Waiting for {engine_name} readiness"
-    if command == "ucinewgame":
+    if command == "ucinewgame" or command.startswith("teinewgame "):
         return "startup", "new_game_reset", f"Resetting {engine_name} for the assigned game"
     if command.startswith("position"):
         move_count = len(command.split(" moves ", 1)[1].split()) if " moves " in command else 0

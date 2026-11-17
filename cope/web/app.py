@@ -1280,6 +1280,7 @@ def _is_platform_access_request(request: Request) -> bool:
         "/api/ratings",
         "/api/engines",
         "/api/pgn",
+        "/api/ptn",
         "/api/public-urls",
     )
     if any(path == root or path.startswith(f"{root}/") for root in public_api_roots):

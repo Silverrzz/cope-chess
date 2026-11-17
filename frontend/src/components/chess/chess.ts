@@ -1,10 +1,10 @@
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
 export type Color = 'white' | 'black'
-export type Variant = 'standard' | 'dfrc' | 'duck' | 'duck960'
+export type Variant = 'standard' | 'dfrc' | 'duck' | 'duck960' | 'tak'
 export const VARIANT_OPTIONS = [
   { id: 'standard', name: 'Standard' }, { id: 'dfrc', name: 'DFRC' },
-  { id: 'duck', name: 'Duck' }, { id: 'duck960', name: 'Duck960' },
+  { id: 'duck', name: 'Duck' }, { id: 'duck960', name: 'Duck960' }, { id: 'tak', name: 'Tak 6×6 +2' },
 ] as const
 
 export function isTurn(move: string): boolean {

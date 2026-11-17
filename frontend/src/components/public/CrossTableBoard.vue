@@ -2,9 +2,11 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
+import type { Variant } from '@/components/chess/chess'
 
 defineProps<{
   fen: string
+  variant?: Variant | undefined
   lastMove?: string | null
   label: string
 }>()
@@ -34,6 +36,8 @@ onBeforeUnmount(() => {
   <div ref="root" class="cross-table-board">
     <ChessBoard
       v-if="rendered"
+      :key="variant || 'standard'"
+      :variant="variant"
       :fen="fen"
       :last-move="lastMove || ''"
       :label="label"
