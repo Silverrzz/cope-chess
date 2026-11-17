@@ -9,13 +9,13 @@ import QuorumDisclosure from '@/components/public/QuorumDisclosure.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence, type Witness } from '@/quorum'
-import { resultLabels } from '@/quorum-results'
+import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
+import { resultLabels, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, unlockedCredential } from '@/quorum-voter'
 
 interface Publications {
   certified: boolean
-  witnesses: (Witness & { signed_at: string | null })[]
+  witnesses: WitnessStatus[]
   disclosures: { username: string; option: string }[]
 }
 
@@ -66,9 +66,8 @@ async function load() {
     if (next.status !== 'completed') {
       const boundary = next.status === 'scheduled' ? next.manifest.opens_at : next.manifest.closes_at
       refreshTimer = setTimeout(load, Math.min(2147483647, Math.max(1000, Date.parse(boundary) - Date.now() + 250)))
-    } else {
-      void loadPublications()
     }
+    if (next.status === 'completed' || next.manifest.witnesses?.length) void loadPublications()
   } catch (cause) {
     if (path === endpoint.value) loadError.value = (cause as Error).message
   } finally {
@@ -84,7 +83,7 @@ async function loadPublications() {
     if (path !== endpoint.value) return
     publications.value = data
     publicationError.value = ''
-    if (data.witnesses.length && !data.certified) publicationTimer = setTimeout(loadPublications, 30000)
+    if (packet.value?.result && data.witnesses.length && !data.certified) publicationTimer = setTimeout(loadPublications, 30000)
   } catch (cause) {
     if (path === endpoint.value) publicationError.value = (cause as Error).message
   }
@@ -177,14 +176,14 @@ async function cast() {
         <div class="toolbar toolbar--between">
           <h2>Witness certification</h2>
           <StatusBadge :tone="publications.certified ? 'success' : 'neutral'">
-            {{ publications.certified ? 'Certified' : signedCount + ' of ' + publications.witnesses.length + ' signed' }}
+            {{ publications.certified ? 'Certified' : packet.result ? signedCount + ' of ' + publications.witnesses.length + ' signed' : 'Signs after closing' }}
           </StatusBadge>
         </div>
         <ul class="section-stack">
           <li v-for="witness in publications.witnesses" :key="witness.public_key">
             <strong>{{ witness.name }}</strong> ·
-            <a v-if="witness.signed_at" :href="witness.report_origin ? witness.report_origin + '/ballots/' + manifest.id : endpoint + '/witness-reports/' + witness.public_key" target="_blank" rel="noopener noreferrer">Signed report</a>
-            <span v-else class="muted">Awaiting signature</span>
+            <a v-if="witness.signed_at" :href="witnessReportUrl(manifest.id, witness)" target="_blank" rel="noopener noreferrer">Signed report</a>
+            <span v-else class="muted">{{ packet.result ? 'Awaiting signature' : 'Assigned' }}</span>
           </li>
         </ul>
       </section>

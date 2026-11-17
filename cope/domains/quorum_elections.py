@@ -160,8 +160,9 @@ def publish(connection, draft_id, revision):
     if draft.closes_at <= datetime.now(UTC):
         fail("quorum_past_deadline", "Choose a closing date in the future.")
     manifest = {**draft.model_dump(mode="json"), "roster": digest(roster)}
-    if setup.witnesses:
-        manifest["witnesses"] = [witness.model_dump() for witness in setup.witnesses]
+    witnesses = [witness.model_dump(exclude={"enabled"}) for witness in setup.witnesses if witness.enabled]
+    if witnesses:
+        manifest["witnesses"] = witnesses
     row = connection.execute(
         """INSERT INTO cope_quorum.ballots (id, manifest, roster, opens_at, closes_at)
            VALUES (?::uuid, ?::jsonb, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
@@ -192,9 +193,12 @@ def proof_rows(connection, ballot_id):
 
 def ballot_package(connection, ballot_id):
     row = ballot(connection, ballot_id, lock=" FOR SHARE")
-    now = datetime.now(UTC)
+    return build_evidence(connection, row, datetime.now(UTC))
+
+
+def build_evidence(connection, row, now):
     closed = now >= row["closes_at"]
-    votes = proof_rows(connection, ballot_id) if closed else []
+    votes = proof_rows(connection, row["id"]) if closed else []
     roster = row["roster"]
     return {
         "version": "cope-quorum-evidence/1",
@@ -228,14 +232,28 @@ def tally(manifest, votes, electorate):
     return {"options": options, "counts": counts, "total": total, "electorate": electorate, "outcome": result}
 
 
+def witness_status(connection, evidence):
+    manifest = evidence["manifest"]
+    witnesses = manifest.get("witnesses", [])
+    signed = {}
+    if witnesses and evidence["status"] == "completed":
+        signed = {
+            row["public_key"]: row["signed_at"]
+            for row in connection.execute(
+                """SELECT public_key, signed_at FROM cope_quorum.witness_signatures
+                   WHERE ballot_id = ?::uuid AND digest = ?""", (manifest["id"], digest(evidence)),
+            )
+        }
+    return [{**witness, "signed_at": signed.get(witness["public_key"])} for witness in witnesses]
+
+
 def directory(connection):
     now = datetime.now(UTC)
     entries = []
     for row in connection.execute("SELECT * FROM cope_quorum.ballots ORDER BY opens_at DESC FOR SHARE"):
-        closed = now >= row["closes_at"]
-        result = tally(row["manifest"], proof_rows(connection, row["id"]), len(row["roster"]["members"])) if closed else None
-        entries.append({**row["manifest"], "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
-                        "result": result})
+        evidence = build_evidence(connection, row, now)
+        entries.append({**evidence["manifest"], "status": evidence["status"], "result": evidence["result"],
+                        "witnesses": witness_status(connection, evidence)})
     return entries
 
 

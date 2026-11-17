@@ -53,6 +53,7 @@ class Witness(Input):
     name: str = Field(min_length=1, max_length=80)
     public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     report_origin: str = Field(default="", max_length=250)
+    enabled: bool = True
 
     @field_validator("report_origin")
     @classmethod
@@ -64,6 +65,18 @@ class Witness(Input):
                 or url.path not in ("", "/") or "\\" in value or any(character.isspace() for character in value)):
             raise ValueError("Use the HTTPS origin of the witness's report server.")
         return f"https://{url.netloc}"
+
+
+class WitnessUpdate(Input):
+    revision: int = Field(strict=True, ge=0)
+    witnesses: list[Witness] = Field(max_length=12)
+
+    @field_validator("witnesses")
+    @classmethod
+    def unique_witnesses(cls, value):
+        if len({item.public_key for item in value}) != len(value):
+            raise ValueError("Each witness must have a distinct signing key.")
+        return value
 
 
 class Setup(Input):

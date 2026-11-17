@@ -11,7 +11,7 @@ from cope.control.api import database
 from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
 from cope.domains import quorum_elections as elections
 from cope.domains import quorum_publications as published
-from cope.domains.quorum import Setup, read_setup, save_setup
+from cope.domains.quorum import Setup, WitnessUpdate, read_setup, save_setup
 
 
 def require_secure(request):
@@ -177,6 +177,28 @@ def register_quorum_routes(app):
         if current != account:
             raise HTTPException(401, "The Discord session changed. Preview your vote again.")
         return election_call(published.record_disclosure, connection, ballot_id, account, payload.proof.nullifier)
+
+    @app.post("/api/quorum/verifiers/check-in")
+    def verifier_checkin(payload: published.VerifierCheckin, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(published.record_checkin, connection, request.app.state.discord_runtime.origin, payload)
+
+    @app.get("/api/admin/quorum/witnesses")
+    def verifier_directory(request: Request, connection=Depends(database)):
+        require_admin(request)
+        return published.verifier_directory(connection)
+
+    @app.put("/api/admin/quorum/witnesses")
+    def update_witnesses(payload: WitnessUpdate, request: Request, connection=Depends(database)):
+        require_admin(request)
+        setup = read_setup(connection)
+        if setup.revision != payload.revision:
+            raise HTTPException(409, "Quorum settings changed. Refresh the witness list and try again.")
+        updated = election_call(save_setup, connection, setup.model_copy(update={"witnesses": payload.witnesses}))
+        if updated is None:
+            raise HTTPException(409, "Quorum settings changed. Refresh the witness list and try again.")
+        return published.verifier_directory(connection)
 
     @app.get("/api/admin/quorum/status")
     def election_status(request: Request, connection=Depends(database)):

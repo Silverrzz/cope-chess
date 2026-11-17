@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import api from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
+import QuorumVerifiers from '@/components/admin/QuorumVerifiers.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import type { Witness } from '@/quorum'
 
@@ -23,7 +24,7 @@ interface Setup {
   revision: number
   enrollment_role_id: string | null
   drafts: Draft[]
-  witnesses: Witness[]
+  witnesses: (Witness & { enabled: boolean })[]
 }
 
 const setup = ref<Setup>()
@@ -169,6 +170,13 @@ async function save(publish = false) {
   }
 }
 
+function witnessSettingsSaved(fromRevision: number, revision: number, witnesses: Setup['witnesses']) {
+  if (setup.value?.revision === fromRevision) {
+    setup.value.revision = revision
+    setup.value.witnesses = witnesses
+  }
+}
+
 onMounted(() => { void load(); void loadRoles() })
 </script>
 
@@ -177,6 +185,7 @@ onMounted(() => { void load(); void loadRoles() })
     <AdminPageHeader title="Quorum" />
     <InlineFeedback :message="error" />
     <InlineFeedback :message="notice" tone="info" />
+    <QuorumVerifiers :disabled="busy" @saved="witnessSettingsSaved" />
     <form v-if="setup" ref="quorumForm" class="section-stack" @submit.prevent="save()">
       <fieldset class="panel panel__body section-stack" :disabled="busy">
         <div class="toolbar toolbar--between">
@@ -191,22 +200,6 @@ onMounted(() => { void load(); void loadRoles() })
         </select></label>
         <InlineFeedback :message="roleError" />
         <div v-if="roleError" class="button-row"><BaseButton size="small" @click="loadRoles">Retry role list</BaseButton></div>
-      </fieldset>
-      <fieldset class="panel panel__body section-stack" :disabled="busy">
-        <div class="toolbar toolbar--between">
-          <h2>Witnesses</h2>
-          <BaseButton size="small" :disabled="setup.witnesses.length >= 12"
-            @click="setup.witnesses.push({ name: '', public_key: '', report_origin: '' })">Add witness</BaseButton>
-        </div>
-        <p class="muted">New ballots use this witness list. COPE hosts the signed reports.</p>
-        <div v-for="(witness, index) in setup.witnesses" :key="index" class="section-stack">
-          <div class="form-grid">
-            <label class="field"><span>Name</span><input v-model.trim="witness.name" class="input" maxlength="80" required></label>
-            <label class="field"><span>External report URL (optional)</span><input v-model.trim="witness.report_origin" class="input" type="url" maxlength="250"></label>
-            <label class="field"><span>Signing public key</span><input v-model.trim="witness.public_key" class="input input--mono" pattern="[0-9a-f]{64}" maxlength="64" required></label>
-          </div>
-          <div class="button-row"><BaseButton size="small" variant="ghost" @click="setup.witnesses.splice(index, 1)">Remove witness</BaseButton></div>
-        </div>
       </fieldset>
       <fieldset class="panel panel__body section-stack" :disabled="busy">
         <div class="toolbar toolbar--between">

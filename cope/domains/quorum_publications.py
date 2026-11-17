@@ -1,15 +1,73 @@
+from datetime import UTC, datetime, timedelta
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field
 
 from cope.application.contracts import Input
 from cope.domains import quorum_elections as elections
+from cope.domains.quorum import read_setup
 
 
 class WitnessSignature(Input):
     public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+class VerifierCheckin(Input):
+    public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    sent_at: int = Field(strict=True, ge=0, le=2**53 - 1)
+    last_scan: int | None = Field(ge=0, le=2**53 - 1)
+    archived: int = Field(strict=True, ge=0, le=1_000_000)
+    scan_errors: int = Field(strict=True, ge=0, le=1_000_000)
+    runtime: str = Field(pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+$", max_length=30)
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+def record_checkin(connection, origin, submitted):
+    if not any(item.public_key == submitted.public_key for item in read_setup(connection).witnesses):
+        elections.fail("quorum_unknown_witness", "Register this verifier's key in Admin → Quorum.", 403)
+    if abs(int(datetime.now(UTC).timestamp()) - submitted.sent_at) > 120 or (
+            submitted.last_scan is not None and submitted.last_scan > submitted.sent_at):
+        elections.fail("quorum_checkin_expired", "Verifier check-in timestamp is out of range.", 409)
+    statement = ["cope-quorum-verifier-checkin/1", origin, submitted.public_key, submitted.sent_at, submitted.last_scan,
+                 submitted.archived, submitted.scan_errors, submitted.runtime]
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(submitted.public_key)).verify(
+            bytes.fromhex(submitted.signature), elections.canonical(statement)
+        )
+    except (ValueError, InvalidSignature):
+        elections.fail("quorum_bad_signature", "Invalid verifier check-in signature.", 422)
+    connection.execute(
+        """INSERT INTO cope_quorum.verifier_checkins (public_key, sent_at, last_scan, archived, scan_errors, runtime)
+           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (public_key) DO UPDATE SET
+           sent_at = EXCLUDED.sent_at, seen_at = clock_timestamp(), last_scan = EXCLUDED.last_scan,
+           archived = EXCLUDED.archived, scan_errors = EXCLUDED.scan_errors, runtime = EXCLUDED.runtime
+           WHERE EXCLUDED.sent_at > verifier_checkins.sent_at""",
+        (submitted.public_key, submitted.sent_at, submitted.last_scan, submitted.archived, submitted.scan_errors, submitted.runtime),
+    )
+    connection.commit()
+    return {"received": True}
+
+
+def verifier_directory(connection):
+    setup = read_setup(connection)
+    now = datetime.now(UTC)
+    checkins = {row["public_key"]: row for row in connection.execute("SELECT * FROM cope_quorum.verifier_checkins")}
+    signatures = {
+        row["public_key"]: row
+        for row in connection.execute("""SELECT public_key, count(*) AS signed_count, max(signed_at) AS last_signed
+                                         FROM cope_quorum.witness_signatures GROUP BY public_key""")
+    }
+    witnesses = []
+    for witness in setup.witnesses:
+        checkin = checkins.get(witness.public_key)
+        signed = signatures.get(witness.public_key, {})
+        status = "awaiting_checkin" if not checkin else "online" if now - checkin["seen_at"] <= timedelta(seconds=150) else "offline"
+        witnesses.append({**witness.model_dump(), "status": status, "checkin": checkin,
+                          "signed_count": signed.get("signed_count", 0), "last_signed": signed.get("last_signed")})
+    return {"revision": setup.revision, "witnesses": witnesses}
 
 
 class DisclosureProof(elections.Proof):
@@ -29,19 +87,10 @@ def closed_evidence(connection, ballot_id):
 
 
 def publications(connection, ballot_id):
-    evidence = closed_evidence(connection, ballot_id)
-    digest = elections.digest(evidence)
-    signed = {
-        row["public_key"]: row["signed_at"]
-        for row in connection.execute(
-            """SELECT public_key, signed_at FROM cope_quorum.witness_signatures
-               WHERE ballot_id = ?::uuid AND digest = ?""", (str(ballot_id), digest)
-        )
-    }
-    witnesses = [
-        {**item, "signed_at": signed.get(item["public_key"])}
-        for item in evidence["manifest"].get("witnesses", [])
-    ]
+    evidence = elections.ballot_package(connection, ballot_id)
+    witnesses = elections.witness_status(connection, evidence)
+    if evidence["status"] != "completed":
+        return {"certified": False, "witnesses": witnesses, "disclosures": []}
     options = evidence["result"]["options"]
     disclosures = [
         {"username": row["username"], "option": options[int(row["message"])]}

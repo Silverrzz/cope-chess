@@ -33,6 +33,35 @@ const privateKey = createPrivateKey(await readFile(keyFile))
 const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex')
 console.log('Witness public key: ' + publicKey)
 let lastScan = null
+let scanErrors = 0
+
+async function archivedBallots() {
+  const files = await readdir(archive)
+  return files.filter(file => file.endsWith('.json') && uuid.test(file.slice(0, -5)))
+    .map(file => '/ballots/' + file.slice(0, -5))
+}
+
+async function checkIn() {
+  try {
+    const sent_at = Math.floor(Date.now() / 1000)
+    const last_scan = lastScan ? Math.floor(Date.parse(lastScan) / 1000) : null
+    const archived = (await archivedBallots()).length
+    const errors = scanErrors
+    const runtime = process.version
+    const statement = JSON.stringify(['cope-quorum-verifier-checkin/1', origin.origin, publicKey, sent_at, last_scan, archived, errors, runtime])
+    const signature = sign(null, Buffer.from(statement), privateKey).toString('hex')
+    const response = await fetch(new URL('/api/quorum/verifiers/check-in', origin), {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: publicKey, sent_at, last_scan, archived, scan_errors: errors, runtime, signature }),
+    })
+    if (!response.ok && response.status !== 403) throw new Error('COPE returned HTTP ' + response.status)
+  } catch (error) {
+    console.error('Verifier check-in failed: ' + error.message)
+  } finally {
+    setTimeout(checkIn, 60000)
+  }
+}
 
 async function fetchEvidence(path) {
   const response = await fetch(new URL(path, origin), { redirect: 'error', signal: AbortSignal.timeout(15000) })
@@ -107,6 +136,7 @@ async function observe(id) {
 }
 
 async function scan() {
+  let errors = 0
   try {
     const directory = await fetchEvidence('/api/quorum')
     for (const ballot of directory.ballots) {
@@ -114,13 +144,16 @@ async function scan() {
       try {
         await observe(ballot.id)
       } catch (error) {
+        errors++
         console.error('Ballot ' + ballot.id + ': ' + error.message)
       }
     }
     lastScan = new Date().toISOString()
   } catch (error) {
+    errors++
     console.error('Could not read the Quorum directory: ' + error.message)
   } finally {
+    scanErrors = errors
     setTimeout(scan, 60000)
   }
 }
@@ -135,9 +168,7 @@ createServer(async (request, response) => {
   try {
     const path = new URL(request.url, 'http://localhost').pathname
     if (path === '/') {
-      const files = await readdir(archive)
-      const ballots = files.filter(file => file.endsWith('.json') && uuid.test(file.slice(0, -5)))
-        .map(file => '/ballots/' + file.slice(0, -5))
+      const ballots = await archivedBallots()
       return send(response, 200, { origin: origin.origin, public_key: publicKey, last_scan: lastScan, ballots })
     }
     const match = /^\/ballots\/([^/]+)(\/evidence)?$/.exec(path)
@@ -151,3 +182,4 @@ createServer(async (request, response) => {
   }
 }).listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1')
 void scan()
+void checkIn()

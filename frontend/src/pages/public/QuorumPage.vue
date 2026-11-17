@@ -10,7 +10,7 @@ import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import type { FeedbackTone } from '@/types/ui'
 import type { BallotResult } from '@/quorum'
-import { resultLabels } from '@/quorum-results'
+import { resultLabels, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
 
 interface BallotSummary {
   id: string
@@ -19,6 +19,7 @@ interface BallotSummary {
   closes_at: string
   status: 'scheduled' | 'open' | 'completed'
   result: BallotResult | null
+  witnesses: WitnessStatus[]
 }
 
 const route = useRoute()
@@ -113,6 +114,18 @@ onMounted(load)
                 </div>
               </dl>
             </div>
+            <div v-if="ballot.witnesses?.length" class="ballot-card__witnesses">
+              <div class="toolbar toolbar--between">
+                <strong>Witnesses</strong>
+                <StatusBadge v-if="ballot.witnesses.every(witness => witness.signed_at)" tone="success">Certified</StatusBadge>
+              </div>
+              <ul>
+                <li v-for="witness in ballot.witnesses" :key="witness.public_key">
+                  <a v-if="witness.signed_at" :href="witnessReportUrl(ballot.id, witness)" target="_blank" rel="noopener noreferrer">{{ witness.name }} · Verified</a>
+                  <span v-else class="muted">{{ witness.name }} · {{ ballot.result ? 'Awaiting signature' : 'Assigned' }}</span>
+                </li>
+              </ul>
+            </div>
             <footer class="ballot-card__footer">
               <div class="ballot-card__meta muted">
                 <time :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
@@ -200,6 +213,9 @@ onMounted(load)
   content: '';
 }
 .ballot-result__counts dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.ballot-card__witnesses { display: grid; gap: var(--space-2); font-size: .8125rem; }
+.ballot-card__witnesses ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
 
 .credential-dialog {
   width: min(28rem, calc(100vw - 2rem));
