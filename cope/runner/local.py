@@ -1255,6 +1255,7 @@ def run_worker_assignment_game(
         "running",
         f"Persisting result {result} ({termination})",
     )
+    _validated_assignment_record(connection, assignment, for_update=True)
     finish_game(
         connection,
         game_record.id,
@@ -1846,9 +1847,11 @@ def _validated_game(connection: sqlite3.Connection, game_id: int) -> GameRecord:
 def _validated_assignment_record(
     connection: sqlite3.Connection,
     assignment: WorkerGameAssignment,
+    *,
+    for_update: bool = False,
 ) -> GameAssignmentRecord:
     payload = assignment.assignment
-    assignment_record = get_game_assignment(connection, payload.assignment_id)
+    assignment_record = get_game_assignment(connection, payload.assignment_id, for_update=for_update)
     if assignment_record is None:
         raise RuntimeError(f"unknown assignment {payload.assignment_id}")
     if assignment_record.assignment_key != payload.assignment_key:

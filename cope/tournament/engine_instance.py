@@ -63,6 +63,10 @@ class IllegalEngineTurn(RuntimeError):
     pass
 
 
+class WorkerDisconnected(ConnectionError):
+    pass
+
+
 @runtime_checkable
 class EngineCommandTransport(Protocol):
     def execute_engine_command(
@@ -264,6 +268,11 @@ class EngineInstance:
 
     def uses_worker_search_clock(self) -> bool:
         return self._is_remote()
+
+    def check_worker_connection(self) -> None:
+        check = getattr(self._host, "check_connection", None)
+        if callable(check):
+            check()
 
     def get_worker_search_elapsed_ms(self) -> int | None:
         if not self._is_remote():

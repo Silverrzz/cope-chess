@@ -110,7 +110,7 @@ from cope.runner.events import (
     set_runner_wake_handler,
     start_event_publisher,
 )
-from cope.tournament.engine_instance import EngineCommandOutput
+from cope.tournament.engine_instance import EngineCommandOutput, WorkerDisconnected
 from cope.tournament.clock_scaling import calibrate_game, game_calibration, save_game_calibration
 
 
@@ -1420,12 +1420,20 @@ class WorkerHandshakeServer:
                 error.failure.stage,
                 error.failure.error,
             )
+        except WorkerDisconnected as error:
+            self._fail_assignment(assignment, error)
+            LOG.info(
+                "game interrupted worker_id=%s assignment_id=%s game_id=%s reason=%s",
+                worker.id,
+                payload.assignment_id,
+                payload.game_id,
+                error,
+            )
         except asyncio.CancelledError:
+            transport.close()
             try:
-                self._fail_assignment(
-                    assignment,
-                    RuntimeError("worker assignment stopped"),
-                )
+                reason = "worker assignment stopped" if websocket.open else "worker connection lost"
+                self._fail_assignment(assignment, RuntimeError(reason))
             except Exception:
                 LOG.exception(
                     "assignment cleanup failed worker_id=%s assignment_id=%s game_id=%s",
@@ -2608,6 +2616,12 @@ class WorkerEngineTransport:
         self._active_searches: set[int] = set()
         self._clock_lock = threading.Lock()
 
+    def check_connection(self) -> None:
+        if not self._websocket.open:
+            raise WorkerDisconnected("worker connection lost")
+        if self._closed.is_set():
+            raise WorkerDisconnected("worker transport closed")
+
     def close(self) -> None:
         self._closed.set()
         if self._receiver_task is not None:
@@ -2644,8 +2658,7 @@ class WorkerEngineTransport:
         info_handler: Callable[[str], None] | None = None,
     ) -> EngineCommandOutput:
         with self._pending_lock:
-            if self._closed.is_set():
-                raise RuntimeError("worker transport closed")
+            self.check_connection()
             future = asyncio.run_coroutine_threadsafe(
                 self._execute_engine_command(engine_id, command, info_handler),
                 self._loop,
@@ -2671,8 +2684,7 @@ class WorkerEngineTransport:
             return parse_result(output)
 
         with self._pending_lock:
-            if self._closed.is_set():
-                raise RuntimeError("worker transport closed")
+            self.check_connection()
             future = asyncio.run_coroutine_threadsafe(search(), self._loop)
             self._pending.add(future)
 
@@ -2721,6 +2733,8 @@ class WorkerEngineTransport:
         async with command_lock:
             try:
                 return await self._execute_engine_command_locked(engine_id, command, info_handler)
+            except ConnectionClosed as error:
+                raise WorkerDisconnected("worker connection lost") from error
             finally:
                 if command.startswith("go"):
                     with self._clock_lock:

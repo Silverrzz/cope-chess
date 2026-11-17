@@ -2392,8 +2392,10 @@ def create_game_assignment(
 def get_game_assignment(
     connection: sqlite3.Connection,
     assignment_id: int,
+    *,
+    for_update: bool = False,
 ) -> GameAssignmentRecord | None:
-    return _get_game_assignment(connection, "id", assignment_id)
+    return _get_game_assignment(connection, "id", assignment_id, for_update=for_update)
 
 
 def get_game_assignment_for_game(
@@ -2698,9 +2700,12 @@ def _get_game_assignment(
     connection: sqlite3.Connection,
     column: str,
     value: int,
+    *,
+    for_update: bool = False,
 ) -> GameAssignmentRecord | None:
+    lock = " FOR UPDATE" if for_update else ""
     row = connection.execute(
-        f"SELECT * FROM game_assignments WHERE {column} = ?",
+        f"SELECT * FROM game_assignments WHERE {column} = ?{lock}",
         (value,),
     ).fetchone()
     if row is None:

@@ -1,8 +1,9 @@
 import chess
 from cope.variants import Position, Turn
 from collections.abc import Callable, Iterable
+from concurrent.futures import CancelledError
 
-from .engine_instance import EngineInstance, EngineSearchResult, IllegalEngineTurn
+from .engine_instance import EngineInstance, EngineSearchResult, IllegalEngineTurn, WorkerDisconnected
 from .game_state import GameState
 from .time_control import TimeControlCategory, TimeManager, TimeOutError
 from .tournament import Game
@@ -74,6 +75,7 @@ class GameRunner:
 
         try:
             while engine.is_searching():
+                engine.check_worker_connection()
                 worker_elapsed_ms = (
                     engine.get_worker_search_elapsed_ms()
                     if self._use_worker_search_clock
@@ -114,6 +116,7 @@ class GameRunner:
                 if result is not None:
                     move = result.bestmove
         except TimeOutError:
+            engine.check_worker_connection()
             result = self._capture_search_result(engine, board)
             if result is not None:
                 move = result.bestmove
@@ -127,54 +130,50 @@ class GameRunner:
                 if self._on_clock_sync is not None:
                     self._on_clock_sync(side_to_move, False, 0)
                 return None
+        except CancelledError as error:
+            raise WorkerDisconnected("worker transport closed") from error
+        except WorkerDisconnected:
+            raise
         except Exception as error:
-            result = self._capture_search_result(engine, board)
-            if result is not None:
-                move = result.bestmove
-                move_captured_at_timeout = True
-                clock.stop_clock_after_timeout()
-                if self._on_clock_sync is not None:
-                    self._on_clock_sync(side_to_move, False, 0)
+            clock.stop_clock_after_timeout()
+            if isinstance(error, IllegalEngineTurn):
+                self._get_game_state().record_illegal_move(side_to_move, str(error))
             else:
-                clock.stop_clock_after_timeout()
-                if isinstance(error, IllegalEngineTurn):
-                    self._get_game_state().record_illegal_move(side_to_move, str(error))
-                else:
-                    self._get_game_state().record_engine_error(side_to_move, error)
+                self._get_game_state().record_engine_error(side_to_move, error)
+            if self._on_clock_sync is not None:
+                self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
+            return None
+
+        if not self._get_game_state().is_finished() and not move_captured_at_timeout:
+            try:
+                search = engine.get_last_search_result()
+                elapsed_ms = (
+                    search.command_elapsed_ms
+                    if search is not None
+                    and self._use_worker_search_clock
+                    and engine.uses_worker_search_clock()
+                    else None
+                )
+                if elapsed_ms is not None:
+                    elapsed_ms = max(0, elapsed_ms - self._lag_compensation_ms)
+                clock.stop_clock(elapsed_ms)
                 if self._on_clock_sync is not None:
                     self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
-                return None
-        finally:
-            if not self._get_game_state().is_finished() and not move_captured_at_timeout:
-                try:
-                    search = engine.get_last_search_result()
-                    elapsed_ms = (
-                        search.command_elapsed_ms
-                        if search is not None
-                        and self._use_worker_search_clock
-                        and engine.uses_worker_search_clock()
-                        else None
-                    )
-                    if elapsed_ms is not None:
-                        elapsed_ms = max(0, elapsed_ms - self._lag_compensation_ms)
-                    clock.stop_clock(elapsed_ms)
+            except TimeOutError:
+                result = (
+                    engine.capture_latest_info_result(board)
+                    if self._use_latest_info_move_on_timeout
+                    else None
+                )
+                if result is not None:
+                    move = result.bestmove
+                    move_captured_at_timeout = True
                     if self._on_clock_sync is not None:
-                        self._on_clock_sync(side_to_move, False, _clock_remaining_ms(clock))
-                except TimeOutError:
-                    result = (
-                        engine.capture_latest_info_result(board)
-                        if self._use_latest_info_move_on_timeout
-                        else None
-                    )
-                    if result is not None:
-                        move = result.bestmove
-                        move_captured_at_timeout = True
-                        if self._on_clock_sync is not None:
-                            self._on_clock_sync(side_to_move, False, 0)
-                    else:
-                        self._get_game_state().record_timeout(side_to_move)
-                        if self._on_clock_sync is not None:
-                            self._on_clock_sync(side_to_move, False, 0)
+                        self._on_clock_sync(side_to_move, False, 0)
+                else:
+                    self._get_game_state().record_timeout(side_to_move)
+                    if self._on_clock_sync is not None:
+                        self._on_clock_sync(side_to_move, False, 0)
 
         if self._get_game_state().is_finished():
             return None

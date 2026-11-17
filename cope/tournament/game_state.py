@@ -134,7 +134,8 @@ class GameState():
 
     def record_engine_error(self, loser: chess.Color, error: Exception):
         winner = not loser
-        self._set_decisive_result(winner, GameTermination.ENGINE_ERROR, str(error))
+        detail = str(error).strip() or type(error).__name__
+        self._set_decisive_result(winner, GameTermination.ENGINE_ERROR, detail)
 
     def get_summary(self) -> str:
         if not self.is_finished():
