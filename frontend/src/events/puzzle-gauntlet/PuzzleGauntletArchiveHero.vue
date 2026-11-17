@@ -4,7 +4,7 @@ import { RouterLink } from "vue-router";
 
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
-import PuzzlePair from "./PuzzlePair.vue";
+import PuzzleMosaic from "./PuzzleMosaic.vue";
 
 const props = defineProps<{ summary: EventSummary; current?: boolean; nowMs: number }>();
 
@@ -49,7 +49,7 @@ function themeColor(key: string, fallback: string): string {
 <template>
   <RouterLink class="gauntlet-archive" :class="{ 'gauntlet-archive--current': current, 'gauntlet-archive--sequel': sequel }" :style="eventStyle" :to="target" :aria-label="`${current ? 'Open' : 'View'} ${event.title}`">
     <div class="puzzle-field" aria-hidden="true"></div>
-    <PuzzlePair v-if="sequel" class="gauntlet-pair" />
+    <PuzzleMosaic v-if="sequel" class="gauntlet-mosaic" />
     <div v-else class="gauntlet-mark" aria-hidden="true">
       <span></span><i></i>
       <svg class="gauntlet-puzzle" width="clamp(7rem, 13vw, 12rem)" height="clamp(7rem, 13vw, 12rem)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
@@ -105,17 +105,18 @@ function themeColor(key: string, fallback: string): string {
 .gauntlet-archive--sequel .gauntlet-copy h2 { line-height: .92; }
 .gauntlet-archive--sequel .gauntlet-kicker, .gauntlet-archive--sequel .gauntlet-meta strong { color: var(--archive-accent); }
 .gauntlet-archive--sequel .gauntlet-meta { color: #cbbad6; }
-.gauntlet-pair {
-  --pair-primary: var(--archive-primary);
-  --pair-accent: var(--archive-accent);
-  --pair-surface: var(--archive-surface);
+.gauntlet-mosaic {
+  --puzzle-ink: #c2a9f2;
+  --puzzle-accent: var(--archive-accent);
+  --puzzle-surface: var(--archive-surface);
   position: absolute;
   inset: 50% clamp(2rem, 10vw, 12rem) auto auto;
-  width: clamp(12rem, 29vw, 28rem);
+  width: clamp(12rem, 23vw, 23rem);
   transform: translateY(-50%) rotate(-8deg);
+  filter: drop-shadow(0 1rem 2rem #0c061db0);
 }
 @media (max-width: 46rem) {
   .gauntlet-archive--sequel { align-content: center; gap: 1.25rem; }
-  .gauntlet-pair { position: static; width: clamp(8rem, 29vw, 13rem); margin-left: auto; transform: rotate(-8deg); }
+  .gauntlet-mosaic { position: static; width: clamp(8rem, 26vw, 12rem); margin-left: auto; transform: rotate(-8deg); }
 }
 </style>

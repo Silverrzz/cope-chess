@@ -13,7 +13,7 @@ import type { ChatMessage } from "@/components/public/types";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventDetailResponse } from "@/types/events";
-import PuzzlePair from "./PuzzlePair.vue";
+import PuzzleMosaic from "./PuzzleMosaic.vue";
 
 import type { GauntletEngineInfo, GauntletEntry, GauntletPayload, GauntletPuzzle, GauntletRound } from "./types";
 
@@ -837,7 +837,11 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 <template>
   <main class="gauntlet" :class="[`gauntlet--${view === 'arena' ? 'live' : isComplete ? 'complete' : isLive ? 'live' : 'countdown'}`, `gauntlet--${view || 'event'}`, { 'gauntlet--sequel': sequel }]">
     <div class="puzzle-pattern" aria-hidden="true"></div>
-    <PuzzlePair v-if="sequel && view === 'event' && !isLive && !isComplete" class="countdown-puzzle-pair" animated />
+    <div v-if="sequel && view === 'event' && !isLive && !isComplete" class="countdown-puzzle-field" aria-hidden="true">
+      <PuzzleMosaic class="countdown-puzzle-field__top" animated />
+      <PuzzleMosaic class="countdown-puzzle-field__left" animated />
+      <PuzzleMosaic class="countdown-puzzle-field__right" animated />
+    </div>
     <div v-if="confettiEnabled" class="confetti-layer" aria-hidden="true">
       <span v-for="burst in confettiBursts" :key="burst.id" class="confetti-burst" :class="`confetti-burst--${burst.side}`" :style="{ left: `${burst.x}%`, top: `${burst.y}%` }">
         <i v-for="piece in burst.pieces" :key="piece.id" :style="{ '--confetti-start-x': `${piece.startX}rem`, '--confetti-start-y': `${piece.startY}rem`, '--confetti-end-x': `${piece.endX}rem`, '--confetti-end-y': `${piece.endY}rem`, '--confetti-rotation': `${piece.rotation}deg`, '--confetti-delay': `${piece.delay}ms`, '--confetti-duration': `${piece.duration}ms`, '--confetti-size': `${piece.size}rem` }"></i>
@@ -1285,19 +1289,39 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 }
 .gauntlet--sequel .countdown-copy h1 em { color: var(--cyan); font-style: normal; }
 .gauntlet--sequel .countdown-schedule { color: #cbbad6; }
-.countdown-puzzle-pair {
-  --pair-primary: var(--violet);
-  --pair-accent: var(--cyan);
-  --pair-surface: transparent;
+.countdown-puzzle-field {
+  --puzzle-ink: var(--violet);
+  --puzzle-accent: var(--cyan);
+  --puzzle-surface: transparent;
   position: absolute;
-  inset: 12% clamp(-3.5rem, 4vw, 6rem) auto auto;
-  width: clamp(12rem, 35vw, 31rem);
-  opacity: .18;
+  inset: 0;
+  overflow: hidden;
   pointer-events: none;
+}
+.countdown-puzzle-field > svg {
+  position: absolute;
+  opacity: .13;
+}
+.countdown-puzzle-field__top {
+  inset: -3rem 13% auto auto;
+  width: clamp(8rem, 17vw, 15rem);
   transform: rotate(-14deg);
 }
+.countdown-puzzle-field__left {
+  --puzzle-delay: -4s;
+  inset: auto auto 8% -3rem;
+  width: clamp(12rem, 24vw, 23rem);
+  transform: rotate(13deg);
+}
+.countdown-puzzle-field__right {
+  --puzzle-delay: -7s;
+  inset: auto 4% 5% auto;
+  width: clamp(9rem, 20vw, 19rem);
+  transform: rotate(-9deg);
+}
 @media (max-width: 36rem) {
-  .countdown-puzzle-pair { inset: 8% -2rem auto auto; opacity: .12; }
+  .countdown-puzzle-field > svg { opacity: .10; }
+  .countdown-puzzle-field__right { right: -2.5rem; }
   .gauntlet--sequel .countdown-copy h1 { font-size: clamp(2.8rem, 10vw, 3.7rem); }
 }
 </style>
