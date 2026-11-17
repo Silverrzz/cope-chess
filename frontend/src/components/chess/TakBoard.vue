@@ -35,7 +35,7 @@ function stackLabel(index: number): string {
 </script>
 
 <template>
-  <div class="tak-board" :class="{ 'tak-board--flipped': orientation === 'black', 'tak-board--compact': compact }" role="group" :aria-label="label">
+  <div class="tak-board" :class="{ 'tak-board--flipped': orientation === 'black' }" role="group" :aria-label="label">
     <div v-for="(index, displayIndex) in squares" :key="index" class="tak-square"
       :class="{
         'tak-square--dark': (index % TAK_SIZE + Math.floor(index / TAK_SIZE)) % 2,
@@ -65,29 +65,44 @@ function stackLabel(index: number): string {
 <style scoped>
 .tak-board { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(6, minmax(0, 1fr)); aspect-ratio: 1; overflow: hidden; }
 .tak-square {
-  --tak-tile: #476071;
+  --tak-tile: var(--board-light, #f0d9b5);
   position: relative;
   isolation: isolate;
-  background: radial-gradient(ellipse at 22% 16%, #e5f4fc0d, transparent 78%), var(--tak-tile);
-  color: #e3eff4;
-  box-shadow: inset 0 0 0 1px #2336454d;
+  background-color: var(--tak-tile);
+  box-shadow: inset 0 0 0 1px #0001;
 }
-.tak-square--dark { --tak-tile: #3b5263; }
-.tak-square--last { --tak-tile: #456579; }
-.tak-square--last::after { position: absolute; inset: 0; z-index: 2; border: 1px solid #98b6c98c; pointer-events: none; content: ''; }
+.tak-square--dark { --tak-tile: var(--board-dark, #b58863); }
+.tak-square--winning { background-color: color-mix(in srgb, var(--tak-tile) 90%, var(--color-success)); }
+.tak-square--last {
+  --tak-last-highlight: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  background-image: linear-gradient(var(--tak-last-highlight), var(--tak-last-highlight));
+}
+.tak-square--last::after {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 65%, var(--tak-tile));
+  pointer-events: none;
+  content: '';
+}
 .tak-square--origin::after { border-style: dashed; }
-.tak-square--winning { --tak-tile: #486465; }
 .tak-connections { position: absolute; inset: 0; pointer-events: none; }
 .tak-board--flipped .tak-connections { transform: rotate(180deg); }
-.tak-connection { --connection: #ded8bc36; position: absolute; display: block; background: var(--connection); }
-.tak-connection--black { --connection: #1f2c3e75; }
+.tak-connection {
+  --tak-road-color: #fff8ea;
+  --tak-road-opacity: 24%;
+  position: absolute;
+  display: block;
+  background: color-mix(in srgb, var(--tak-road-color) var(--tak-road-opacity), transparent);
+}
+.tak-connection--black { --tak-road-color: #151821; }
 .tak-connection--north, .tak-connection--south { width: 14%; height: 52%; left: 43%; }
 .tak-connection--north { top: 0; }
 .tak-connection--south { bottom: 0; }
 .tak-connection--east, .tak-connection--west { width: 52%; height: 14%; top: 43%; }
 .tak-connection--east { right: 0; }
 .tak-connection--west { left: 0; }
-.tak-connection--winning { --connection: #a5b8aa8c; }
+.tak-connection--winning { --tak-road-opacity: 40%; }
 .tak-stack { position: absolute; inset: 0; --tak-stone-size: 54%; pointer-events: none; }
 .tak-stack .tak-stack__stone { position: absolute; left: 50%; transform: translate(-50%, -50%); }
 .tak-rank, .tak-file, .tak-count, .tak-drop {
@@ -100,8 +115,8 @@ function stackLabel(index: number): string {
 }
 .tak-rank { inset: 6% auto auto 7%; }
 .tak-file { inset: auto 7% 5% auto; }
-.tak-count, .tak-drop { padding: .15em .28em; border-radius: .22rem; background: #111f30e6; color: #fff; }
+.tak-rank, .tak-file { color: #fff; -webkit-text-stroke: 2px #000a; paint-order: stroke fill; }
+.tak-count, .tak-drop { padding: .15em .28em; border-radius: .22rem; background: var(--color-surface); color: var(--color-text); }
 .tak-count { inset: 6% 6% auto auto; }
-.tak-drop { inset: auto auto 5% 6%; background: #aedaf5; color: #102e43; }
-.tak-board--compact .tak-square--last::after { border-color: #98d4f76b; }
+.tak-drop { inset: auto auto 5% 6%; background: var(--color-accent-soft); }
 </style>
