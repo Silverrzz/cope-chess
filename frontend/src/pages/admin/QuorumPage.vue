@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import api from '@/api/client'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
@@ -24,16 +24,20 @@ interface Setup {
   revision: number
   enrollment_role_id: string | null
   witness_user_ids: string[]
+  witness_labels: Record<string, string>
   drafts: Draft[]
 }
 
 const setup = ref<Setup>()
 const selected = ref('')
+interface DiscordUser { id: string; username: string; display_name: string }
 const role = ref('')
-const witnesses = ref('')
+const roles = ref<{ id: string; name: string }[]>([])
+const roleError = ref('')
+const nominees = ref<{ id: string; label: string }[]>([])
+const registered = ref<string[]>([])
 const witnessQuery = ref('')
-const foundUsers = ref<{ id: string; username: string; display_name: string }[]>([])
-const matchingUser = ref('')
+const foundUsers = ref<DiscordUser[]>([])
 const searching = ref(false)
 const searchNotice = ref('')
 const options = ref('')
@@ -106,30 +110,52 @@ function removeDraft() {
   selectDraft(setup.value.drafts[0]?.id ?? '')
 }
 
-async function searchUsers() {
-  const query = witnessQuery.value.trim()
+watch(witnessQuery, (value, _, cleanup) => {
+  const query = value.trim()
+  const controller = new AbortController()
+  foundUsers.value = []
+  searching.value = false
+  searchNotice.value = ''
   if (query.length < 2) return
   searching.value = true
-  searchNotice.value = ''
-  matchingUser.value = ''
-  foundUsers.value = []
+  const timer = setTimeout(async () => {
+    try {
+      const response = await api.get<{ users: DiscordUser[] }>('/api/admin/quorum/discord-users', {
+        query: { q: query }, signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+      foundUsers.value = response.users
+      if (!response.users.length) searchNotice.value = 'No guild members match.'
+    } catch (cause) {
+      if (!controller.signal.aborted) searchNotice.value = cause instanceof Error ? cause.message : 'Could not search the guild.'
+    } finally {
+      if (!controller.signal.aborted) searching.value = false
+    }
+  }, 300)
+  cleanup(() => { clearTimeout(timer); controller.abort() })
+})
+
+function nominateUser(user: DiscordUser) {
+  if (nominees.value.length >= 12 || nominees.value.some(item => item.id === user.id)) return
+  nominees.value.push({ id: user.id, label: user.display_name })
+  witnessQuery.value = ''
+}
+
+async function loadRoles() {
+  roleError.value = ''
   try {
-    const response = await api.get<{ users: typeof foundUsers.value }>('/api/admin/quorum/discord-users', { query: { q: query } })
-    foundUsers.value = response.users
-    if (!response.users.length) searchNotice.value = 'No connected Discord accounts match.'
+    roles.value = (await api.get<{ roles: typeof roles.value }>('/api/admin/quorum/discord-roles')).roles
   } catch (cause) {
-    searchNotice.value = cause instanceof Error ? cause.message : 'Could not search Discord accounts.'
-  } finally {
-    searching.value = false
+    roleError.value = cause instanceof Error ? cause.message : 'Could not load Discord roles.'
   }
 }
 
-function nominateUser() {
-  if (!matchingUser.value) return
-  const ids = new Set(witnesses.value.split(/\s+/).filter(Boolean))
-  ids.add(matchingUser.value)
-  witnesses.value = [...ids].join('\n')
-  matchingUser.value = ''
+async function loadWitnesses() {
+  try {
+    registered.value = (await api.get<{ registered: string[] }>('/api/admin/quorum/witnesses')).registered
+  } catch {
+    registered.value = []
+  }
 }
 
 function createDraft() {
@@ -146,7 +172,7 @@ async function load() {
   try {
     setup.value = await api.get<Setup>('/api/admin/quorum')
     role.value = setup.value.enrollment_role_id ?? ''
-    witnesses.value = setup.value.witness_user_ids.join('\n')
+    nominees.value = setup.value.witness_user_ids.map((id, index) => ({ id, label: setup.value?.witness_labels[id] ?? ("Witness " + (index + 1)) }))
     selectDraft(setup.value.drafts[0]?.id ?? '')
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not load Quorum setup.'
@@ -163,7 +189,8 @@ async function save() {
     setup.value = await api.put<Setup>('/api/admin/quorum', { body: {
       ...setup.value,
       enrollment_role_id: role.value.trim() || null,
-      witness_user_ids: witnesses.value.split(/\s+/).filter(Boolean),
+      witness_user_ids: nominees.value.map(item => item.id),
+      witness_labels: Object.fromEntries(nominees.value.map(item => [item.id, item.label])),
     } })
     notice.value = 'Quorum setup saved.'
   } catch (cause) {
@@ -173,7 +200,7 @@ async function save() {
   }
 }
 
-onMounted(load)
+onMounted(() => { void load(); void loadRoles(); void loadWitnesses() })
 </script>
 
 <template>
@@ -184,24 +211,38 @@ onMounted(load)
     <form v-if="setup" class="section-stack" @submit.prevent="save">
       <fieldset class="panel panel__body section-stack" :disabled="busy">
         <h2>Founding eligibility</h2>
-        <label class="field"><span>Discord role ID</span><input v-model="role" class="input" inputmode="numeric" maxlength="20"></label>
-        <p class="muted">Eligibility uses the guild connected in Discord settings. Role holders still need to register a credential before they can join the founding roster.</p>
-        <div class="form-grid">
-          <label class="field"><span>Find a connected Discord account</span>
-            <input v-model="witnessQuery" class="input" type="search" maxlength="64" @keydown.enter.prevent="searchUsers">
-          </label>
-          <div class="button-row"><BaseButton :disabled="witnessQuery.trim().length < 2" :loading="searching" @click="searchUsers">Search accounts</BaseButton></div>
+        <label class="field"><span>Discord role</span><select v-model="role" class="select">
+          <option value="">No enrollment role</option>
+          <option v-if="role && !roles.some(item => item.id === role)" :value="role">Previously selected role</option>
+          <option v-for="item in roles" :key="item.id" :value="item.id">{{ item.name }}</option>
+        </select></label>
+        <InlineFeedback :message="roleError" />
+        <div v-if="roleError" class="button-row"><BaseButton size="small" @click="loadRoles">Retry role list</BaseButton></div>
+      </fieldset>
+      <fieldset class="panel panel__body section-stack" :disabled="busy">
+        <div class="toolbar toolbar--between">
+          <h2>Independent witnesses</h2>
+          <BaseButton size="small" variant="ghost" :to="{ name: 'quorum-witness' }">Witness registration page</BaseButton>
         </div>
-        <p v-if="searchNotice" class="muted" role="status">{{ searchNotice }}</p>
-        <div v-if="foundUsers.length" class="form-grid">
-          <label class="field"><span>Account</span><select v-model="matchingUser" class="select">
-            <option value="">Choose an account</option>
-            <option v-for="user in foundUsers" :key="user.id" :value="user.id">{{ user.display_name }} (@{{ user.username }})</option>
-          </select></label>
-          <div class="button-row"><BaseButton :disabled="!matchingUser" @click="nominateUser">Add nominee</BaseButton></div>
-        </div>
-        <label class="field"><span>Witness nominees</span><textarea v-model="witnesses" class="textarea" rows="3" maxlength="400" placeholder="Discord user IDs, one per line" /></label>
-        <p class="muted">Nominees need independent operators and trusted signing keys to witness the public record. This list records nominations for setup.</p>
+        <label class="field"><span>Find a member of the connected Discord server</span>
+          <input v-model="witnessQuery" class="input" type="search" maxlength="64" placeholder="Username or server nickname"
+            @keydown.enter.prevent>
+        </label>
+        <p v-if="searching || searchNotice" class="muted" role="status">{{ searching ? 'Searching Discord…' : searchNotice }}</p>
+        <ul v-if="foundUsers.length" class="witness-list">
+          <li v-for="user in foundUsers" :key="user.id" class="toolbar toolbar--between">
+            <span><strong>{{ user.display_name }}</strong> <span class="muted">@{{ user.username }}</span></span>
+            <BaseButton size="small" :disabled="nominees.length >= 12 || nominees.some(item => item.id === user.id)"
+              @click="nominateUser(user)">Nominate</BaseButton>
+          </li>
+        </ul>
+        <ul v-if="nominees.length" class="witness-list">
+          <li v-for="nominee in nominees" :key="nominee.id" class="toolbar toolbar--between">
+            <span><strong>{{ nominee.label }}</strong> <span class="muted">{{ registered.includes(nominee.id) ? 'Key registered' : 'Awaiting signing key' }}</span></span>
+            <BaseButton size="small" variant="ghost" @click="nominees = nominees.filter(item => item.id !== nominee.id)">Remove</BaseButton>
+          </li>
+        </ul>
+        <p v-else class="muted">No nominees yet.</p>
       </fieldset>
       <fieldset class="panel panel__body section-stack" :disabled="busy">
         <div class="toolbar toolbar--between">
@@ -243,3 +284,15 @@ onMounted(load)
     <div v-else-if="error" class="button-row"><BaseButton @click="load">Try again</BaseButton></div>
   </div>
 </template>
+
+<style scoped>
+.witness-list {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+.witness-list li {
+  padding-block: var(--space-2);
+  border-block-start: 1px solid var(--color-border);
+}
+</style>

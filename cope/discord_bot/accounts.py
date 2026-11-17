@@ -102,7 +102,7 @@ def decrypt(runtime, value: bytes) -> str:
         raise ApplicationError("discord_unavailable", "The saved Discord credentials need to be updated.", 503) from exc
 
 
-def discord_json(url: str, *, authorization: str | None = None, body: dict | None = None) -> dict:
+def discord_json(url: str, *, authorization: str | None = None, body: dict | None = None, expect_list: bool = False):
     headers = {"Accept": "application/json", "User-Agent": "Cope Chess (https://github.com/Silverrzz/cope-chess)"}
     data = None
     if body is not None:
@@ -112,7 +112,7 @@ def discord_json(url: str, *, authorization: str | None = None, body: dict | Non
         headers["Authorization"] = authorization
     with urlopen(Request(url, headers=headers, data=data), timeout=6) as response:
         result = json.loads(response.read(1024 * 1024))
-    if not isinstance(result, dict):
+    if not isinstance(result, list if expect_list else dict):
         raise ValueError("Discord returned an invalid response.")
     return result
 

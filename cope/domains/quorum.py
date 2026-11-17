@@ -1,4 +1,7 @@
+import json
 from typing import Literal
+
+from cope.application.errors import ApplicationError
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -6,6 +9,7 @@ from cope.application.contracts import Input
 from cope.discord_bot.accounts import snowflake
 
 SETUP_KEY = "quorum.setup.v1"
+WITNESS_KEYS = "quorum.witness-keys.v1"
 
 
 class BallotDraft(Input):
@@ -40,6 +44,7 @@ class Setup(Input):
     revision: int = Field(default=0, strict=True, ge=0)
     enrollment_role_id: str | None = None
     witness_user_ids: list[str] = Field(default_factory=list, max_length=12)
+    witness_labels: dict[str, str] = Field(default_factory=dict, max_length=12)
     drafts: list[BallotDraft] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
@@ -49,6 +54,9 @@ class Setup(Input):
         if (any(not snowflake(user) for user in self.witness_user_ids)
                 or len(set(self.witness_user_ids)) != len(self.witness_user_ids)):
             raise ValueError("Enter unique Discord user IDs for witness nominees.")
+        if any(account not in self.witness_user_ids or not 1 <= len(label) <= 100
+               for account, label in self.witness_labels.items()):
+            raise ValueError("Witness names must match the selected nominees.")
         if len({draft.id for draft in self.drafts}) != len(self.drafts):
             raise ValueError("Draft identifiers must be unique.")
         return self
@@ -61,6 +69,7 @@ def read_setup(connection):
 
 
 def save_setup(connection, proposed: Setup):
+    connection.execute("SELECT pg_advisory_xact_lock(692784510936)")
     current, raw = read_setup(connection)
     if proposed.revision != current.revision:
         return None
@@ -76,3 +85,27 @@ def save_setup(connection, proposed: Setup):
         return None
     connection.commit()
     return updated
+
+def witness_keys(connection) -> dict[str, str]:
+    row = connection.execute("SELECT value FROM platform_settings WHERE key = ?", (WITNESS_KEYS,)).fetchone()
+    return json.loads(row["value"]) if row else {}
+
+
+def connect_witness(connection, account_id: str, public_key: str) -> None:
+    connection.execute("SELECT pg_advisory_xact_lock(692784510936)")
+    setup, _ = read_setup(connection)
+    if account_id not in setup.witness_user_ids:
+        raise ApplicationError("witness_nomination_required", "This account is not a witness nominee.", 403)
+    keys = witness_keys(connection)
+    if keys.get(account_id) == public_key:
+        connection.commit()
+        return
+    if account_id in keys or public_key in keys.values():
+        raise ApplicationError("witness_key_conflict", "This account or signing key is already registered.", 409)
+    keys[account_id] = public_key
+    connection.execute(
+        """INSERT INTO platform_settings (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+        (WITNESS_KEYS, json.dumps(keys)),
+    )
+    connection.commit()
