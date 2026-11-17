@@ -234,7 +234,7 @@ onMounted(() => { void load(); void loadRoles() })
               <BaseButton variant="primary" :disabled="!draft.title" @click="save(true)">Save and publish ballot</BaseButton>
               <BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton>
             </div>
-            <p v-if="election && election.enrolled < 3" class="muted">Publishing requires at least three enrolled voters.</p>
+            <p v-if="election && election.enrolled === 0" class="muted">Enroll at least one voter before publishing.</p>
           </template>
         </template>
         <p v-else class="muted">No ballot drafts yet.</p>

@@ -81,7 +81,7 @@ export async function verifyBallot(packet: BallotPackage) {
   requireValid(packet.version === 'cope-quorum-evidence/1' && packet.status === 'completed' && result,
     'Results are available after voting closes.')
   const rosterKey = manifest.roster === undefined ? 'genesis' : 'roster'
-  requireValid(roster.members.length >= 3 && roster.members.length <= 1024
+  requireValid(roster.members.length >= 1 && roster.members.length <= 1024
     && new Set(roster.members).size === roster.members.length
     && roster.members.every(member => member !== '0' && decimal(member, field))
     && await fingerprint(roster) === manifest[rosterKey]

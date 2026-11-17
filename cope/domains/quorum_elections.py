@@ -136,8 +136,8 @@ def publish(connection, draft_id, revision):
     members = [row["commitment"] for row in connection.execute(
         "SELECT commitment FROM cope_quorum.credentials ORDER BY commitment",
     )]
-    if len(members) < 3:
-        fail("quorum_roster_too_small", "At least three voters must enroll before publishing.")
+    if not members:
+        fail("quorum_roster_too_small", "Enroll at least one voter before publishing.")
     roster = {"members": members, "root": proof_worker(members)["root"]}
     if draft.closes_at <= datetime.now(UTC):
         fail("quorum_past_deadline", "Choose a closing date in the future.")
