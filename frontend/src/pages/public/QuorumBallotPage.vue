@@ -211,7 +211,7 @@ async function cast() {
       <section v-if="publications?.witnesses.length" class="ballot-sheet__section ballot-sheet__details" aria-labelledby="quorum-witnesses-title">
         <div class="ballot-sheet__toolbar">
           <h2 id="quorum-witnesses-title">Witnesses</h2>
-          <StatusBadge :tone="publications.certified ? 'success' : 'neutral'">
+          <StatusBadge :tone="publications.certified ? 'success' : signedCount ? 'warning' : 'neutral'">
             {{ publications.certified ? 'Certified' : packet.result ? signedCount + ' of ' + publications.witnesses.length + ' signed' : 'Sign after closing' }}
           </StatusBadge>
         </div>

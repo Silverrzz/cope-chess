@@ -112,6 +112,9 @@ onMounted(load)
                   <StatusBadge v-if="ballot.witnesses?.length && ballot.witnesses.every(witness => witness.signed_at)" tone="success">
                     Certified
                   </StatusBadge>
+                  <StatusBadge v-else-if="ballot.witnesses?.some(witness => witness.signed_at)" tone="warning">
+                    Partially verified
+                  </StatusBadge>
                 </div>
               </div>
               <BaseButton size="small" :variant="ballotAction(ballot) === 'Vote' ? 'primary' : 'secondary'"
