@@ -8,7 +8,8 @@ import QuorumCredential from '@/components/public/QuorumCredential.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import { ballotOptions, ballotScope, resultLabels, verifyBallot, type BallotPackage } from '@/quorum'
+import { ballotOptions, ballotScope, verifyBallot, type BallotPackage } from '@/quorum'
+import { resultLabels } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, unlockedCredential } from '@/quorum-voter'
 
 const route = useRoute()

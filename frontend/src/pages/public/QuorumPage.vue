@@ -8,6 +8,9 @@ import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import type { FeedbackTone } from '@/types/ui'
+import type { BallotResult } from '@/quorum'
+import { resultLabels } from '@/quorum-results'
 
 interface BallotSummary {
   id: string
@@ -15,7 +18,7 @@ interface BallotSummary {
   opens_at: string
   closes_at: string
   status: 'scheduled' | 'open' | 'completed'
-  result: { total: number; electorate: number } | null
+  result: BallotResult | null
 }
 
 const route = useRoute()
@@ -31,6 +34,20 @@ const sections = computed(() => [
   { id: 'completed', title: 'Completed votes', ballots: ballots.value.filter(ballot => ballot.status === 'completed'), empty: 'No completed votes yet.' },
 ])
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+const resultTones: Record<BallotResult['outcome'], FeedbackTone> = {
+  passed: 'success',
+  rejected: 'danger',
+  quorum_not_met: 'warning',
+  report_only: 'info',
+}
+const motionColors = ['success', 'danger', 'text-muted']
+const pollColors = ['accent', 'success', 'warning', 'danger', 'text-muted']
+
+function voteColor(result: BallotResult, index: number) {
+  const colors = result.outcome === 'report_only' ? pollColors : motionColors
+  return 'var(--color-' + colors[index % colors.length] + ')'
+}
+
 
 function openCredential() {
   if (!dialog.value || dialog.value.open) return
@@ -72,27 +89,44 @@ onMounted(load)
     <div v-else class="ballot-sections">
       <section v-for="section in sections" :key="section.id" class="ballot-section" :aria-labelledby="'quorum-' + section.id">
         <h2 :id="'quorum-' + section.id">{{ section.title }}</h2>
-        <ul v-if="section.ballots.length" class="panel ballot-list">
-          <li v-for="ballot in section.ballots" :key="ballot.id" class="ballot-row">
-            <div class="ballot-row__title">
+        <ul v-if="section.ballots.length" class="wide-card-grid ballot-grid">
+          <li v-for="ballot in section.ballots" :key="ballot.id" class="panel panel__body ballot-card">
+            <header class="ballot-card__header">
               <h3>{{ ballot.title }}</h3>
-              <StatusBadge v-if="ballot.status !== 'completed'" :tone="ballot.status === 'open' ? 'success' : 'neutral'" :dot="ballot.status === 'open'">
-                {{ ballot.status === 'open' ? 'Open' : 'Scheduled' }}
+              <StatusBadge v-if="ballot.result" :tone="resultTones[ballot.result.outcome]">
+                {{ resultLabels[ballot.result.outcome] }}
               </StatusBadge>
+              <StatusBadge v-else :tone="ballot.status === 'open' ? 'success' : 'neutral'" :dot="ballot.status === 'open'">
+                {{ ballot.status === 'open' ? 'Open' : ballot.status === 'scheduled' ? 'Scheduled' : 'Completed' }}
+              </StatusBadge>
+            </header>
+            <div v-if="ballot.result" class="ballot-result">
+              <div class="ballot-result__bar" aria-hidden="true">
+                <span v-for="(count, index) in ballot.result.counts" v-show="count > 0" :key="index"
+                  :style="{ flexGrow: count, backgroundColor: voteColor(ballot.result, index) }" />
+              </div>
+              <dl class="ballot-result__counts">
+                <div v-for="(option, index) in ballot.result.options" :key="index" :style="{ '--vote-color': voteColor(ballot.result, index) }">
+                  <dt>{{ option }}</dt>
+                  <dd>{{ ballot.result.counts[index] }}</dd>
+                </div>
+              </dl>
             </div>
-            <div class="ballot-row__detail muted">
-              <time :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
-                {{ ballot.status === 'scheduled' ? 'Opens' : ballot.status === 'open' ? 'Closes' : 'Closed' }}
-                {{ dates.format(new Date(ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at)) }}
-              </time>
-              <span v-if="ballot.result">{{ ballot.result.total }} of {{ ballot.result.electorate }} voted</span>
-            </div>
-            <BaseButton size="small" :variant="ballot.status === 'open' ? 'primary' : 'secondary'"
-              :to="{ name: 'quorum-ballot', params: { id: ballot.id } }"
-              :aria-label="(ballot.status === 'open' ? 'Vote on ' : 'View ') + ballot.title">
-              {{ ballot.status === 'open' ? 'Vote' : ballot.status === 'completed' ? 'View results' : 'View ballot' }}
-              <template #trailing><AppIcon name="arrow-right" :size="16" /></template>
-            </BaseButton>
+            <footer class="ballot-card__footer">
+              <div class="ballot-card__meta muted">
+                <time :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
+                  {{ ballot.status === 'scheduled' ? 'Opens' : ballot.status === 'open' ? 'Closes' : 'Closed' }}
+                  {{ dates.format(new Date(ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at)) }}
+                </time>
+                <span v-if="ballot.result">{{ ballot.result.total }} of {{ ballot.result.electorate }} voted</span>
+              </div>
+              <BaseButton size="small" :variant="ballot.status === 'open' ? 'primary' : 'secondary'"
+                :to="{ name: 'quorum-ballot', params: { id: ballot.id } }"
+                :aria-label="(ballot.status === 'open' ? 'Vote on ' : ballot.status === 'completed' ? 'View results for ' : 'View ') + ballot.title">
+                {{ ballot.status === 'open' ? 'Vote' : ballot.status === 'completed' ? 'View results' : 'View ballot' }}
+                <template #trailing><AppIcon name="arrow-right" :size="16" /></template>
+              </BaseButton>
+            </footer>
           </li>
         </ul>
         <p v-else class="panel panel__body muted">{{ section.empty }}</p>
@@ -121,19 +155,50 @@ onMounted(load)
 .ballot-section { display: grid; gap: var(--space-3); }
 .ballot-section h2 { margin: 0; font-size: 1.25rem; }
 
-.ballot-list { margin: 0; padding: 0; list-style: none; }
-.ballot-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(13rem, 28%) auto;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
+.ballot-grid { margin: 0; padding: 0; list-style: none; }
+.ballot-card { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.ballot-card__header,
+.ballot-card__footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
+.ballot-card h3 { margin: 0; min-width: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.ballot-card__footer { margin-top: auto; }
+.ballot-card__meta { display: grid; gap: var(--space-1); font-size: .875rem; }
+
+.ballot-result { display: grid; gap: var(--space-3); }
+.ballot-result__bar {
+  display: flex;
+  overflow: hidden;
+  height: .5rem;
+  border-radius: var(--radius-round);
+  background: var(--color-surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--color-border);
 }
-.ballot-row + .ballot-row { border-top: 1px solid var(--color-border); }
-.ballot-row__title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-.ballot-row__title h3 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
-.ballot-row__detail { display: grid; gap: var(--space-1); font-size: .875rem; }
-.ballot-row > .base-button { justify-self: end; }
+.ballot-result__bar span { flex-basis: 0; }
+.ballot-result__counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+.ballot-result__counts > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-sunken);
+}
+.ballot-result__counts dt { font-size: .875rem; overflow-wrap: anywhere; }
+.ballot-result__counts dt::before {
+  display: inline-block;
+  width: .5rem;
+  height: .5rem;
+  margin-inline-end: var(--space-2);
+  border-radius: var(--radius-round);
+  background: var(--vote-color);
+  content: '';
+}
+.ballot-result__counts dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .credential-dialog {
   width: min(28rem, calc(100vw - 2rem));
@@ -146,8 +211,4 @@ onMounted(load)
 .credential-dialog::backdrop { background: var(--color-overlay); }
 .credential-dialog h2 { margin: 0; font-size: 1.125rem; }
 
-@media (max-width: 38rem) {
-  .ballot-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-3); padding: var(--space-4); }
-  .ballot-row__title { grid-column: 1 / -1; }
-}
 </style>

@@ -39,13 +39,6 @@ export interface BallotPackage {
   result: BallotResult | null
 }
 
-export const resultLabels: Record<BallotResult['outcome'], string> = {
-  report_only: 'Poll results',
-  quorum_not_met: 'Quorum not met',
-  passed: 'Motion passed',
-  rejected: 'Motion rejected',
-}
-
 export const ballotOptions = (manifest: Manifest) =>
   manifest.rule === 'report_only' ? manifest.options : ['Support', 'Oppose', 'Abstain']
 

@@ -122,7 +122,7 @@ function progress(item: TournamentSummary): number {
           <RouterLink to="/tournaments">All tournaments</RouterLink>
         </div>
 
-        <div v-if="data.running_tournaments.length" class="live-grid">
+        <div v-if="data.running_tournaments.length" class="wide-card-grid">
           <article v-for="item in data.running_tournaments" :key="item.tournament.record.id" class="live-card" :class="{ 'live-card--without-preview': !item.preview }">
             <div v-if="item.preview" class="live-card__board" aria-hidden="true">
               <ChessBoard
@@ -322,12 +322,6 @@ function progress(item: TournamentSummary): number {
   font-weight: 700;
   text-decoration: none;
   white-space: nowrap;
-}
-
-.live-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr));
-  gap: var(--space-md, 1rem);
 }
 
 .live-card {

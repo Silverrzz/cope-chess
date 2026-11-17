@@ -84,6 +84,12 @@ code {
   align-items: start;
 }
 
+.wide-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr));
+  gap: var(--space-md, 1rem);
+}
+
 .panel {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
