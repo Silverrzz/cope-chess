@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
+VERIFIER_IMAGE = "cope-quorum-verifier:local"
+VERIFIER_CONTAINER = "cope-quorum-verifier"
 INSTALLER_VERSION = "8"
 
 
@@ -35,6 +37,7 @@ TARGETS = (
     Target("server", "Server platform", "Docker Compose web, database, scheduler, and APIs"),
     Target("worker", "Game worker", "Runs chess games directly on this host without Docker"),
     Target("benchmarker", "Benchmarker", "Uses Docker to build engines and records hardware benchmarks"),
+    Target("verifier", "Quorum verifier", "Independently verifies and archives published ballots in Docker"),
 )
 
 
@@ -42,8 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python install.py")
     parser.add_argument(
         "--targets",
-        help="comma-separated targets: server, worker, benchmarker",
+        help="comma-separated targets: server, worker, benchmarker, verifier",
     )
+    parser.add_argument("--verifier-origin", help="HTTPS COPE site for the Quorum verifier to follow")
     parser.add_argument(
         "--prepare-only",
         action="store_true",
@@ -87,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
                     _start_host_worker(settings)
                 else:
                     _start_client(key, settings)
+    if "verifier" in selected:
+        origin = args.verifier_origin or settings.get("verifier_origin") or "https://dev.cope-chess.live"
+        settings["verifier_origin"] = _prepare_verifier(origin, start=not args.prepare_only)
     _save_settings(settings)
     print("\nCOPE installation complete.")
     if args.prepare_only:
@@ -301,6 +308,44 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
             raise
         _verify_server_deployment(compose_project, version)
     return settings
+
+
+def _prepare_verifier(origin: str, *, start: bool) -> str:
+    url = urlsplit(origin)
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.path not in {"", "/"}
+        or url.query
+        or url.fragment
+    ):
+        raise SystemExit("The verifier origin must be an HTTPS site URL.")
+    origin = f"{url.scheme}://{url.netloc}"
+    _require_command("docker")
+    _run(["docker", "build", "--target", "verifier-runtime", "--tag", VERIFIER_IMAGE, str(ROOT)])
+    if not start:
+        return origin
+    status = _container_status(VERIFIER_CONTAINER)
+    if status:
+        installed_origin = _container_label(VERIFIER_CONTAINER, "cope.quorum.origin")
+        if not installed_origin:
+            raise SystemExit(f"An existing container already uses the name {VERIFIER_CONTAINER}.")
+        if installed_origin != origin:
+            raise SystemExit("This verifier already has an archive for a different COPE origin.")
+        if status == "running" and _container_image_id(VERIFIER_CONTAINER) == _image_id(VERIFIER_IMAGE):
+            print("Quorum verifier: http://127.0.0.1:8788")
+            return origin
+        _run(["docker", "rm", "--force", VERIFIER_CONTAINER])
+    _run([
+        "docker", "run", "--detach", "--name", VERIFIER_CONTAINER, "--init", "--restart", "unless-stopped",
+        "--label", f"cope.quorum.origin={origin}", "--env", f"COPE_VERIFIER_ORIGIN={origin}",
+        "--publish", "127.0.0.1:8788:8788",
+        "--volume", "cope-quorum-verifier:/var/lib/cope-quorum-verifier", VERIFIER_IMAGE,
+    ])
+    print("Quorum verifier: http://127.0.0.1:8788")
+    return origin
 
 
 def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:

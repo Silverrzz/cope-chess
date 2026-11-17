@@ -8,7 +8,7 @@ import QuorumCredential from '@/components/public/QuorumCredential.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import { ballotOptions, ballotScope, verifyBallot, type BallotPackage } from '@/quorum'
+import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
 import { resultLabels } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, unlockedCredential } from '@/quorum-voter'
 
@@ -30,8 +30,17 @@ const credential = computed(() => {
   const unlocked = unlockedCredential.value
   return unlocked && packet.value?.roster.members.includes(unlocked.commitment) ? unlocked : null
 })
-const receiptCovered = computed(() => Boolean(receipt.value && verified.value && packet.value?.votes
-  .some(proof => proof.nullifier === receipt.value)))
+const myProof = computed(() => receipt.value && packet.value?.result
+  ? packet.value.votes.find(proof => proof.nullifier === receipt.value)
+  : undefined)
+const receiptCovered = computed(() => verified.value && Boolean(myProof.value))
+
+function downloadVoteProof() {
+  if (!packet.value || !myProof.value) return
+  const { manifest, roster } = packet.value
+  const evidence: VoteEvidence = { version: 'cope-quorum-vote/1', manifest, roster, proof: myProof.value }
+  downloadQuorumFile('quorum-vote-' + manifest.id + '.json', JSON.stringify(evidence))
+}
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
 async function load() {
@@ -129,14 +138,17 @@ async function cast() {
         <p class="muted">{{ packet.result.total }} of {{ packet.result.electorate }} eligible voters participated.</p>
         <div class="button-row">
           <BaseButton :loading="verifying" @click="audit">Verify vote proofs</BaseButton>
-          <BaseButton @click="downloadQuorumFile('quorum-' + manifest.id + '.json', JSON.stringify(packet))">Download evidence</BaseButton>
+          <BaseButton @click="downloadQuorumFile('quorum-' + manifest.id + '.json', JSON.stringify(packet))">Download ballot evidence</BaseButton>
         </div>
         <InlineFeedback v-if="verified" tone="info" message="The vote proofs match the published tally." />
       </section>
 
       <section v-if="receipt" class="panel panel__body section-stack">
         <h2>Your vote</h2>
-        <p>{{ receiptCovered ? 'Your vote is included in the verified record.' : 'Vote submitted. After voting closes, verify the vote proofs to confirm inclusion.' }}</p>
+        <p>{{ receiptCovered ? 'Your vote is included in the verified record.' : 'Vote submitted.' }}</p>
+        <div v-if="myProof" class="button-row">
+          <BaseButton @click="downloadVoteProof">Download my vote proof</BaseButton>
+        </div>
       </section>
       <section v-else-if="open" class="panel panel__body section-stack">
         <h2>Cast a vote</h2>

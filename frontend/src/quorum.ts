@@ -39,6 +39,13 @@ export interface BallotPackage {
   result: BallotResult | null
 }
 
+export interface VoteEvidence {
+  version: 'cope-quorum-vote/1'
+  manifest: Manifest
+  roster: Roster
+  proof: SemaphoreProof
+}
+
 export const ballotOptions = (manifest: Manifest) =>
   manifest.rule === 'report_only' ? manifest.options : ['Support', 'Oppose', 'Abstain']
 
@@ -47,7 +54,7 @@ const curveField = 2188824287183927522224640574525727508869631115729782366268903
 const decimal = (value: unknown, limit: bigint) =>
   typeof value === 'string' && /^(0|[1-9][0-9]{0,77})$/.test(value) && BigInt(value) < limit
 const exactKeys = (record: object, keys: string[]) =>
-  Object.keys(record).length === keys.length && keys.every(key => Object.hasOwn(record, key))
+  record && typeof record === 'object' && Object.keys(record).length === keys.length && keys.every(key => Object.hasOwn(record, key))
 
 function requireValid(valid: unknown, message: string): asserts valid {
   if (!valid) throw new Error(message)
@@ -69,10 +76,8 @@ export async function ballotScope(manifest: Manifest) {
   return BigInt('0x' + await fingerprint(['cope-quorum-ballot/1', manifest])).toString()
 }
 
-export async function verifyBallot(packet: BallotPackage) {
-  const { manifest, roster, votes, result } = packet
-  requireValid(packet.version === 'cope-quorum-evidence/1' && packet.status === 'completed' && result,
-    'Results are available after voting closes.')
+async function verifyBallotContext(manifest: Manifest, roster: Roster) {
+  requireValid(manifest && Array.isArray(manifest.options) && Array.isArray(roster?.members), 'Invalid ballot or roster.')
   const rosterKey = manifest.roster === undefined ? 'genesis' : 'roster'
   requireValid(roster.members.length >= 1 && roster.members.length <= 1024
     && new Set(roster.members).size === roster.members.length
@@ -100,20 +105,33 @@ export async function verifyBallot(packet: BallotPackage) {
     && options.length >= 2 && options.length <= 20 && new Set(options).size === options.length
     && options.every(option => typeof option === 'string' && option.trim().length > 0 && Array.from(option).length <= 100),
   'Invalid ballot manifest.')
-  requireValid(votes.length <= roster.members.length, 'Too many votes for this roster.')
+  requireValid(Date.now() >= Date.parse(manifest.closes_at), 'Verification is available after voting closes.')
+  return { options, scope: await ballotScope(manifest) }
+}
+
+async function verifyVote(proof: SemaphoreProof, roster: Roster, options: string[], scope: string) {
+  requireValid(exactKeys(proof, ['merkleTreeDepth', 'merkleTreeRoot', 'nullifier', 'message', 'scope', 'points'])
+    && decimal(proof.nullifier, field)
+    && typeof proof.message === 'string' && /^(0|[1-9][0-9]?)$/.test(proof.message)
+    && Number(proof.message) < options.length && proof.scope === scope
+    && proof.merkleTreeRoot === roster.root && proof.merkleTreeDepth === 10
+    && Array.isArray(proof.points) && proof.points.length === 8 && proof.points.every(point => decimal(point, curveField))
+    && await verifyProof(proof), 'The evidence contains an invalid vote proof.')
+  return Number(proof.message)
+}
+
+export async function verifyBallot(packet: BallotPackage) {
+  const { manifest, roster, votes, result } = packet
+  requireValid(packet.version === 'cope-quorum-evidence/1' && packet.status === 'completed' && result,
+    'Results are available after voting closes.')
+  const { options, scope } = await verifyBallotContext(manifest, roster)
+  requireValid(Array.isArray(votes) && votes.length <= roster.members.length, 'Invalid ballot vote list.')
   const seen = new Set<string>()
-  const scope = await ballotScope(manifest)
   const counts = options.map(() => 0)
   for (const proof of votes) {
-    requireValid(exactKeys(proof, ['merkleTreeDepth', 'merkleTreeRoot', 'nullifier', 'message', 'scope', 'points'])
-      && decimal(proof.nullifier, field) && !seen.has(proof.nullifier)
-      && typeof proof.message === 'string' && /^(0|[1-9][0-9]?)$/.test(proof.message)
-      && Number(proof.message) < options.length && proof.scope === scope
-      && proof.merkleTreeRoot === roster.root && proof.merkleTreeDepth === 10
-      && Array.isArray(proof.points) && proof.points.length === 8 && proof.points.every(point => decimal(point, curveField))
-      && await verifyProof(proof), 'A counted vote has an invalid or repeated proof.')
+    requireValid(proof && !seen.has(proof.nullifier), 'The evidence contains a repeated vote.')
+    const index = await verifyVote(proof, roster, options, scope)
     seen.add(proof.nullifier)
-    const index = Number(proof.message)
     counts[index] = (counts[index] ?? 0) + 1
   }
   const [support = 0, oppose = 0] = counts
@@ -127,4 +145,20 @@ export async function verifyBallot(packet: BallotPackage) {
       passes ? 'passed' : 'rejected'
   requireValid(canonical({ counts, options, electorate, total: turnout, outcome }) === canonical(result),
     'The published tally differs from the vote proofs.')
+}
+
+export async function verifyEvidence(value: unknown) {
+  requireValid(value && typeof value === 'object' && 'version' in value, 'Choose a Quorum ballot or vote proof JSON file.')
+  if (value.version === 'cope-quorum-evidence/1') {
+    const ballot = value as BallotPackage
+    await verifyBallot(ballot)
+    return { kind: 'ballot' as const, title: ballot.manifest.title, result: ballot.result! }
+  }
+  if (value.version === 'cope-quorum-vote/1') {
+    const vote = value as VoteEvidence
+    const { options, scope } = await verifyBallotContext(vote.manifest, vote.roster)
+    const choice = await verifyVote(vote.proof, vote.roster, options, scope)
+    return { kind: 'vote' as const, title: vote.manifest.title, option: options[choice] }
+  }
+  throw new Error('Unsupported Quorum evidence format.')
 }

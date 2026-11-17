@@ -80,8 +80,9 @@ onMounted(load)
 <template>
   <div class="page-container page-stack">
     <PageHeader title="Quorum">
-      <template v-if="enrollmentAvailable" #actions>
-        <BaseButton size="small" aria-haspopup="dialog" @click="openCredential">Voting credential</BaseButton>
+      <template #actions>
+        <BaseButton size="small" variant="ghost" :to="{ name: 'quorum-verify' }">Verify evidence</BaseButton>
+        <BaseButton v-if="enrollmentAvailable" size="small" aria-haspopup="dialog" @click="openCredential">Voting credential</BaseButton>
       </template>
     </PageHeader>
     <ContentState v-if="loading" kind="loading" compact title="Loading ballots" />

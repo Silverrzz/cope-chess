@@ -72,6 +72,7 @@ const router = createRouter({
           meta: { title: "Ratings" },
         },
         { path: "quorum/ballots/:id", name: "quorum-ballot", component: () => import("@/pages/public/QuorumBallotPage.vue"), meta: { title: "Quorum ballot", requiresPlatformAccess: false } },
+        { path: "quorum/verify", name: "quorum-verify", component: () => import("@/pages/public/QuorumVerifyPage.vue"), meta: { title: "Verify Quorum evidence", requiresPlatformAccess: false } },
         { path: "quorum/tools", redirect: { name: "quorum" } },
         { path: "quorum", name: "quorum", component: () => import("@/pages/public/QuorumPage.vue"), meta: { title: "Quorum", requiresPlatformAccess: false } },
         {

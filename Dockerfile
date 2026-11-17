@@ -8,6 +8,20 @@ RUN npm prune --omit=dev --ignore-scripts
 
 FROM node:24-bookworm-slim AS quorum-node
 
+FROM quorum-node AS verifier-runtime
+WORKDIR /opt/quorum
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts \
+    && mkdir -p /var/lib/cope-quorum-verifier \
+    && chown node:node /var/lib/cope-quorum-verifier
+COPY frontend/quorum-node.mjs frontend/quorum-audit.mjs ./
+COPY frontend/src/quorum.ts ./src/quorum.ts
+USER node
+VOLUME /var/lib/cope-quorum-verifier
+EXPOSE 8788
+ENTRYPOINT ["node"]
+CMD ["quorum-node.mjs"]
+
 FROM docker:28-cli AS docker-tools
 
 FROM python:3.13-slim-bookworm AS common-system
