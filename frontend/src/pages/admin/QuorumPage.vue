@@ -13,7 +13,6 @@ interface Draft {
   rationale: string
   subject: Subject
   action: 'include' | 'exclude' | null
-  target: string | null
   rule: Rule
   quorum_percent: number | null
   opens_at: string
@@ -64,7 +63,7 @@ function addDraft() {
   const id = crypto.randomUUID()
   const now = new Date()
   setup.value.drafts.push({
-    id, title: '', rationale: '', subject: 'engine', action: 'include', target: '',
+    id, title: '', rationale: '', subject: 'engine', action: 'include',
     rule: 'majority', quorum_percent: null, opens_at: now.toISOString(),
     closes_at: new Date(now.valueOf() + 7 * 86400000).toISOString(), options: [],
   })
@@ -78,7 +77,6 @@ function syncDraft() {
   active.closes_at = new Date(closing.value).toISOString()
   if (active.subject === 'poll') {
     active.action = null
-    active.target = null
     active.rule = 'report_only'
     active.options = options.value.split('\n').map(option => option.trim()).filter(Boolean)
     active.quorum_percent = null
@@ -218,8 +216,6 @@ onMounted(() => { void load(); void loadRoles() })
                 <label class="field"><span>Action</span><select v-model="draft.action" class="select" required>
                   <option value="include">Add or admit</option><option value="exclude">Remove</option>
                 </select></label>
-                <label class="field"><span>{{ draft.subject === 'member' ? 'Credential commitment' : 'Engine identifier' }}</span>
-                  <input v-model="draft.target" class="input" required maxlength="128"></label>
                 <label class="field"><span>Decision rule</span><select v-model="draft.rule" class="select" required>
                   <option value="majority">Simple majority</option><option value="unanimous_electorate">Unanimity of all eligible members</option>
                   <option value="unanimous_decisive">Unanimity of decisive votes</option>

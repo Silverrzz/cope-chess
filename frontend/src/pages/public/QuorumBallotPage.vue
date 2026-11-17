@@ -118,7 +118,6 @@ async function cast() {
           <StatusBadge :tone="open ? 'success' : 'neutral'" :dot="open">{{ open ? 'Open' : packet.status === 'scheduled' ? 'Scheduled' : 'Completed' }}</StatusBadge>
           <span class="muted">{{ packet.status === 'scheduled' ? 'Opens' : 'Closes' }} {{ dates.format(new Date(packet.status === 'scheduled' ? manifest.opens_at : manifest.closes_at)) }}</span></div>
         <p class="quorum-rationale">{{ manifest.rationale }}</p>
-        <p v-if="manifest.target" class="muted">{{ manifest.action === 'include' ? 'Add' : 'Remove' }} {{ manifest.target }}</p>
       </section>
 
       <section v-if="packet.result" class="panel panel__body section-stack">
