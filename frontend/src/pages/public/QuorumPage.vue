@@ -164,7 +164,12 @@ onBeforeUnmount(() => {
 .ballot-section { display: grid; gap: var(--space-3); }
 .ballot-section h2 { margin: 0; font-size: 1.25rem; }
 
-.ballot-grid { margin: 0; padding: 0; list-style: none; }
+.ballot-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 31rem), 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
 .ballot-card { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 .ballot-card__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .ballot-card__header > :last-child { flex-shrink: 0; }
