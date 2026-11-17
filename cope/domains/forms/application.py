@@ -5,7 +5,7 @@ import json
 import uuid
 from typing import Literal
 
-from pydantic import Field, StrictBool
+from pydantic import UUID4, Field, StrictBool
 
 from cope.application.contracts import Command, CommandContext, Input, Outcome
 from cope.application.errors import ApplicationError
@@ -56,6 +56,7 @@ class SubmitResponse(Input):
     release_id: str
     answers: dict
     attachment_subject: str | None = None
+    attempt_id: UUID4 | None = None
 
 
 class AmendResponse(Input):

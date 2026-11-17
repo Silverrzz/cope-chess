@@ -62,6 +62,7 @@ export interface FormDefinition {
   mapping?: Record<string, string>
   audience: 'public' | 'authenticated' | 'invited'
   allow_amendments?: boolean
+  allow_multiple_submissions?: boolean
   anonymous?: boolean
   listed?: boolean
   response_visibility?: ResponseVisibility

@@ -281,7 +281,7 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
 
 def public_definition(definition: FormDefinition) -> dict:
     keys = {"schema_version", "title", "description", "fields", "audience", "allow_amendments", "max_payload_bytes", "max_rows",
-            "anonymous", "listed", "response_visibility", "discord_role_id"}
+            "anonymous", "listed", "response_visibility", "discord_role_id", "allow_multiple_submissions"}
     return {key: value for key, value in definition.model_dump(mode="json").items() if key in keys}
 
 

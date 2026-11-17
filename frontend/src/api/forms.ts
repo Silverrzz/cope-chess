@@ -70,9 +70,9 @@ export function formResults(slug: string, cursor?: string | null, signal?: Abort
   return api.get<PublicResults>(`/api/forms/${encodeURIComponent(slug)}/results`, { query: { cursor }, signal })
 }
 
-export function submitForm(slug: string, releaseId: string, answers: FormAnswers, attachmentSubject: string) {
+export function submitForm(slug: string, releaseId: string, answers: FormAnswers, attachmentSubject: string, attemptId: string) {
   return api.post<{ submitted: boolean; already_submitted: boolean; response_id: string | null }>(
     `/api/forms/${encodeURIComponent(slug)}/submit`,
-    { headers: discordHeaders, body: { release_id: releaseId, answers, attachment_subject: attachmentSubject } },
+    { headers: discordHeaders, body: { release_id: releaseId, answers, attachment_subject: attachmentSubject, attempt_id: attemptId } },
   )
 }

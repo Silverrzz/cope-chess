@@ -30,7 +30,11 @@ const releaseChanged = ref(false)
 const fields = ref<InstanceType<typeof FormExperience> | null>(null)
 const errorSummary = ref<HTMLElement | null>(null)
 const attachmentSubject = ref(crypto.randomUUID())
-const submitFormVisible = computed(() => !!discord.account && !!form.value && !form.value.closed && !form.value.submitted)
+const attemptId = ref(crypto.randomUUID())
+const startingAnother = ref(false)
+const canStartAnother = computed(() => !!discord.account && !!form.value && !form.value.closed && form.value.definition.allow_multiple_submissions === true)
+const submitFormVisible = computed(() => !!discord.account && !!form.value && !form.value.closed &&
+  (!form.value.submitted || (canStartAnother.value && startingAnother.value)))
 const unsubmitted = computed(() => submitFormVisible.value && Object.values(answers.value).some(
   value => value !== '' && value !== false && value !== undefined,
 ))
@@ -55,18 +59,30 @@ async function upload(file: File, field: FormField, path: string[]): Promise<str
   finally { uploading.value -= 1 }
 }
 
+function resetAnswers(active: PublicForm) {
+  answers.value = initialAnswers(active.definition.fields)
+  attachmentSubject.value = crypto.randomUUID()
+  attemptId.value = crypto.randomUUID()
+}
+
+function startAnother() {
+  if (!form.value || !canStartAnother.value) return
+  resetAnswers(form.value)
+  startingAnother.value = true
+}
+
 async function load(slug: string, signal?: AbortSignal) {
   loading.value = true
   error.value = ''
   errors.value = {}
   needsSignIn.value = false
   releaseChanged.value = false
+  startingAnother.value = false
   try {
     const [loaded] = await Promise.all([publicForm(slug, signal), discord.load()])
     signal?.throwIfAborted()
     form.value = loaded
-    answers.value = initialAnswers(loaded.definition.fields)
-    attachmentSubject.value = crypto.randomUUID()
+    resetAnswers(loaded)
   } catch (cause) {
     if (signal?.aborted) return
     form.value = null
@@ -106,10 +122,12 @@ async function submit() {
   error.value = ''
   errors.value = {}
   try {
-    const accepted = await submitForm(active.slug, active.release_id, canonicalAnswers(active.definition.fields, answers.value), attachmentSubject.value)
+    const snapshot = canonicalAnswers(active.definition.fields, answers.value)
+    const accepted = await submitForm(active.slug, active.release_id, snapshot, attachmentSubject.value, attemptId.value)
     if (!signal.aborted) {
       form.value = { ...active, submitted: accepted.submitted, my_response_id: accepted.response_id }
       answers.value = {}
+      startingAnother.value = false
     }
   } catch (cause) {
     if (signal.aborted) return
@@ -171,14 +189,17 @@ onBeforeRouteUpdate((to, from) => to.params.slug === from.params.slug || (!busy.
         <FormMarkdown v-if="form.definition.description" :source="form.definition.description" />
         <section v-if="form.submitted" class="panel panel__body section-stack" role="status">
           <h2>Response submitted</h2>
-          <div v-if="form.my_response_id" class="button-row">
-            <BaseButton :to="{ name: 'form-response', params: { id: form.my_response_id }, query: { form: form.id } }">Open your response</BaseButton>
+          <div v-if="canStartAnother || form.my_response_id" class="button-row">
+            <BaseButton v-if="canStartAnother" variant="primary" @click="startAnother">Submit another response</BaseButton>
+            <BaseButton v-if="form.my_response_id" :to="{ name: 'form-response', params: { id: form.my_response_id }, query: { form: form.id } }">
+              {{ form.definition.allow_multiple_submissions ? 'Open your latest response' : 'Open your response' }}
+            </BaseButton>
           </div>
         </section>
         <p v-else-if="form.closed" class="muted">This form is closed to new responses.</p>
         <section v-else class="panel panel__body section-stack">
           <h2>Sign in to respond</h2>
-          <p class="muted">Each Discord account can respond once.</p>
+          <p class="muted">{{ form.definition.allow_multiple_submissions ? 'You can submit multiple responses.' : 'Each Discord account can respond once.' }}</p>
           <div v-if="discord.enabled" class="button-row">
             <BaseButton :href="discordLogin()" variant="primary">
               <template #icon><AppIcon name="discord" :size="17" /></template>

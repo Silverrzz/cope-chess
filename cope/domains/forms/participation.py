@@ -10,9 +10,20 @@ from .application import SubmitResponse, store_response
 from .storage import definition_from_json, form_permission, pinned_release
 
 
-def participant_hash(connection, form_id: str, discord_id: str) -> str:
+def participant_hash(connection, form_id: str, discord_id: str, attempt_id: uuid.UUID | None = None) -> str:
     secret = connection.execute("SELECT secret FROM form_private_keys WHERE purpose = 'discord_participation'").fetchone()["secret"]
-    return hmac.digest(secret.encode(), f"{form_id}:{discord_id}".encode(), "sha256").hex()
+    subject = f"{form_id}:{discord_id}"
+    if attempt_id is not None:
+        subject = f"submission-attempt:{subject}:{attempt_id}"
+    return hmac.digest(secret.encode(), subject.encode(), "sha256").hex()
+
+
+def record_participation(connection, form_id: str, key: str) -> bool:
+    row = connection.execute(
+        """INSERT INTO form_discord_participation(form_id, participant_hash) VALUES (%s, %s)
+           ON CONFLICT DO NOTHING RETURNING form_id""", (form_id, key),
+    ).fetchone()
+    return row is not None
 
 
 def participation(connection, form_id: str, discord_id: str) -> tuple[bool, str | None]:
@@ -23,7 +34,7 @@ def participation(connection, form_id: str, discord_id: str) -> tuple[bool, str 
     if not accepted:
         return False, None
     linked = connection.execute(
-        "SELECT id FROM form_responses WHERE form_id = %s AND owner_actor = %s ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM form_responses WHERE form_id = %s AND owner_actor = %s ORDER BY created_at DESC, id DESC LIMIT 1",
         (form_id, "discord:" + discord_id),
     ).fetchone()
     return True, str(linked["id"]) if linked else None
@@ -58,13 +69,16 @@ def submit(connection, profile, slug: str, payload: SubmitResponse, verified_rol
     if definition.audience == "invited":
         form_permission(connection, profile.principal, form, "read")
     participant = participant_hash(connection, form_id, profile.id)
-    inserted = connection.execute(
-        """INSERT INTO form_discord_participation(form_id, participant_hash) VALUES (%s, %s)
-           ON CONFLICT DO NOTHING RETURNING form_id""", (form_id, participant),
-    ).fetchone()
-    if inserted is None:
+    key = participant
+    if definition.allow_multiple_submissions:
+        if payload.attempt_id is None:
+            raise ApplicationError("submission_attempt_required", "Refresh this form before submitting a new response.", 422)
+        key = participant_hash(connection, form_id, profile.id, payload.attempt_id)
+    if not record_participation(connection, form_id, key):
         _, linked = participation(connection, form_id, profile.id)
         return {"submitted": True, "already_submitted": True, "response_id": linked}
+    if definition.allow_multiple_submissions:
+        record_participation(connection, form_id, participant)
     owner = Principal("form-anonymous:" + str(uuid.uuid4()), ()) if definition.anonymous else profile.principal
     response_id = store_response(connection, owner, form, release, payload)
     return {"submitted": True, "already_submitted": False, "response_id": None if definition.anonymous else response_id}

@@ -435,7 +435,8 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
         <section v-if="live" class="panel panel__body form-panel">
           <header class="form-panel-heading">
             <div><h2>Submissions</h2><p>{{ form.closed ? 'This form is closed.' : 'The live form is accepting responses.' }}</p>
-              <p>{{ live.definition.anonymous ? 'Anonymous responses' : 'Discord-linked responses' }} · {{ live.definition.response_visibility === 'individual' ? 'Public individual answers' : live.definition.response_visibility === 'summary' ? 'Public summary' : 'Private results' }}</p></div>
+              <p>{{ live.definition.anonymous ? 'Anonymous responses' : 'Discord-linked responses' }} · {{ live.definition.response_visibility === 'individual' ? 'Public individual answers' : live.definition.response_visibility === 'summary' ? 'Public summary' : 'Private results' }}</p>
+              <p>{{ live.definition.allow_multiple_submissions ? 'Multiple responses allowed per account' : 'One response per account' }}</p></div>
             <BaseButton :disabled="mutation.unavailable('forms.close.v1')" @click="toggleClosed">{{ form.closed ? 'Reopen submissions' : 'Close submissions' }}</BaseButton>
           </header>
         </section>

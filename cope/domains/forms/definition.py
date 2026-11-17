@@ -67,6 +67,7 @@ class FormDefinition(DefinitionValue):
     mapping: dict[str, str] = Field(default_factory=dict, max_length=100)
     audience: Literal["public", "authenticated", "invited"] = "authenticated"
     allow_amendments: bool = True
+    allow_multiple_submissions: bool = False
     anonymous: bool = False
     listed: bool = False
     response_visibility: Literal["private", "summary", "individual"] = "private"
