@@ -10,6 +10,7 @@ from cope.adapters.http.forms import require_origin
 from cope.control.api import database
 from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
 from cope.domains import quorum_elections as elections
+from cope.domains import quorum_publications as published
 from cope.domains.quorum import Setup, read_setup, save_setup
 
 
@@ -129,6 +130,42 @@ def register_quorum_routes(app):
     def ballot_package(ballot_id: UUID, request: Request, connection=Depends(database)):
         require_secure(request)
         return election_call(elections.ballot_package, connection, ballot_id)
+
+    @app.get("/api/quorum/ballots/{ballot_id}/publications")
+    def ballot_publications(ballot_id: UUID, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return election_call(published.publications, connection, ballot_id)
+
+    @app.post("/api/quorum/ballots/{ballot_id}/witness-signatures")
+    def sign_ballot(ballot_id: UUID, payload: published.WitnessSignature, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        origin = request.app.state.discord_runtime.origin
+        return election_call(published.record_signature, connection, ballot_id, origin, payload)
+
+    @app.get("/api/quorum/ballots/{ballot_id}/disclosure")
+    def disclosure_challenge(ballot_id: UUID, request: Request, connection=Depends(database)):
+        require_secure(request)
+        account = request_account(request, connection)
+        if not account:
+            raise HTTPException(401, "Connect Discord to publish your vote.")
+        election_call(published.closed_evidence, connection, ballot_id)
+        message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
+        return JSONResponse({"message": message, "username": account.username}, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/quorum/ballots/{ballot_id}/disclosure")
+    def disclose_vote(ballot_id: UUID, payload: published.Disclosure, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        account = request_account(request, connection)
+        if not account:
+            raise HTTPException(401, "Connect Discord to publish your vote.")
+        message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
+        election_call(published.validate_disclosure, connection, ballot_id, payload, message)
+        current = request_account(request, connection)
+        if current != account:
+            raise HTTPException(401, "The Discord session changed. Preview your vote again.")
+        return election_call(published.record_disclosure, connection, ballot_id, account, payload.proof.nullifier)
 
     @app.get("/api/admin/quorum/status")
     def election_status(request: Request, connection=Depends(database)):

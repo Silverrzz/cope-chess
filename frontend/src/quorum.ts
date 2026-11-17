@@ -6,6 +6,12 @@ export interface Roster {
   root: string
 }
 
+export interface Witness {
+  name: string
+  public_key: string
+  report_origin: string
+}
+
 export interface Manifest {
   id: string
   title: string
@@ -20,6 +26,7 @@ export interface Manifest {
   options: string[]
   roster?: string
   genesis?: string
+  witnesses?: Witness[]
 }
 
 export interface BallotResult {
@@ -91,6 +98,7 @@ async function verifyBallotContext(manifest: Manifest, roster: Roster) {
     'quorum_percent', 'opens_at', 'closes_at', 'options', rosterKey]
   if (Object.hasOwn(manifest, 'action')) manifestKeys.push('action')
   if (Object.hasOwn(manifest, 'target')) manifestKeys.push('target')
+  if (Object.hasOwn(manifest, 'witnesses')) manifestKeys.push('witnesses')
   requireValid(exactKeys(manifest, manifestKeys) && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(manifest.id)
     && typeof manifest.title === 'string' && manifest.title.length > 0
     && typeof manifest.rationale === 'string' && manifest.rationale.length > 0

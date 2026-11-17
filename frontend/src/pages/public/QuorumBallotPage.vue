@@ -5,15 +5,24 @@ import api from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import QuorumCredential from '@/components/public/QuorumCredential.vue'
+import QuorumDisclosure from '@/components/public/QuorumDisclosure.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
+import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence, type Witness } from '@/quorum'
 import { resultLabels } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, unlockedCredential } from '@/quorum-voter'
 
+interface Publications {
+  certified: boolean
+  witnesses: (Witness & { signed_at: string | null })[]
+  disclosures: { username: string; option: string }[]
+}
+
 const route = useRoute()
 const packet = ref<BallotPackage>()
+const publications = ref<Publications>()
+const publicationError = ref('')
 const choice = ref('')
 const verified = ref(false)
 const verifying = ref(false)
@@ -22,9 +31,11 @@ const busy = ref(false)
 const loadError = ref('')
 const error = ref('')
 let refreshTimer: ReturnType<typeof setTimeout> | undefined
+let publicationTimer: ReturnType<typeof setTimeout> | undefined
 const receipt = ref('')
 const manifest = computed(() => packet.value?.manifest)
 const endpoint = computed(() => '/api/quorum/ballots/' + encodeURIComponent(String(route.params.id)))
+const signedCount = computed(() => publications.value?.witnesses.filter(witness => witness.signed_at).length ?? 0)
 const open = computed(() => packet.value?.status === 'open')
 const credential = computed(() => {
   const unlocked = unlockedCredential.value
@@ -55,6 +66,8 @@ async function load() {
     if (next.status !== 'completed') {
       const boundary = next.status === 'scheduled' ? next.manifest.opens_at : next.manifest.closes_at
       refreshTimer = setTimeout(load, Math.min(2147483647, Math.max(1000, Date.parse(boundary) - Date.now() + 250)))
+    } else {
+      void loadPublications()
     }
   } catch (cause) {
     if (path === endpoint.value) loadError.value = (cause as Error).message
@@ -63,15 +76,32 @@ async function load() {
   }
 }
 
+async function loadPublications() {
+  clearTimeout(publicationTimer)
+  const path = endpoint.value
+  try {
+    const data = await api.get<Publications>(path + '/publications')
+    if (path !== endpoint.value) return
+    publications.value = data
+    publicationError.value = ''
+    if (data.witnesses.length && !data.certified) publicationTimer = setTimeout(loadPublications, 30000)
+  } catch (cause) {
+    if (path === endpoint.value) publicationError.value = (cause as Error).message
+  }
+}
+
 watch(endpoint, () => {
   clearTimeout(refreshTimer)
+  clearTimeout(publicationTimer)
   packet.value = undefined
+  publications.value = undefined
+  publicationError.value = ''
   choice.value = ''
   receipt.value = localStorage.getItem('cope-quorum-receipt:' + route.params.id) ?? ''
   loading.value = true
   void load()
 }, { immediate: true })
-onBeforeUnmount(() => clearTimeout(refreshTimer))
+onBeforeUnmount(() => { clearTimeout(refreshTimer); clearTimeout(publicationTimer) })
 
 async function audit() {
   const evidence = packet.value
@@ -141,6 +171,31 @@ async function cast() {
           <BaseButton @click="downloadQuorumFile('quorum-' + manifest.id + '.json', JSON.stringify(packet))">Download ballot evidence</BaseButton>
         </div>
         <InlineFeedback v-if="verified" tone="info" message="The vote proofs match the published tally." />
+      </section>
+
+      <section v-if="publications?.witnesses.length" class="panel panel__body section-stack">
+        <div class="toolbar toolbar--between">
+          <h2>Witness certification</h2>
+          <StatusBadge :tone="publications.certified ? 'success' : 'neutral'">
+            {{ publications.certified ? 'Certified' : signedCount + ' of ' + publications.witnesses.length + ' signed' }}
+          </StatusBadge>
+        </div>
+        <ul class="section-stack">
+          <li v-for="witness in publications.witnesses" :key="witness.public_key">
+            <strong>{{ witness.name }}</strong> ·
+            <a v-if="witness.signed_at" :href="witness.report_origin + '/ballots/' + manifest.id" target="_blank" rel="noopener noreferrer">Signed report</a>
+            <span v-else class="muted">Awaiting signature</span>
+          </li>
+        </ul>
+      </section>
+
+      <section v-if="packet.result" class="panel panel__body section-stack">
+        <h2>Public votes</h2>
+        <ul v-if="publications?.disclosures.length" class="section-stack">
+          <li v-for="vote in publications.disclosures" :key="vote.username">@{{ vote.username }} · <strong>{{ vote.option }}</strong></li>
+        </ul>
+        <QuorumDisclosure :key="manifest.id" :ballot="packet" @published="loadPublications" />
+        <InlineFeedback :message="publicationError" />
       </section>
 
       <section v-if="receipt" class="panel panel__body section-stack">

@@ -1,9 +1,10 @@
 import json
 from typing import Literal
+from urllib.parse import urlsplit
 
 from cope.application.errors import ApplicationError
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from cope.application.contracts import Input
 from cope.discord_bot.accounts import snowflake
@@ -48,10 +49,26 @@ class BallotDraft(Input):
         return self
 
 
+class Witness(Input):
+    name: str = Field(min_length=1, max_length=80)
+    public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    report_origin: str = Field(min_length=1, max_length=250)
+
+    @field_validator("report_origin")
+    @classmethod
+    def validate_origin(cls, value):
+        url = urlsplit(value)
+        if (url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment
+                or url.path not in ("", "/") or "\\" in value or any(character.isspace() for character in value)):
+            raise ValueError("Use the HTTPS origin of the witness's report server.")
+        return f"https://{url.netloc}"
+
+
 class Setup(Input):
     revision: int = Field(default=0, strict=True, ge=0)
     enrollment_role_id: str | None = None
     drafts: list[BallotDraft] = Field(default_factory=list, max_length=32)
+    witnesses: list[Witness] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def validate_setup(self):
@@ -59,6 +76,8 @@ class Setup(Input):
             raise ValueError("Enter a valid Discord role ID.")
         if len({draft.id for draft in self.drafts}) != len(self.drafts):
             raise ValueError("Draft identifiers must be unique.")
+        if len({item.public_key for item in self.witnesses}) != len(self.witnesses):
+            raise ValueError("Each witness must have a distinct signing key.")
         return self
 
 

@@ -1,3 +1,4 @@
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -20,6 +21,15 @@ try {
 if (await readFile(originFile, 'utf8') !== origin.origin) {
   throw new Error('This archive belongs to a different COPE origin.')
 }
+const keyFile = join(archive, 'witness-ed25519.pem')
+try {
+  const generated = generateKeyPairSync('ed25519').privateKey
+  await writeFile(keyFile, generated.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 })
+} catch (error) {
+  if (error.code !== 'EEXIST') throw error
+}
+const privateKey = createPrivateKey(await readFile(keyFile))
+const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex')
 let lastScan = null
 
 async function fetchEvidence(path) {
@@ -50,12 +60,35 @@ async function saveRecord(id, record) {
   await rename(file + '.new', file)
 }
 
+async function publishSignature(id, record) {
+  if (!record.evidence.manifest.witnesses?.some(witness => witness.public_key === publicKey)
+    || record.report.signature_published_at) return
+  const { digest } = record.report
+  const statement = JSON.stringify(['cope-quorum-witness-result/1', origin.origin, id, digest])
+  const signature = sign(null, Buffer.from(statement), privateKey).toString('hex')
+  record.report.public_key = publicKey
+  record.report.signature = signature
+  await saveRecord(id, record)
+  const response = await fetch(new URL('/api/quorum/ballots/' + id + '/witness-signatures', origin), {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public_key: publicKey, digest, signature }),
+  })
+  if (!response.ok) throw new Error('COPE returned HTTP ' + response.status + ' for the witness signature.')
+  record.report.signature_published_at = new Date().toISOString()
+  await saveRecord(id, record)
+}
+
 async function observe(id) {
   const packet = await fetchEvidence('/api/quorum/ballots/' + id)
   if (packet.manifest?.id !== id) throw new Error('Ballot ID does not match the directory.')
   const digest = await fingerprint(packet)
   const existing = await readRecord(id)
-  if (existing?.report.digest === digest || existing?.report.conflict?.digest === digest) return
+  if (existing?.report.digest === digest) {
+    if (!existing.report.conflict) await publishSignature(id, existing)
+    return
+  }
+  if (existing?.report.conflict?.digest === digest) return
   await verifyBallot(packet)
   const observedAt = new Date().toISOString()
   if (existing) {
@@ -63,10 +96,12 @@ async function observe(id) {
     await saveRecord(id, existing)
     return
   }
-  await saveRecord(id, {
+  const record = {
     evidence: packet,
     report: { id, title: packet.manifest.title, origin: origin.origin, digest, observed_at: observedAt, result: packet.result },
-  })
+  }
+  await saveRecord(id, record)
+  await publishSignature(id, record)
 }
 
 async function scan() {
@@ -101,7 +136,7 @@ createServer(async (request, response) => {
       const files = await readdir(archive)
       const ballots = files.filter(file => file.endsWith('.json') && uuid.test(file.slice(0, -5)))
         .map(file => '/ballots/' + file.slice(0, -5))
-      return send(response, 200, { origin: origin.origin, last_scan: lastScan, ballots })
+      return send(response, 200, { origin: origin.origin, public_key: publicKey, last_scan: lastScan, ballots })
     }
     const match = /^\/ballots\/([^/]+)(\/evidence)?$/.exec(path)
     if (match && uuid.test(match[1])) {

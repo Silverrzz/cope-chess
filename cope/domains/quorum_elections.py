@@ -160,6 +160,8 @@ def publish(connection, draft_id, revision):
     if draft.closes_at <= datetime.now(UTC):
         fail("quorum_past_deadline", "Choose a closing date in the future.")
     manifest = {**draft.model_dump(mode="json"), "roster": digest(roster)}
+    if setup.witnesses:
+        manifest["witnesses"] = [witness.model_dump() for witness in setup.witnesses]
     row = connection.execute(
         """INSERT INTO cope_quorum.ballots (id, manifest, roster, opens_at, closes_at)
            VALUES (?::uuid, ?::jsonb, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
