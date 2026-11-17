@@ -37,6 +37,20 @@ export interface ResponseCollection {
   id: string
   label: string
   response_count: number
+  pending_response_count: number
+}
+
+export type MySubmission = Pick<FormResponseRow, 'id' | 'form_id' | 'form_title' | 'state' | 'created_at'> & {
+  updated_at: string
+}
+
+export async function mySubmissions(formId?: string, cursor?: string | null, signal?: AbortSignal): Promise<Page<MySubmission>> {
+  const result = await api.get<{ data: Page<MySubmission> }>('/api/forms/responses/mine', {
+    headers: discordHeaders,
+    query: { form_id: formId, cursor },
+    signal,
+  })
+  return result.data
 }
 
 export async function formResponses(formId: string, cursor?: string | null): Promise<Page<FormResponseRow>> {

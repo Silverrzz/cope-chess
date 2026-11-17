@@ -195,8 +195,8 @@ onBeforeRouteUpdate((to, from) => to.params.slug === from.params.slug || (!busy.
           <h2>Response submitted</h2>
           <div v-if="canStartAnother || form.my_response_id" class="button-row">
             <BaseButton v-if="canStartAnother" variant="primary" @click="startAnother">Submit another response</BaseButton>
-            <BaseButton v-if="form.my_response_id" :to="{ name: 'form-response', params: { id: form.my_response_id }, query: { form: form.id } }">
-              {{ form.definition.allow_multiple_submissions ? 'Open your latest response' : 'Open your response' }}
+            <BaseButton v-if="form.my_response_id" :to="{ name: 'my-submissions', query: { form: form.id } }">
+              See responses
             </BaseButton>
           </div>
         </section>

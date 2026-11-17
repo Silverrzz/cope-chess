@@ -16,7 +16,8 @@ const router = useRouter()
 const session = useSessionStore()
 const canEdit = computed(() => session.user?.role === 'admin')
 const mutation = useApplicationMutation()
-type CollectionRow = Pick<FormDetail, 'id' | 'label' | 'closed' | 'published_release'> | ResponseCollection
+type AdminCollectionRow = Pick<FormDetail, 'id' | 'label' | 'closed' | 'published_release'> & { pending_response_count: number }
+type CollectionRow = AdminCollectionRow | ResponseCollection
 
 const rows = ref<CollectionRow[]>([])
 const cursor = ref<string | null>(null)
@@ -33,7 +34,7 @@ async function load(more = false): Promise<void> {
   try {
     const next = more ? cursor.value : null
     const page = canEdit.value
-      ? await applicationQuery<Page<FormDetail>>('forms.list.v1', { limit: 30, cursor: next })
+      ? await applicationQuery<Page<AdminCollectionRow>>('forms.list.v1', { limit: 30, cursor: next })
       : await responseCollections(next)
     rows.value = more ? [...rows.value, ...page.items] : page.items
     total.value = page.total; cursor.value = page.next_cursor
@@ -80,12 +81,13 @@ onMounted(() => load())
       <p v-if="loading && !rows.length" class="panel__body muted" role="status">Loading collections…</p>
       <div v-else-if="rows.length" class="table-wrap">
         <table class="data-table data-table--list" aria-label="Response collections">
-          <thead><tr><th scope="col">Form</th><th scope="col">{{ canEdit ? 'Status' : 'Responses' }}</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th scope="col">Form</th><th scope="col">{{ canEdit ? 'Status' : 'Responses' }}</th><th scope="col">Awaiting approval</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             <tr v-for="form in rows" :key="form.id">
               <th scope="row"><RouterLink :to="{ name: 'admin-form-editor', params: { id: form.id }, query: canEdit ? {} : { view: 'responses' } }">{{ form.label }}</RouterLink></th>
               <td v-if="'response_count' in form">{{ form.response_count.toLocaleString() }}</td>
               <td v-else><StatusBadge :status="form.closed ? 'offline' : form.published_release ? 'published' : 'draft'" :label="form.closed ? 'Closed' : form.published_release ? 'Published' : 'Draft'" /></td>
+              <td>{{ form.pending_response_count.toLocaleString() }}</td>
               <td><BaseButton size="small" variant="ghost" :to="{ name: 'admin-form-editor', params: { id: form.id }, query: { view: 'responses' } }">Responses</BaseButton></td>
             </tr>
           </tbody>

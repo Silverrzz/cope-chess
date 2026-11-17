@@ -17,6 +17,7 @@ const router = createRouter({
         { path: "", name: "forms", component: () => import("@/pages/public/FormsDirectoryPage.vue"), meta: { title: "Forms" } },
         { path: "ballots/:slug", redirect: { name: "forms" } },
         { path: "tools/voter-proof/:slug", redirect: { name: "forms" } },
+        { path: "responses", name: "my-submissions", component: () => import("@/pages/public/MySubmissionsPage.vue"), meta: { title: "My submissions" } },
         { path: "responses/:id", name: "form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Private response" } },
         { path: ":slug", name: "public-form", component: () => import("@/pages/public/PublicFormPage.vue"), props: true, meta: { title: "Form" } },
       ],

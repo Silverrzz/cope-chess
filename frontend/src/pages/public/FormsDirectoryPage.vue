@@ -35,7 +35,9 @@ onMounted(() => load())
 
 <template>
   <div class="page-container page-stack" :aria-busy="loading">
-    <PageHeader title="Forms" />
+    <PageHeader title="Forms">
+      <template #actions><BaseButton :to="{ name: 'my-submissions' }">My submissions</BaseButton></template>
+    </PageHeader>
     <ContentState v-if="error" kind="error" compact :message="error" action-label="Try again" @action="load(items.length > 0)" />
     <ContentState v-else-if="loading && !items.length" kind="loading" compact title="Loading forms" />
     <ContentState v-else-if="!items.length" kind="empty" compact title="No listed forms" />
