@@ -22,7 +22,7 @@ interface UpdateMethod {
 
 interface DeploymentTarget {
   id: number;
-  target_kind: "server" | "worker" | "benchmarker";
+  target_kind: "server" | "worker" | "benchmarker" | "verifier";
   target_id: number | null;
   label: string;
   current_commit: string | null;
@@ -161,6 +161,7 @@ function completedTargets(job: DeploymentJob): number {
 
 function targetKind(target: DeploymentTarget): string {
   if (target.target_kind === "server") return target.label;
+  if (target.target_kind === "verifier") return "Verifier";
   return target.target_kind === "benchmarker" ? "Benchmarker" : "Worker";
 }
 

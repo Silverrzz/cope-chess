@@ -10,7 +10,7 @@ import type { Witness } from '@/quorum'
 type ManagedWitness = Witness & { enabled: boolean }
 interface Verifier extends ManagedWitness {
   status: 'awaiting_checkin' | 'online' | 'offline'
-  checkin: { seen_at: string; last_scan: number | null; archived: number; scan_errors: number; runtime: string } | null
+  checkin: { seen_at: string; last_scan: number | null; archived: number; scan_errors: number; runtime: string; app_commit: string | null } | null
   signed_count: number
   last_signed: string | null
 }
@@ -136,6 +136,7 @@ onBeforeUnmount(() => clearInterval(timer))
         <div class="verifier-meta muted">
           <code :title="witness.public_key">{{ witness.public_key.slice(0, 12) }}…{{ witness.public_key.slice(-6) }}</code>
           <span v-if="witness.checkin">Node {{ witness.checkin.runtime }}</span>
+          <code v-if="witness.checkin?.app_commit" :title="witness.checkin.app_commit">{{ witness.checkin.app_commit.slice(0, 8) }}</code>
           <a v-if="witness.report_origin" :href="witness.report_origin" rel="noopener noreferrer" target="_blank">External reports</a>
         </div>
       </li>

@@ -41,6 +41,20 @@ async function archivedBallots() {
     .map(file => '/ballots/' + file.slice(0, -5))
 }
 
+const appCommit = process.env.COPE_VERIFIER_BUILD_COMMIT
+const updateFile = process.env.COPE_VERIFIER_UPDATE_FILE
+const updateFailure = process.env.COPE_VERIFIER_UPDATE_FAILURE
+
+async function failedJob() {
+  if (!updateFailure) return null
+  try {
+    return JSON.parse(await readFile(updateFailure, 'utf8')).job_id ?? null
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
 async function checkIn() {
   try {
     const sent_at = Math.floor(Date.now() / 1000)
@@ -48,14 +62,28 @@ async function checkIn() {
     const archived = (await archivedBallots()).length
     const errors = scanErrors
     const runtime = process.version
-    const statement = JSON.stringify(['cope-quorum-verifier-checkin/1', origin.origin, publicKey, sent_at, last_scan, archived, errors, runtime])
-    const signature = sign(null, Buffer.from(statement), privateKey).toString('hex')
+    const body = { public_key: publicKey, sent_at, last_scan, archived, scan_errors: errors, runtime }
+    const statement = ['cope-quorum-verifier-checkin/1', origin.origin, publicKey, sent_at, last_scan, archived, errors, runtime]
+    if (appCommit) {
+      body.app_commit = appCommit
+      body.failed_job = await failedJob()
+      statement[0] = 'cope-quorum-verifier-checkin/2'
+      statement.push(appCommit, body.failed_job)
+    }
+    body.signature = sign(null, Buffer.from(JSON.stringify(statement)), privateKey).toString('hex')
     const response = await fetch(new URL('/api/quorum/verifiers/check-in', origin), {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: publicKey, sent_at, last_scan, archived, scan_errors: errors, runtime, signature }),
+      body: JSON.stringify(body),
     })
     if (!response.ok && response.status !== 403) throw new Error('COPE returned HTTP ' + response.status)
+    if (response.ok && updateFile) {
+      const { release } = await response.json()
+      if (release) {
+        await writeFile(updateFile + '.new', JSON.stringify(release), { mode: 0o600 })
+        await rename(updateFile + '.new', updateFile)
+      }
+    }
   } catch (error) {
     console.error('Verifier check-in failed: ' + error.message)
   } finally {
@@ -180,6 +208,7 @@ createServer(async (request, response) => {
   } catch {
     return send(response, 500, { error: 'Could not read the archive' })
   }
-}).listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1')
-void scan()
-void checkIn()
+}).listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1', () => {
+  void scan()
+  void checkIn()
+})

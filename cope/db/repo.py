@@ -4443,6 +4443,20 @@ def create_deployment_job(
             """,
             (job_id, now),
         )
+        connection.execute(
+            """
+            INSERT INTO deployment_targets (
+              job_id, target_kind, target_id, label, current_commit, status, updated_at
+            )
+            SELECT ?, 'verifier', node.id, witness->>'name', node.app_commit, 'pending', ?
+            FROM cope_quorum.settings AS setup
+            CROSS JOIN LATERAL jsonb_array_elements(setup.value::jsonb->'witnesses') AS witness
+            JOIN cope_quorum.verifier_checkins AS node ON node.public_key = witness->>'public_key'
+            WHERE setup.key = 'quorum.setup.v1' AND node.app_commit IS NOT NULL
+            ORDER BY node.id
+            """,
+            (job_id, now),
+        )
     return job_id
 
 
@@ -4801,6 +4815,20 @@ def update_server_deployment_target(
         WHERE job_id = ? AND target_kind = 'server'
         """,
         (status, current_commit, detail[:4000], utc_now(), job_id),
+    )
+
+
+def defer_offline_deployment_verifiers(connection: sqlite3.Connection, job_id: int) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets AS target
+        SET status = 'deferred', detail = 'Verifier is offline and will update on its next check-in.', updated_at = ?
+        FROM cope_quorum.verifier_checkins AS node
+        WHERE target.job_id = ? AND target.target_kind = 'verifier' AND target.target_id = node.id
+          AND target.status IN ('pending', 'waiting', 'updating')
+          AND node.seen_at < clock_timestamp() - interval '150 seconds'
+        """,
+        (utc_now(), job_id),
     )
 
 

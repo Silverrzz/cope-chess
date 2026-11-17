@@ -20,6 +20,7 @@ from cope.db import (
     activate_benchmarker_deployment_targets,
     claim_dockerfile_pull_job,
     claim_deployment_job,
+    defer_offline_deployment_verifiers,
     connect_database,
     database_schema_version,
     fail_interrupted_deployment_jobs,
@@ -742,10 +743,12 @@ def _wait_for_client_reconnections(config: UpdaterConfig, job_id: int) -> None:
     while True:
         connection = connect_database(config.db_path)
         try:
+            defer_offline_deployment_verifiers(connection, job_id)
+            connection.commit()
             active = [
                 target
                 for target in list_deployment_targets(connection, job_id)
-                if target.target_kind in {"worker", "benchmarker"}
+                if target.target_kind in {"worker", "benchmarker", "verifier"}
                 and target.status in {"pending", "waiting", "updating", "restarting"}
             ]
             if not active:

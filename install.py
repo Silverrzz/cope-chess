@@ -335,14 +335,33 @@ def _prepare_verifier(origin: str) -> tuple[str, list[str]]:
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not node or not npm or _run([node, "-p", "Number(process.versions.node.split('.')[0]) >= 24"], capture=True) != "true":
         raise SystemExit("Install Node.js 24 or newer with npm to run the Quorum verifier.")
+    repository = _git_value("remote", "get-url", "origin")
+    tracking = _git_value("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    branch = tracking.removeprefix("origin/") if tracking.startswith("origin/") else _git_value("branch", "--show-current")
+    commit = _git_value("rev-parse", "HEAD")
+    if not repository or not branch or len(commit) != 40:
+        raise SystemExit("Install the verifier from a Git branch with an origin remote.")
     runtime = RUNTIME / "quorum-verifier"
-    for file in ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "src/quorum.ts"):
-        destination = runtime / file
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / "frontend" / file, destination)
-    _run([npm, "--prefix", str(runtime), "ci", "--omit=dev", "--ignore-scripts"])
-    return origin, [node, str(runtime / "quorum-node.mjs"), origin]
-
+    release = runtime / "releases" / commit
+    release.mkdir(parents=True, exist_ok=True)
+    if not (release / "ready").is_file():
+        files = ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "src/quorum.ts")
+        for file in files:
+            destination = release / file
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            content = subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/{file}"])
+            destination.write_bytes(content)
+        _run([npm, "--prefix", str(release), "ci", "--omit=dev", "--ignore-scripts"])
+        (release / "ready").touch()
+    launcher = runtime / "quorum-supervisor.py"
+    launcher.write_bytes(subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/quorum-supervisor.py"]))
+    configuration = runtime / "verifier.json"
+    configuration.write_text(json.dumps({
+        "origin": origin, "node": node, "npm": npm, "branch": branch, "commit": commit,
+        "repository": repository, "repository_id": _normalise_repository_url(repository),
+    }), encoding="utf-8")
+    _restrict_file(configuration)
+    return origin, [sys.executable, str(launcher), str(configuration)]
 
 def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
     _require_command("docker")

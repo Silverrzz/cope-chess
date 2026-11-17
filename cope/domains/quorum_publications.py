@@ -5,6 +5,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field
 
 from cope.application.contracts import Input
+from cope.db import update_deployment_target_status
+from cope.db.repo import utc_now
 from cope.domains import quorum_elections as elections
 from cope.domains.quorum import read_setup
 
@@ -22,33 +24,84 @@ class VerifierCheckin(Input):
     archived: int = Field(strict=True, ge=0, le=1_000_000)
     scan_errors: int = Field(strict=True, ge=0, le=1_000_000)
     runtime: str = Field(pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+$", max_length=30)
+    app_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    failed_job: int | None = Field(default=None, strict=True, gt=0)
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
 
 
-def record_checkin(connection, origin, submitted):
-    if not any(item.public_key == submitted.public_key for item in read_setup(connection).witnesses):
+def record_checkin(connection, origin, submitted, web_commit=None):
+    witness = next((item for item in read_setup(connection).witnesses if item.public_key == submitted.public_key), None)
+    if witness is None:
         elections.fail("quorum_unknown_witness", "Register this verifier's key in Admin → Quorum.", 403)
     if abs(int(datetime.now(UTC).timestamp()) - submitted.sent_at) > 120 or (
             submitted.last_scan is not None and submitted.last_scan > submitted.sent_at):
         elections.fail("quorum_checkin_expired", "Verifier check-in timestamp is out of range.", 409)
     statement = ["cope-quorum-verifier-checkin/1", origin, submitted.public_key, submitted.sent_at, submitted.last_scan,
                  submitted.archived, submitted.scan_errors, submitted.runtime]
+    if submitted.app_commit:
+        statement[0] = "cope-quorum-verifier-checkin/2"
+        statement.extend((submitted.app_commit, submitted.failed_job))
+    elif submitted.failed_job is not None:
+        elections.fail("quorum_checkin_invalid", "An update status requires a verifier revision.", 422)
     try:
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(submitted.public_key)).verify(
             bytes.fromhex(submitted.signature), elections.canonical(statement)
         )
     except (ValueError, InvalidSignature):
         elections.fail("quorum_bad_signature", "Invalid verifier check-in signature.", 422)
-    connection.execute(
-        """INSERT INTO cope_quorum.verifier_checkins (public_key, sent_at, last_scan, archived, scan_errors, runtime)
-           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (public_key) DO UPDATE SET
+    row = connection.execute(
+        """INSERT INTO cope_quorum.verifier_checkins (public_key, sent_at, last_scan, archived, scan_errors, runtime, app_commit)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (public_key) DO UPDATE SET
            sent_at = EXCLUDED.sent_at, seen_at = clock_timestamp(), last_scan = EXCLUDED.last_scan,
-           archived = EXCLUDED.archived, scan_errors = EXCLUDED.scan_errors, runtime = EXCLUDED.runtime
-           WHERE EXCLUDED.sent_at > verifier_checkins.sent_at""",
-        (submitted.public_key, submitted.sent_at, submitted.last_scan, submitted.archived, submitted.scan_errors, submitted.runtime),
-    )
+           archived = EXCLUDED.archived, scan_errors = EXCLUDED.scan_errors, runtime = EXCLUDED.runtime,
+           app_commit = COALESCE(EXCLUDED.app_commit, verifier_checkins.app_commit)
+           WHERE EXCLUDED.sent_at > verifier_checkins.sent_at
+           RETURNING id""",
+        (submitted.public_key, submitted.sent_at, submitted.last_scan, submitted.archived, submitted.scan_errors,
+         submitted.runtime, submitted.app_commit),
+    ).fetchone()
+    release = None
+    if row is not None and submitted.app_commit:
+        release = verifier_release(connection, row["id"], witness.name, submitted, web_commit)
     connection.commit()
-    return {"received": True}
+    return {"received": True, "release": release}
+
+
+def verifier_release(connection, verifier_id, label, submitted, web_commit):
+    job = connection.execute(
+        """SELECT job.id, job.target_commit AS commit, server.repository_url
+           FROM deployment_jobs AS job
+           JOIN deployment_targets AS server ON server.job_id = job.id AND server.target_kind = 'server'
+           WHERE job.scope = 'platform' AND job.target_commit IS NOT NULL
+             AND (job.status = 'succeeded' OR (job.status = 'verifying' AND job.target_commit = ?))
+           ORDER BY job.id DESC LIMIT 1""",
+        (web_commit,),
+    ).fetchone()
+    if not job or not job["repository_url"]:
+        return None
+    connection.execute(
+        """INSERT INTO deployment_targets
+           (job_id, target_kind, target_id, label, current_commit, target_commit, repository_url, status, updated_at)
+           VALUES (?, 'verifier', ?, ?, ?, ?, ?, 'waiting', ?) ON CONFLICT DO NOTHING""",
+        (job["id"], verifier_id, label, submitted.app_commit, job["commit"], job["repository_url"], utc_now()),
+    )
+    target = connection.execute(
+        """SELECT id, status FROM deployment_targets
+           WHERE job_id = ? AND target_kind = 'verifier' AND target_id = ?""",
+        (job["id"], verifier_id),
+    ).fetchone()
+    if job["commit"] == submitted.app_commit:
+        if target["status"] != "succeeded":
+            update_deployment_target_status(connection, target["id"], "succeeded", current_commit=submitted.app_commit)
+        return None
+    if submitted.failed_job == job["id"]:
+        if target["status"] != "failed":
+            update_deployment_target_status(connection, target["id"], "failed", current_commit=submitted.app_commit,
+                                            detail="Verifier could not install this release and kept its previous revision.")
+        return None
+    if target["status"] != "updating":
+        update_deployment_target_status(connection, target["id"], "updating", current_commit=submitted.app_commit)
+    return {"job_id": job["id"], "commit": job["commit"], "repository_url": job["repository_url"]}
 
 
 def verifier_directory(connection):
