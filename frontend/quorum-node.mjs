@@ -2,14 +2,15 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'no
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fingerprint, verifyBallot } from './src/quorum.ts'
 
-const origin = new URL(process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
+const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
 if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
   throw new Error('COPE_VERIFIER_ORIGIN must be an HTTPS origin.')
 }
 
-const archive = process.env.COPE_VERIFIER_ARCHIVE ?? '/var/lib/cope-quorum-verifier'
+const archive = process.env.COPE_VERIFIER_ARCHIVE ?? fileURLToPath(new URL('./state/', import.meta.url))
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 await mkdir(archive, { recursive: true })
 const originFile = join(archive, 'origin')
@@ -147,5 +148,5 @@ createServer(async (request, response) => {
   } catch {
     return send(response, 500, { error: 'Could not read the archive' })
   }
-}).listen(8788, '0.0.0.0')
+}).listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1')
 void scan()

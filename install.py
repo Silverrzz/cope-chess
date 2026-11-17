@@ -21,8 +21,6 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".cope-worker" / "installer"
 IMAGE = "cope-chess:local"
-VERIFIER_IMAGE = "cope-quorum-verifier:local"
-VERIFIER_CONTAINER = "cope-quorum-verifier"
 INSTALLER_VERSION = "8"
 
 
@@ -37,7 +35,7 @@ TARGETS = (
     Target("server", "Server platform", "Docker Compose web, database, scheduler, and APIs"),
     Target("worker", "Game worker", "Runs chess games directly on this host without Docker"),
     Target("benchmarker", "Benchmarker", "Uses Docker to build engines and records hardware benchmarks"),
-    Target("verifier", "Quorum verifier", "Independently verifies and archives published ballots in Docker"),
+    Target("verifier", "Quorum verifier", "Independently verifies and archives published ballots directly on this host"),
 )
 
 
@@ -91,9 +89,10 @@ def main(argv: list[str] | None = None) -> int:
                     _start_host_worker(settings)
                 else:
                     _start_client(key, settings)
+    verifier_command = None
     if "verifier" in selected:
         origin = args.verifier_origin or settings.get("verifier_origin") or "https://dev.cope-chess.live"
-        settings["verifier_origin"] = _prepare_verifier(origin, start=not args.prepare_only)
+        settings["verifier_origin"], verifier_command = _prepare_verifier(origin)
     _save_settings(settings)
     print("\nCOPE installation complete.")
     if args.prepare_only:
@@ -106,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{_target(key).label} log: tail -f {RUNTIME / 'worker.log'}")
             else:
                 print(f"{_target(key).label} log: docker logs --follow {_container_name(key)}")
+    if verifier_command:
+        if args.prepare_only:
+            display = subprocess.list2cmdline(verifier_command) if os.name == "nt" else shlex.join(verifier_command)
+            print(f"Start the verifier: {display}")
+        else:
+            print("Quorum verifier: http://127.0.0.1:8788", flush=True)
+            if os.name != "nt":
+                os.execv(verifier_command[0], verifier_command)
+            return subprocess.call(verifier_command)
     return 0
 
 
@@ -310,7 +318,7 @@ def _prepare_server(settings: dict[str, str], *, start: bool) -> dict[str, str]:
     return settings
 
 
-def _prepare_verifier(origin: str, *, start: bool) -> str:
+def _prepare_verifier(origin: str) -> tuple[str, list[str]]:
     url = urlsplit(origin)
     if (
         url.scheme != "https"
@@ -323,29 +331,17 @@ def _prepare_verifier(origin: str, *, start: bool) -> str:
     ):
         raise SystemExit("The verifier origin must be an HTTPS site URL.")
     origin = f"{url.scheme}://{url.netloc}"
-    _require_command("docker")
-    _run(["docker", "build", "--target", "verifier-runtime", "--tag", VERIFIER_IMAGE, str(ROOT)])
-    if not start:
-        return origin
-    status = _container_status(VERIFIER_CONTAINER)
-    if status:
-        installed_origin = _container_label(VERIFIER_CONTAINER, "cope.quorum.origin")
-        if not installed_origin:
-            raise SystemExit(f"An existing container already uses the name {VERIFIER_CONTAINER}.")
-        if installed_origin != origin:
-            raise SystemExit("This verifier already has an archive for a different COPE origin.")
-        if status == "running" and _container_image_id(VERIFIER_CONTAINER) == _image_id(VERIFIER_IMAGE):
-            print("Quorum verifier: http://127.0.0.1:8788")
-            return origin
-        _run(["docker", "rm", "--force", VERIFIER_CONTAINER])
-    _run([
-        "docker", "run", "--detach", "--name", VERIFIER_CONTAINER, "--init", "--restart", "unless-stopped",
-        "--label", f"cope.quorum.origin={origin}", "--env", f"COPE_VERIFIER_ORIGIN={origin}",
-        "--publish", "127.0.0.1:8788:8788",
-        "--volume", "cope-quorum-verifier:/var/lib/cope-quorum-verifier", VERIFIER_IMAGE,
-    ])
-    print("Quorum verifier: http://127.0.0.1:8788")
-    return origin
+    node = shutil.which("node")
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not node or not npm or _run([node, "-p", "Number(process.versions.node.split('.')[0]) >= 24"], capture=True) != "true":
+        raise SystemExit("Install Node.js 24 or newer with npm to run the Quorum verifier.")
+    runtime = RUNTIME / "quorum-verifier"
+    for file in ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "src/quorum.ts"):
+        destination = runtime / file
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "frontend" / file, destination)
+    _run([npm, "--prefix", str(runtime), "ci", "--omit=dev", "--ignore-scripts"])
+    return origin, [node, str(runtime / "quorum-node.mjs"), origin]
 
 
 def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
