@@ -10,8 +10,8 @@ export interface Manifest {
   id: string
   title: string
   rationale: string
-  subject: 'engine' | 'member' | 'poll'
-  action: 'include' | 'exclude' | null
+  subject: 'motion' | 'poll' | 'engine' | 'member'
+  action?: 'include' | 'exclude' | null
   target?: string | null
   rule: 'majority' | 'unanimous_electorate' | 'unanimous_decisive' | 'report_only'
   quorum_percent: number | null
@@ -80,19 +80,21 @@ export async function verifyBallot(packet: BallotPackage) {
     && await fingerprint(roster) === manifest[rosterKey]
     && new Group(roster.members).root.toString() === roster.root, 'Invalid ballot roster.')
   const options = ballotOptions(manifest)
-  const roles = ['engine', 'member', 'poll']
+  const subjects = ['motion', 'poll', 'engine', 'member']
   const rules = ['majority', 'unanimous_electorate', 'unanimous_decisive', 'report_only']
-  const manifestKeys = ['id', 'title', 'rationale', 'subject', 'action', 'rule',
+  const manifestKeys = ['id', 'title', 'rationale', 'subject', 'rule',
     'quorum_percent', 'opens_at', 'closes_at', 'options', rosterKey]
+  if (Object.hasOwn(manifest, 'action')) manifestKeys.push('action')
   if (Object.hasOwn(manifest, 'target')) manifestKeys.push('target')
   requireValid(exactKeys(manifest, manifestKeys) && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(manifest.id)
     && typeof manifest.title === 'string' && manifest.title.length > 0
     && typeof manifest.rationale === 'string' && manifest.rationale.length > 0
-    && roles.includes(manifest.subject) && rules.includes(manifest.rule)
-    && (manifest.subject === 'poll' ? manifest.rule === 'report_only' && manifest.action === null && manifest.target == null && manifest.quorum_percent === null
-      : manifest.rule !== 'report_only' && ['include', 'exclude'].includes(manifest.action ?? '')
-        && (manifest.target === undefined || (typeof manifest.target === 'string' && manifest.target.length > 0))
-        && manifest.options.length === 0)
+    && subjects.includes(manifest.subject) && rules.includes(manifest.rule)
+    && (manifest.subject === 'poll' ? manifest.rule === 'report_only' && (manifest.action === undefined || manifest.action === null) && manifest.target == null && manifest.quorum_percent === null
+      : manifest.rule !== 'report_only' && manifest.options.length === 0
+        && (manifest.subject === 'motion' ? manifest.action === undefined && manifest.target === undefined
+          : ['include', 'exclude'].includes(manifest.action ?? '')
+            && (manifest.target === undefined || (typeof manifest.target === 'string' && manifest.target.length > 0))))
     && (manifest.quorum_percent === null || (Number.isInteger(manifest.quorum_percent) && manifest.quorum_percent > 0 && manifest.quorum_percent <= 100))
     && Date.parse(manifest.closes_at) > Date.parse(manifest.opens_at)
     && options.length >= 2 && options.length <= 20 && new Set(options).size === options.length

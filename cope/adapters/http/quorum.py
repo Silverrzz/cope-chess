@@ -100,10 +100,13 @@ def register_quorum_routes(app):
         row = connection.execute(
             "SELECT commitment FROM cope_quorum.credentials WHERE account_id = ?", (account.id,),
         ).fetchone()
+        commitment = row["commitment"] if row else None
+        session = request.cookies[COOKIE]
         return JSONResponse({
             "eligible": True,
-            "scope": elections.enrollment_scope(origin, request.cookies[COOKIE]),
-            "commitment": row["commitment"] if row else None,
+            "scope": elections.enrollment_scope(origin, session),
+            "commitment": commitment,
+            "replacement_scope": elections.enrollment_scope(origin, session, commitment) if commitment else None,
         }, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/quorum/enroll")
@@ -113,13 +116,13 @@ def register_quorum_routes(app):
         if int(payload.commitment) >= elections.FIELD or payload.proof.message != "0":
             raise HTTPException(422, "Invalid enrollment statement.")
         origin = request.app.state.discord_runtime.origin
-        scope = elections.enrollment_scope(origin, request.cookies[COOKIE])
+        scope = elections.enrollment_scope(origin, request.cookies[COOKIE], payload.replaces)
         connection.commit()
         if not election_call(elections.proof_worker, [payload.commitment], payload.proof, scope)["valid"]:
             raise HTTPException(422, "The credential possession proof is invalid.")
         if request_account(request, connection) != account:
             raise HTTPException(401, "The Discord session changed.")
-        election_call(elections.enroll, connection, account.id, payload.commitment, role)
+        election_call(elections.enroll, connection, account.id, payload.commitment, role, payload.replaces)
         return {"commitment": payload.commitment}
 
     @app.get("/api/quorum/ballots/{ballot_id}")

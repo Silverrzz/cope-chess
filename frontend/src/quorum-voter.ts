@@ -38,15 +38,17 @@ async function credentialKey(password: string, salt: Uint8Array<ArrayBuffer>) {
     { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 }
 
-export async function createCredential(password: string): Promise<Credential> {
+export function createCredential(): Credential {
   const identity = new Identity(crypto.getRandomValues(new Uint8Array(32)))
-  const secret = identity.export()
+  return { secret: identity.export(), commitment: identity.commitment.toString() }
+}
+
+export async function encryptCredential(credential: Credential, password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16))
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await credentialKey(password, salt),
-    new TextEncoder().encode(secret))
-  localStorage.setItem(credentialStorage, JSON.stringify({ salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(encrypted)) }))
-  return { secret, commitment: identity.commitment.toString() }
+    new TextEncoder().encode(credential.secret))
+  return JSON.stringify({ salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(encrypted)) })
 }
 
 export async function unlockCredential(password: string, encrypted: string): Promise<Credential> {

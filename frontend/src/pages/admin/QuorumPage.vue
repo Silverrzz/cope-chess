@@ -5,14 +5,13 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 
-type Subject = 'engine' | 'member' | 'poll'
+type Subject = 'motion' | 'poll'
 type Rule = 'majority' | 'unanimous_electorate' | 'unanimous_decisive' | 'report_only'
 interface Draft {
   id: string
   title: string
   rationale: string
   subject: Subject
-  action: 'include' | 'exclude' | null
   rule: Rule
   quorum_percent: number | null
   opens_at: string
@@ -63,7 +62,7 @@ function addDraft() {
   const id = crypto.randomUUID()
   const now = new Date()
   setup.value.drafts.push({
-    id, title: '', rationale: '', subject: 'engine', action: 'include',
+    id, title: '', rationale: '', subject: 'motion',
     rule: 'majority', quorum_percent: null, opens_at: now.toISOString(),
     closes_at: new Date(now.valueOf() + 7 * 86400000).toISOString(), options: [],
   })
@@ -76,12 +75,10 @@ function syncDraft() {
   active.opens_at = new Date(opening.value).toISOString()
   active.closes_at = new Date(closing.value).toISOString()
   if (active.subject === 'poll') {
-    active.action = null
     active.rule = 'report_only'
     active.options = options.value.split('\n').map(option => option.trim()).filter(Boolean)
     active.quorum_percent = null
   } else {
-    active.action ??= 'include'
     if (active.rule === 'report_only') active.rule = 'majority'
     active.options = []
     active.quorum_percent = quorum.value === '' ? null : quorum.value
@@ -210,12 +207,9 @@ onMounted(() => { void load(); void loadRoles() })
             <label class="field"><span>Rationale</span><textarea v-model="draft.rationale" class="textarea" required maxlength="4000" /></label>
             <div class="form-grid">
               <label class="field"><span>Motion type</span><select v-model="draft.subject" class="select">
-                <option value="engine">Engine decision</option><option value="member">Membership decision</option><option value="poll">Report-only poll</option>
+                <option value="motion">Motion</option><option value="poll">Report-only poll</option>
               </select></label>
               <template v-if="draft.subject !== 'poll'">
-                <label class="field"><span>Action</span><select v-model="draft.action" class="select" required>
-                  <option value="include">Add or admit</option><option value="exclude">Remove</option>
-                </select></label>
                 <label class="field"><span>Decision rule</span><select v-model="draft.rule" class="select" required>
                   <option value="majority">Simple majority</option><option value="unanimous_electorate">Unanimity of all eligible members</option>
                   <option value="unanimous_decisive">Unanimity of decisive votes</option>

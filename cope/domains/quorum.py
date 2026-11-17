@@ -16,8 +16,7 @@ class BallotDraft(Input):
     id: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")
     title: str = Field(min_length=1, max_length=160)
     rationale: str = Field(min_length=1, max_length=4000)
-    subject: Literal["engine", "member", "poll"]
-    action: Literal["include", "exclude"] | None = None
+    subject: Literal["motion", "poll"]
     rule: Literal["majority", "unanimous_electorate", "unanimous_decisive", "report_only"]
     quorum_percent: int | None = Field(default=None, strict=True, ge=1, le=100)
     opens_at: AwareDatetime
@@ -26,23 +25,26 @@ class BallotDraft(Input):
 
     @model_validator(mode="before")
     @classmethod
-    def read_legacy_target(cls, value):
-        if isinstance(value, dict) and "target" in value:
-            return {key: item for key, item in value.items() if key != "target"}
-        return value
+    def read_legacy_draft(cls, value):
+        if not isinstance(value, dict):
+            return value
+        data = {key: item for key, item in value.items() if key not in {"action", "target"}}
+        if data.get("subject") in ("engine", "member"):
+            data["subject"] = "motion"
+        return data
 
     @model_validator(mode="after")
     def validate_draft(self):
         if self.closes_at <= self.opens_at:
             raise ValueError("Closing time must follow opening time.")
         if self.subject == "poll":
-            if self.rule != "report_only" or self.action or self.quorum_percent is not None:
+            if self.rule != "report_only" or self.quorum_percent is not None:
                 raise ValueError("Polls report turnout and results without applying a decision.")
             if (len(self.options) < 2 or any(not 1 <= len(option.strip()) <= 100 for option in self.options)
                     or len({option.strip().casefold() for option in self.options}) != len(self.options)):
                 raise ValueError("Enter 2–20 distinct options of up to 100 characters.")
-        elif self.rule == "report_only" or not self.action or self.options:
-            raise ValueError("A governance motion needs an action and decision rule.")
+        elif self.rule == "report_only" or self.options:
+            raise ValueError("A motion uses Support, Oppose, and Abstain and needs a decision rule.")
         return self
 
 

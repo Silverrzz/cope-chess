@@ -50,6 +50,7 @@ class Proof(Input):
 class Enrollment(Input):
     commitment: str = Field(pattern=r"^[1-9][0-9]{0,76}$")
     proof: Proof
+    replaces: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,76}$")
 
 
 class BallotPublication(Input):
@@ -88,20 +89,37 @@ def proof_worker(members, proof=None, expected_scope=None):
         VERIFY_SLOTS.release()
 
 
-def enrollment_scope(origin, session_token):
-    return scope(["cope-quorum-enrollment/1", origin, hashlib.sha256(session_token.encode()).hexdigest()])
+def enrollment_scope(origin, session_token, replaces=None):
+    session = hashlib.sha256(session_token.encode()).hexdigest()
+    if replaces is not None:
+        return scope(["cope-quorum-replacement/1", origin, session, replaces])
+    return scope(["cope-quorum-enrollment/1", origin, session])
 
 
-def enroll(connection, account_id, commitment, expected_role):
+def enroll(connection, account_id, commitment, expected_role, replaces=None):
     connection.execute(STATE_LOCK)
     if read_setup(connection).enrollment_role_id != expected_role:
         fail("quorum_role_changed", "The enrollment role changed. Check eligibility again.")
     existing = connection.execute(
         "SELECT commitment FROM cope_quorum.credentials WHERE account_id = ?", (account_id,),
     ).fetchone()
-    if existing:
-        if existing["commitment"] != commitment:
+    current = existing["commitment"] if existing else None
+    if current == commitment:
+        connection.commit()
+        return
+    if current != replaces:
+        if replaces is None:
             fail("quorum_credential_exists", "This account already has a credential. Import its backup.")
+        fail("quorum_credential_changed", "Your enrolled credential changed. Reopen Voting credential and try again.")
+    if connection.execute("SELECT 1 FROM cope_quorum.retired_credentials WHERE commitment = ?", (commitment,)).fetchone():
+        fail("quorum_credential_retired", "This credential was replaced. Use your current credential.")
+    if current is not None:
+        if connection.execute("SELECT 1 FROM cope_quorum.credentials WHERE commitment = ?", (commitment,)).fetchone():
+            fail("quorum_credential_taken", "This credential is already registered.")
+        connection.execute("INSERT INTO cope_quorum.retired_credentials (commitment) VALUES (?)", (current,))
+        connection.execute(
+            "UPDATE cope_quorum.credentials SET commitment = ? WHERE account_id = ?", (commitment, account_id),
+        )
         connection.commit()
         return
     total = connection.execute("SELECT count(*) AS total FROM cope_quorum.credentials").fetchone()["total"]
