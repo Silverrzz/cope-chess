@@ -224,7 +224,7 @@ def list_responses(connection, principal, target, payload: PageInput) -> dict:
     cut, after, scope = page_basis(connection, principal, payload, "responses")
     parent = "" if payload.form_id is None else "AND r.form_id = %s"
     where = "" if after is None else "WHERE (created_at, id) < (%s, %s::uuid)"
-    parameters = [cut, *response_visibility_parameters(principal)]
+    parameters = ["*" in principal.scopes, cut, *response_visibility_parameters(principal)]
     if payload.form_id is not None:
         parameters.append(identity(payload.form_id))
     if after:
@@ -234,9 +234,13 @@ def list_responses(connection, principal, target, payload: PageInput) -> dict:
         f"""WITH visible AS MATERIALIZED (
           SELECT r.id, r.form_id, f.slug, release.definition->>'title' AS form_title,
                  release.number AS release_number, r.current_revision AS revision, r.created_at,
+                 CASE WHEN %s AND a.username IS NOT NULL
+                      THEN jsonb_build_object('username', a.username, 'display_name', a.display_name) END AS respondent,
+                 r.owner_actor LIKE 'form-anonymous:%%' AS anonymous,
                  CASE WHEN r.withdrawn_at IS NOT NULL THEN 'withdrawn' ELSE COALESCE(review.decision, 'awaiting_review') END AS state
           FROM form_responses r JOIN form_definitions f ON f.id = r.form_id
           JOIN form_releases release ON release.id = r.release_id
+          LEFT JOIN discord_accounts a ON r.owner_actor = 'discord:' || a.id
           JOIN form_response_revisions v ON v.response_id = r.id AND v.revision = r.current_revision
           LEFT JOIN LATERAL (SELECT decision FROM form_reviews WHERE response_id = r.id AND response_revision = r.current_revision
             AND subject_digest = v.subject_digest ORDER BY created_at DESC, id DESC LIMIT 1) review ON TRUE

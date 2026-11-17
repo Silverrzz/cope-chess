@@ -8,7 +8,6 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import Query as QueryParameter
 from pydantic import Field
-from starlette.responses import JSONResponse
 
 from cope.adapters.http.browser_identity import request_browser_principal
 from cope.application import (
@@ -21,9 +20,10 @@ from cope.application.contracts import Input, QueryRequest
 from cope.application.queries import execute_query
 from cope.control.api import application_result, database
 from cope.db import get_platform_settings
-from cope.domains.forms.guest import issue_challenge, redeem_challenge
-from cope.domains.forms.resources import game_embed, rating_embed, resource_choices
-from cope.infrastructure.postgres.application import run_application
+from cope.discord_bot.accounts import request_account, require_guild_role
+from cope.domains.forms import participation, public_results
+from cope.domains.forms.application import SubmitResponse
+from cope.domains.forms.resources import chess_position, engine_resource, game_embed, rating_embed, resource_choices
 from cope.infrastructure.postgres.credentials import authenticate_bearer
 
 TRUSTED_PROXIES = tuple(ipaddress.ip_network(value.strip()) for value in os.environ.get(
@@ -88,6 +88,10 @@ def form_principal(request: Request, connection=Depends(database)):
         except ApplicationError as error:
             raise HTTPException(error.status, error.payload()) from error
     role = admin_session_role(request)
+    if request.headers.get("x-cope-discord") == "1" and (role or not get_platform_settings(connection).privatise_platform):
+        profile = request_account(request, connection)
+        if profile:
+            return profile.principal
     if role:
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             token = admin_token(request) if role == "admin" else manager_token(request)
@@ -99,28 +103,41 @@ def form_principal(request: Request, connection=Depends(database)):
             raise HTTPException(error.status,error.payload()) from error
     if get_platform_settings(connection).privatise_platform:
         raise HTTPException(401, "Sign in to access forms on this private platform")
-    return Principal("public", ())
+    profile = request_account(request, connection)
+    return profile.principal if profile else Principal("public", ())
 
 
-class ChallengeRequest(Input):
-    release_id: str = Field(min_length=36, max_length=36)
-
-
-class ClaimProof(ChallengeRequest):
-    challenge: str = Field(min_length=1, max_length=128)
-    answer: int = Field(strict=True, ge=0, le=4294967295)
+class PositionInput(Input):
+    fen: str = Field(default="", max_length=120)
+    pgn: str = Field(default="", max_length=32000)
 
 
 def register_form_routes(app):
     router = APIRouter()
 
     @router.get("/resources/search")
-    def search_resources(kind: Literal["tournament", "game", "rating_list"],
+    def search_resources(kind: Literal["tournament", "game", "rating_list", "engine"],
                          q: str = QueryParameter(default="", max_length=100),
                          tournament: int | None = QueryParameter(default=None, ge=1, le=999999999999999),
                          identity=Depends(form_principal), connection=Depends(database)):
         try:
             return {"items": resource_choices(connection, kind, q, tournament)}
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
+
+    @router.get("/resources/engine/{engine_id}")
+    def engine(engine_id: int, identity=Depends(form_principal), connection=Depends(database)):
+        if not 1 <= engine_id <= 999999999999999:
+            raise HTTPException(422, "Choose a valid engine.")
+        try:
+            return engine_resource(connection, engine_id)
+        except ApplicationError as error:
+            raise HTTPException(error.status, error.payload()) from error
+
+    @router.post("/resources/position")
+    def position(payload: PositionInput, identity=Depends(form_principal)):
+        try:
+            return chess_position(payload.fen, payload.pgn)
         except ApplicationError as error:
             raise HTTPException(error.status, error.payload()) from error
 
@@ -166,30 +183,57 @@ def register_form_routes(app):
 
     @router.post("/commands")
     def command(payload: CommandRequest, identity=Depends(form_principal), connection=Depends(database)):
-        if payload.command not in {"forms.submit.v1", "forms.amend.v1", "forms.withdraw.v1"}:
-            raise HTTPException(422, "This endpoint accepts form submission and amendment commands")
+        if payload.command not in {"forms.amend.v1", "forms.withdraw.v1"}:
+            raise HTTPException(422, "This endpoint accepts form amendments and withdrawals.")
         return application_result(connection, identity, execute_command, payload)
 
-    @router.post("/{slug}/challenge")
-    def challenge(slug: str, payload: ChallengeRequest, request: Request, identity=Depends(form_principal), connection=Depends(database)):
-        try:
-            result = run_application(connection, identity, lambda raw, actor: issue_challenge(raw, slug, client_address(request), payload.release_id))
-            return JSONResponse(result, headers={"Cache-Control": "no-store"})
-        except ApplicationError as error:
-            raise HTTPException(error.status, error.payload()) from error
+    @router.get("/directory/list")
+    def directory(limit: int = QueryParameter(default=24, ge=1, le=50), offset: int = QueryParameter(default=0, ge=0),
+                  identity=Depends(form_principal), connection=Depends(database)):
+        return application_result(connection, identity, public_results.directory, limit, offset)
 
-    @router.post("/{slug}/claims")
-    def claim(slug: str, payload: ClaimProof, request: Request, identity=Depends(form_principal), connection=Depends(database)):
+    @router.get("/{slug}/results")
+    def results(slug: str, cursor: str | None = None, limit: int = QueryParameter(default=10, ge=1, le=20),
+                identity=Depends(form_principal), connection=Depends(database)):
+        return application_result(connection, identity, public_results.results, slug, cursor, limit)
+
+    @router.post("/{slug}/submit")
+    def submit(slug: str, payload: SubmitResponse, request: Request, identity=Depends(form_principal), connection=Depends(database)):
+        profile = request_account(request, connection)
+        if not profile:
+            raise HTTPException(401, "Sign in with Discord to submit this form.")
         try:
-            result = run_application(connection, identity, lambda raw, actor: redeem_challenge(
-                raw, slug, client_address(request), payload.release_id, payload.challenge, payload.answer
+            _, _, definition = participation.submission_release(connection.native_connection(), slug, payload.release_id)
+            role = definition.discord_role_id
+            guild = None
+            connection.commit()
+            if role:
+                runtime = request.app.state.discord_runtime
+                settings = runtime.read_settings()
+                guild = settings["guild_id"]
+                require_guild_role(runtime, settings, profile.id, role)
+            current = request_account(request, connection)
+            if not current or current.id != profile.id:
+                raise ApplicationError("authentication_required", "Sign in with Discord to submit this form.", 401)
+            return application_result(connection, current.principal, lambda raw, actor: participation.submit(
+                raw, current, slug, payload, role, guild,
             ))
-            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except ApplicationError as error:
+            connection.rollback()
             raise HTTPException(error.status, error.payload()) from error
 
     @router.get("/{slug}")
-    def public_form(slug: str, identity=Depends(form_principal), connection=Depends(database)):
-        return application_result(connection, identity, execute_query, QueryRequest(query="forms.public.v1", input={"slug": slug}))
+    def public_form(slug: str, request: Request, identity=Depends(form_principal), connection=Depends(database)):
+        actor = request_account(request, connection)
+        query = QueryRequest(query="forms.public.v1", input={"slug": slug})
+
+        def view(raw, principal):
+            result = execute_query(raw, principal, query)
+            if actor:
+                submitted, response_id = participation.participation(raw, result["data"]["id"], actor.id)
+                result["data"].update(submitted=submitted, my_response_id=response_id)
+            return result
+
+        return application_result(connection, actor.principal if actor else identity, view)
 
     app.include_router(router, prefix="/api/forms", tags=["Forms"])

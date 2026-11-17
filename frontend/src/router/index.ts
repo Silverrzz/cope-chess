@@ -12,10 +12,11 @@ const router = createRouter({
     {
       path: "/forms",
       component: PublicLayout,
+      meta: { requiresPlatformAccess: true },
       children: [
         { path: "", name: "forms", component: () => import("@/pages/public/FormsDirectoryPage.vue"), meta: { title: "Forms" } },
-        { path: "ballots/:slug", name: "secret-ballot", component: () => import("@/pages/public/SecretBallotPage.vue"), props: true, meta: { title: "Ballot form" } },
-        { path: "tools/voter-proof/:slug", name: "voter-proof", component: () => import("@/pages/public/VoterProofPage.vue"), props: true, meta: { title: "Voter proof" } },
+        { path: "ballots/:slug", redirect: { name: "forms" } },
+        { path: "tools/voter-proof/:slug", redirect: { name: "forms" } },
         { path: "responses/:id", name: "form-response", component: () => import("@/pages/public/FormResponsePage.vue"), props: true, meta: { title: "Private response" } },
         { path: ":slug", name: "public-form", component: () => import("@/pages/public/PublicFormPage.vue"), props: true, meta: { title: "Form" } },
       ],
@@ -121,16 +122,9 @@ const router = createRouter({
       meta: { requiresAdmin: true },
       children: [
         { path: "activity", name: "admin-activity", component: () => import("@/pages/admin/ActivityPage.vue"), meta: { title: "Activity" } },
-        {
-          path: "forms",
-          name: "admin-forms",
-          component: () => import("@/pages/admin/BallotFormsPage.vue"),
-          beforeEnter: () => useSessionStore().user?.role === "manager" ? { name: "admin-form-collections" } : true,
-          meta: { title: "Forms" },
-        },
-        { path: "forms/collections", name: "admin-form-collections", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Response collections" } },
-        { path: "forms/new-ballot", name: "admin-new-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), meta: { title: "New ballot form" } },
-        { path: "forms/ballots/:slug", name: "admin-ballot-form", component: () => import("@/pages/admin/BallotFormEditorPage.vue"), props: true, meta: { title: "Manage ballot form" } },
+        { path: "forms", name: "admin-form-collections", alias: "forms/collections", component: () => import("@/pages/admin/FormsPage.vue"), meta: { title: "Forms" } },
+        { path: "forms/new-ballot", redirect: { name: "admin-form-collections" } },
+        { path: "forms/ballots/:slug", redirect: { name: "admin-form-collections" } },
         { path: "forms/:id", name: "admin-form-editor", component: () => import("@/pages/admin/FormEditorPage.vue"), props: true, meta: { title: "Form editor" } },
         {
           path: "form-responses",

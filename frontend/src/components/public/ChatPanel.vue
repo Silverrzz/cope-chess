@@ -9,6 +9,7 @@ import { useToast } from '@/composables/useToast'
 import { chatViewerId, savedViewerName, saveViewerName } from '@/composables/useViewerPresence'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 import { useSessionStore } from '@/stores/session'
+import { useDiscordSession } from '@/stores/discord'
 import { timestampDate } from '@/utils/time'
 
 import { errorMessage, formatDate } from './format'
@@ -56,6 +57,8 @@ const submitError = ref('')
 const route = useRoute()
 const router = useRouter()
 const session = useSessionStore()
+const discord = useDiscordSession()
+void discord.load().catch(() => {})
 const { confirm } = useConfirm()
 const toast = useToast()
 const { chatGameLinksVisible } = useViewerSettings()
@@ -81,6 +84,7 @@ const chatRows = computed(() => {
   return visibleMessages.value.map((message) => {
     const time = message.at ? timestampDate(message.at).getTime() : NaN
     const continued = activeTab.value === 'chat' && groupStart?.display_name === message.display_name
+      && groupStart.discord_username === message.discord_username
       && (message.sender_key || groupStart.sender_key
         ? message.sender_key === groupStart.sender_key
         : message.display_name !== 'Anonymous')
@@ -100,7 +104,7 @@ const chatRows = computed(() => {
 })
 const enabled = computed(() => props.settings.enabled !== false)
 const maxLength = computed(() => Math.max(1, props.settings.max_message_length || 500))
-const requiresName = computed(() => props.settings.allow_anonymous_names === false)
+const requiresName = computed(() => !discord.account && props.settings.allow_anonymous_names === false)
 const reservedName = computed(() => displayName.value.trim().toLocaleLowerCase() === 'system')
 const canSend = computed(() => (props.tournamentId !== null || !!props.eventSlug) && enabled.value && !submitting.value && !reservedName.value && text.value.trim() && (!requiresName.value || displayName.value.trim()))
 const emojiSuggestions = computed(() => {
@@ -390,6 +394,11 @@ function scrollToLatest(): void {
           >
             <div v-if="!continued" class="chat-message__header">
               <strong v-if="activeTab === 'chat'" :title="message.display_name">{{ message.display_name }}</strong>
+              <span v-if="activeTab === 'chat' && message.discord_username" class="discord-chat-badge"
+                :title="'Discord: @' + message.discord_username" :aria-label="'Discord: @' + message.discord_username" tabindex="0">
+                <AppIcon name="discord" :size="13" />
+                <span class="discord-chat-badge__tooltip" aria-hidden="true">@{{ message.discord_username }}</span>
+              </span>
               <template v-if="showGame && message.game_id != null">
                 <span aria-hidden="true">-</span>
                 <a
@@ -435,7 +444,7 @@ function scrollToLatest(): void {
       </div>
       <label>
         <span>Name{{ requiresName ? '' : ' (optional)' }}</span>
-        <input v-model="displayName" name="display_name" maxlength="40" autocomplete="nickname" :required="requiresName" placeholder="Your name">
+        <input v-model="displayName" name="display_name" maxlength="40" autocomplete="nickname" :required="requiresName" :placeholder="discord.account?.display_name ?? 'Your name'">
         <small v-if="reservedName" class="chat-error" role="alert">System is a reserved display name.</small>
       </label>
       <div class="chat-form__message">
@@ -518,6 +527,32 @@ function scrollToLatest(): void {
 </template>
 
 <style scoped>
+.discord-chat-badge {
+  display: inline-flex;
+  position: relative;
+  align-items: center;
+  color: var(--color-info);
+}
+
+.discord-chat-badge__tooltip {
+  display: none;
+  position: absolute;
+  z-index: 2;
+  top: 100%;
+  left: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.discord-chat-badge:hover .discord-chat-badge__tooltip,
+.discord-chat-badge:focus-visible .discord-chat-badge__tooltip {
+  display: block;
+}
+
 .chat-panel {
   display: flex;
   min-height: 0;

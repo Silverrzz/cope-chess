@@ -14,6 +14,7 @@ import FormFields from '@/components/forms/FormFields.vue'
 import { useApplicationMutation } from '@/composables/useApplicationMutation'
 import { useConfirm } from '@/composables/useConfirm'
 import { useSessionStore } from '@/stores/session'
+import { discordHeaders, discordLogin, useDiscordSession } from '@/stores/discord'
 import { canonicalAnswers, initialAnswers, type FormAnswers, type FormErrors, type FormField, type FormResponse } from '@/types/forms'
 
 const props = defineProps<{ id: string; formId?: string; embedded?: boolean }>()
@@ -23,9 +24,11 @@ const { confirm } = useConfirm()
 const adminView = computed(() => props.embedded || route.name === 'admin-form-response')
 const editing = ref(false)
 const session = useSessionStore()
+const discord = useDiscordSession()
+const responseHeaders = () => claim.value ? claimHeaders(claim.value.token) : !adminView.value ? discordHeaders : undefined
 const response = ref<FormResponse | null>(null)
 const claim = ref<FormClaim | null>(null)
-const mutation = useApplicationMutation('/api/forms/commands', () => claimHeaders(claim.value?.token))
+const mutation = useApplicationMutation('/api/forms/commands', responseHeaders)
 const reviewMutation = useApplicationMutation()
 const answers = ref<FormAnswers>({})
 const saved = ref('')
@@ -60,12 +63,12 @@ const maxUpload = computed(() => {
 const uploader = createFormUploader(() => {
   if (!response.value?.attachment_subject) throw new Error('Only the submitter can upload amendments for this response.')
   return { form_id: response.value.form_id, release_id: response.value.release_id, subject: response.value.attachment_subject, response_id: props.id, max_bytes: maxUpload.value ?? response.value.attachment_policy.max_file_bytes, ...(guestExtensions.value ? { guest_extensions: guestExtensions.value } : {}) }
-}, async () => {}, () => claimHeaders(claim.value?.token))
+}, async () => {}, responseHeaders)
 async function upload(file: File, field: FormField, path: string[]): Promise<string> {
   uploading.value += 1
   try { return await uploader(file,field,path) } finally { uploading.value -= 1 }
 }
-async function downloadFile(id: string): Promise<void> { await downloadAttachment(id, claimHeaders(claim.value?.token)) }
+async function downloadFile(id: string): Promise<void> { await downloadAttachment(id, responseHeaders()) }
 
 async function failure(cause: unknown): Promise<void> {
   error.value = cause instanceof Error ? cause.message : 'The action could not be completed.'
@@ -75,7 +78,7 @@ async function failure(cause: unknown): Promise<void> {
 async function load(preserve = false): Promise<void> {
   loading.value = true
   try {
-    const loaded = await formResponse(props.id, claim.value?.token)
+    const loaded = await formResponse(props.id, claim.value?.token, !adminView.value)
     if (props.formId && loaded.form_id !== props.formId.toLowerCase()) throw new Error('This response belongs to a different form.')
     response.value = loaded
     emit('title', loaded.definition.title)
@@ -153,6 +156,7 @@ async function cancelEdit(): Promise<void> {
 
 function beforeUnload(event: BeforeUnloadEvent): void { if (dirty.value || uncertain.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(() => {
+  if (!adminView.value) void discord.load().catch(() => {})
   const formId = typeof route.query.form === 'string' ? route.query.form : ''
   claim.value = adminView.value || session.authenticated ? null : storedClaim(formId, props.id)
   window.addEventListener('beforeunload', beforeUnload); void load()
@@ -194,9 +198,12 @@ onBeforeRouteUpdate((to, from) => !props.embedded ||
     <InlineFeedback v-if="uncertain" message="Retry the same action to recover its receipt." tone="info" />
     <div v-if="loading && !response" class="panel panel__body" role="status">Loading response…</div>
     <section v-else-if="!adminView && !session.authenticated && !response" class="panel panel__body response-panel">
-      <h2>Restore access</h2>
-      <label>Access receipt<input class="input" type="file" accept="application/json,.json" @change="recover"></label>
-      <p class="response-muted">Use the JSON receipt you downloaded after submitting.</p>
+      <h2>Open your response</h2>
+      <div v-if="discord.enabled && !discord.account" class="button-row"><BaseButton :href="discordLogin()" variant="primary">Sign in with Discord</BaseButton></div>
+      <details>
+        <summary>Restore an older response</summary>
+        <label class="field">Access receipt<input class="input" type="file" accept="application/json,.json" @change="recover"></label>
+      </details>
     </section>
 
     <template v-if="response">
@@ -215,7 +222,9 @@ onBeforeRouteUpdate((to, from) => !props.embedded ||
               <BaseButton type="submit" variant="primary" :disabled="(!dirty && !mutation.uncertain.value) || mutation.unavailable('forms.amend.v1')">{{ mutation.uncertain.value ? 'Retry save' : 'Save changes' }}</BaseButton>
             </div>
           </form>
-          <FormAnswerSummary v-else :fields="response.definition.fields" :answers="response.answers" :download="downloadFile" />
+          <p v-if="adminView && response.respondent" class="muted">Submitted by {{ response.respondent.display_name }} (@{{ response.respondent.username }})</p>
+          <p v-else-if="adminView && response.anonymous" class="muted">Anonymous response</p>
+          <FormAnswerSummary v-if="!editing || adminView" :fields="response.definition.fields" :answers="response.answers" :download="downloadFile" />
         </section>
 
         <section v-if="adminView && response.can_review" class="panel panel__body response-panel">
@@ -238,7 +247,7 @@ onBeforeRouteUpdate((to, from) => !props.embedded ||
           <div><h2>Response access</h2><p v-if="claim" class="response-muted">Keep your receipt private to reopen this response from another browser.</p></div>
         </header>
         <div class="response-actions">
-          <BaseButton variant="secondary" @click="download">Download receipt</BaseButton>
+          <BaseButton v-if="claim" variant="secondary" @click="download">Download access receipt</BaseButton>
           <BaseButton :to="`/forms/${response.slug}`" variant="ghost">Back to form</BaseButton>
           <BaseButton v-if="response.can_withdraw && !editing" variant="ghost" :disabled="mutation.unavailable('forms.withdraw.v1')" @click="withdraw">Withdraw response</BaseButton>
           <BaseButton v-if="response.can_review" :to="{ name: 'admin-form-editor', params: { id: response.form_id }, query: { view: 'responses', response: response.id } }" variant="ghost">Open admin review</BaseButton>

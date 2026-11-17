@@ -100,7 +100,7 @@ def compile_binding(definition: FormDefinition) -> FormBinding:
     binding = BINDINGS.get(definition.binding)
     if binding is None:
         raise ApplicationError("binding_unavailable", "This form binding has no installed implementation.", 422)
-    if definition.audience == "public" and not binding.permits_anonymous:
+    if definition.anonymous and not binding.permits_anonymous:
         raise ApplicationError("anonymous_binding_denied", "This binding requires an authenticated response.", 422)
     fields = {field.id: field for field in definition.fields}
     arguments = {argument.name: argument for argument in binding.arguments}
@@ -111,7 +111,7 @@ def compile_binding(definition: FormDefinition) -> FormBinding:
             errors.append({"path": ["mapping", name], "code": "protected_or_unknown_argument", "message": "This binding does not accept that argument."})
         elif field is None or field.kind not in argument.kinds:
             errors.append({"path": ["mapping", name], "code": "mapping_type", "message": "Choose a field with a compatible type."})
-        elif argument.required and (not field.required or field.when is not None or field.nullable):
+        elif argument.required and (not field.required or field.when is not None or field.conditions or field.nullable):
             errors.append({"path": ["mapping", name], "code": "required_mapping", "message": "Required binding inputs need unconditional required answers."})
     for argument in binding.arguments:
         if argument.required and argument.name not in definition.mapping:

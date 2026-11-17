@@ -10,7 +10,7 @@ const props = defineProps<{
   modelValue: FormAnswers
   errors?: FormErrors
   disabled?: boolean
-  upload?: (file: File, field: FormField, path: string[]) => Promise<string>
+  upload?: ((file: File, field: FormField, path: string[]) => Promise<string>) | undefined
   maxUploadBytes?: number | undefined
   guestExtensions?: Record<string, string[]> | undefined
   preview?: boolean
@@ -23,8 +23,8 @@ defineExpose({ focusField: (path: string) => fields.value?.focusField(path) })
 
 <template>
   <article class="form-experience">
-    <header class="form-cover">
-      <p class="form-kicker">{{ preview ? 'Respondent preview' : 'Cope form' }}</p>
+    <header class="section-stack">
+      <p v-if="preview" class="muted">Respondent preview</p>
       <h1>{{ definition.title || 'Untitled form' }}</h1>
       <FormMarkdown v-if="definition.description" :source="definition.description" />
       <slot name="context" />
@@ -43,10 +43,6 @@ defineExpose({ focusField: (path: string) => fields.value?.focusField(path) })
 
 <style scoped>
 .form-experience { min-width: 0; display: grid; gap: clamp(1rem, 4vw, 1.7rem); }
-.form-cover { display: grid; gap: .65rem; padding: clamp(1rem, 5vw, 2rem); border: 1px solid var(--color-border); border-top: 4px solid var(--color-accent); border-radius: var(--radius-lg); background: var(--color-surface-raised); }
-.form-cover h1 { font-size: clamp(1.6rem, 4vw, 2.5rem); line-height: 1.12; overflow-wrap: anywhere; letter-spacing: -.03em; }
-.form-cover h1, .form-kicker { margin: 0; }
-.form-kicker { font-size: .74rem; text-transform: uppercase; font-weight: 750; letter-spacing: .1em; color: var(--color-accent); }
 .form-progress { display: grid; grid-template-columns: 1fr auto; gap: .4rem; color: var(--color-text-muted); font-size: .8rem; }
 .form-progress progress { grid-column: 1 / -1; width: 100%; height: .45rem; accent-color: var(--color-accent); }
 </style>

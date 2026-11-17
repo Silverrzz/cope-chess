@@ -4,7 +4,6 @@ import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
-import FormAdminNav from '@/components/forms/FormAdminNav.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { applicationQuery } from '@/api/application'
@@ -52,6 +51,9 @@ async function create(): Promise<void> {
         document: {
           title: label.value,
           audience: audience.value,
+          anonymous: true,
+          response_visibility: 'private',
+          listed: false,
           binding: purpose.value,
           mapping: feedback ? { message: 'message' } : {},
           fields: [{ id: 'message', kind: 'long_text', label: feedback ? 'Message' : 'Response', required: true }],
@@ -66,8 +68,7 @@ onMounted(() => load())
 
 <template>
   <div class="admin-page page-stack">
-    <AdminPageHeader title="Response collections" />
-    <FormAdminNav v-if="canEdit" />
+    <AdminPageHeader title="Forms" />
     <InlineFeedback :message="error" />
     <section class="panel" :aria-busy="loading">
       <header class="panel__header">
@@ -94,11 +95,11 @@ onMounted(() => load())
       </div>
     </section>
     <form v-if="canEdit" class="panel panel__body section-stack" @submit.prevent="create">
-      <h2>Create a collection</h2>
+      <h2>Create a form</h2>
       <fieldset class="form-grid collection-fields" :disabled="mutation.busy.value || mutation.uncertain.value">
         <label class="field"><span>Internal name</span><input v-model="label" class="input" required maxlength="300"></label>
         <label class="field"><span>Public link name</span><input v-model="slug" class="input" required maxlength="100" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="event-feedback"><small>Lowercase words separated by hyphens.</small></label>
-        <label class="field"><span>Who can respond?</span><select v-model="audience" class="select"><option value="public">Anyone with the link</option><option value="authenticated">Signed-in users</option><option value="invited">Invited users</option></select></label>
+        <label class="field"><span>Who can respond?</span><select v-model="audience" class="select"><option value="public">Anyone signed in with Discord</option><option value="invited">Invited Discord accounts</option></select></label>
         <label class="field"><span>Response purpose</span><select v-model="purpose" class="select"><option value="response_collection.v1">Collect responses</option><option value="feedback.v1">Feedback</option></select></label>
       </fieldset>
       <div class="form-actions">

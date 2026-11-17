@@ -42,6 +42,14 @@ const discordLabels = {
   connection_error: 'Connection failed',
 } as const
 
+interface DiscordOAuthSettings {
+  client_id: string | null
+  secret_configured: boolean
+  enabled: boolean
+  ready: boolean
+  callback_url: string | null
+}
+
 interface DiscordSettings {
   guild_id: string | null
   channel_id: string | null
@@ -69,6 +77,42 @@ const discord = ref<DiscordSettings | null>(null)
 const discordForm = reactive({ guild_id: '', channel_id: '', token: '', enabled: false, remove_token: false })
 const discordPending = ref(false)
 const discordError = ref('')
+const oauth = ref<DiscordOAuthSettings | null>(null)
+const oauthForm = reactive({ client_id: '', secret: '', enabled: false, remove_secret: false })
+const oauthError = ref('')
+const oauthPending = ref(false)
+
+function applyOAuth(current: DiscordOAuthSettings) {
+  oauth.value = current
+  Object.assign(oauthForm, { client_id: current.client_id ?? '', secret: '', enabled: current.enabled, remove_secret: false })
+}
+
+async function loadOAuth() {
+  oauthPending.value = true
+  oauthError.value = ''
+  try {
+    applyOAuth(await api.get<DiscordOAuthSettings>('/api/admin/settings/discord/oauth'))
+  } catch (cause) {
+    oauthError.value = errorText(cause)
+  } finally {
+    oauthPending.value = false
+  }
+}
+
+async function saveOAuth() {
+  oauthPending.value = true
+  oauthError.value = ''
+  try {
+    applyOAuth(await api.put<DiscordOAuthSettings>('/api/admin/settings/discord/oauth', {
+      body: { ...oauthForm, client_id: oauthForm.client_id.trim(), secret: oauthForm.secret.trim() },
+    }))
+    toast.success('Discord sign-in settings saved.')
+  } catch (cause) {
+    oauthError.value = errorText(cause)
+  } finally {
+    oauthPending.value = false
+  }
+}
 let discordPoll: number | undefined
 let discordLoading = false
 const showNewHost = ref(false)
@@ -89,6 +133,7 @@ async function load(): Promise<void> {
     const response = await api.get<{ can_manage_tokens: boolean; cope_build: CopeBuildSettings; platform: PlatformSettings; git_hosts: GitHost[] }>('/api/admin/settings')
     canManageTokens.value = response.can_manage_tokens
     if (canManageTokens.value && !discord.value) void refreshDiscord()
+    if (canManageTokens.value && !oauth.value) void loadOAuth()
     Object.assign(copeBuild, response.cope_build)
     Object.assign(platform, response.platform)
     hosts.value = response.git_hosts.map((host) => ({ ...host, access_token: '', clear_access_token: false }))
@@ -337,7 +382,23 @@ onBeforeUnmount(() => {
         </form>
       </section>
       <section v-if="canManageTokens" id="discord-notifications" class="platform-section">
-        <div class="section-heading"><div><h2>Discord notifications</h2><p>Post engine alerts in a Discord channel and mention the users who follow them.</p></div></div>
+        <div class="section-heading"><div><h2>Discord</h2><p>Configure public sign-in, role-gated forms, and bot notifications.</p></div></div>
+        <InlineFeedback :message="oauthError" />
+        <form v-if="oauth" class="panel settings-card" @submit.prevent="saveOAuth">
+          <div class="section-stack">
+            <h3>Discord sign-in</h3>
+            <p class="muted">Use the OAuth2 credentials from your Discord application. Add this redirect URL in its Developer Portal settings.</p>
+            <label v-if="oauth.callback_url" class="field"><span>Redirect URL</span><input class="input input--mono" :value="oauth.callback_url" readonly @focus="($event.target as HTMLInputElement).select()"></label>
+          </div>
+          <div class="form-grid">
+            <label class="field"><span>OAuth client ID</span><input v-model="oauthForm.client_id" class="input" inputmode="numeric" maxlength="20" :required="oauthForm.enabled" autocomplete="off"></label>
+            <label class="field"><span>OAuth client secret</span><input v-model="oauthForm.secret" class="input" type="password" maxlength="512" :disabled="oauthForm.remove_secret" autocomplete="new-password" :placeholder="oauth.secret_configured ? 'Leave blank to keep the saved secret' : 'Paste the application client secret'"></label>
+            <label class="switch-row"><input v-model="oauthForm.enabled" type="checkbox" :disabled="oauthForm.remove_secret"><span>Enable Discord sign-in</span></label>
+            <label v-if="oauth.secret_configured" class="switch-row"><input v-model="oauthForm.remove_secret" type="checkbox" :disabled="Boolean(oauthForm.secret)"><span>Remove saved OAuth secret</span></label>
+          </div>
+          <div class="form-actions"><BaseButton type="submit" variant="primary" :loading="oauthPending">Save Discord sign-in</BaseButton></div>
+        </form>
+        <BaseButton v-else-if="oauthError" :loading="oauthPending" @click="loadOAuth">Retry sign-in settings</BaseButton>
         <InlineFeedback :message="discordError" />
         <form v-if="discord" class="panel settings-card" @submit.prevent="saveDiscord">
           <div class="card-heading">
@@ -351,7 +412,7 @@ onBeforeUnmount(() => {
             <span :class="['auth-status', { configured: discord.state === 'online' }]" aria-live="polite">{{ discordLabels[discord.state] }}</span>
           </div>
           <div class="form-grid">
-            <label class="field"><span>Discord server ID</span><input v-model="discordForm.guild_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"></label>
+            <label class="field"><span>Discord server ID</span><input v-model="discordForm.guild_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"><small>Also used to verify roles on forms.</small></label>
             <label class="field"><span>Notifications channel ID</span><input v-model="discordForm.channel_id" class="input" inputmode="numeric" autocomplete="off" maxlength="20" :required="discordForm.enabled"><small>Allow the bot to view the channel, send messages and embed links for link previews.</small></label>
             <label class="field"><span>Bot token</span><input v-model="discordForm.token" class="input" type="password" autocomplete="new-password" maxlength="512" :disabled="discordForm.remove_token" :placeholder="discord.token_configured ? 'Leave blank to keep the saved token' : 'Paste the token from the Discord Developer Portal'"><small>{{ discord.token_configured ? 'A token is saved.' : 'The saved token is encrypted.' }}</small></label>
             <label class="switch-row"><input v-model="discordForm.enabled" type="checkbox" :disabled="discordForm.remove_token"><span><strong>Enable Discord notifications</strong></span></label>

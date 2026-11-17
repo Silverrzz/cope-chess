@@ -281,6 +281,12 @@ async function publish(): Promise<void> {
 
 async function toggleClosed(): Promise<void> {
   if (!form.value) return
+  const visibility = live.value?.definition.response_visibility
+  if (!form.value.closed && (visibility === 'summary' || visibility === 'individual') && !await confirm({
+    title: 'Close submissions and publish results?',
+    message: visibility === 'individual' ? 'Anyone with access to this form will be able to read each individual answer.' : 'Anyone with access to this form will be able to see the aggregate results.',
+    confirmLabel: 'Close and publish',
+  })) return
   clear()
   try {
     await mutation.execute<'forms.close.v1'>({ command: 'forms.close.v1', target: props.id, expected_version: form.value.state_version, input: { closed: !form.value.closed } })
@@ -325,7 +331,7 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
 
 <template>
   <div class="admin-page page-stack form-editor-page" :aria-busy="loading || opening">
-    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink to="/admin/forms/collections">Response collections</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? (responseTitle || 'Form') }}</span></nav>
+    <nav class="form-breadcrumbs" aria-label="Breadcrumb"><RouterLink :to="{ name: 'admin-form-collections' }">Forms</RouterLink><span aria-hidden="true">/</span><span aria-current="page">{{ form?.label ?? (responseTitle || 'Form') }}</span></nav>
     <AdminPageHeader :title="live?.definition.title ?? form?.label ?? (responseTitle || 'Form responses')">
       <template v-if="form" #actions>
         <BaseButton v-if="live" :to="`/forms/${form.slug}`" variant="secondary">Open live form</BaseButton>
@@ -428,7 +434,8 @@ onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || (!loading.v
       <template v-else-if="view === 'settings' && form">
         <section v-if="live" class="panel panel__body form-panel">
           <header class="form-panel-heading">
-            <div><h2>Submissions</h2><p>{{ form.closed ? 'This form is closed.' : 'The live form is accepting responses.' }}</p></div>
+            <div><h2>Submissions</h2><p>{{ form.closed ? 'This form is closed.' : 'The live form is accepting responses.' }}</p>
+              <p>{{ live.definition.anonymous ? 'Anonymous responses' : 'Discord-linked responses' }} · {{ live.definition.response_visibility === 'individual' ? 'Public individual answers' : live.definition.response_visibility === 'summary' ? 'Public summary' : 'Private results' }}</p></div>
             <BaseButton :disabled="mutation.unavailable('forms.close.v1')" @click="toggleClosed">{{ form.closed ? 'Reopen submissions' : 'Close submissions' }}</BaseButton>
           </header>
         </section>

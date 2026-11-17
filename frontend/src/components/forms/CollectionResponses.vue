@@ -50,11 +50,12 @@ onMounted(() => load())
     <p v-if="loading && !items.length" class="panel__body muted" role="status">Loading responses…</p>
     <div v-else-if="items.length" class="table-wrap">
       <table class="data-table data-table--list" aria-labelledby="collection-responses">
-        <thead><tr><th scope="col">Submitted</th><th scope="col">Status</th><th scope="col">Release</th><th scope="col">Revision</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th scope="col">Submitted</th><th scope="col">Status</th><th scope="col">Respondent</th><th scope="col">Release</th><th scope="col">Revision</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>
           <tr v-for="item in items" :key="item.id">
             <th scope="row"><time :datetime="item.created_at">{{ formatDate(item.created_at) }}</time></th>
             <td><StatusBadge :status="item.state" /></td>
+            <td>{{ item.respondent ? '@' + item.respondent.username : item.anonymous ? 'Anonymous' : '—' }}</td>
             <td>{{ item.release_number }}</td>
             <td>{{ item.revision }}</td>
             <td>

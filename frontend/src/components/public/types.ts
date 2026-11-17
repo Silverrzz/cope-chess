@@ -251,6 +251,7 @@ export interface ChatMessage {
   game_label?: string | null
   reply_to_id?: Identifier | null
   sender_key?: string | null
+  discord_username?: string | null
 }
 
 export interface ChatSettings {

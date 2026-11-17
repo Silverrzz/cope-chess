@@ -43,6 +43,10 @@ def manage_target(connection, principal, target, *, lock):
 def current_identity(connection, actor: str) -> None:
     if actor in {"browser:admin","browser:manager"}:
         return
+    if actor.startswith("discord:") and connection.execute(
+        "SELECT 1 FROM discord_accounts WHERE id = %s", (actor[8:],)
+    ).fetchone():
+        return
     try:
         kind, identifier = actor.split(":",1)
         if kind != "token" or str(uuid.UUID(identifier)) != identifier:
@@ -77,6 +81,14 @@ def access_view(connection, principal, target, payload: Empty) -> dict:
     if "*" in principal.scopes:
         tokens = connection.execute("SELECT id,label FROM control_tokens WHERE revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY label,id LIMIT 200").fetchall()
         identities.extend({"actor":"token:"+str(row["id"]),"label":row["label"]} for row in tokens)
+        accounts = connection.execute(
+            """SELECT id, username FROM discord_accounts
+               WHERE 'discord:' || id IN (SELECT actor FROM form_permissions WHERE form_id = %s)
+               UNION
+               (SELECT id, username FROM discord_accounts ORDER BY username, id LIMIT 200)
+               ORDER BY username, id""", (resolved.object_id,),
+        ).fetchall()
+        identities.extend({"actor": "discord:" + row["id"], "label": "Discord: @" + row["username"]} for row in accounts)
     return {"state_version":resolved.version,"owner_actor":resolved.data["owner_actor"],"grants":[dict(row) for row in grants],"identities":identities}
 
 

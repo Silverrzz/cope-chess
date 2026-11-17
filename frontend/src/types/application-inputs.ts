@@ -16,7 +16,6 @@ export interface ApplicationInputs {
   'forms.permissions.set.v1': { "actor": string; "permissions": Array<"read" | "edit" | "review" | "responses"> }
   'forms.publish.v1': { "copy_id": string; "copy_revision": number; "keep_previous_hours"?: number; "state_version": number }
   'forms.review.v1': { "state_version": number; "subject_digest": string; "decision": "accepted" | "declined" | "changes_requested"; "reason"?: string }
-  'forms.submit.v1': { "release_id": string; "answers": Record<string, unknown>; "attachment_subject"?: string | null }
   'forms.withdraw.v1': Record<string, never>
   'jobs.legacy_hold.v1': { "held": boolean; "reason": string }
   'operations.cancel.v1': { "reason": string }
@@ -45,7 +44,6 @@ export const applicationCommandContracts = {
   'forms.permissions.set.v1': { requiresTarget: true, requiresVersion: true },
   'forms.publish.v1': { requiresTarget: true, requiresVersion: true },
   'forms.review.v1': { requiresTarget: true, requiresVersion: true },
-  'forms.submit.v1': { requiresTarget: true, requiresVersion: false },
   'forms.withdraw.v1': { requiresTarget: true, requiresVersion: true },
   'jobs.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
   'operations.cancel.v1': { requiresTarget: true, requiresVersion: true },
@@ -72,7 +70,6 @@ export interface ApplicationOutputs {
   'forms.permissions.set.v1': { "form_id": string; "actor": string; "permissions": Array<string> }
   'forms.publish.v1': { "form_id": string; "release_id": string; "release_number": number; "slug": string }
   'forms.review.v1': { "response_id": string; "review_id": string; "revision": number; "decision": string }
-  'forms.submit.v1': { "response_id": string; "form_id": string; "revision": number }
   'forms.withdraw.v1': { "response_id": string; "withdrawn": boolean }
   'jobs.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
   'operations.cancel.v1': { "operation_id": string; "status": "cancelled"; "cancelled_jobs": number; "continuing_jobs": number; "cleanup"?: "no_attempt_started" }
@@ -87,6 +84,7 @@ export interface ApplicationQueryInputs {
   'activity.legacy.inspect.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
   'activity.list.v1': { "kind"?: "operation" | "job" | null; "source"?: string | null; "state"?: "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown" | null; "limit"?: number; "cursor"?: string | null }
   'activity.sources.v1': Record<string, never>
+  'donors.leaderboard.v1': Record<string, never>
   'events.catalogue.v1': Record<string, never>
   'events.status.v1': Record<string, never>
   'execution.control.v1': Record<string, never>
@@ -103,6 +101,7 @@ export interface ApplicationQueryInputs {
   'forms.permissions.v1': Record<string, never>
   'forms.preview.check.v1': { "document": Record<string, unknown>; "answers": Record<string, unknown> }
   'forms.public.v1': { "slug": string }
+  'forms.responses.collections.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
   'forms.responses.detail.v1': Record<string, never>
   'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
   'objects.removal.v1': Record<string, never>
@@ -115,6 +114,7 @@ export interface ApplicationQueryOutputs {
   'activity.legacy.inspect.v1': { "items": Array<ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_legacy_inspect_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_legacy_inspect_v1_ActivityBasis }
   'activity.list.v1': { "items": Array<ApplicationSchema_query_output_activity_list_v1_ActivityItem>; "count": ApplicationSchema_query_output_activity_list_v1_Count; "next_cursor": string | null; "basis": ApplicationSchema_query_output_activity_list_v1_ActivityBasis }
   'activity.sources.v1': { "items": Array<ApplicationSchema_query_output_activity_sources_v1_SourceItem> }
+  'donors.leaderboard.v1': { "donors": Array<ApplicationSchema_query_output_donors_leaderboard_v1_DonorRow>; "completed_games": number; "unattributed_games": number }
   'events.catalogue.v1': { "events": Array<Record<string, unknown>>; "statuses": Array<string>; "registered_modules": Array<Record<string, unknown>> }
   'events.status.v1': { "incarnation": string; "schema_version": number; "retained_after": string; "last_delivery_position": string; "last_delivered_at": string | null; "pending_source": ApplicationSchema_query_output_events_status_v1_BoundedCount; "consumers": Array<ApplicationSchema_query_output_events_status_v1_ConsumerStatus>; "consumers_truncated": boolean; "basis"?: "single_statement_inspector" }
   'execution.control.v1': { "status": "unconfigured" | "unavailable" | "mismatch" | "recovery_incomplete" | "held"; "configured": boolean; "database_incarnation": string | null; "external_incarnation": string | null; "generation": number; "recovery_hold": boolean; "credential_reset_pending": boolean; "bootstrap_admin_locked": boolean; "bootstrap_manager_locked": boolean; "held_work": number; "held_work_more": boolean; "journal_digest": string | null; "new_dispatch": "disabled" }
@@ -131,6 +131,7 @@ export interface ApplicationQueryOutputs {
   'forms.permissions.v1': { "state_version": number; "owner_actor": string; "grants": Array<Record<string, unknown>>; "identities": Array<Record<string, unknown>> }
   'forms.preview.check.v1': { "valid": boolean }
   'forms.public.v1': Record<string, unknown>
+  'forms.responses.collections.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'forms.responses.detail.v1': Record<string, unknown>
   'forms.responses.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'objects.removal.v1': { "id": string; "type_key": string; "source": string; "source_id": string; "reason": "source_deleted" | "source_missing"; "observed_at": string; "state_version": number; "cleanup_state": "not_recorded"; "restore_supported": false }
@@ -170,6 +171,7 @@ export type ApplicationSchema_query_output_activity_list_v1_ActivityBasis = { "o
 export type ApplicationSchema_query_output_activity_list_v1_ActivityItem = { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "title": string; "state": "planned" | "blocked" | "queued" | "leased" | "exported" | "running" | "waiting" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown"; "source_state": string; "owner_actor": string | null; "execution_owner": string; "execution_route": "legacy" | "held" | "canonical"; "ownership_generation": number; "inspect_url": string; "ownership_mode": "legacy_observed" | "canonical"; "mapping_quality": "status_only" | "authoritative"; "cleanup_state": "not_recorded" | "not_started"; "observed_at": string; "source_created_at": string | null; "content_revision": number; "state_version": number }
 export type ApplicationSchema_query_output_activity_list_v1_Count = { "count": number; "more": boolean; "limit"?: number }
 export type ApplicationSchema_query_output_activity_sources_v1_SourceItem = { "key": string; "label": string; "kind": string; "execution_owner": string; "inspect_url": string; "ownership_mode": "legacy_observed" | "canonical" }
+export type ApplicationSchema_query_output_donors_leaderboard_v1_DonorRow = { "donor_key": string; "name": string; "cpu_hours": number | null; "games": number; "timed_games": number }
 export type ApplicationSchema_query_output_events_status_v1_BoundedCount = { "count": number; "more": boolean; "limit"?: number }
 export type ApplicationSchema_query_output_events_status_v1_ConsumerStatus = { "key": string; "registered": boolean; "state": "current" | "pending" | "backoff" | "recovery_required" | "unavailable" | "not_started"; "applied_position": string; "pending": ApplicationSchema_query_output_events_status_v1_BoundedCount; "failure_count": number; "error": string | null; "retry_at": string | null; "updated_at": string | null }
 export type ApplicationSchema_query_output_execution_jobs_detail_v1_BlockReason = { "code": "control_plane_unavailable" | "execution_recovery_review_required"; "message": string }

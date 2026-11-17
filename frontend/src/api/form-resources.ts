@@ -19,7 +19,7 @@ export interface EmbeddedRatings {
   rows: { name: string; version: string; elo: number; error_margin: number | null }[]
 }
 
-export type ResourceKind = 'game' | 'rating_list'
+export type ResourceKind = 'game' | 'rating_list' | 'engine'
 export function resourceChoices(kind: ResourceKind | 'tournament', query: string, tournament?: string, signal?: AbortSignal) {
   return api.get<{ items: FormChoice[] }>('/api/forms/resources/search', { query: { kind, q: query, tournament }, signal })
 }
@@ -32,4 +32,9 @@ export function gameResource(value: string, signal?: AbortSignal) {
 export function ratingsResource(value: string, signal?: AbortSignal) {
   if (!/^[1-9][0-9]{0,14}$/.test(value)) throw new Error('Choose a valid rating list.')
   return api.get<EmbeddedRatings>(`/api/forms/resources/rating-list/${value}`, { signal })
+}
+
+export function engineResource(value: string, signal?: AbortSignal) {
+  if (!/^[1-9][0-9]{0,14}$/.test(value)) throw new Error('Choose a valid engine.')
+  return api.get<{ id: string; title: string; url: string }>(`/api/forms/resources/engine/${value}`, { signal })
 }

@@ -96,6 +96,12 @@ def register_event_routes(app: FastAPI) -> None:
         )
 
         def create_message():
+            from cope.adapters.http.forms import require_origin
+            from cope.discord_bot.accounts import request_account
+
+            profile = request_account(request, connection)
+            if profile:
+                require_origin(request)
             return web_app._create_event_chat_message_from_form(
                 connection,
                 form,
@@ -103,6 +109,7 @@ def register_event_routes(app: FastAPI) -> None:
                 settings=settings,
                 allow_game_context=web_app._event_arena_is_public(event),
                 sender_ip_hash=web_app._chat_address_hash(request),
+                discord_account=profile,
             )
 
         message = await asyncio.to_thread(create_message)

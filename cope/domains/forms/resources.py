@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
 import re
 
+import chess
+import chess.pgn
+
 from cope.application.errors import ApplicationError
-from cope.db import get_game, get_opening_position, get_rating_list, get_tournament
+from cope.db import get_engine_family, get_game, get_opening_position, get_rating_list, get_tournament
 from cope.db.events import list_event_tournament_links
 
 RESOURCE_ID = re.compile(r"[1-9][0-9]{0,14}")
@@ -39,6 +43,9 @@ def validate_public_resource(connection, kind: str, value: str) -> str:
         public_game(connection, tournament_id, game_id)
         return f"{tournament_id}/{game_id}"
     selected = resource_id(value)
+    if kind == "engine":
+        engine_resource(connection, selected)
+        return str(selected)
     if get_rating_list(connection, selected) is None:
         raise ApplicationError("resource_unavailable", "This rating list is unavailable.", 404)
     return str(selected)
@@ -61,7 +68,12 @@ def resource_choices(connection, kind: str, query: str, tournament_id: int | Non
             (tournament_id, text, text),
         )
         return [{"id": f"{tournament_id}/{row['id']}", "label": f"#{row['id']} · {row['white']} vs {row['black']}"} for row in rows]
-    if kind == "rating_list":
+    if kind == "engine":
+        rows = connection.execute(
+            """SELECT id, name FROM engines WHERE strpos(lower(name), ?) > 0 OR id::text = ?
+               ORDER BY name, id LIMIT 25""", (text, text),
+        )
+    elif kind == "rating_list":
         rows = connection.execute(
             "SELECT id, name FROM rating_lists WHERE strpos(lower(name), ?) > 0 OR id::text = ? ORDER BY name, id LIMIT 25",
             (text, text),
@@ -110,3 +122,40 @@ def rating_embed(connection, rating_list_id: int) -> dict:
         (rating_list_id,),
     )
     return {"title": rating_list.name, "url": f"/ratings?rating_list_id={rating_list_id}", "rows": list(rows)}
+
+def engine_resource(connection, engine_id: int) -> dict:
+    engine = get_engine_family(connection, engine_id)
+    if engine is None:
+        raise ApplicationError("resource_unavailable", "This engine is unavailable.", 404)
+    return {"id": str(engine.id), "title": engine.name, "url": f"/engines/{engine.id}"}
+
+
+class PositionGameBuilder(chess.pgn.GameBuilder):
+    def handle_error(self, error: Exception) -> None:
+        self.game.errors.append(error)
+
+
+def chess_position(fen: str, pgn: str) -> dict:
+    if not isinstance(fen, str) or not isinstance(pgn, str) or len(fen) > 120 or len(pgn) > 32000:
+        raise ApplicationError("invalid_position", "Use a FEN up to 120 characters or a PGN up to 32,000 characters.", 422)
+    pgn = pgn.strip()
+    try:
+        if pgn:
+            stream = io.StringIO(pgn)
+            game = chess.pgn.read_game(stream, Visitor=PositionGameBuilder)
+            if game is None or game.errors or not (game.variations or "FEN" in game.headers):
+                raise ValueError("Invalid PGN")
+            if chess.pgn.read_game(stream, Visitor=PositionGameBuilder) is not None:
+                raise ValueError("Choose one PGN game")
+            board = game.end().board()
+            if type(board) is not chess.Board or board.chess960:
+                raise ValueError("Choose standard chess")
+            if fen and chess.Board(fen).fen() != board.fen():
+                raise ValueError("The PGN and FEN must describe the same final position")
+        else:
+            board = chess.Board(fen)
+        if not board.is_valid():
+            raise ValueError("Invalid board")
+        return {"fen": board.fen(), **({"pgn": pgn} if pgn else {})}
+    except (ValueError, RecursionError) as exc:
+        raise ApplicationError("invalid_position", "Enter a valid standard-chess FEN or a single legal PGN.", 422) from exc

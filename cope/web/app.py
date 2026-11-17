@@ -16,7 +16,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,6 +28,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from cope.adapters.http import authentication as http_authentication
+if TYPE_CHECKING:
+    from cope.discord_bot.accounts import DiscordAccount
+
 from cope.chat import (
     DEFAULT_COMMAND_REGISTRY,
     ChatCommandContext,
@@ -1205,9 +1208,9 @@ def create_app(
     from cope.adapters.http.forms import register_form_routes
 
     register_form_routes(app)
-    from cope.adapters.http.ballots import register_ballot_routes
+    from cope.web.discord_oauth import register_discord_oauth
 
-    register_ballot_routes(app)
+    register_discord_oauth(app)
     from cope.adapters.http.artifacts import register_artifact_routes
 
     register_artifact_routes(app)
@@ -2590,6 +2593,7 @@ def _create_chat_message_from_form(
     *,
     tournament_id: int,
     sender_ip_hash: str | None = None,
+    discord_account: DiscordAccount | None = None,
 ) -> dict[str, Any] | None:
     _require_chat_address_allowed(connection, sender_ip_hash)
     settings = get_chat_settings(connection)
@@ -2597,6 +2601,10 @@ def _create_chat_message_from_form(
         raise HTTPException(status_code=403, detail="Chat is disabled.")
 
     display_name = form_value(form, "display_name")[:40].strip()
+    if not display_name and discord_account:
+        display_name = discord_account.display_name[:40].strip()
+        if display_name.casefold() == "system":
+            display_name = discord_account.username[:40]
     if not display_name:
         if settings.allow_anonymous_names:
             display_name = "Anonymous"
@@ -2648,6 +2656,7 @@ def _create_chat_message_from_form(
         display_name=display_name,
         text=text,
         sender_ip_hash=sender_ip_hash,
+        discord_username=discord_account.username if discord_account else None,
     )
 
 
@@ -2659,12 +2668,17 @@ def _create_event_chat_message_from_form(
     settings: EventChatSettingsRecord,
     allow_game_context: bool = True,
     sender_ip_hash: str | None = None,
+    discord_account: DiscordAccount | None = None,
 ) -> dict[str, Any]:
     _require_chat_address_allowed(connection, sender_ip_hash)
     if not settings.enabled:
         raise HTTPException(status_code=403, detail="Chat is disabled.")
 
     display_name = form_value(form, "display_name")[:40].strip()
+    if not display_name and discord_account:
+        display_name = discord_account.display_name[:40].strip()
+        if display_name.casefold() == "system":
+            display_name = discord_account.username[:40]
     if not display_name:
         if settings.allow_anonymous_names:
             display_name = "Anonymous"
@@ -2707,6 +2721,7 @@ def _create_event_chat_message_from_form(
         text=text,
         allow_game_context=allow_game_context,
         sender_ip_hash=sender_ip_hash,
+        discord_username=discord_account.username if discord_account else None,
     )
 
 
@@ -2720,6 +2735,7 @@ def _create_user_chat_message(
     tournament_id: int | None = None,
     event_id: int | None = None,
     allow_game_context: bool = True,
+    discord_username: str | None = None,
 ) -> dict[str, Any]:
     reply_to_id = _chat_reference_id(form, "reply_to_id")
     if form_value(form, "reply_to_id"):
@@ -2773,6 +2789,7 @@ def _create_user_chat_message(
         reply_to_id=reply_to_id,
         sender_key=sender_key,
         sender_ip_hash=sender_ip_hash,
+        discord_username=discord_username,
     )
     message = get_chat_message(connection, message_id)
     connection.commit()

@@ -4,6 +4,8 @@ import { nextTick, ref, watch, onBeforeUnmount } from "vue";
 import { useBoardTheme, type BoardTheme } from "@/composables/useBoardTheme";
 import { useTheme } from "@/composables/useTheme";
 import { useViewerSettings } from "@/composables/useViewerSettings";
+import { discordLogin, useDiscordSession } from "@/stores/discord";
+import InlineFeedback from "@/components/admin/InlineFeedback.vue";
 import AppIcon from "./AppIcon.vue";
 import BaseButton from "./BaseButton.vue";
 import OptionPicker from "./OptionPicker.vue";
@@ -20,6 +22,21 @@ const {
 } = useViewerSettings();
 
 const open = ref(false);
+const discord = useDiscordSession();
+const discordError = ref("");
+const signingOut = ref(false);
+
+async function signOut(): Promise<void> {
+  signingOut.value = true;
+  discordError.value = "";
+  try {
+    await discord.signOut();
+  } catch {
+    discordError.value = "Could not sign out of Discord. Please try again.";
+  } finally {
+    signingOut.value = false;
+  }
+}
 let originalDarkMode = resolvedTheme.value === "dark";
 let originalPerspective = evaluationPerspective.value;
 const panel = ref<HTMLElement | null>(null);
@@ -34,6 +51,8 @@ const draftDarkMode = ref(resolvedTheme.value === "dark");
 
 watch(open, async (isOpen) => {
   if (!isOpen) return;
+  discordError.value = "";
+  void discord.load().catch(() => { discordError.value = "Could not load your Discord sign-in."; });
   originalPerspective = evaluationPerspective.value;
   draftPerspective.value = originalPerspective;
   draftKibitzer.value = kibitzerEnabled.value;
@@ -143,6 +162,19 @@ function reset(): void {
       </header>
 
       <div class="settings-drawer__body">
+        <section class="section-stack" aria-labelledby="discord-settings-heading">
+          <h3 id="discord-settings-heading">Discord account</h3>
+          <div v-if="discord.account" class="section-stack">
+            <p><strong>{{ discord.account.display_name }}</strong> <small class="muted">@{{ discord.account.username }}</small></p>
+            <div class="button-row"><BaseButton size="small" :loading="signingOut" @click="signOut">Sign out</BaseButton></div>
+          </div>
+          <div v-else-if="discord.enabled" class="button-row">
+            <BaseButton :href="discordLogin()" size="small"><template #icon><AppIcon name="discord" :size="17" /></template>Sign in with Discord</BaseButton>
+          </div>
+          <p v-else-if="discord.loaded" class="muted">Discord sign-in is currently unavailable.</p>
+          <InlineFeedback :message="discordError" />
+        </section>
+
         <h3>Appearance</h3>
         <label class="setting-toggle">
           <input v-model="draftDarkMode" type="checkbox" />

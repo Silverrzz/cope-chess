@@ -4,6 +4,7 @@ import { nextTick, reactive, ref, useId } from 'vue'
 import FormDateTime from './FormDateTime.vue'
 import FormMarkdown from './FormMarkdown.vue'
 import FormResourcePicker from './FormResourcePicker.vue'
+import FormPositionEditor from './FormPositionEditor.vue'
 import { contentKinds, fieldActive, initialAnswers, type FormAnswers, type FormChoice, type FormErrors, type FormField } from '@/types/forms'
 
 const props = withDefaults(defineProps<{
@@ -164,11 +165,11 @@ async function findReferences(field: FormField, search: string): Promise<void> {
 <template>
   <div ref="container" class="form-fields">
     <template v-for="field in fields" :key="field.id">
-      <section v-if="fieldActive(field, modelValue) && contentKinds.has(field.kind)" class="form-content" :class="{ 'form-content--section': field.kind === 'section' }">
+      <section v-if="fieldActive(field, modelValue, fields) && contentKinds.has(field.kind)" class="form-content" :class="{ 'form-content--section': field.kind === 'section' }">
         <h2>{{ field.label }}</h2>
         <FormMarkdown :source="field.content || field.help" />
       </section>
-      <div v-else-if="fieldActive(field, modelValue)" class="form-field" :data-field-path="key(field)" :class="{ 'form-field--invalid': errors(field).length }">
+      <div v-else-if="fieldActive(field, modelValue, fields)" class="form-field" :data-field-path="key(field)" :class="{ 'form-field--invalid': errors(field).length }">
         <fieldset v-if="field.kind === 'group'" class="form-group" :aria-describedby="descriptions(field)">
           <legend>{{ field.label }}<span v-if="field.required" class="required"> · required</span></legend>
           <div v-for="(row, index) in rows(field)" :key="String(row._row_id ?? index)" :data-row-id="String(row._row_id)" class="form-row">
@@ -226,8 +227,10 @@ async function findReferences(field: FormField, search: string): Promise<void> {
             </div>
             <small v-if="transfers[key(field)]" role="status">Uploading {{ transfers[key(field)] }}…</small><div v-else-if="modelValue[field.id]" class="attachment-receipt"><span>Attachment received</span><BaseButton v-if="download" type="button" variant="ghost" size="small" @click="downloadFile(field)">Download attachment</BaseButton><BaseButton type="button" class="button button--ghost button--small" :disabled="disabled" @click="update(field, undefined)" variant="ghost" size="small">Remove</BaseButton></div><small v-else-if="!upload">Attachment selection is unavailable here.</small>
           </template>
-          <FormResourcePicker v-else-if="field.kind === 'chess_game' || field.kind === 'rating_list'" :id="elementId(field)"
-            :kind="field.kind === 'chess_game' ? 'game' : 'rating_list'" :model-value="display(field)" :described-by="descriptions(field)"
+          <FormPositionEditor v-else-if="field.kind === 'chess_position'" :id="elementId(field)" :model-value="modelValue[field.id]"
+            :disabled="disabled" @update:model-value="update(field, $event)" />
+          <FormResourcePicker v-else-if="field.kind === 'chess_game' || field.kind === 'rating_list' || field.kind === 'engine'" :id="elementId(field)"
+            :kind="field.kind === 'chess_game' ? 'game' : field.kind" :model-value="display(field)" :described-by="descriptions(field)"
             :disabled="disabled" @update:model-value="update(field, $event)" />
           <input v-else-if="field.kind === 'reference' && !references" :id="elementId(field)" class="input" :value="display(field)" :disabled="disabled"
             placeholder="Cope object UUID" :aria-describedby="descriptions(field)" @input="update(field, ($event.target as HTMLInputElement).value)">

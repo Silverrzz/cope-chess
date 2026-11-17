@@ -24,6 +24,7 @@ class Choice(DefinitionValue):
 class Condition(DefinitionValue):
     field: str = Field(min_length=1, max_length=100)
     equals: str | StrictBool
+    operator: Literal["is", "is_not", "includes"] = "is"
 
 
 class FormField(DefinitionValue):
@@ -31,7 +32,7 @@ class FormField(DefinitionValue):
     kind: Literal["text", "long_text", "email", "url", "phone", "integer", "decimal",
                   "date", "time", "datetime", "choice", "dropdown", "multiple_choice", "ranking",
                   "matrix", "checkbox", "yes_no", "consent", "rating", "scale", "group", "attachment",
-                  "reference", "chess_game", "rating_list", "section", "markdown"]
+                  "reference", "chess_game", "chess_position", "engine", "rating_list", "section", "markdown"]
     label: str = Field(min_length=1, max_length=300)
     help: str = Field(default="", max_length=4000)
     required: bool = False
@@ -47,6 +48,8 @@ class FormField(DefinitionValue):
     rows: tuple[Choice, ...] = Field(default=(), max_length=30)
     content: str = Field(default="", max_length=16000)
     when: Condition | None = None
+    conditions: tuple[Condition, ...] = Field(default=(), max_length=8)
+    condition_match: Literal["all", "any"] = "all"
     fields: tuple[FormField, ...] = Field(default=(), max_length=100)
     min_items: int = Field(default=0, ge=0, le=100)
     max_items: int = Field(default=20, ge=1, le=100)
@@ -64,9 +67,55 @@ class FormDefinition(DefinitionValue):
     mapping: dict[str, str] = Field(default_factory=dict, max_length=100)
     audience: Literal["public", "authenticated", "invited"] = "authenticated"
     allow_amendments: bool = True
+    anonymous: bool = False
+    listed: bool = False
+    response_visibility: Literal["private", "summary", "individual"] = "private"
+    discord_role_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
     max_payload_bytes: int = Field(default=1048576, ge=1024, le=1048576)
     max_rows: int = Field(default=200, ge=1, le=1000)
     submissions_per_hour: int = Field(default=20, ge=1, le=1000)
+
+
+def conditions(field: FormField) -> tuple[Condition, ...]:
+    return field.conditions or ((field.when,) if field.when else ())
+
+
+def ordered_fields(fields: tuple[FormField, ...]) -> list[FormField]:
+    by_id = {field.id: field for field in fields}
+    completed = set()
+    visiting = set()
+    ordered = []
+
+    def visit(field: FormField) -> None:
+        if field.id in completed:
+            return
+        if field.id in visiting:
+            raise ValueError(field.id)
+        visiting.add(field.id)
+        for condition in conditions(field):
+            control = by_id.get(condition.field)
+            if control is not None:
+                visit(control)
+        visiting.remove(field.id)
+        completed.add(field.id)
+        ordered.append(field)
+
+    for field in fields:
+        visit(field)
+    return ordered
+
+
+def conditions_match(field: FormField, answers: dict) -> bool:
+    def matches(condition: Condition) -> bool:
+        actual = answers.get(condition.field)
+        if condition.operator == "includes":
+            return isinstance(actual, list) and condition.equals in actual
+        if type(actual) is not type(condition.equals):
+            return False
+        return actual != condition.equals if condition.operator == "is_not" else actual == condition.equals
+
+    rules = conditions(field)
+    return not rules or (any if field.condition_match == "any" else all)(matches(rule) for rule in rules)
 
 
 def compile_definition(definition: FormDefinition) -> FormDefinition:
@@ -97,6 +146,10 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
                 fail(path, "invalid_number_bounds", "The minimum cannot exceed the maximum.")
             if field.kind not in NUMBER_KINDS and (field.minimum is not None or field.maximum is not None):
                 fail(path, "unexpected_number_bounds", "Numeric bounds apply only to number fields.")
+            if field.kind == "attachment" and (definition.anonymous or definition.response_visibility == "individual"):
+                fail(path, "attachment_privacy", "File uploads require linked responses and private or summary results.")
+            if field.kind == "reference" and definition.response_visibility == "individual":
+                fail(path, "reference_privacy", "Internal references cannot be part of individually published answers.")
             if field.accepted_content_types and field.kind != "attachment":
                 fail(path, "unexpected_attachment_policy", "Content-type restrictions apply only to attachment fields.")
             if field.required and field.nullable:
@@ -142,18 +195,29 @@ def compile_definition(definition: FormDefinition) -> FormDefinition:
                     except (ZoneInfoNotFoundError, ValueError):
                         fail(path, "unknown_timezone", "Choose a supported timezone.")
         for field in fields:
-            if field.when is None:
-                continue
             path = (*parent, field.id)
-            control = by_id.get(field.when.field)
-            if control is None or control.when is not None or control.kind not in {"checkbox", "choice", "dropdown", "yes_no", "consent"}:
-                fail(path, "invalid_condition", "Conditions need an unconditional checkbox or choice in this group.")
-            elif control.kind in {"checkbox", "yes_no", "consent"} and type(field.when.equals) is not bool:
-                fail(path, "condition_type", "Checkbox conditions compare a boolean value.")
-            elif control.kind in {"choice", "dropdown"} and (type(field.when.equals) is not str or field.when.equals not in {choice.id for choice in control.choices}):
-                fail(path, "condition_choice", "Choose a valid option identity for this condition.")
+            if field.when and field.conditions:
+                fail(path, "invalid_condition", "Use one set of branching conditions.")
+            for rule in conditions(field):
+                control = by_id.get(rule.field)
+                if control is None or control.kind not in {"checkbox", "choice", "dropdown", "yes_no", "consent", "multiple_choice"}:
+                    fail(path, "invalid_condition", "Choose a checkbox or choice question in this group.")
+                elif (rule.operator == "includes") != (control.kind == "multiple_choice"):
+                    fail(path, "condition_operator", "Use “Includes” for multiple-choice conditions.")
+                elif control.kind in {"checkbox", "yes_no", "consent"} and type(rule.equals) is not bool:
+                    fail(path, "condition_type", "Checkbox conditions compare a boolean value.")
+                elif control.kind in CHOICE_KINDS and rule.equals not in {choice.id for choice in control.choices}:
+                    fail(path, "condition_choice", "Choose an available option for this condition.")
+        try:
+            ordered_fields(fields)
+        except ValueError as error:
+            fail((*parent, str(error)), "condition_cycle", "Branching conditions cannot depend on each other in a loop.")
 
     scope(definition.fields, (), 1)
+    if definition.listed and definition.audience == "invited":
+        fail(("listed",), "invited_form_listing", "Invited forms must be shared directly.")
+    if definition.discord_role_id is not None and int(definition.discord_role_id) >= 2**64:
+        fail(("discord_role_id",), "invalid_discord_role", "Enter a valid Discord role ID.")
     if count > 200:
         fail((), "too_many_fields", "A form can contain at most 200 field definitions.")
     if not definition.title.strip():

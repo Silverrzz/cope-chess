@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { gameResource, ratingsResource, resourceChoices, type ResourceKind } from '@/api/form-resources'
+import { engineResource, gameResource, ratingsResource, resourceChoices, type ResourceKind } from '@/api/form-resources'
 import type { FormChoice } from '@/types/forms'
 
 const props = defineProps<{ kind: ResourceKind; modelValue?: string; id?: string; disabled?: boolean | undefined; describedBy?: string | undefined }>()
@@ -13,15 +13,16 @@ const failure = ref('')
 const pending = ref(false)
 const open = ref(false)
 const searchKind = computed(() => props.kind === 'game' && !tournament.value ? 'tournament' : props.kind)
-const searchLabel = computed(() => searchKind.value === 'tournament' ? 'Find a tournament' : searchKind.value === 'game' ? 'Find a game by ID or player' : 'Find a rating list')
+const searchLabel = computed(() => searchKind.value === 'tournament' ? 'Find a tournament' : searchKind.value === 'game' ? 'Find a game by ID or player' : searchKind.value === 'engine' ? 'Find an engine' : 'Find a rating list')
 
 watch(() => props.modelValue, async (value, _, cleanup) => {
   if (!value || current.value?.id === value) return
   const controller = new AbortController()
   cleanup(() => controller.abort())
-  current.value = { id: value, label: props.kind === 'game' ? `Game #${value.split('/')[1] ?? value}` : `Rating list #${value}` }
+  current.value = { id: value, label: props.kind === 'game' ? `Game #${value.split('/')[1] ?? value}` : props.kind === 'engine' ? `Engine #${value}` : `Rating list #${value}` }
   try {
-    const item = await (props.kind === 'game' ? gameResource(value, controller.signal) : ratingsResource(value, controller.signal))
+    const item = await (props.kind === 'game' ? gameResource(value, controller.signal) :
+      props.kind === 'engine' ? engineResource(value, controller.signal) : ratingsResource(value, controller.signal))
     if (!controller.signal.aborted) current.value = { id: value, label: item.title }
   } catch { }
 }, { immediate: true })

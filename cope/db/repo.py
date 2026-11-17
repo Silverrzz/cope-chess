@@ -337,6 +337,7 @@ class ChatMessageRecord:
     game_label: str | None = None
     reply_to_id: int | None = None
     sender_key: str | None = None
+    discord_username: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4196,6 +4197,7 @@ def create_chat_message(
     reply_to_id: int | None = None,
     sender_key: str | None = None,
     sender_ip_hash: str | None = None,
+    discord_username: str | None = None,
 ) -> int:
     if (tournament_id is None) == (event_id is None):
         raise ValueError("chat message requires exactly one subject")
@@ -4203,13 +4205,13 @@ def create_chat_message(
         """
         INSERT INTO chat_messages (
             tournament_id, event_id, display_name, text, at,
-            game_id, game_label, reply_to_id, sender_key, sender_ip_hash
+            game_id, game_label, reply_to_id, sender_key, sender_ip_hash, discord_username
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             tournament_id, event_id, display_name, text, utc_now(),
-            game_id, game_label, reply_to_id, sender_key, sender_ip_hash,
+            game_id, game_label, reply_to_id, sender_key, sender_ip_hash, discord_username,
         ),
     )
     return int(cursor.lastrowid)
@@ -5373,6 +5375,7 @@ def _chat_message_from_row(row: sqlite3.Row) -> ChatMessageRecord:
         game_label=row["game_label"] if row["game_id"] is not None else None,
         reply_to_id=row["reply_to_id"],
         sender_key=row["sender_key"],
+        discord_username=row["discord_username"],
     )
 
 

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from cope.application.errors import ApplicationError
 
-from .definition import CONTENT_KINDS, FormDefinition, FormField, compile_definition, scale_bounds
+from .definition import CONTENT_KINDS, FormDefinition, FormField, compile_definition, conditions_match, ordered_fields, scale_bounds
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,16 @@ def decode_scalar(field: FormField, value: Any, context: ResponseContext, path: 
         if any(type(item) is not str or item not in permitted for item in value) or len(set(value)) != len(value):
             invalid("invalid_choice", "Choose distinct available options.")
         return value
-    if field.kind in {"chess_game", "rating_list"}:
+    if field.kind == "chess_position":
+        from .resources import chess_position
+
+        if type(value) is not dict or set(value) - {"fen", "pgn"}:
+            invalid("invalid_position", "Set up a board or import a game.")
+        try:
+            return chess_position(value.get("fen", ""), value.get("pgn", ""))
+        except ApplicationError as error:
+            invalid("invalid_position", error.message)
+    if field.kind in {"chess_game", "rating_list", "engine"}:
         if type(value) is not str or context.resolve_public_resource is None:
             invalid("invalid_resource", "Choose an available Cope resource.")
         try:
@@ -212,16 +221,12 @@ def validate_response(definition: FormDefinition, values: dict, context: Respons
         for key in submitted:
             if key not in known:
                 fail((*parent, str(key)), "unknown_field", "This field is not part of the published form.")
-        ordered = sorted(fields, key=lambda field: field.when is not None)
-        for field in ordered:
+        for field in ordered_fields(fields):
             path = (*parent, field.id)
-            if field.when:
-                control = result.get(field.when.field)
-                active = control is not None and type(control) is type(field.when.equals) and control == field.when.equals
-                if not active:
-                    if field.id in submitted:
-                        fail(path, "inactive_field_supplied", "Remove this inactive answer before submitting.")
-                    continue
+            if not conditions_match(field, result):
+                if field.id in submitted:
+                    fail(path, "inactive_field_supplied", "Remove this inactive answer before submitting.")
+                continue
             if field.kind in CONTENT_KINDS:
                 if field.id in submitted:
                     fail(path, "content_answer_supplied", "Content blocks cannot accept answers.")

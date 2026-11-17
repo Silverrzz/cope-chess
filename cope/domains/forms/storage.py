@@ -256,7 +256,14 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
                               and form["owner_actor"] == revision["subject"]["owner_actor"])
         except ApplicationError:
             pass
+    respondent = None
+    if "*" in principal.scopes and response["owner_actor"].startswith("discord:"):
+        account = connection.execute(
+            "SELECT username, display_name FROM discord_accounts WHERE id = %s", (response["owner_actor"][8:],)
+        ).fetchone()
+        respondent = dict(account) if account else None
     return {"id": str(response["id"]), "form_id": str(form["id"]), "slug": form["slug"], "release_id": str(response["release_id"]),
+            "respondent": respondent, "anonymous": response["owner_actor"].startswith("form-anonymous:"),
             "revision": response["current_revision"], "state_version": object_version(connection, response_id, "state_version", lock=False),
             "state": state, "next_actor": actor, "answers": revision["answers"], "subject_digest": revision["subject_digest"],
             "definition": public_definition(definition), "can_amend": bool(audience_allowed and release["eligible"] and definition.allow_amendments
@@ -273,7 +280,8 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
 
 
 def public_definition(definition: FormDefinition) -> dict:
-    keys = {"schema_version", "title", "description", "fields", "audience", "allow_amendments", "max_payload_bytes", "max_rows"}
+    keys = {"schema_version", "title", "description", "fields", "audience", "allow_amendments", "max_payload_bytes", "max_rows",
+            "anonymous", "listed", "response_visibility", "discord_role_id"}
     return {key: value for key, value in definition.model_dump(mode="json").items() if key in keys}
 
 
@@ -294,16 +302,13 @@ def public_form_view(connection, slug: str, principal: Principal | None = None) 
     if form is None:
         raise ApplicationError("form_unavailable", "The form is not available.", 404)
     form = get_form(connection, str(form["id"]))
-    if form["closed"] or form["published_release"] is None:
-        raise ApplicationError("form_unavailable", "The form is not accepting submissions.", 404)
-    release = pinned_release(connection, str(form["id"]), str(form["published_release"]), accepting=True)
+    if form["published_release"] is None:
+        raise ApplicationError("form_unavailable", "The form is not published.", 404)
+    release = pinned_release(connection, str(form["id"]), str(form["published_release"]), accepting=False)
     definition = definition_from_json(release["definition"])
-    if definition.audience != "public":
+    if definition.audience == "invited":
         if principal is None or principal.credential_kind == "form_claim":
-            raise ApplicationError("authentication_required", "Sign in to open this form.", 401)
-        principal = current_principal(connection, principal)
-        principal.require("forms:submit")
-        if definition.audience == "invited":
-            form_permission(connection, principal, form, "read")
+            raise ApplicationError("authentication_required", "Sign in with Discord to open this invited form.", 401)
+        form_permission(connection, current_principal(connection, principal), form, "read")
     return {"id": str(form["id"]), "slug": form["slug"], "release_id": str(release["id"]), "release_number": release["number"],
-            "definition": public_definition(definition), "attachment_policy": attachment_policy()}
+            "closed": form["closed"], "definition": public_definition(definition), "attachment_policy": attachment_policy()}

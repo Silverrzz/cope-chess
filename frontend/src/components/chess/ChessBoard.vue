@@ -46,6 +46,7 @@ const props = withDefaults(defineProps<{
   arrows?: BoardArrow[]
   rings?: string[]
   lastMove?: string
+  selectable?: boolean
 }>(), {
   fen: 'startpos',
   moves: () => [],
@@ -63,6 +64,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [ply: number]
   position: [value: { ply: number; fen: string }]
+  'select-square': [square: Key]
 }>()
 
 const viewer = ref<HTMLElement | null>(null)
@@ -155,15 +157,24 @@ function selectPly(ply: number): void {
   emit('update:modelValue', next)
 }
 
-function annotationSquare(event: PointerEvent): Key | undefined {
+function boardSquare(event: MouseEvent): Key | undefined {
   if (!ground) return
   const bounds = ground.state.dom.elements.board.getBoundingClientRect()
   return getKeyAtDomPos([event.clientX, event.clientY], ground.state.orientation === 'white', bounds)
 }
 
+function handleBoardClick(event: MouseEvent): void {
+  if (!props.selectable) {
+    clearAnnotations()
+    return
+  }
+  const square = boardSquare(event)
+  if (square) emit('select-square', square)
+}
+
 function startAnnotation(event: PointerEvent): void {
-  if (!boardAnnotationsEnabled.value || event.button !== 2 || !board.value) return
-  const square = annotationSquare(event)
+  if (props.selectable || !boardAnnotationsEnabled.value || event.button !== 2 || !board.value) return
+  const square = boardSquare(event)
   if (!square) return
   event.preventDefault()
   board.value.setPointerCapture(event.pointerId)
@@ -173,7 +184,7 @@ function startAnnotation(event: PointerEvent): void {
 function previewAnnotation(event: PointerEvent): void {
   if (!ground || annotationDrag?.pointerId !== event.pointerId) return
   const { orig } = annotationDrag
-  const square = annotationSquare(event)
+  const square = boardSquare(event)
   const dest = square === orig ? undefined : square
   if (dest === annotationDrag.dest) return
   annotationDrag.dest = dest
@@ -185,7 +196,7 @@ function finishAnnotation(event: PointerEvent): void {
   if (event.button !== 2 || !ground || annotationDrag?.pointerId !== event.pointerId) return
   const { orig } = annotationDrag
   annotationDrag = null
-  const dest = annotationSquare(event)
+  const dest = boardSquare(event)
   if (dest === orig) {
     const custom = new Map(ground.state.highlight.custom)
     if (custom.has(orig)) custom.delete(orig)
@@ -337,12 +348,12 @@ defineExpose({ selectPly, focusBoard })
         class="board-mount"
         role="img"
         :aria-label="`${label}, ${positionDescription}`"
+        @click="handleBoardClick"
         @pointerdown="startAnnotation"
         @pointermove="previewAnnotation"
         @pointerup="finishAnnotation"
         @lostpointercapture="cancelAnnotation"
         @contextmenu="handleContextMenu"
-        @click="clearAnnotations"
       ></div>
     </div>
 

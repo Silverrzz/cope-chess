@@ -14,7 +14,7 @@ from .bindings import compile_binding
 from .storage import (
     checkpoint_document, create_copy, definition_from_json, form_permission, form_resolver, get_form,
     identity, insert_response_revision, new_object, object_version, pinned_release, resolve_copy,
-    response_resolver, take_rate, validate_answers,
+    response_resolver, validate_answers,
 )
 
 
@@ -240,33 +240,22 @@ def resolve_submission(connection, principal, target, *, lock):
     return Target(str(form["id"]), None, data=form)
 
 
-def submit_response(context: CommandContext, payload: SubmitResponse) -> Outcome:
-    form = context.target.data
-    if form["closed"]:
-        raise ApplicationError("form_closed", "This form is closed to new submissions.")
-    release = pinned_release(context.connection, context.target.object_id, payload.release_id, accepting=True)
-    definition = definition_from_json(release["definition"])
-    if definition.audience != "public" and context.principal.credential_kind == "form_claim":
-        raise ApplicationError("authentication_required", "This release requires an authenticated response.", 403)
-    if definition.audience == "invited":
-        form_permission(context.connection, context.principal, form, "read")
-    if context.principal.credential_kind == "form_claim":
-        from .guest import guest_admission
-
-        guest_admission(context.connection, context.principal, str(release["id"]), lock=True)
-    attachment_subject = identity(payload.attachment_subject) if payload.attachment_subject else str(uuid.uuid4())
+def store_response(connection, owner, form: dict, release: dict, payload: SubmitResponse) -> str:
+    attachment_subject = (identity(payload.attachment_subject)
+                          if payload.attachment_subject and owner.credential_kind == "discord" else str(uuid.uuid4()))
     attachments = []
-    canonical, proposal, subject = validate_answers(context.connection, context.principal, form, release, payload.answers,
-                                                   attachment_subject=attachment_subject,attachments=attachments)
-    take_rate(context.connection, "response:" + context.target.object_id, context.principal.actor, definition.submissions_per_hour)
-    response_id = new_object(context.connection, "form_response")
-    context.connection.execute("INSERT INTO form_responses(id, form_id, release_id, owner_actor, attachment_subject) VALUES (%s, %s, %s, %s, %s)",
-                               (response_id, context.target.object_id, release["id"], context.principal.actor, attachment_subject))
-    insert_response_revision(context.connection, response_id, 1, context.principal, canonical, proposal, subject)
+    canonical, proposal, subject = validate_answers(connection, owner, form, release, payload.answers,
+                                                   attachment_subject=attachment_subject, attachments=attachments)
+    response_id = new_object(connection, "form_response")
+    connection.execute(
+        "INSERT INTO form_responses(id, form_id, release_id, owner_actor, attachment_subject) VALUES (%s, %s, %s, %s, %s)",
+        (response_id, form["id"], release["id"], owner.actor, attachment_subject),
+    )
+    insert_response_revision(connection, response_id, 1, owner, canonical, proposal, subject)
     from cope.domains.artifacts.retention import retain_attachments
 
-    retain_attachments(context.connection,response_id,1,attachments)
-    return Outcome(response_id, 1, {"response_id": response_id, "form_id": context.target.object_id, "revision": 1})
+    retain_attachments(connection, response_id, 1, attachments)
+    return response_id
 
 
 def amend_response(context: CommandContext, payload: AmendResponse) -> Outcome:
@@ -364,12 +353,6 @@ def describe_response(connection, principal, target) -> dict:
     return response_view(connection, principal, target.object_id, require_scope=False)
 
 
-def describe_submission(connection, principal, target) -> dict:
-    from .storage import public_form_view
-
-    return public_form_view(connection, target.data["slug"], principal)
-
-
 def project_form(connection, principal, result):
     form_permission(connection, principal, get_form(connection, result["object_id"]), "read")
     return result
@@ -405,8 +388,6 @@ def commands() -> tuple[Command, ...]:
                 form_resolver("edit"), publish_form, describe_form, project_form),
         Command("forms.close.v1", "form", "forms:write", "state_version", CloseForm, ClosedOutput,
                 form_resolver("edit", "state_version"), close_form, describe_form, project_form),
-        Command("forms.submit.v1", "form_response", "forms:submit", None, SubmitResponse, ResponseOutput,
-                resolve_submission, submit_response, describe_submission, project_response, True, False),
         Command("forms.amend.v1", "form_response", "forms:amend", "content_revision", AmendResponse, ResponseOutput,
                 response_resolver("read", owner_only=True), amend_response, describe_response, project_response),
         Command("forms.review.v1", "form_response", "forms:review", "content_revision", ReviewResponse, ReviewOutput,

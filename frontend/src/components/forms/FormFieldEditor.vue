@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import FormMarkdownEditor from './FormMarkdownEditor.vue'
-import { booleanKinds, contentKinds, type FormChoice, type FormErrors, type FormField, type FormKind } from '@/types/forms'
+import { booleanKinds, contentKinds, fieldConditions, type FormChoice, type FormCondition, type FormErrors, type FormField, type FormKind } from '@/types/forms'
 
 const props = withDefaults(defineProps<{
   modelValue: FormField[]; errors?: FormErrors; path?: string[]; depth?: number; disabled?: boolean
@@ -12,7 +12,7 @@ const groups: { label: string; fields: [FormKind, string][] }[] = [
   { label: 'Text and contact', fields: [['text', 'Short text'], ['long_text', 'Paragraph'], ['email', 'Email'], ['url', 'Website'], ['phone', 'Phone number']] },
   { label: 'Choices and feedback', fields: [['choice', 'Single choice'], ['dropdown', 'Dropdown'], ['multiple_choice', 'Multiple choices'], ['yes_no', 'Yes or no'], ['checkbox', 'Checkbox'], ['consent', 'Consent'], ['rating', 'Rating'], ['scale', 'Number scale'], ['ranking', 'Ranking'], ['matrix', 'Choice grid']] },
   { label: 'Numbers and dates', fields: [['integer', 'Whole number'], ['decimal', 'Decimal number'], ['date', 'Date'], ['time', 'Time'], ['datetime', 'Date and time']] },
-  { label: 'Files and Cope resources', fields: [['attachment', 'File upload'], ['chess_game', 'Tournament game'], ['rating_list', 'Rating list'], ['reference', 'Internal object'], ['group', 'Repeatable group']] },
+  { label: 'Files and Cope resources', fields: [['attachment', 'File upload'], ['chess_game', 'Tournament game'], ['chess_position', 'Chess board editor'], ['engine', 'Engine dropdown'], ['rating_list', 'Rating list'], ['reference', 'Internal object'], ['group', 'Repeatable group']] },
   { label: 'Layout and content', fields: [['section', 'Section heading'], ['markdown', 'Rich content']] },
 ]
 const labels = new Map(groups.flatMap(group => group.fields))
@@ -66,12 +66,14 @@ function id(prefix: string): string {
 }
 
 function make(kind: FormKind, previous?: FormField): FormField {
-  const block: FormField = { id: id('field'), kind, label: previous?.label ?? labels.get(kind) ?? 'Question' }
+  const block: FormField = { id: previous?.id ?? id('field'), kind, label: previous?.label ?? labels.get(kind) ?? 'Question' }
   if (!contentKinds.has(kind)) {
     block.help = previous?.help ?? ''
     block.required = kind === 'consent' || previous?.required || false
   }
   block.when = previous?.when ?? null
+  if (previous?.conditions) block.conditions = previous.conditions
+  if (previous?.condition_match) block.condition_match = previous.condition_match
   if (options.has(kind)) block.choices = [{ id: id('option'), label: 'Option 1' }, { id: id('option'), label: 'Option 2' }]
   if (kind === 'matrix') block.rows = [{ id: id('row'), label: 'First statement' }]
   if (kind === 'group') block.fields = [make('text')]
@@ -123,24 +125,44 @@ function updateOptions(index: number, list: 'choices' | 'rows', values: FormChoi
 }
 
 function controls(field: FormField): FormField[] {
-  return props.modelValue.filter(candidate => candidate.id !== field.id && !candidate.when &&
-    (booleanKinds.has(candidate.kind) || ['choice', 'dropdown'].includes(candidate.kind)))
+  return props.modelValue.filter(candidate => candidate.id !== field.id &&
+    (booleanKinds.has(candidate.kind) || ['choice', 'dropdown', 'multiple_choice'].includes(candidate.kind)))
 }
 
-function controlFor(field: FormField): FormField | undefined {
-  return props.modelValue.find(candidate => candidate.id === field.when?.field)
+function controlFor(rule: FormCondition): FormField | undefined {
+  return props.modelValue.find(candidate => candidate.id === rule.field)
 }
 
-function selectCondition(index: number, controlId: string): void {
-  const control = props.modelValue.find(field => field.id === controlId)
-  update(index, { when: control ? { field: control.id, equals: booleanKinds.has(control.kind) ? true : control.choices?.[0]?.id ?? '' } : null })
+function setRules(index: number, conditions: FormCondition[]): void {
+  update(index, { conditions, when: null })
 }
 
-function changeExpected(index: number, value: string): void {
+function newRule(control: FormField): FormCondition {
+  return {
+    field: control.id,
+    equals: booleanKinds.has(control.kind) ? true : control.choices?.[0]?.id ?? '',
+    operator: control.kind === 'multiple_choice' ? 'includes' : 'is',
+  }
+}
+
+function changeRule(index: number, position: number, changes: Partial<FormCondition>): void {
   const field = props.modelValue[index]
-  if (!field?.when) return
-  const control = controlFor(field)
-  update(index, { when: { field: field.when.field, equals: control && booleanKinds.has(control.kind) ? value === 'true' : value } })
+  if (field) setRules(index, fieldConditions(field).map((rule, offset) => offset === position ? { ...rule, ...changes } : rule))
+}
+
+function changeControl(index: number, position: number, fieldId: string): void {
+  const control = props.modelValue.find(candidate => candidate.id === fieldId)
+  if (control) changeRule(index, position, newRule(control))
+}
+
+function addRule(index: number, field: FormField): void {
+  const control = controls(field)[0]
+  if (control) setRules(index, [...fieldConditions(field), newRule(control)])
+}
+
+function changeExpected(index: number, position: number, rule: FormCondition, value: string): void {
+  const control = controlFor(rule)
+  changeRule(index, position, { equals: control && booleanKinds.has(control.kind) ? value === 'true' : value })
 }
 
 function messages(field: FormField, index: number): string[] {
@@ -204,11 +226,30 @@ function mediaChange(index: number, field: FormField, type: string, enabled: boo
         <details class="question-rules">
           <summary>Conditions and limits</summary>
           <div class="rule-fields">
-            <label>Show this block<select class="input" :value="field.when?.field ?? ''" @change="selectCondition(index, value($event))"><option value="">Always</option><option v-for="control in controls(field)" :key="control.id" :value="control.id">Depending on “{{ control.label }}”</option></select></label>
-            <label v-if="field.when">Expected answer<select class="input" :value="String(field.when.equals)" @change="changeExpected(index, value($event))">
-              <template v-if="controlFor(field) && booleanKinds.has(controlFor(field)!.kind)"><option value="true">Yes / checked</option><option value="false">No / unchecked</option></template>
-              <option v-for="choice in controlFor(field)?.choices ?? []" v-else :key="choice.id" :value="choice.id">{{ choice.label }}</option>
-            </select></label>
+            <div class="section-stack">
+              <p v-if="!fieldConditions(field).length" class="muted">Always shown</p>
+              <label v-else>Show when<select class="input" :value="field.condition_match ?? 'all'" @change="update(index, { condition_match: value($event) === 'any' ? 'any' : 'all' })"><option value="all">All conditions match</option><option value="any">Any condition matches</option></select></label>
+              <div v-for="(rule, ruleIndex) in fieldConditions(field)" :key="ruleIndex" class="panel panel__body section-stack">
+                <div class="question-grid">
+                  <label>Question<select class="input" :value="rule.field" @change="changeControl(index, ruleIndex, value($event))">
+                    <option v-if="!controlFor(rule)" :value="rule.field" disabled>Choose a question</option>
+                    <option v-for="control in controls(field)" :key="control.id" :value="control.id">{{ control.label }}</option>
+                  </select></label>
+                  <label>Comparison<select class="input" :value="rule.operator ?? 'is'" @change="changeRule(index, ruleIndex, { operator: value($event) as NonNullable<FormCondition['operator']> })">
+                    <option v-if="controlFor(rule)?.kind === 'multiple_choice'" value="includes">Includes</option>
+                    <template v-else><option value="is">Is</option><option value="is_not">Is not</option></template>
+                  </select></label>
+                  <label>Answer<select class="input" :value="String(rule.equals)" @change="changeExpected(index, ruleIndex, rule, value($event))">
+                    <template v-if="controlFor(rule) && booleanKinds.has(controlFor(rule)!.kind)"><option value="true">Yes / checked</option><option value="false">No / unchecked</option></template>
+                    <option v-for="choice in controlFor(rule)?.choices ?? []" v-else :key="choice.id" :value="choice.id">{{ choice.label }}</option>
+                  </select></label>
+                </div>
+                <div class="button-row"><BaseButton size="small" variant="ghost" @click="setRules(index, fieldConditions(field).filter((_, position) => position !== ruleIndex))">Remove condition</BaseButton></div>
+              </div>
+              <div class="button-row">
+                <BaseButton size="small" :disabled="!controls(field).length || fieldConditions(field).length >= 8" @click="addRule(index, field)">Add condition</BaseButton>
+              </div>
+            </div>
             <div v-if="text.has(field.kind)" class="question-grid">
               <label>Minimum characters<input class="input" type="number" min="0" max="65536" :value="field.min_length ?? 0" @input="update(index, { min_length: number($event) })"></label>
               <label>Maximum characters<input class="input" type="number" min="1" max="65536" :value="field.max_length ?? 4096" @input="update(index, { max_length: number($event, 4096) })"></label>
@@ -228,7 +269,7 @@ function mediaChange(index: number, field: FormField, type: string, enabled: boo
               <label>Maximum upload size (MiB)<input class="input" type="number" min="0.1" max="1024" step="0.1" :value="(field.max_bytes ?? 10485760) / 1048576" @input="update(index, { max_bytes: Math.round(number($event, 10) * 1048576) })"></label>
               <strong>Allowed file types</strong>
               <label v-for="[type, label] in media" :key="type" class="check"><input type="checkbox" :checked="field.accepted_content_types?.includes(type)" @change="mediaChange(index, field, type, ($event.target as HTMLInputElement).checked)">{{ label }}</label>
-              <small>Leave all unchecked to use the default file policy. Guest uploads use the allowed image, PDF, and text formats.</small>
+              <small>Leave all unchecked to use the default file policy. Files are available to form staff and the linked respondent.</small>
             </template>
             <label v-if="field.kind === 'reference'">Internal object type<input class="input" :value="field.reference_type ?? ''" @input="update(index, { reference_type: value($event) })"></label>
           </div>

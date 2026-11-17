@@ -1,5 +1,6 @@
 import { api } from './client'
-import type { FormResponse, Page, PublicForm } from '@/types/forms'
+import { discordHeaders } from '@/stores/discord'
+import type { FormAnswers, FormResponse, Page, PublicForm, Respondent, ResponseVisibility } from '@/types/forms'
 
 export interface FormClaim { id: string; form_id: string; token: string; expires_at: string; submit_until?: string }
 export function claimHeaders(token = ''): HeadersInit | undefined { return token ? { Authorization: `Bearer ${token}` } : undefined }
@@ -16,16 +17,20 @@ export function rememberClaim(claim: FormClaim, responseId: string): void {
   catch { }
 }
 export async function publicForm(slug: string, signal?: AbortSignal): Promise<PublicForm> {
-  const result = await api.get<{ data: PublicForm }>(`/api/forms/${encodeURIComponent(slug)}`, { signal })
+  const result = await api.get<{ data: PublicForm }>(`/api/forms/${encodeURIComponent(slug)}`, { signal, headers: discordHeaders })
   return result.data
 }
-export async function formResponse(id: string, token = ''): Promise<FormResponse> {
-  const result = await api.get<{ data: FormResponse }>(`/api/forms/responses/${encodeURIComponent(id)}`, { headers: claimHeaders(token) })
+export async function formResponse(id: string, token = '', discord = false): Promise<FormResponse> {
+  const result = await api.get<{ data: FormResponse }>(`/api/forms/responses/${encodeURIComponent(id)}`, {
+    headers: token ? claimHeaders(token) : discord ? discordHeaders : undefined,
+  })
   return result.data
 }
 export type FormResponseRow = Pick<FormResponse, 'id' | 'form_id' | 'state' | 'revision' | 'created_at'> & {
   form_title: string
   release_number: number
+  respondent?: Respondent | null
+  anonymous?: boolean
 }
 
 export interface ResponseCollection {
@@ -42,4 +47,32 @@ export async function formResponses(formId: string, cursor?: string | null): Pro
 export async function responseCollections(cursor?: string | null): Promise<Page<ResponseCollection>> {
   const result = await api.get<{ data: Page<ResponseCollection> }>('/api/forms/responses/collections', { query: { cursor, limit: 30 } })
   return result.data
+}
+
+export interface ListedForm {
+  slug: string
+  title: string
+  description: string
+  closed: boolean
+  response_visibility: ResponseVisibility
+}
+
+export type PublicResults =
+  | { published: false; mode: 'summary' | 'individual' }
+  | { published: true; mode: 'summary'; total: number; fields: { id: string; label: string; answered: number; average: string | null; options: { label: string; count: number }[] }[] }
+  | { published: true; mode: 'individual'; items: { id: string; answers: FormAnswers }[]; next_cursor: string | null }
+
+export function formDirectory(offset = 0) {
+  return api.get<{ items: ListedForm[]; more: boolean }>('/api/forms/directory/list', { query: { offset } })
+}
+
+export function formResults(slug: string, cursor?: string | null, signal?: AbortSignal) {
+  return api.get<PublicResults>(`/api/forms/${encodeURIComponent(slug)}/results`, { query: { cursor }, signal })
+}
+
+export function submitForm(slug: string, releaseId: string, answers: FormAnswers, attachmentSubject: string) {
+  return api.post<{ submitted: boolean; already_submitted: boolean; response_id: string | null }>(
+    `/api/forms/${encodeURIComponent(slug)}/submit`,
+    { headers: discordHeaders, body: { release_id: releaseId, answers, attachment_subject: attachmentSubject } },
+  )
 }

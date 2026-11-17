@@ -17,7 +17,7 @@ export function requiredProgress(fields: FormField[], answers: FormAnswers) {
   let total = 0
   function visit(blocks: FormField[], values: FormAnswers, path: string[]): void {
     for (const field of blocks) {
-      if (contentKinds.has(field.kind) || !fieldActive(field, values)) continue
+      if (contentKinds.has(field.kind) || !fieldActive(field, values, blocks)) continue
       const value = values[field.id]
       const position = [...path, field.id]
       if (field.required) {

@@ -1993,12 +1993,19 @@ def register_api_routes(app: FastAPI) -> None:
         form = await read_form(request)
 
         def create_message():
+            from cope.adapters.http.forms import require_origin
+            from cope.discord_bot.accounts import request_account
+
+            profile = request_account(request, connection)
+            if profile:
+                require_origin(request)
             web_app._require_public_chat_tournament(connection, tournament_id)
             return web_app._create_chat_message_from_form(
                 connection,
                 form,
                 tournament_id=tournament_id,
                 sender_ip_hash=web_app._chat_address_hash(request),
+                discord_account=profile,
             )
 
         message = await asyncio.to_thread(create_message)

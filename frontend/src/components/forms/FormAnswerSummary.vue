@@ -1,17 +1,34 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import ChessBoard from '@/components/chess/ChessBoard.vue'
+import { engineResource } from '@/api/form-resources'
 import BaseButton from '@/components/ui/BaseButton.vue'
-import { contentKinds, fieldActive, type FormAnswers, type FormField } from '@/types/forms'
+import { contentKinds, fieldActive, type ChessPositionAnswer, type FormAnswers, type FormField } from '@/types/forms'
 
 const props = defineProps<{
   fields: FormField[]
   answers: FormAnswers
-  download: (id: string) => Promise<void>
+  download?: ((id: string) => Promise<void>) | undefined
 }>()
 
-const visible = computed(() => props.fields.filter(field => !contentKinds.has(field.kind) && fieldActive(field, props.answers)))
+const visible = computed(() => props.fields.filter(field => !contentKinds.has(field.kind) && fieldActive(field, props.answers, props.fields)))
 const downloadError = ref('')
 const downloading = ref<string | null>(null)
+const engineTitles = ref<Record<string, string>>({})
+
+watch([visible, () => props.answers], ([fields, answers], _, cleanup) => {
+  const controller = new AbortController()
+  cleanup(() => controller.abort())
+  for (const field of fields) {
+    const id = answers[field.id]
+    if (field.kind !== 'engine' || typeof id !== 'string' || !/^[1-9][0-9]{0,14}$/.test(id)) continue
+    void engineResource(id, controller.signal).then(item => { engineTitles.value[id] = item.title }).catch(() => {})
+  }
+}, { immediate: true })
+
+function position(value: unknown): ChessPositionAnswer | undefined {
+  if (value && typeof value === 'object' && 'fen' in value && typeof value.fen === 'string') return value as ChessPositionAnswer
+}
 
 function groups(value: unknown): FormAnswers[] {
   return Array.isArray(value)
@@ -44,6 +61,9 @@ function resource(field: FormField, value: unknown): { label: string; url: strin
     const [tournament, game] = value.split('/')
     return { label: `Game #${game}`, url: `/tournaments/${tournament}?game_id=${game}` }
   }
+  if (field.kind === 'engine' && /^[1-9]\d*$/.test(value)) {
+    return { label: engineTitles.value[value] ?? `Engine #${value}`, url: `/engines/${value}` }
+  }
   if (field.kind === 'rating_list' && /^[1-9]\d*$/.test(value)) {
     return { label: `Rating list #${value}`, url: `/ratings?rating_list_id=${value}` }
   }
@@ -52,7 +72,7 @@ function resource(field: FormField, value: unknown): { label: string; url: strin
 async function openFile(id: string): Promise<void> {
   downloading.value = id
   downloadError.value = ''
-  try { await props.download(id) }
+  try { await props.download?.(id) }
   catch (cause) { downloadError.value = cause instanceof Error ? cause.message : 'Could not download the attachment.' }
   finally { downloading.value = null }
 }
@@ -68,7 +88,12 @@ async function openFile(id: string): Promise<void> {
           <FormAnswerSummary :fields="field.fields ?? []" :answers="row" :download="download" />
         </section>
       </dd>
-      <dd v-else-if="field.kind === 'attachment' && typeof answers[field.id] === 'string'">
+      <dd v-else-if="field.kind === 'chess_position' && position(answers[field.id])" class="section-stack">
+        <div class="answer-position"><ChessBoard :fen="position(answers[field.id])!.fen" :controls="false" compact label="Submitted chess position" /></div>
+        <code>{{ position(answers[field.id])!.fen }}</code>
+        <details v-if="position(answers[field.id])?.pgn"><summary>PGN</summary><pre class="form-command">{{ position(answers[field.id])!.pgn }}</pre></details>
+      </dd>
+      <dd v-else-if="download && field.kind === 'attachment' && typeof answers[field.id] === 'string'">
         <BaseButton size="small" :loading="downloading === answers[field.id]" :disabled="downloading !== null" @click="openFile(String(answers[field.id]))">Download attachment</BaseButton>
       </dd>
       <dd v-else-if="resource(field, answers[field.id])">
@@ -87,6 +112,7 @@ async function openFile(id: string): Promise<void> {
 </template>
 
 <style scoped>
+.answer-position { max-width: 20rem; }
 .answer-summary { margin: 0; }
 .answer-summary-row { padding: .85rem 0; display: grid; gap: .35rem; }
 .answer-summary-row + .answer-summary-row { border-top: 1px solid var(--color-border); }
