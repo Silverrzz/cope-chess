@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { SemaphoreProof } from '@semaphore-protocol/proof'
 import api from '@/api/client'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
@@ -13,7 +13,15 @@ const props = defineProps<{ ballot: BallotPackage }>()
 const emit = defineEmits<{ published: [] }>()
 const discord = useDiscordSession()
 const active = ref(false)
-const busy = ref(false)
+const checkingDiscord = ref(false)
+const checkedDiscord = ref(false)
+const preparing = ref(false)
+const publishing = ref(false)
+const busy = computed(() => checkingDiscord.value || preparing.value || publishing.value)
+const eligibleCredential = computed(() => {
+  const credential = unlockedCredential.value
+  return credential && props.ballot.roster.members.includes(credential.commitment) ? credential : null
+})
 const published = ref(false)
 const error = ref('')
 const preview = ref<{ commitment: string; proof: SemaphoreProof; username: string; option: string }>()
@@ -21,15 +29,18 @@ const path = '/api/quorum/ballots/' + props.ballot.manifest.id + '/disclosure'
 const returnTo = '/quorum/ballots/' + props.ballot.manifest.id + '?publish-vote=1'
 
 async function begin() {
+  if (busy.value) return
   active.value = true
   error.value = ''
-  busy.value = true
+  checkingDiscord.value = true
+  checkedDiscord.value = false
   try {
     await discord.load()
+    checkedDiscord.value = true
   } catch (cause) {
     error.value = (cause as Error).message
   } finally {
-    busy.value = false
+    checkingDiscord.value = false
   }
 }
 
@@ -37,28 +48,34 @@ onMounted(() => {
   if (new URLSearchParams(location.search).get('publish-vote') === '1') void begin()
 })
 
-async function previewVote() {
-  const credential = unlockedCredential.value
-  if (!credential || busy.value) return
-  busy.value = true
+watch([active, checkedDiscord, () => discord.account, eligibleCredential], async ([show, checked, account, credential], _, onCleanup) => {
+  preview.value = undefined
+  preparing.value = false
+  if (!show || !checked || !account || !credential || published.value) return
+
+  let current = true
+  onCleanup(() => { current = false })
+  preparing.value = true
   error.value = ''
   try {
     const challenge = await api.get<{ message: string; username: string }>(path, { headers: discordHeaders })
+    if (!current) return
     const proof = await generateQuorumProof(credential, [credential.commitment], challenge.message, await ballotScope(props.ballot.manifest))
+    if (!current) return
     const recorded = props.ballot.votes.find(vote => vote.nullifier === proof.nullifier)
     const option = recorded && props.ballot.result?.options[Number(recorded.message)]
     if (!option) throw new Error('This credential has no recorded vote on this ballot.')
     preview.value = { commitment: credential.commitment, proof, username: challenge.username, option }
   } catch (cause) {
-    error.value = (cause as Error).message
+    if (current) error.value = (cause as Error).message
   } finally {
-    busy.value = false
+    if (current) preparing.value = false
   }
-}
+})
 
 async function publishVote() {
   if (!preview.value || busy.value) return
-  busy.value = true
+  publishing.value = true
   error.value = ''
   try {
     const { commitment, proof } = preview.value
@@ -68,9 +85,8 @@ async function publishVote() {
     emit('published')
   } catch (cause) {
     error.value = (cause as Error).message
-    preview.value = undefined
   } finally {
-    busy.value = false
+    publishing.value = false
   }
 }
 
@@ -88,21 +104,21 @@ function cancel() {
       <BaseButton size="small" @click="begin">Publish my vote</BaseButton>
     </div>
     <template v-else>
-      <template v-if="preview">
+      <p v-if="checkingDiscord || preparing" class="muted" role="status">Preparing confirmation…</p>
+      <template v-else-if="preview">
         <p>Anyone will be able to see that <strong>@{{ preview.username }}</strong> voted <strong>{{ preview.option }}</strong>. Publishing is permanent.</p>
         <div class="button-row">
-          <BaseButton variant="danger" :loading="busy" @click="publishVote">Confirm public vote</BaseButton>
+          <BaseButton variant="danger" :loading="publishing" @click="publishVote">Confirm public vote</BaseButton>
           <BaseButton variant="ghost" :disabled="busy" @click="cancel">Cancel</BaseButton>
         </div>
       </template>
       <template v-else>
-        <div v-if="!discord.account" class="button-row">
-          <BaseButton v-if="discord.enabled" :href="discordLogin(returnTo)">Connect Discord</BaseButton>
-          <BaseButton v-else-if="error" @click="begin">Try again</BaseButton>
+        <div v-if="error" class="button-row"><BaseButton size="small" @click="begin">Try again</BaseButton></div>
+        <div v-else-if="checkedDiscord && !discord.account && discord.enabled" class="button-row">
+          <BaseButton :href="discordLogin(returnTo)">Connect Discord</BaseButton>
         </div>
-        <QuorumCredential v-else-if="!unlockedCredential || !ballot.roster.members.includes(unlockedCredential.commitment)"
-          :members="ballot.roster.members" />
-        <div v-else class="button-row"><BaseButton :loading="busy" @click="previewVote">Preview public vote</BaseButton></div>
+        <p v-else-if="checkedDiscord && !discord.account" class="muted">Discord sign-in is unavailable.</p>
+        <QuorumCredential v-else-if="!eligibleCredential" :members="ballot.roster.members" />
         <div class="button-row"><BaseButton size="small" variant="ghost" :disabled="busy" @click="cancel">Cancel</BaseButton></div>
       </template>
       <InlineFeedback :message="error" />
