@@ -5,6 +5,18 @@ import type { SemaphoreProof } from '@semaphore-protocol/proof'
 export const credentialStorage = 'cope-quorum-credential-v1'
 export type Credential = { secret: string; commitment: string }
 
+export function quorumReceiptKey(ballotId: string) {
+  return 'cope-quorum-receipt:' + ballotId
+}
+
+export function readQuorumReceipt(ballotId: string) {
+  try {
+    return localStorage.getItem(quorumReceiptKey(ballotId)) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 const sessionKey = 'cope-quorum-unlocked-v1'
 
 function restoreSession(): Credential | null {

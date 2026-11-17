@@ -3,9 +3,11 @@ import { ref } from 'vue'
 import api from '@/api/client'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import QuorumTally from '@/components/public/QuorumTally.vue'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import { fingerprint, verifyEvidence, type BallotPackage, type VoteEvidence } from '@/quorum'
-import { resultLabels } from '@/quorum-results'
+import { resultLabels, resultTones } from '@/quorum-results'
 
 const file = ref<File>()
 const result = ref<Awaited<ReturnType<typeof verifyEvidence>>>()
@@ -70,37 +72,51 @@ async function verify() {
 
 <template>
   <div class="page-container page-container--narrow page-stack">
-    <PageHeader title="Verify Quorum evidence">
-      <template #actions><BaseButton :to="{ name: 'quorum' }" size="small" variant="ghost">All votes</BaseButton></template>
-    </PageHeader>
-    <form class="panel panel__body section-stack" @submit.prevent="verify">
-      <label class="field">
-        <span>Ballot evidence or vote proof</span>
-        <input type="file" accept=".json,application/json" :disabled="busy" required @change="selectFile">
-        <small class="muted">Verification runs in this browser. The file stays on your device.</small>
-      </label>
-      <div class="button-row">
-        <BaseButton type="submit" variant="primary" :disabled="!file" :loading="busy">Verify file</BaseButton>
+    <article class="panel evidence-sheet">
+      <div class="evidence-sheet__section section-stack">
+        <PageHeader title="Verify Quorum evidence">
+          <template #actions><BaseButton :to="{ name: 'quorum' }" size="small" variant="ghost">All votes</BaseButton></template>
+        </PageHeader>
+        <form class="section-stack" @submit.prevent="verify">
+          <label class="field">
+            <span>Ballot evidence or vote proof</span>
+            <input type="file" accept=".json,application/json" :disabled="busy" required @change="selectFile">
+            <small class="muted">Verification runs in this browser. The file stays on your device.</small>
+          </label>
+          <div class="button-row">
+            <BaseButton type="submit" variant="primary" :disabled="!file" :loading="busy">Verify file</BaseButton>
+          </div>
+          <InlineFeedback :message="error" />
+        </form>
       </div>
-      <InlineFeedback :message="error" />
-    </form>
-    <section v-if="result" class="panel panel__body section-stack" aria-live="polite">
-      <h2>{{ result.title }}</h2>
-      <template v-if="result.kind === 'ballot'">
-        <InlineFeedback tone="info" message="The vote proofs match the tally in this file." />
-        <p>{{ resultLabels[result.result.outcome] }} · {{ result.result.total }} of {{ result.result.electorate }} voted</p>
-        <ul>
-          <li v-for="(option, index) in result.result.options" :key="option">{{ option }} <strong>{{ result.result.counts[index] }}</strong></li>
-        </ul>
-      </template>
-      <template v-else>
-        <InlineFeedback tone="info" message="Valid vote proof for the ballot in this file." />
-        <p>Choice · <strong>{{ result.option }}</strong></p>
-      </template>
-      <p>{{ recordCheck }}</p>
-      <div v-if="ballotId" class="button-row">
-        <BaseButton :to="{ name: 'quorum-ballot', params: { id: ballotId } }" size="small">View ballot</BaseButton>
-      </div>
-    </section>
+      <section v-if="result" class="evidence-sheet__section section-stack" aria-live="polite">
+        <div class="toolbar toolbar--between">
+          <h2>{{ result.title }}</h2>
+          <StatusBadge v-if="result.kind === 'ballot'" :tone="resultTones[result.result.outcome]">
+            {{ resultLabels[result.result.outcome] }}
+          </StatusBadge>
+        </div>
+        <template v-if="result.kind === 'ballot'">
+          <InlineFeedback tone="info" message="The vote proofs match the tally in this file." />
+          <QuorumTally :result="result.result" />
+          <p class="muted">{{ result.result.total }} of {{ result.result.electorate }} eligible voters participated.</p>
+        </template>
+        <template v-else>
+          <InlineFeedback tone="info" message="Valid vote proof for the ballot in this file." />
+          <p>Choice · <strong>{{ result.option }}</strong></p>
+        </template>
+        <p>{{ recordCheck }}</p>
+        <div v-if="ballotId" class="button-row">
+          <BaseButton :to="{ name: 'quorum-ballot', params: { id: ballotId } }" size="small">View ballot</BaseButton>
+        </div>
+      </section>
+    </article>
   </div>
 </template>
+
+<style scoped>
+.evidence-sheet__section { padding: clamp(var(--space-4), 3vw, var(--space-8)); }
+.evidence-sheet__section + .evidence-sheet__section { border-top: 1px solid var(--color-border); }
+.evidence-sheet h2, .evidence-sheet p { margin: 0; overflow-wrap: anywhere; }
+.evidence-sheet h2 { font-size: 1.1875rem; }
+</style>

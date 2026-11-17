@@ -4,13 +4,14 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '@/api/client'
 import ContentState from '@/components/public/ContentState.vue'
 import QuorumCredential from '@/components/public/QuorumCredential.vue'
+import QuorumTally from '@/components/public/QuorumTally.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import type { FeedbackTone } from '@/types/ui'
 import type { BallotResult } from '@/quorum'
-import { resultLabels, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
+import { resultLabels, resultTones, type WitnessStatus } from '@/quorum-results'
+import { readQuorumReceipt } from '@/quorum-voter'
 
 interface BallotSummary {
   id: string
@@ -25,6 +26,7 @@ interface BallotSummary {
 const route = useRoute()
 const router = useRouter()
 const ballots = ref<BallotSummary[]>([])
+const submittedBallots = ref(new Set<string>())
 const enrollmentAvailable = ref(false)
 const loading = ref(true)
 const error = ref('')
@@ -35,20 +37,12 @@ const sections = computed(() => [
   { id: 'completed', title: 'Completed votes', ballots: ballots.value.filter(ballot => ballot.status === 'completed'), empty: 'No completed votes yet.' },
 ])
 const dates = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-const resultTones: Record<BallotResult['outcome'], FeedbackTone> = {
-  passed: 'success',
-  rejected: 'danger',
-  quorum_not_met: 'warning',
-  report_only: 'info',
-}
-const motionColors = ['success', 'danger', 'text-muted']
-const pollColors = ['accent', 'success', 'warning', 'danger', 'text-muted']
 
-function voteColor(result: BallotResult, index: number) {
-  const colors = result.outcome === 'report_only' ? pollColors : motionColors
-  return 'var(--color-' + colors[index % colors.length] + ')'
+function ballotAction(ballot: BallotSummary) {
+  if (ballot.status === 'completed') return 'View results'
+  if (ballot.status === 'open' && !submittedBallots.value.has(ballot.id)) return 'Vote'
+  return 'View ballot'
 }
-
 
 function openCredential() {
   if (!dialog.value || dialog.value.open) return
@@ -61,6 +55,9 @@ async function load() {
   error.value = ''
   try {
     const directory = await api.get<{ ballots: BallotSummary[]; eligibility_check_available: boolean }>('/api/quorum')
+    submittedBallots.value = new Set(directory.ballots
+      .filter(ballot => ballot.status === 'open' && readQuorumReceipt(ballot.id))
+      .map(ballot => ballot.id))
     ballots.value = directory.ballots
     enrollmentAvailable.value = directory.eligibility_check_available
     if (enrollmentAvailable.value && route.query.credential === '1') {
@@ -98,46 +95,29 @@ onMounted(load)
               <StatusBadge v-if="ballot.result" :tone="resultTones[ballot.result.outcome]">
                 {{ resultLabels[ballot.result.outcome] }}
               </StatusBadge>
+              <StatusBadge v-else-if="submittedBallots.has(ballot.id)" tone="info">Voted</StatusBadge>
               <StatusBadge v-else :tone="ballot.status === 'open' ? 'success' : 'neutral'" :dot="ballot.status === 'open'">
                 {{ ballot.status === 'open' ? 'Open' : ballot.status === 'scheduled' ? 'Scheduled' : 'Completed' }}
               </StatusBadge>
             </header>
-            <div v-if="ballot.result" class="ballot-result">
-              <div class="ballot-result__bar" aria-hidden="true">
-                <span v-for="(count, index) in ballot.result.counts" v-show="count > 0" :key="index"
-                  :style="{ flexGrow: count, backgroundColor: voteColor(ballot.result, index) }" />
-              </div>
-              <dl class="ballot-result__counts">
-                <div v-for="(option, index) in ballot.result.options" :key="index" :style="{ '--vote-color': voteColor(ballot.result, index) }">
-                  <dt>{{ option }}</dt>
-                  <dd>{{ ballot.result.counts[index] }}</dd>
-                </div>
-              </dl>
-            </div>
-            <div v-if="ballot.witnesses?.length" class="ballot-card__witnesses">
-              <div class="toolbar toolbar--between">
-                <strong>Witnesses</strong>
-                <StatusBadge v-if="ballot.witnesses.every(witness => witness.signed_at)" tone="success">Certified</StatusBadge>
-              </div>
-              <ul>
-                <li v-for="witness in ballot.witnesses" :key="witness.public_key">
-                  <a v-if="witness.signed_at" :href="witnessReportUrl(ballot.id, witness)" target="_blank" rel="noopener noreferrer">{{ witness.name }} · Verified</a>
-                  <span v-else class="muted">{{ witness.name }} · {{ ballot.result ? 'Awaiting signature' : 'Assigned' }}</span>
-                </li>
-              </ul>
-            </div>
+            <QuorumTally v-if="ballot.result" :result="ballot.result" />
             <footer class="ballot-card__footer">
               <div class="ballot-card__meta muted">
                 <time :datetime="ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at">
                   {{ ballot.status === 'scheduled' ? 'Opens' : ballot.status === 'open' ? 'Closes' : 'Closed' }}
                   {{ dates.format(new Date(ballot.status === 'scheduled' ? ballot.opens_at : ballot.closes_at)) }}
                 </time>
-                <span v-if="ballot.result">{{ ballot.result.total }} of {{ ballot.result.electorate }} voted</span>
+                <div v-if="ballot.result" class="ballot-card__turnout">
+                  <span>{{ ballot.result.total }} of {{ ballot.result.electorate }} voted</span>
+                  <StatusBadge v-if="ballot.witnesses?.length && ballot.witnesses.every(witness => witness.signed_at)" tone="success">
+                    Certified
+                  </StatusBadge>
+                </div>
               </div>
-              <BaseButton size="small" :variant="ballot.status === 'open' ? 'primary' : 'secondary'"
+              <BaseButton size="small" :variant="ballotAction(ballot) === 'Vote' ? 'primary' : 'secondary'"
                 :to="{ name: 'quorum-ballot', params: { id: ballot.id } }"
-                :aria-label="(ballot.status === 'open' ? 'Vote on ' : ballot.status === 'completed' ? 'View results for ' : 'View ') + ballot.title">
-                {{ ballot.status === 'open' ? 'Vote' : ballot.status === 'completed' ? 'View results' : 'View ballot' }}
+                :aria-label="ballotAction(ballot) + ' · ' + ballot.title">
+                {{ ballotAction(ballot) }}
                 <template #trailing><AppIcon name="arrow-right" :size="16" /></template>
               </BaseButton>
             </footer>
@@ -171,51 +151,14 @@ onMounted(load)
 
 .ballot-grid { margin: 0; padding: 0; list-style: none; }
 .ballot-card { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
-.ballot-card__header,
+.ballot-card__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.ballot-card__header > :last-child { flex-shrink: 0; }
 .ballot-card__footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
 .ballot-card h3 { margin: 0; min-width: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
 .ballot-card__footer { margin-top: auto; }
 .ballot-card__meta { display: grid; gap: var(--space-1); font-size: .875rem; }
 
-.ballot-result { display: grid; gap: var(--space-3); }
-.ballot-result__bar {
-  display: flex;
-  overflow: hidden;
-  height: .5rem;
-  border-radius: var(--radius-round);
-  background: var(--color-surface-sunken);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-}
-.ballot-result__bar span { flex-basis: 0; }
-.ballot-result__counts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
-  gap: var(--space-2);
-  margin: 0;
-}
-.ballot-result__counts > div {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-sunken);
-}
-.ballot-result__counts dt { font-size: .875rem; overflow-wrap: anywhere; }
-.ballot-result__counts dt::before {
-  display: inline-block;
-  width: .5rem;
-  height: .5rem;
-  margin-inline-end: var(--space-2);
-  border-radius: var(--radius-round);
-  background: var(--vote-color);
-  content: '';
-}
-.ballot-result__counts dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
-
-.ballot-card__witnesses { display: grid; gap: var(--space-2); font-size: .8125rem; }
-.ballot-card__witnesses ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); }
+.ballot-card__turnout { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 
 .credential-dialog {
   width: min(28rem, calc(100vw - 2rem));
