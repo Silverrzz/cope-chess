@@ -88,6 +88,10 @@ def install_mcp(app):
         result = await asyncio.to_thread(application_invoke,ctx,execute_batch,request,coherent=True)
         return ViewBatch.model_validate(result)
 
+    from .forms_mcp import install_forms_tools
+
+    install_forms_tools(server, application_invoke)
+
     def invoke(ctx, handler, *args, **kwargs):
         request = ctx.request_context.request
         identity = request.scope["cope.control.principal"]

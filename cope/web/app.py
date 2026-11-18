@@ -1201,16 +1201,16 @@ def create_app(
 
     register_api_routes(app)
     register_discord_settings(app, _admin_session_role)
-    from cope.control.api import register_control_routes
-    from cope.control.mcp import install_mcp
-
-    register_control_routes(app)
     from cope.adapters.http.forms import register_form_routes
 
     register_form_routes(app)
     from cope.adapters.http.quorum import register_quorum_routes
 
     register_quorum_routes(app)
+    from cope.control.api import register_control_routes
+    from cope.control.mcp import install_mcp
+
+    register_control_routes(app)
     from cope.web.discord_oauth import register_discord_oauth
 
     register_discord_oauth(app)
