@@ -77,10 +77,14 @@ static int run_bench(const char *native) {
         elapsed += (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     }
     if (ok) ok = send_command(input, "quit");
-    fclose(input); fclose(output);
-    int status;
-    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) || !ok || elapsed <= 0) {
-        fputs("UCI benchmark did not finish with node counts for all positions\n", stderr);
+    fclose(input);
+    char remaining[1024];
+    while (fgets(remaining, sizeof(remaining), output)) fputs(remaining, stderr);
+    fclose(output);
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) return 1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || !ok || elapsed <= 0) {
+        fprintf(stderr, "Vice benchmark failed: wait status %d, completed %d, seconds %.2f\n", status, ok, elapsed);
         return 1;
     }
     printf("NPS: %" PRIu64 "\n", (uint64_t)(total_nodes / elapsed));
@@ -103,6 +107,7 @@ int main(int argc, char **argv) {
 COPE_BENCH
 RUN mkdir -p /opt/cope \
     && sed -i 's/EngineOptions->UseBook = TRUE;/EngineOptions->UseBook = FALSE;/' Vice11/src/uci.c \
+    && sed -i 's/InitHashTable(HashTable, 256);/InitHashTable(HashTable, 16);/' Vice11/src/vice.c \
     && gcc -std=gnu11 -O3 -DNDEBUG -march=x86-64-v3 -pthread -static Vice11/src/*.c -o /opt/cope/engine-native \
     && install -Dm644 LICENSE /opt/cope/LICENSE \
     && gcc -std=c11 -O2 -static /tmp/cope-bench.c -o /opt/cope/engine \
