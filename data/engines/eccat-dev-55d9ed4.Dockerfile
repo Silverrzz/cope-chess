@@ -101,8 +101,8 @@ int main(int argc, char **argv) {
 }
 COPE_BENCH
 RUN mkdir -p /opt/cope \
-    && VERGEN_IDEMPOTENT=1 RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+bmi2,+crt-static" \
-    cargo build --locked --profile full --target x86_64-unknown-linux-gnu --features pext \
+    && VERGEN_IDEMPOTENT=1 RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static" \
+       cargo build --locked --profile full --target x86_64-unknown-linux-gnu \
     && install -Dm755 target/x86_64-unknown-linux-gnu/full/eccat /opt/cope/engine-native \
     && install -Dm644 LICENSE /opt/cope/LICENSE \
     && gcc -std=c11 -O2 -static /tmp/cope-bench.c -o /opt/cope/engine \
