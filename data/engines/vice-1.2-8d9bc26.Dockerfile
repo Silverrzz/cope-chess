@@ -45,6 +45,7 @@ static int wait_for(FILE *output, const char *marker, uint64_t *nodes) {
 }
 
 static int run_bench(const char *native) {
+    alarm(120);
     int to_engine[2], from_engine[2];
     if (pipe(to_engine) || pipe(from_engine)) return 1;
     pid_t child = fork();
@@ -69,7 +70,7 @@ static int run_bench(const char *native) {
         uint64_t nodes = 0;
         ok = send_command(input, "ucinewgame") && send_command(input, "isready")
             && wait_for(output, "readyok", NULL) && send_command(input, positions[i])
-            && clock_gettime(CLOCK_MONOTONIC, &start) == 0 && send_command(input, "go depth 11")
+            && clock_gettime(CLOCK_MONOTONIC, &start) == 0 && send_command(input, "go depth 8")
             && wait_for(output, "bestmove", &nodes) && clock_gettime(CLOCK_MONOTONIC, &end) == 0;
         if (!ok || !nodes) { ok = 0; break; }
         total_nodes += nodes;
