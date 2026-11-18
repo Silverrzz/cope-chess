@@ -12,10 +12,10 @@ WORKDIR /app/bootstrap
 RUN mkdir -p src/styles quorum-web
 COPY --chmod=644 frontend/quorum-runtime/package.json frontend/quorum-runtime/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
-COPY --chmod=644 frontend/quorum-node.mjs frontend/quorum-web.mjs frontend/quorum-audit.mjs ./
+COPY --chmod=644 frontend/quorum-node.mjs frontend/quorum-web.mjs frontend/quorum-audit.mjs frontend/quorum-policy.mjs ./
 COPY --chmod=644 frontend/quorum-supervisor.py frontend/quorum_updates.py ./
 COPY --chmod=644 frontend/quorum-web/index.html frontend/quorum-web/app.js frontend/quorum-web/style.css ./quorum-web/
-COPY --chmod=644 frontend/src/quorum.ts ./src/quorum.ts
+COPY --chmod=644 frontend/src/quorum.ts frontend/src/quorum-history.ts ./src/
 COPY --chmod=644 frontend/src/styles/tokens.css ./src/styles/tokens.css
 RUN node --input-type=module -e '\
     import {writeFileSync} from "node:fs"; \

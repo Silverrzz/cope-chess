@@ -141,7 +141,7 @@ def admin_status(connection):
     }
 
 
-def publish(connection, draft_id, revision):
+def publish(connection, draft_id, revision, origin):
     connection.execute(STATE_LOCK)
     setup = read_setup(connection)
     if setup.revision != revision:
@@ -161,6 +161,11 @@ def publish(connection, draft_id, revision):
         fail("quorum_past_deadline", "Choose a closing date in the future.")
     manifest = {**draft.model_dump(mode="json"), "roster": digest(roster)}
     witnesses = [witness.model_dump(exclude={"enabled"}) for witness in setup.witnesses if witness.enabled]
+    from cope.domains.quorum_history import publication_policy
+
+    history = publication_policy(connection, witnesses, origin)
+    if history:
+        manifest["vote_history"] = history
     if witnesses:
         manifest["witnesses"] = witnesses
     row = connection.execute(
@@ -204,7 +209,7 @@ def build_evidence(connection, row, now):
     live_tally = None
     if not closed and now >= row["opens_at"]:
         live_tally = current_tally(connection, row["id"], ballot_options(manifest), electorate)
-        closed = live_tally["total"] == electorate
+        closed = not manifest.get("vote_history") and live_tally["total"] == electorate
     votes = proof_rows(connection, row["id"]) if closed else []
     evidence = {
         "version": "cope-quorum-evidence/1",
@@ -308,6 +313,8 @@ def cast_vote(connection, ballot_id, proof):
     if accepted:
         if accepted["proof"]["message"] != proof.message:
             fail("quorum_already_voted", "This credential already cast a different choice.")
+        if manifest.get("vote_history") and accepted["proof"] != proof.model_dump():
+            fail("quorum_already_voted", "This credential already submitted a vote. Use the original submission to check its receipt.")
         return {"position": accepted["position"], "nullifier": proof.nullifier}
     if datetime.now(UTC) >= row["closes_at"]:
         fail("quorum_voting_closed", "This ballot has closed.")

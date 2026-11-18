@@ -107,7 +107,7 @@ onBeforeUnmount(() => clearInterval(timer))
       <h2>Verifiers</h2>
       <div class="button-row">
         <BaseButton size="small" variant="ghost" :disabled="busy" @click="load">Refresh</BaseButton>
-        <BaseButton size="small" :disabled="disabled || busy || !directory || directory.witnesses.length >= 12" @click="openEditor()">Register verifier</BaseButton>
+        <BaseButton size="small" :disabled="disabled || busy || !directory || directory.witnesses.length >= 64" @click="openEditor()">Register verifier</BaseButton>
       </div>
     </div>
     <InlineFeedback :message="error" />

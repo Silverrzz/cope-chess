@@ -20,6 +20,7 @@ interface BallotSummary {
   closes_at: string
   status: 'scheduled' | 'open' | 'completed'
   rule: Manifest['rule']
+  vote_history?: Manifest['vote_history']
   result: BallotResult | null
   live_tally: VoteTally | null
   witnesses: WitnessStatus[]
@@ -102,10 +103,11 @@ onBeforeUnmount(() => {
           <li v-for="ballot in section.ballots" :key="ballot.id" class="panel panel__body ballot-card">
             <header class="ballot-card__header">
               <h3>{{ ballot.title }}</h3>
-              <StatusBadge v-if="ballot.result" :tone="resultTones[ballot.result.outcome]">
+              <StatusBadge v-if="ballot.result && ballot.vote_history" tone="neutral">Check witnessed result</StatusBadge>
+              <StatusBadge v-else-if="ballot.result" :tone="resultTones[ballot.result.outcome]">
                 {{ resultLabels[ballot.result.outcome] }}
               </StatusBadge>
-              <StatusBadge v-else-if="submittedBallots.has(ballot.id)" tone="info">Voted</StatusBadge>
+              <StatusBadge v-else-if="submittedBallots.has(ballot.id)" tone="info">Submitted</StatusBadge>
               <StatusBadge v-else :tone="ballot.status === 'open' ? 'success' : 'neutral'" :dot="ballot.status === 'open'">
                 {{ ballot.status === 'open' ? 'Open' : ballot.status === 'scheduled' ? 'Scheduled' : 'Completed' }}
               </StatusBadge>

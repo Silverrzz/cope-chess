@@ -1,11 +1,13 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createWeb, send } from './quorum-web.mjs'
 import { fingerprint, verifyBallot } from './src/quorum.ts'
+import { checkHistoryPacket, checkOpenQuorum, checkpointStatement, extendsHistory, historyDigest,
+  matchesWitnessPolicy, verifyHistoryResult, verifyPolicyChain } from './src/quorum-history.ts'
 
 const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
 if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
@@ -37,14 +39,108 @@ console.log('Witness public key: ' + publicKey)
 let lastScan = null
 let scanErrors = 0
 const witnessPolicyFile = process.env.COPE_VERIFIER_WITNESS_POLICY
-const witnessPolicy = witnessPolicyFile ? JSON.parse(await readFile(witnessPolicyFile, 'utf8')) : null
-const witnessOperators = witnessPolicy && Object.entries(witnessPolicy.operators ?? {})
-if (witnessPolicyFile && (!witnessPolicy || witnessPolicy.threshold !== 3 || Array.isArray(witnessPolicy.operators)
-  || witnessOperators.length !== 4
-  || new Set(witnessOperators.map(([, key]) => key)).size !== 4
-  || !witnessOperators.every(([id, key]) => /^[a-z0-9][a-z0-9-]{0,31}$/.test(id)
-    && typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)))) {
-  throw new Error('The local witness policy must pin four distinct keys with a threshold of three.')
+const policyFile = join(archive, 'witness-policy-head')
+const pinnedHead = await readFile(policyFile, 'utf8').catch(error => {
+  if (error.code === 'ENOENT') return null
+  throw error
+})
+const policyChain = witnessPolicyFile
+  ? await verifyPolicyChain(JSON.parse(await readFile(witnessPolicyFile, 'utf8')), origin.origin) : null
+if (pinnedHead && !policyChain?.heads.includes(pinnedHead)) {
+  throw new Error('The configured witness policy does not extend the verifier’s pinned policy.')
+}
+const witnessPolicy = policyChain?.current ?? null
+const witnessOperators = witnessPolicy && Object.entries(witnessPolicy.operators)
+const journal = join(archive, 'vote-history')
+if (witnessPolicy) {
+  await mkdir(journal, { recursive: true, mode: 0o700 })
+  if (policyChain.head !== pinnedHead) await durableWrite(policyFile, policyChain.head)
+}
+
+async function readJournal(id) {
+  try {
+    return JSON.parse(await readFile(join(journal, id + '.json'), 'utf8'))
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+// Persist the head before a signature can escape. A crash or restart must not
+// let this key endorse a fork. The supervisor holds the installation lock.
+async function durableWrite(target, value) {
+  const temporary = target + '.new'
+  const file = await open(temporary, 'w', 0o600)
+  try {
+    await file.writeFile(value)
+    await file.sync()
+  } finally {
+    await file.close()
+  }
+  await rename(temporary, target)
+  if (process.platform !== 'win32') {
+    const directory = await open(dirname(target), 'r')
+    try {
+      await directory.sync()
+    } finally {
+      await directory.close()
+    }
+  }
+}
+
+const saveJournal = (id, head) => durableWrite(join(journal, id + '.json'), JSON.stringify(head))
+
+const announced = new Map()
+
+async function witnessHistory(packet, history, previous, opens, closes, policy) {
+  const manifest = packet.manifest
+  await checkHistoryPacket(manifest, policy, history)
+  const { manifest_digest, vote_hashes } = history
+  if (Date.now() < opens) return
+  if (previous && (previous.manifest_digest !== manifest_digest || !extendsHistory(previous.vote_hashes, vote_hashes))) {
+    throw new Error('The supplied history conflicts with the checkpoint already kept by this witness.')
+  }
+
+  const phase = Date.now() < closes ? 'open' : 'closed'
+  if (phase === 'open') {
+    if (previous?.closed || packet.status !== 'open') return
+    if (!previous) {
+      if (manifest.vote_history.epoch !== policyChain.head) return
+      const changeApproved = await readFile(join(archive, 'policy-approvals', policyChain.head + '.json'), 'utf8').catch(error => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
+      if (changeApproved) return
+    }
+  }
+  const digest = await historyDigest(vote_hashes)
+  const key = phase + ':' + digest
+  if (announced.get(manifest.id) === key) return
+  if (phase === 'closed') {
+    if (previous?.closed && previous.vote_hashes.length !== vote_hashes.length) {
+      throw new Error('This witness already closed a different history.')
+    }
+    await checkOpenQuorum(origin.origin, manifest, policy, history)
+    const finalHashes = await Promise.all(packet.votes.map(fingerprint))
+    if (finalHashes.length !== vote_hashes.length || !extendsHistory(finalHashes, vote_hashes)) {
+      throw new Error('The final votes differ from the witnessed history.')
+    }
+    // An observer with no prior head may only seal a valid open quorum. It
+    // never creates an open attestation after the deadline.
+    await verifyBallot(packet)
+  }
+  const size = vote_hashes.length
+  if (phase === 'open' && Date.now() >= closes) return
+  const signature = sign(null, Buffer.from(JSON.stringify(checkpointStatement(
+    origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex')
+  await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed' })
+  const response = await fetch(new URL('/api/quorum/ballots/' + manifest.id + '/history/checkpoints', origin), {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public_key: publicKey, phase, size, digest, signature }),
+  })
+  if (!response.ok) throw new Error('COPE returned HTTP ' + response.status + ' for the history checkpoint.')
+  announced.set(manifest.id, key)
 }
 
 const witnessPolicyDigest = witnessOperators ? await fingerprint(witnessPolicy) : null
@@ -118,13 +214,8 @@ async function saveRecord(id, record) {
   await rename(file + '.new', file)
 }
 
-function matchesWitnessPolicy(witnesses) {
-  return Array.isArray(witnesses) && witnesses.length === witnessOperators.length
-    && witnessOperators.every(([, key]) => witnesses.some(item => item?.public_key === key))
-}
-
 async function publishSignature(id, record) {
-  if ((witnessOperators && !matchesWitnessPolicy(record.evidence.manifest.witnesses))
+  if ((witnessOperators && !matchesWitnessPolicy(record.evidence.manifest, witnessPolicy))
     || !record.evidence.manifest.witnesses?.some(witness => witness?.public_key === publicKey)
     || record.report.signature_published_at) return
   const { digest } = record.report
@@ -145,8 +236,8 @@ async function publishSignature(id, record) {
 
 async function checkWitnesses(id, record) {
   if (!witnessOperators) return
-  const matches = matchesWitnessPolicy(record.evidence.manifest.witnesses)
-  const status = { policy_digest: witnessPolicyDigest, policy_matches: matches, checked: [], threshold: 3, operators: witnessOperators.length }
+  const matches = matchesWitnessPolicy(record.evidence.manifest, witnessPolicy)
+  const status = { policy_digest: witnessPolicyDigest, policy_matches: matches, checked: [], threshold: witnessPolicy.threshold, operators: witnessOperators.length }
   if (matches) {
     const { signatures } = await fetchEvidence('/api/quorum/ballots/' + id + '/publications')
     const statement = Buffer.from(JSON.stringify(['cope-quorum-witness-result/1', origin.origin, id, record.report.digest]))
@@ -163,11 +254,36 @@ async function checkWitnesses(id, record) {
   }
 }
 
-async function observe(id) {
+async function observe(id, witnessed) {
   const packet = await fetchEvidence('/api/quorum/ballots/' + id)
   if (packet.manifest?.id !== id) throw new Error('Ballot ID does not match the directory.')
-  const digest = await fingerprint(packet)
+  if (Boolean(packet.manifest.vote_history) !== witnessed) throw new Error('The ballot history format does not match the directory.')
+  const previous = await readJournal(id)
   const existing = await readRecord(id)
+  let finalHistory
+  let ballotPolicy
+  if (packet.manifest.vote_history) {
+    ballotPolicy = policyChain?.epochs.get(packet.manifest.vote_history.epoch)
+    if (!ballotPolicy) throw new Error('This ballot needs a locally pinned witness policy.')
+    const opens = Date.parse(packet.manifest.opens_at)
+    const closes = Date.parse(packet.manifest.closes_at)
+    if (!Number.isFinite(opens) || !Number.isFinite(closes) || opens >= closes) throw new Error('Invalid ballot window.')
+    if (Date.now() < opens) return
+    finalHistory = await fetchEvidence('/api/quorum/ballots/' + id + '/history')
+    if (Object.values(ballotPolicy.operators).includes(publicKey)) {
+      await witnessHistory(packet, finalHistory, previous, opens, closes, ballotPolicy)
+    }
+    if (Date.now() < closes || packet.status !== 'completed' || !finalHistory.closed) return
+    if (previous && (previous.manifest_digest !== finalHistory.manifest_digest
+      || !extendsHistory(previous.vote_hashes, finalHistory.vote_hashes)
+      || (previous.closed && previous.vote_hashes.length !== finalHistory.vote_hashes.length))) {
+      throw new Error('The final history conflicts with this witness’s stored checkpoint.')
+    }
+    await checkHistoryPacket(packet.manifest, ballotPolicy, finalHistory)
+  } else if (previous) {
+    throw new Error('The previously witnessed ballot no longer advertises its history.')
+  } else if (packet.status !== 'completed') return
+  const digest = await fingerprint(packet)
   if (existing?.report.digest === digest) {
     if (!existing.report.conflict) {
       await publishSignature(id, existing)
@@ -176,7 +292,8 @@ async function observe(id) {
     return
   }
   if (existing?.report.conflict?.digest === digest) return
-  await verifyBallot(packet)
+  if (finalHistory) await verifyHistoryResult(packet, finalHistory, ballotPolicy, origin.origin)
+  else await verifyBallot(packet)
   const observedAt = new Date().toISOString()
   if (existing) {
     existing.report.conflict = { digest, observed_at: observedAt }
@@ -185,24 +302,38 @@ async function observe(id) {
   }
   const record = {
     evidence: packet,
-    report: { id, title: packet.manifest.title, origin: origin.origin, digest, observed_at: observedAt, result: packet.result },
+    ...(finalHistory ? { history: finalHistory } : {}),
+    report: { id, title: packet.manifest.title, origin: origin.origin, digest, observed_at: observedAt, result: packet.result,
+      ...(finalHistory ? { history_verified: true } : {}) },
   }
   await saveRecord(id, record)
   await publishSignature(id, record)
   await checkWitnesses(id, record)
 }
 
-async function scan() {
+const observing = new Set()
+const completedHistoryScans = new Map()
+let historyScanErrors = 0
+let legacyScanErrors = 0
+
+async function scan(witnessed) {
   let errors = 0
   try {
-    const directory = await fetchEvidence('/api/quorum')
+    const directory = await fetchEvidence(witnessed ? '/api/quorum/history/ballots' : '/api/quorum')
     for (const ballot of directory.ballots) {
-      if (ballot.status !== 'completed' || !uuid.test(ballot.id)) continue
+      const { id, status } = ballot
+      if (!uuid.test(id) || observing.has(id)) continue
+      if (!witnessed && (status !== 'completed' || ballot.vote_history)) continue
+      if (witnessed && status === 'completed' && (completedHistoryScans.get(id) ?? 0) > Date.now()) continue
       try {
-        await observe(ballot.id)
+        observing.add(id)
+        await observe(id, witnessed)
+        if (witnessed && status === 'completed' && await readRecord(id)) completedHistoryScans.set(id, Date.now() + 60000)
       } catch (error) {
         errors++
-        console.error('Ballot ' + ballot.id + ': ' + error.message)
+        console.error('Ballot ' + id + ': ' + error.message)
+      } finally {
+        observing.delete(id)
       }
     }
     lastScan = new Date().toISOString()
@@ -210,8 +341,10 @@ async function scan() {
     errors++
     console.error('Could not read the Quorum directory: ' + error.message)
   } finally {
-    scanErrors = errors
-    setTimeout(scan, 60000)
+    if (witnessed) historyScanErrors = errors
+    else legacyScanErrors = errors
+    scanErrors = historyScanErrors + legacyScanErrors
+    setTimeout(scan, witnessed ? 5000 : 60000, witnessed)
   }
 }
 
@@ -235,7 +368,11 @@ const server = createServer({ headersTimeout: 10000, requestTimeout: 15000 }, as
     }
     if (ballotId) {
       const record = await readRecord(ballotId)
-      if (record) return send(response, 200, match[2] ? record.evidence : record.report, undefined, { Vary: 'Accept' })
+      if (record) {
+        const evidence = record.history ? { version: 'cope-quorum-final-evidence/1', origin: origin.origin,
+          ballot: record.evidence, history: record.history } : record.evidence
+        return send(response, 200, match[2] ? evidence : record.report, undefined, { Vary: 'Accept' })
+      }
     }
     return send(response, 404, { error: 'No archived ballot at this address' })
   } catch {
@@ -257,5 +394,6 @@ if (ready && activate) {
   }
 }
 serving = true
-void scan()
+void scan(false)
+if (witnessPolicy) void scan(true)
 void checkIn()

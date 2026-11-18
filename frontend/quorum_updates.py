@@ -23,7 +23,7 @@ HEX = re.compile(r"[a-f0-9]{64}")
 CHANNEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 REQUIRED = {"package.json", "quorum-node.mjs", "quorum-web.mjs", "src/quorum.ts",
             "src/styles/tokens.css", "quorum-web/index.html", "quorum-web/app.js", "quorum-web/style.css"}
-SOURCE_FILES = REQUIRED | {"package-lock.json", "quorum-audit.mjs"}
+SOURCE_FILES = REQUIRED | {"package-lock.json", "quorum-audit.mjs", "quorum-policy.mjs", "src/quorum-history.ts"}
 PACKAGE_FILES = {"package.json", "package-lock.json"}
 
 

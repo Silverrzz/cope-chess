@@ -69,7 +69,7 @@ class Witness(Input):
 
 class WitnessUpdate(Input):
     revision: int = Field(strict=True, ge=0)
-    witnesses: list[Witness] = Field(max_length=12)
+    witnesses: list[Witness] = Field(max_length=64)
 
     @field_validator("witnesses")
     @classmethod
@@ -83,7 +83,7 @@ class Setup(Input):
     revision: int = Field(default=0, strict=True, ge=0)
     enrollment_role_id: str | None = None
     drafts: list[BallotDraft] = Field(default_factory=list, max_length=32)
-    witnesses: list[Witness] = Field(default_factory=list, max_length=12)
+    witnesses: list[Witness] = Field(default_factory=list, max_length=64)
 
     @model_validator(mode="after")
     def validate_setup(self):

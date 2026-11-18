@@ -27,6 +27,7 @@ export interface Manifest {
   roster?: string
   genesis?: string
   witnesses?: Witness[]
+  vote_history?: { version: 'cope-quorum-vote-history/1'; policy: string; epoch: string; threshold: number }
 }
 
 export interface VoteTally {
@@ -103,6 +104,15 @@ async function verifyBallotContext(manifest: Manifest, roster: Roster) {
   if (Object.hasOwn(manifest, 'action')) manifestKeys.push('action')
   if (Object.hasOwn(manifest, 'target')) manifestKeys.push('target')
   if (Object.hasOwn(manifest, 'witnesses')) manifestKeys.push('witnesses')
+  if (Object.hasOwn(manifest, 'vote_history')) {
+    manifestKeys.push('vote_history')
+    requireValid(manifest.vote_history && exactKeys(manifest.vote_history, ['version', 'policy', 'epoch', 'threshold'])
+      && manifest.vote_history.version === 'cope-quorum-vote-history/1'
+      && Number.isInteger(manifest.vote_history.threshold) && manifest.vote_history.threshold >= 1
+      && typeof manifest.vote_history.epoch === 'string' && /^[0-9a-f]{64}$/.test(manifest.vote_history.epoch)
+      && typeof manifest.vote_history.policy === 'string' && /^[0-9a-f]{64}$/.test(manifest.vote_history.policy),
+    'Invalid ballot history policy.')
+  }
   requireValid(exactKeys(manifest, manifestKeys) && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(manifest.id)
     && typeof manifest.title === 'string' && manifest.title.length > 0
     && typeof manifest.rationale === 'string' && manifest.rationale.length > 0
@@ -137,7 +147,8 @@ export async function verifyBallot(packet: BallotPackage) {
     'Results are available after voting closes.')
   const { options, scope } = await verifyBallotContext(manifest, roster)
   requireValid(Array.isArray(votes) && votes.length <= roster.members.length, 'Invalid ballot vote list.')
-  requireValid(votes.length === roster.members.length || Date.now() >= Date.parse(manifest.closes_at),
+  requireValid((!manifest.vote_history && votes.length === roster.members.length)
+    || Date.now() >= Date.parse(manifest.closes_at),
     'Verification is available after voting closes.')
   const seen = new Set<string>()
   const counts = options.map(() => 0)

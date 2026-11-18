@@ -2,8 +2,10 @@
 
 The verifier archives completed ballots and checks the supplied vote proofs and
 tally. The browser interface shows reports, evidence, the first observed digest,
-and conflicts. These checks do not establish roster authorization or completeness
-of the voting history. The ordinary COPE website still serves its own voting code;
+and conflicts. For ballots published with a pinned witness policy, it also verifies
+that the final tally covers the complete history sealed by those witnesses.
+These checks do not establish roster authorization. Legacy ballots have only
+proof and tally checks. The ordinary COPE website still serves its own voting code;
 it does not have the trust boundary of an independently distributed voting app.
 
 The public archive starts at `/`. Existing JSON clients can keep using
@@ -103,16 +105,89 @@ protection. Approved verifier code runs with access to the archive and witness
 key. Protect local files and treat signing and approving such code as trust
 decisions.
 
-## Checking witness signatures
+## Witnessed vote history
 
-An optional `COPE_VERIFIER_WITNESS_POLICY` file pins a separate three-of-four
-witness policy for the independent verifier. Use the actual, independently
-authenticated witness keys as the values in
-`{"threshold":3,"operators":{"node-one":"…","node-two":"…","node-three":"…","node-four":"…"}}`.
-The report displays how many distinct pinned keys signed the exact archived
-evidence digest. A substituted or incomplete assigned witness list does not
-satisfy the pin. A signature threshold is an attestation to the packet; it
-does not certify an authorized electorate or a complete vote history.
+For new ballots, configure the web service with `COPE_QUORUM_WITNESS_POLICY`
+(pointing to a locally provisioned JSON file) or set
+`COPE_QUORUM_WITNESS_POLICY_JSON` in the web service’s Compose environment.
+On each independent verifier, point `COPE_VERIFIER_WITNESS_POLICY` at the
+independently authenticated policy file for the same COPE origin. Register and
+enable exactly those keys in COPE’s witness setup. Each published ballot freezes
+the policy and its assigned keys. When the platform first publishes a witnessed
+ballot, it pins the authority; subsequent publication requires the same policy
+or an approved successor. Existing and unconfigured legacy ballots are explicitly
+proof-only. Browsers can import a policy obtained outside the COPE site.
+
+A policy contains `operators` (a mapping of operator IDs to distinct raw
+Ed25519 public keys), a `threshold`, and optional `max_faulty`. The supported
+range is one to 64 distinct operators. For `n` operators, threshold `t` and
+fault allowance `f`, two quorums must share at least one honest witness:
+`2*t - n > f`. If `max_faulty` is omitted, the largest allowance consistent
+with that inequality is used. For example, three of four tolerates one
+faulty operator for safety; four of six also tolerates one. Meeting the safety
+condition is separate from having enough available operators to advance.
+Keys assigned to different IDs must actually be independently controlled.
+
+The platform exposes the full ordered vector of vote-proof hashes while voting
+is open. Each witness keeps a durable copy of its last signed prefix and can
+only sign extensions of that prefix. Votes and individual choices are not
+revealed by that endpoint. A receipt records the exact proof and an open
+checkpoint signed by a quorum. The hosted UI initially shows submitted or
+pending and only marks a vote recorded after checking a receipt against the
+locally pinned policy. Exported receipts reveal the anonymous vote’s choice
+to whoever receives them; keep them private unless you intend to share them.
+
+A witnessed ballot closes at its published deadline, even at full turnout.
+Witnesses use their own clocks. They sign an opening checkpoint only while the
+ballot is open. After closing, a witness seals the final history only if it
+extends everything that witness already signed and a quorum attested to that
+exact head during voting. The result verifier checks both quorums, recomputes
+the ordered hashes from the complete final list, and verifies the proofs and
+tally. This stays provisional if COPE withholds history, witnesses disagree
+or are offline, or the final submissions do not reach a quorum before the
+deadline. Submit early enough to receive a receipt; the platform cannot prove
+that an unacknowledged request was ever recorded. This protocol does not
+attempt to recover votes that the host refused to record.
+
+Keep the `vote-history/`, `policy-approvals/`, and `witness-policy-head`
+files with the witness key. Never run multiple copies of the same signing
+identity or let it resume signing from stale state: doing so can let it
+endorse incompatible histories. If signing state is lost, restore it from
+an independently confirmed current backup or rotate the affected key under
+the current policy before continuing. Synchronize the independent witnesses’
+clocks and review the configured fault model before using real ballots.
+
+Verify an exported receipt or final evidence file without the website:
+
+```sh
+node frontend/quorum-audit.mjs evidence.json trusted-policy.json https://cope-chess.live
+```
+
+### Change a policy
+
+The current threshold approves its successor. If the current requirement is
+three of four, three of those four distinct operators must approve the exact
+change, even if it introduces a different threshold or changes the membership
+entirely. Each operator can approve just one successor to its current policy.
+The signed statement binds the COPE origin, previous history, and both policies.
+
+Agree on the proposal and finish active and scheduled ballots before rotating.
+On each approving verifier, use the local archive and reviewed files:
+
+```sh
+node frontend/quorum-policy.mjs approve https://cope-chess.live   current.json proposed.json /path/to/archive > operator-one.json
+
+# Use enough approvals to satisfy current.json.
+node frontend/quorum-policy.mjs assemble https://cope-chess.live   current.json proposed.json approved.json operator-one.json operator-two.json operator-three.json
+```
+
+Distribute the signed bundle and replace the policy on the platform and
+verifiers, then restart the verifiers and update the platform’s assigned
+witnesses. Existing pins only accept a bundle that extends the chain they
+already trust. The signing key never leaves its verifier. Historical
+evidence can still be audited against the policy under which it was signed.
+After approving a successor, that verifier will no longer start witnessing
+new ballots under the old policy; it can finish ones it already witnessed.
 
 ## Pomni deployment
 
@@ -151,6 +226,5 @@ and after deployment. The health check measures the last successful directory
 scan, not whether every ballot or check-in succeeded.
 
 Further protocol work from the review needs a ratified genesis and governed
-membership transitions, independently witnessed vote receipts and finalization,
-and a packaged voter client distributed through authenticated channels. This
+membership transitions, and a packaged voter client distributed through authenticated channels. This
 verifier release process supplies no authority over those decisions.

@@ -10,6 +10,7 @@ from cope.adapters.http.forms import require_origin
 from cope.control.api import database
 from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
 from cope.domains import quorum_elections as elections
+from cope.domains import quorum_history as history
 from cope.domains import quorum_publications as published
 from cope.domains.quorum import Setup, WitnessUpdate, read_setup, save_setup
 
@@ -208,7 +209,23 @@ def register_quorum_routes(app):
     @app.post("/api/admin/quorum/publish")
     def publish_ballot(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
         require_admin(request)
-        return election_call(elections.publish, connection, payload.draft_id, payload.revision)
+        return election_call(elections.publish, connection, payload.draft_id, payload.revision, request.app.state.discord_runtime.origin)
+
+    @app.get("/api/quorum/history/ballots")
+    def history_directory(request: Request, connection=Depends(database)):
+        require_secure(request)
+        return JSONResponse(history.directory(connection), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/quorum/ballots/{ballot_id}/history")
+    def vote_history(ballot_id: UUID, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return JSONResponse(election_call(history.read_history, connection, ballot_id), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/quorum/ballots/{ballot_id}/history/checkpoints")
+    def checkpoint(ballot_id: UUID, payload: history.CheckpointInput, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(history.record_checkpoint, connection, ballot_id, request.app.state.discord_runtime.origin, payload)
 
     @app.post("/api/quorum/ballots/{ballot_id}/votes")
     def cast(ballot_id: UUID, payload: elections.Proof, request: Request, connection=Depends(database)):

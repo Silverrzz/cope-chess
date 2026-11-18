@@ -82,7 +82,7 @@ async function archive() {
       const path = ballots[start + index]
       return el('li', { class: 'stack compact' },
         row(link(path, report?.title || path.split('/').at(-1)),
-          report?.conflict ? pill('Conflicting evidence', 'warning') : report ? pill('Proofs checked', 'success') : null),
+          report?.conflict ? pill('Conflicting evidence', 'warning') : report ? pill(report.history_verified ? 'Vote history verified' : 'Proofs checked', 'success') : null),
         p(report ? (outcomes[report.result?.outcome] || 'Result') + ' · Observed ' + date(report.observed_at) : 'Report details are unavailable.'))
     }))
     listStatus.textContent = 'Showing ' + (start + 1) + '–' + (start + reports.length) + ' of ' + count + ' reports'
@@ -122,7 +122,10 @@ async function report(path) {
     value.conflict ? panel(row(pill('Conflicting evidence', 'warning')), p('The verifier later saw different valid evidence for this ballot. The first observation is preserved.'),
       details([['Conflicting digest', code(value.conflict.digest)], ['Observed', date(value.conflict.observed_at)]])) : document.createComment(''),
     panel(row(el('h2', {}, 'Recorded tally'), pill(outcomes[result.outcome] || 'Completed')),
-      p(result.total + ' votes supplied for ' + result.electorate + ' roster entries.'), tally, p(limitation)),
+      p(result.total + ' votes supplied for ' + result.electorate + ' roster entries.'), tally,
+      p(value.history_verified
+        ? 'The final tally covers the complete vote history sealed by the pinned witnesses. It does not establish roster authorization.'
+        : limitation)),
     panel(el('h2', {}, 'Evidence and signature'),
       details([
         ['Evidence SHA-256', code(value.digest)],
