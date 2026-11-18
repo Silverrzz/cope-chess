@@ -170,7 +170,9 @@ def register_quorum_routes(app):
         account = request_account(request, connection)
         if not account:
             raise HTTPException(401, "Connect Discord to publish your vote.")
-        election_call(published.closed_evidence, connection, ballot_id)
+        evidence = election_call(published.closed_evidence, connection, ballot_id)
+        if evidence["manifest"].get("vote_history"):
+            raise HTTPException(404, "This ballot does not publish names with votes.")
         message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
         return JSONResponse({"message": message, "username": account.username}, headers={"Cache-Control": "no-store"})
 
@@ -181,6 +183,9 @@ def register_quorum_routes(app):
         account = request_account(request, connection)
         if not account:
             raise HTTPException(401, "Connect Discord to publish your vote.")
+        evidence = election_call(published.closed_evidence, connection, ballot_id)
+        if evidence["manifest"].get("vote_history"):
+            raise HTTPException(404, "This ballot does not publish names with votes.")
         message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
         election_call(published.validate_disclosure, connection, ballot_id, payload, message)
         current = request_account(request, connection)
@@ -233,6 +238,14 @@ def register_quorum_routes(app):
         require_admin(request)
         return election_call(elections.publish, connection, payload.draft_id, payload.revision, request.app.state.discord_runtime.origin)
 
+    @app.post("/api/admin/quorum/approval-proposal")
+    def propose_approval(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
+        require_admin(request)
+        return election_call(
+            lambda: elections.publish(connection, payload.draft_id, payload.revision,
+                                      request.app.state.discord_runtime.origin, propose=True),
+        )
+
     @app.get("/api/quorum/history/ballots")
     def history_directory(request: Request, connection=Depends(database)):
         require_secure(request)
@@ -254,6 +267,12 @@ def register_quorum_routes(app):
         require_secure(request)
         require_origin(request)
         return election_call(elections.cast_vote, connection, ballot_id, payload)
+
+    @app.post("/api/quorum/ballots/{ballot_id}/relay-votes")
+    def relay_vote(ballot_id: UUID, payload: elections.RelayVote, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return election_call(lambda: elections.cast_vote(connection, ballot_id, payload.proof,
+                             intake=payload.signatures, origin=request.app.state.discord_runtime.origin))
 
     @app.get("/api/admin/quorum")
     def get_setup(request: Request, connection=Depends(database)):

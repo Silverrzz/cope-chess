@@ -7,7 +7,9 @@ import QuorumTally from '@/components/public/QuorumTally.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import { fingerprint, verifyEvidence, type BallotPackage, type VoteEvidence } from '@/quorum'
-import { verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, type FinalEvidence, type RecordedReceipt } from '@/quorum-history'
+import { authorizedBallot, verifyHistoryResult, verifyRecordedReceipt, verifyRetentionReceipt,
+  type FinalEvidence, type RecordedReceipt, type RetentionReceipt } from '@/quorum-history'
+import { extendPinnedPolicy, loadPinnedPolicy } from '@/quorum-pins'
 import { resultLabels, resultTones } from '@/quorum-results'
 
 const file = ref<File>()
@@ -16,6 +18,7 @@ const busy = ref(false)
 const policyFile = ref<File>()
 const witnessed = ref(false)
 const recordedTitle = ref('')
+const retained = ref(false)
 const error = ref('')
 const recordCheck = ref('')
 const ballotId = ref('')
@@ -25,6 +28,7 @@ function selectFile(event: Event) {
   result.value = undefined
   witnessed.value = false
   recordedTitle.value = ''
+  retained.value = false
   error.value = ''
   recordCheck.value = ''
   ballotId.value = ''
@@ -36,11 +40,12 @@ async function verify() {
   result.value = undefined
   witnessed.value = false
   recordedTitle.value = ''
+  retained.value = false
   error.value = ''
   recordCheck.value = ''
   ballotId.value = ''
   try {
-    if (file.value.size > 2 * 1024 * 1024) throw new Error('Choose a Quorum JSON file up to 2 MiB.')
+    if (file.value.size > 16 * 1024 * 1024) throw new Error('Choose a Quorum JSON file up to 16 MiB.')
     let evidence: unknown
     try {
       evidence = JSON.parse(await file.value.text())
@@ -48,17 +53,18 @@ async function verify() {
       throw new Error('This file contains invalid JSON.')
     }
     const kind = (evidence as { version?: string } | null)?.version
-    if (kind === 'cope-quorum-final-evidence/1' || kind === 'cope-quorum-recorded-vote/1') {
-      const supplied = evidence as FinalEvidence | RecordedReceipt
+    if (kind === 'cope-quorum-final-evidence/1' || kind === 'cope-quorum-recorded-vote/1' || kind === 'cope-quorum-relayed-vote/1') {
+      const supplied = evidence as FinalEvidence | RecordedReceipt | RetentionReceipt
       if (supplied.origin !== location.origin) throw new Error('This file belongs to another COPE origin. Use the offline auditor with your trusted origin.')
-      if (policyFile.value && policyFile.value.size > 2 * 1024 * 1024) throw new Error('Choose a witness policy file up to 2 MiB.')
-      const raw = policyFile.value ? await policyFile.value.text() : localStorage.getItem('cope-quorum-pinned-witness-policy/1')
-      if (!raw) throw new Error('Choose a trusted witness policy file to verify witnessed evidence.')
-      const chain = await verifyPolicyChain(JSON.parse(raw), location.origin)
-      const manifest = supplied.version === 'cope-quorum-recorded-vote/1' ? supplied.manifest : supplied.ballot.manifest
-      const policy = chain.epochs.get(manifest.vote_history?.epoch ?? '')
-      if (!policy) throw new Error('Your trusted witness policy does not cover this ballot.')
-      if (supplied.version === 'cope-quorum-recorded-vote/1') {
+      const chain = policyFile.value ? await extendPinnedPolicy(policyFile.value, location.origin) : await loadPinnedPolicy(location.origin)
+      if (!chain) throw new Error('Choose a trusted witness policy file to verify witnessed evidence.')
+      const manifest = supplied.version === 'cope-quorum-final-evidence/1' ? supplied.ballot.manifest : supplied.manifest
+      const policy = await authorizedBallot(chain, manifest)
+      if (supplied.version === 'cope-quorum-relayed-vote/1') {
+        await verifyRetentionReceipt(supplied, policy, location.origin)
+        retained.value = true
+        recordedTitle.value = manifest.title
+      } else if (supplied.version === 'cope-quorum-recorded-vote/1') {
         await verifyRecordedReceipt(supplied, policy, location.origin)
         recordedTitle.value = manifest.title
       } else {
@@ -132,7 +138,7 @@ async function verify() {
       </div>
       <section v-if="recordedTitle" class="evidence-sheet__section section-stack" aria-live="polite">
         <h2>{{ recordedTitle }}</h2>
-        <InlineFeedback tone="info" message="The pinned witness quorum recorded this exact vote proof before closing." />
+        <InlineFeedback tone="info" :message="retained ? 'The pinned quorum verified and retained this exact vote proof.' : 'The pinned witness quorum recorded this exact vote proof before closing.'" />
       </section>
       <section v-if="result" class="evidence-sheet__section section-stack" aria-live="polite">
         <div class="toolbar toolbar--between">

@@ -1,14 +1,15 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createWeb, send } from './quorum-web.mjs'
-import { policyDecisionPath, readPolicyDecision, withPolicyLock } from './quorum-policy.mjs'
-import { fingerprint, verifyBallot } from './src/quorum.ts'
-import { checkHistoryPacket, checkOpenQuorum, checkpointStatement, extendsHistory, historyDigest,
-  matchesWitnessPolicy, validPolicyRound, verifyHistoryResult, verifyPolicyChain } from './src/quorum-history.ts'
+import { createVoterWeb, createWeb, send } from './quorum-web.mjs'
+import { hasStoredMembershipDecision, policyDecisionPath, readPolicyDecision, withPolicyLock } from './quorum-policy.mjs'
+import { fingerprint, verifyBallot, verifyBallotContext, verifyVote } from './src/quorum.ts'
+import { verifierEndpoints } from './src/quorum-relay.ts'
+import { authorizedBallot, checkHistoryPacket, checkOpenQuorum, checkPolicySignatures, checkpointStatement, extendsHistory, historyDigest,
+  intakeStatement, matchesWitnessPolicy, retainedStatement, settlementEnd, validPolicyRound, verifyHistoryResult, verifyIntake, verifyPolicyChain } from './src/quorum-history.ts'
 
 const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
 if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
@@ -53,9 +54,111 @@ if (pinnedHead && !policyChain?.heads.includes(pinnedHead)) {
 const witnessPolicy = policyChain?.current ?? null
 const witnessOperators = witnessPolicy && Object.entries(witnessPolicy.operators)
 const journal = join(archive, 'vote-history')
-if (witnessPolicy) {
-  await mkdir(journal, { recursive: true, mode: 0o700 })
-  if (policyChain.head !== pinnedHead) await durableWrite(policyFile, policyChain.head)
+const intakeArchive = join(archive, 'intake')
+const relayRequests = new Set()
+const forwarding = new Set()
+const peerIntake = new Set()
+const intakeStatus = (status, message) => Object.assign(new Error(message), { status })
+
+async function relayBody(request) {
+  if (request.headers['content-type']?.split(';')[0] !== 'application/json')
+    throw intakeStatus(415, 'Use a JSON vote request.')
+  const chunks = []
+  let size = 0
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+    size += chunk.length
+    if (size > 16384) throw intakeStatus(413, 'Vote request exceeds 16 KiB.')
+    chunks.push(chunk)
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+  catch { throw intakeStatus(400, 'The vote request is not valid JSON.') }
+}
+
+async function readRelayFile(path) {
+  return JSON.parse(await readFile(path, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return 'null'
+    throw error
+  }))
+}
+
+async function certifiedIntake(id) {
+  const path = join(intakeArchive, id)
+  const entries = await readdir(path).catch(error => {
+    if (error.code === 'ENOENT') return []
+    throw error
+  })
+  return (await Promise.all(entries.filter(name => /^certified-[0-9]{1,77}\.json$/.test(name))
+    .map(name => readRelayFile(join(path, name))))).filter(Boolean)
+}
+
+async function forwardVote(id, vote) {
+  const key = id + '/' + vote.proof.nullifier
+  if (forwarding.has(key) || forwarding.size >= 4) return
+  forwarding.add(key)
+  try {
+    await fetch(new URL('/api/quorum/ballots/' + id + '/relay-votes', origin), {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proof: vote.proof, signatures: vote.signatures }),
+    })
+  } catch { /* A later scan retries from the durable copy. */ }
+  finally { forwarding.delete(key) }
+}
+
+async function submitRelay(request, id, mode) {
+  if (relayRequests.size >= 4) throw intakeStatus(503, 'This verifier is busy. Try again shortly.')
+  const token = id + '/' + crypto.randomUUID()
+  relayRequests.add(token)
+  let locked
+  try {
+    const { proof, signatures } = await relayBody(request) ?? {}
+    if (typeof proof?.nullifier !== 'string' || !/^(0|[1-9][0-9]{0,76})$/.test(proof.nullifier))
+      throw intakeStatus(422, 'Invalid vote proof.')
+    const packet = await governedPackage(id)
+    const { manifest, roster } = packet
+    const policy = await authorizedBallot(policyChain, manifest)
+    if (!Object.values(policy.operators).includes(publicKey)) throw intakeStatus(403, 'This verifier is not assigned to this ballot.')
+    if (!await readJournal(id) && (manifest.vote_history.policy !== witnessPolicyDigest
+        || await hasStoredMembershipDecision(archive, policyChain.head))) {
+      throw intakeStatus(409, 'This verifier is changing membership and cannot start this ballot.')
+    }
+    const hash = await fingerprint(proof)
+    const manifestDigest = await fingerprint(manifest)
+    const statement = intakeStatement(origin.origin, id, manifestDigest, hash)
+    const retainReply = () => ({ key: publicKey, signature: sign(null,
+      Buffer.from(JSON.stringify(retainedStatement(origin.origin, id, manifestDigest, hash))), privateKey).toString('hex') })
+    const dir = join(intakeArchive, id)
+    const path = join(dir, (mode === 'accept' ? 'received-' : 'certified-') + proof.nullifier + '.json')
+    if (relayRequests.has(path)) throw intakeStatus(503, 'The same vote is already being checked. Try again shortly.')
+    relayRequests.add(path)
+    locked = path
+    const existing = await readRelayFile(path)
+    if (existing) {
+      if (existing.hash !== hash) throw intakeStatus(409, 'This verifier already saw a different proof from this ballot credential.')
+      if (mode !== 'accept' && Date.now() < settlementEnd(manifest)) void forwardVote(id, existing)
+      return mode === 'accept' ? { key: publicKey, signature: existing.signature } : retainReply()
+    }
+    const cutoff = mode === 'accept' ? Date.parse(manifest.closes_at) : settlementEnd(manifest)
+    if (Date.now() < Date.parse(manifest.opens_at) || Date.now() >= cutoff)
+      throw intakeStatus(409, 'This verifier’s vote intake window has closed or has not opened.')
+    try {
+      if (mode !== 'accept') await checkPolicySignatures(policy, statement, signatures)
+      const { options, scope } = await verifyBallotContext(manifest, roster)
+      await verifyVote(proof, roster, options, scope)
+    } catch { throw intakeStatus(422, 'Invalid vote proof or intake certificate.') }
+    if (Date.now() >= cutoff) throw intakeStatus(409, 'The vote intake window closed while this proof was being checked.')
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const signature = mode === 'accept' ? sign(null, Buffer.from(JSON.stringify(statement)), privateKey).toString('hex') : undefined
+    const record = mode === 'accept' ? { hash, proof, signature } : { hash, proof, signatures }
+    await durableWrite(path, JSON.stringify(record))
+    await syncPath(intakeArchive)
+    await syncPath(archive)
+    if (mode !== 'accept') void forwardVote(id, record)
+    return mode === 'accept' ? { key: publicKey, signature } : retainReply()
+  } finally {
+    relayRequests.delete(token)
+    if (locked) relayRequests.delete(locked)
+  }
 }
 
 async function readJournal(id) {
@@ -79,8 +182,12 @@ async function durableWrite(target, value) {
     await file.close()
   }
   await rename(temporary, target)
+  await syncPath(dirname(target))
+}
+
+async function syncPath(path) {
   if (process.platform !== 'win32') {
-    const directory = await open(dirname(target), 'r')
+    const directory = await open(path, 'r')
     try {
       await directory.sync()
     } finally {
@@ -91,7 +198,14 @@ async function durableWrite(target, value) {
 
 const saveJournal = (id, head) => durableWrite(join(journal, id + '.json'), JSON.stringify(head))
 
-const announced = new Map()
+async function publishCheckpoint(id, checkpoint) {
+  const response = await fetch(new URL('/api/quorum/ballots/' + id + '/history/checkpoints', origin), {
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public_key: publicKey, ...checkpoint }),
+  })
+  if (!response.ok) throw new Error('COPE returned HTTP ' + response.status + ' for the history checkpoint.')
+}
 
 async function witnessHistory(packet, history, previous, opens, closes, policy) {
   const manifest = packet.manifest
@@ -104,17 +218,34 @@ async function witnessHistory(packet, history, previous, opens, closes, policy) 
 
   const phase = Date.now() < closes ? 'open' : 'closed'
   if (phase === 'open') {
-    if (previous?.closed || packet.status !== 'open') return
-    if (!previous && manifest.vote_history.epoch !== policyChain.head) return
+    if (previous?.closed) return
+    if (!previous && manifest.vote_history.policy !== await fingerprint(witnessPolicy)) return
   }
   const digest = await historyDigest(vote_hashes)
-  const key = phase + ':' + digest
-  if (announced.get(manifest.id) === key) return
+  const recorded = previous?.[phase === 'open' ? 'opening' : 'seal']
+  if (recorded?.digest === digest) {
+    // Retry the exact durable attestation if the server lost or did not
+    // receive it. Never create a fresh open attestation after the deadline.
+    if (history[phase]?.digest !== digest) await publishCheckpoint(manifest.id, recorded)
+    return
+  }
   if (phase === 'closed') {
+    if (peerIntake.has(manifest.id)) return
+    if ([...relayRequests].some(token => token.startsWith(manifest.id + '/'))) return
+    const seen = new Set(vote_hashes)
+    if ((await certifiedIntake(manifest.id)).some(vote => !seen.has(vote.hash))) {
+      throw new Error('The proposed tally omits a certified vote kept by this verifier.')
+    }
     if (previous?.closed && previous.vote_hashes.length !== vote_hashes.length) {
       throw new Error('This witness already closed a different history.')
     }
-    await checkOpenQuorum(origin.origin, manifest, policy, history)
+    try {
+      await checkOpenQuorum(origin.origin, manifest, policy, history)
+    } catch (error) {
+      if (previous?.opening?.digest !== digest) throw error
+      await publishCheckpoint(manifest.id, previous.opening)
+      return
+    }
     const finalHashes = await Promise.all(packet.votes.map(fingerprint))
     if (finalHashes.length !== vote_hashes.length || !extendsHistory(finalHashes, vote_hashes)) {
       throw new Error('The final votes differ from the witnessed history.')
@@ -122,34 +253,26 @@ async function witnessHistory(packet, history, previous, opens, closes, policy) 
     // An observer with no prior head may only seal a valid open quorum. It
     // never creates an open attestation after the deadline.
     await verifyBallot(packet)
+    await verifyIntake(packet, policy, origin.origin, finalHashes)
   }
   const size = vote_hashes.length
-  let signature
+  let checkpoint
   const recordCheckpoint = async () => {
     if (phase === 'open' && Date.now() >= closes) return
-    signature = sign(null, Buffer.from(JSON.stringify(checkpointStatement(
-      origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex')
-    await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed' })
+    checkpoint = { phase, size, digest, signature: sign(null, Buffer.from(JSON.stringify(checkpointStatement(
+      origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex') }
+    const opening = phase === 'open' ? checkpoint : previous?.opening
+    const seal = phase === 'closed' ? checkpoint : undefined
+    await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed', opening, seal })
   }
   if (phase === 'open' && !previous) {
     // Serialize the first checkpoint with storing a policy decision. Once a
     // quorum has stored the decision, no new old-policy ballot can get a quorum.
     await withPolicyLock(archive, policyChain.head, async () => {
-      const decision = await stat(policyDecisionPath(archive, policyChain.head)).catch(error => {
-        if (error.code === 'ENOENT') return null
-        throw error
-      })
-      if (!decision) await recordCheckpoint()
+      if (!await hasStoredMembershipDecision(archive, policyChain.head)) await recordCheckpoint()
     })
   } else await recordCheckpoint()
-  if (!signature) return
-  const response = await fetch(new URL('/api/quorum/ballots/' + manifest.id + '/history/checkpoints', origin), {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ public_key: publicKey, phase, size, digest, signature }),
-  })
-  if (!response.ok) throw new Error('COPE returned HTTP ' + response.status + ' for the history checkpoint.')
-  announced.set(manifest.id, key)
+  if (checkpoint) await publishCheckpoint(manifest.id, checkpoint)
 }
 
 const witnessPolicyDigest = witnessOperators ? await fingerprint(witnessPolicy) : null
@@ -191,17 +314,80 @@ async function checkIn() {
   }
 }
 
-async function fetchEvidence(path) {
+async function fetchEvidence(path, limit = 16 * 1024 ** 2) {
   const response = await fetch(new URL(path, origin), { redirect: 'error', signal: AbortSignal.timeout(15000) })
   if (!response.ok || !response.body) throw new Error('Evidence request returned HTTP ' + response.status)
   const chunks = []
   let size = 0
   for await (const chunk of response.body) {
     size += chunk.byteLength
-    if (size > 4 * 1024 * 1024) throw new Error('Evidence response is too large.')
+    if (size > limit) throw new Error('Evidence response is too large.')
     chunks.push(chunk)
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+async function recoverPeerIntake(packet, policy) {
+  const { manifest, roster } = packet
+  const id = manifest.id
+  if (peerIntake.has(id) || peerIntake.size >= 2) return
+  peerIntake.add(id)
+  try {
+    const manifestDigest = await fingerprint(manifest)
+    const { options, scope } = await verifyBallotContext(manifest, roster)
+    const peers = verifierEndpoints(manifest, policy).filter(peer => peer.key !== publicKey)
+    const dir = join(intakeArchive, id)
+    const known = new Set((await certifiedIntake(id)).map(vote => vote.hash))
+    for (const peer of peers) {
+      if (Date.now() >= settlementEnd(manifest)) return
+      let listed
+      try { listed = await fetchEvidence(peer.origin + '/api/intake/' + id + '/retained', 81920) }
+      catch { continue }
+      if (!Array.isArray(listed.hashes) || listed.hashes.length > roster.members.length) continue
+      for (const hash of listed.hashes) {
+        if (Date.now() >= settlementEnd(manifest)) return
+        if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash) || known.has(hash)) continue
+        try {
+          const vote = await fetchEvidence(peer.origin + '/api/intake/' + id + '/retained/' + hash, 16384)
+          if (await fingerprint(vote.proof) !== hash) continue
+          await checkPolicySignatures(policy, intakeStatement(origin.origin, id, manifestDigest, hash), vote.signatures)
+          await verifyVote(vote.proof, roster, options, scope)
+          if (Date.now() >= settlementEnd(manifest)) return
+          const path = join(dir, 'certified-' + vote.proof.nullifier + '.json')
+          if (relayRequests.has(path)) continue
+          relayRequests.add(path)
+          try {
+            if (!await readRelayFile(path)) {
+              await mkdir(dir, { recursive: true, mode: 0o700 })
+              await durableWrite(path, JSON.stringify({ hash, proof: vote.proof, signatures: vote.signatures }))
+              await syncPath(intakeArchive)
+              await syncPath(archive)
+            }
+          } finally { relayRequests.delete(path) }
+          known.add(hash)
+          void forwardVote(id, vote)
+        } catch { /* A peer's missing or invalid copy does not count. */ }
+      }
+    }
+  } finally { peerIntake.delete(id) }
+}
+
+async function governedPackage(id) {
+  const entry = policyChain?.ballots.get(id)
+  if (!entry) throw intakeStatus(404, 'This ballot has no approved verifier decision here.')
+  const round = policyChain.bundle.changes[policyChain.heads.indexOf(entry.epoch)]?.round
+  const archived = round === undefined ? null : await readPolicyDecision(archive, entry.epoch, round)
+  const dossier = archived && JSON.parse(archived).proposal
+  if (dossier?.manifest?.id === id) {
+    await authorizedBallot(policyChain, dossier.manifest)
+    if (await fingerprint(dossier.roster) === entry.roster) return { manifest: dossier.manifest, roster: dossier.roster }
+  }
+  try {
+    const ballot = await fetchEvidence('/api/quorum/ballots/' + id)
+    await authorizedBallot(policyChain, ballot.manifest)
+    if (await fingerprint(ballot.roster) === entry.roster) return { manifest: ballot.manifest, roster: ballot.roster }
+  } catch { /* The relay can only use an approved ballot and exact roster. */ }
+  throw intakeStatus(503, 'This verifier cannot load the approved ballot and roster.')
 }
 
 async function readRecord(id) {
@@ -272,14 +458,21 @@ async function observe(id, witnessed) {
   let finalHistory
   let ballotPolicy
   if (packet.manifest.vote_history) {
-    ballotPolicy = policyChain?.epochs.get(packet.manifest.vote_history.epoch)
-    if (!ballotPolicy) throw new Error('This ballot needs a locally pinned witness policy.')
+    ballotPolicy = await authorizedBallot(policyChain, packet.manifest)
     const opens = Date.parse(packet.manifest.opens_at)
-    const closes = Date.parse(packet.manifest.closes_at)
+    const closes = settlementEnd(packet.manifest)
     if (!Number.isFinite(opens) || !Number.isFinite(closes) || opens >= closes) throw new Error('Invalid ballot window.')
     if (Date.now() < opens) return
     finalHistory = await fetchEvidence('/api/quorum/ballots/' + id + '/history')
     if (Object.values(ballotPolicy.operators).includes(publicKey)) {
+      if (Date.now() < closes) {
+        const pending = await certifiedIntake(id)
+        const posted = new Set(finalHistory.vote_hashes)
+        for (const vote of pending) if (!posted.has(vote.hash)) void forwardVote(id, vote)
+        if (Date.now() >= Date.parse(packet.manifest.closes_at)) {
+          void recoverPeerIntake(packet, ballotPolicy).catch(() => {})
+        }
+      }
       await witnessHistory(packet, finalHistory, previous, opens, closes, ballotPolicy)
     }
     if (Date.now() < closes || packet.status !== 'completed' || !finalHistory.closed) return
@@ -300,11 +493,11 @@ async function observe(id, witnessed) {
     }
     return
   }
-  if (existing?.report.conflict?.digest === digest) return
+  if (existing?.report.conflict?.digest === digest && (!finalHistory || existing.history)) return
   if (finalHistory) await verifyHistoryResult(packet, finalHistory, ballotPolicy, origin.origin)
   else await verifyBallot(packet)
   const observedAt = new Date().toISOString()
-  if (existing) {
+  if (existing && (existing.history || !finalHistory)) {
     existing.report.conflict = { digest, observed_at: observedAt }
     await saveRecord(id, existing)
     return
@@ -313,7 +506,8 @@ async function observe(id, witnessed) {
     evidence: packet,
     ...(finalHistory ? { history: finalHistory } : {}),
     report: { id, title: packet.manifest.title, origin: origin.origin, digest, observed_at: observedAt, result: packet.result,
-      ...(finalHistory ? { history_verified: true } : {}) },
+      ...(finalHistory ? { history_verified: true } : {}),
+      ...(existing ? { conflict: { digest: existing.report.digest, observed_at: existing.report.observed_at } } : {}) },
   }
   await saveRecord(id, record)
   await publishSignature(id, record)
@@ -358,6 +552,10 @@ async function scan(witnessed) {
 }
 
 const web = await createWeb()
+const voterWeb = await createVoterWeb(policyChain, origin.origin).catch(error => {
+  console.error('Independent voting disabled:', error.message)
+  return null
+})
 const ready = process.env.COPE_VERIFIER_READY_FILE
 const activate = process.env.COPE_VERIFIER_ACTIVATE_FILE
 let serving = !(ready && activate)
@@ -366,6 +564,31 @@ const server = createServer({ headersTimeout: 10000, requestTimeout: 15000 }, as
     if (!serving) return send(response, 503, { error: 'The verifier is starting.' })
     const url = new URL(request.url, 'http://localhost')
     const path = url.pathname
+    if (voterWeb?.(request, response, path)) return
+    const retained = /^\/api\/intake\/([^/]+)\/retained(?:\/([0-9a-f]{64}))?$/.exec(path)
+    if (request.method === 'GET' && retained && uuid.test(retained[1])) {
+      try {
+        const { manifest } = await governedPackage(retained[1])
+        if (Date.now() < Date.parse(manifest.closes_at)) return send(response, 404, { error: 'Voting is still open.' })
+        const votes = await certifiedIntake(retained[1])
+        if (!retained[2]) return send(response, 200, { hashes: votes.map(vote => vote.hash) })
+        const vote = votes.find(vote => vote.hash === retained[2])
+        return vote ? send(response, 200, vote) : send(response, 404, { error: 'No retained vote at this address.' })
+      } catch { return send(response, 404, { error: 'No approved ballot at this address.' }) }
+    }
+    const intake = /^\/api\/intake\/([^/]+)(?:\/(accept|retain))?$/.exec(path)
+    if (intake && uuid.test(intake[1])) {
+      const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type' }
+      try {
+        if (request.method === 'OPTIONS') return send(response, 204, '', undefined, cors)
+        if (request.method === 'GET' && !intake[2]) return send(response, 200, await governedPackage(intake[1]), undefined, cors)
+        if (request.method === 'POST' && intake[2]) return send(response, 200, await submitRelay(request, intake[1], intake[2]), undefined, cors)
+        return send(response, 405, { error: 'Method not allowed' }, undefined, cors)
+      } catch (error) {
+        return send(response, error.status ?? 503, { error: error.status ? error.message : 'Verifier vote intake is unavailable.' }, undefined, cors)
+      }
+    }
     const match = /^\/ballots\/([^/]+)(\/evidence)?$/.exec(path)
     const ballotId = match && uuid.test(match[1]) ? match[1] : null
     if (await web(request, response, path, ballotId && !match[2], url.searchParams.get('format'))) return
@@ -418,6 +641,10 @@ if (ready && activate) {
       await delay(100)
     }
   }
+}
+if (witnessPolicy) {
+  await mkdir(journal, { recursive: true, mode: 0o700 })
+  if (policyChain.head !== pinnedHead) await durableWrite(policyFile, policyChain.head)
 }
 serving = true
 void scan(false)

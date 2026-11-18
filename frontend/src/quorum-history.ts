@@ -1,6 +1,8 @@
-import { fingerprint, verifyBallot, type BallotPackage, type Manifest, type VoteEvidence } from './quorum.ts'
+import { fingerprint, verifyBallot, verifyBallotContext, verifyVote, type BallotPackage, type Manifest, type Roster, type VoteEvidence } from './quorum.ts'
 
 export const historyVersion = 'cope-quorum-vote-history/1'
+export const maxPolicyChanges = 128
+export const settlementEnd = (manifest: Manifest) => Date.parse(manifest.closes_at) + 120_000
 const hex = /^[a-f0-9]{64}$/
 const signatureHex = /^[a-f0-9]{128}$/
 const operatorId = /^[a-z0-9][a-z0-9-]{0,31}$/
@@ -25,6 +27,7 @@ export interface RecordedReceipt {
   version: 'cope-quorum-recorded-vote/1'
   origin: string
   manifest: Manifest
+  roster: Roster
   vote_hash: string
   proof: VoteEvidence['proof']
   vote_hashes: string[]
@@ -35,6 +38,16 @@ export interface FinalEvidence {
   origin: string
   ballot: BallotPackage
   history: VoteHistory
+}
+
+export interface RetentionReceipt {
+  version: 'cope-quorum-relayed-vote/1'
+  origin: string
+  manifest: Manifest
+  roster: Roster
+  proof: VoteEvidence['proof']
+  signatures: Record<string, string>
+  retained: Record<string, string>
 }
 
 function requireHistory(condition: unknown, message: string): asserts condition {
@@ -83,6 +96,19 @@ export function extendsHistory(previous: string[], next: string[]) {
 export const historyDigest = (hashes: string[]) => fingerprint([historyVersion, hashes])
 export const checkpointStatement = (origin: string, id: string, manifestDigest: string, phase: 'open' | 'closed',
   size: number, digest: string) => ['cope-quorum-history-checkpoint/1', origin, id, manifestDigest, phase, size, digest]
+export const intakeStatement = (origin: string, id: string, manifestDigest: string, voteHash: string) =>
+  ['cope-quorum-vote-intake/1', origin, id, manifestDigest, voteHash]
+export const retainedStatement = (origin: string, id: string, manifestDigest: string, voteHash: string) =>
+  ['cope-quorum-vote-retained/1', origin, id, manifestDigest, voteHash]
+
+export async function verifyIntake(packet: BallotPackage, policy: WitnessPolicy, origin: string, hashes: string[]) {
+  requireHistory(Array.isArray(packet.intake) && packet.intake.length === hashes.length,
+    'The final evidence is missing verifier intake certificates.')
+  const manifestDigest = await fingerprint(packet.manifest)
+  for (const [index, hash] of hashes.entries()) {
+    await checkPolicySignatures(policy, intakeStatement(origin, packet.manifest.id, manifestDigest, hash), packet.intake[index]!)
+  }
+}
 
 const bytes = (value: string) => Uint8Array.from(value.match(/../g) ?? [], part => Number.parseInt(part, 16))
 
@@ -116,17 +142,33 @@ export async function verifyRecordedReceipt(receipt: RecordedReceipt, policy: Wi
   requireHistory(receipt.proof && await fingerprint(receipt.proof) === receipt.vote_hash
     && receipt.vote_hashes.includes(receipt.vote_hash), 'This receipt does not include the vote.')
   await checkCheckpoint(origin, receipt.manifest, policy, receipt.vote_hashes, 'open', receipt.checkpoint)
+  const { options, scope } = await verifyBallotContext(receipt.manifest, receipt.roster)
+  await verifyVote(receipt.proof, receipt.roster, options, scope)
+}
+
+export async function verifyRetentionReceipt(receipt: RetentionReceipt, policy: WitnessPolicy, origin: string) {
+  requireHistory(receipt.version === 'cope-quorum-relayed-vote/1' && receipt.origin === origin,
+    'The retention receipt belongs to a different COPE site.')
+  await checkHistoryPolicy(receipt.manifest, policy)
+  const { options, scope } = await verifyBallotContext(receipt.manifest, receipt.roster)
+  await verifyVote(receipt.proof, receipt.roster, options, scope)
+  const manifestDigest = await fingerprint(receipt.manifest)
+  const voteHash = await fingerprint(receipt.proof)
+  await checkPolicySignatures(policy, intakeStatement(origin, receipt.manifest.id, manifestDigest, voteHash), receipt.signatures)
+  await checkPolicySignatures(policy, retainedStatement(origin, receipt.manifest.id, manifestDigest, voteHash), receipt.retained)
+  return voteHash
 }
 
 export async function verifyHistoryResult(packet: BallotPackage, history: VoteHistory, policy: WitnessPolicy, origin: string,
   receipt?: RecordedReceipt) {
   await checkHistoryPacket(packet.manifest, policy, history)
-  requireHistory(packet.status === 'completed' && Date.now() >= Date.parse(packet.manifest.closes_at), 'The ballot has not reached its scheduled close.')
+  requireHistory(packet.status === 'completed' && Date.now() >= settlementEnd(packet.manifest), 'The ballot has not settled.')
   requireHistory(Array.isArray(packet.votes) && packet.votes.length === history.vote_hashes.length,
     'The final votes differ from the witnessed vote history.')
   const hashes = await Promise.all(packet.votes.map(fingerprint))
   requireHistory(extendsHistory(hashes, history.vote_hashes),
     'The final votes differ from the witnessed vote history.')
+  await verifyIntake(packet, policy, origin, hashes)
   await checkCheckpoint(origin, packet.manifest, policy, hashes, 'open', history.open)
   await checkCheckpoint(origin, packet.manifest, policy, hashes, 'closed', history.closed)
   if (receipt) {
@@ -146,8 +188,10 @@ export async function checkOpenQuorum(origin: string, manifest: Manifest, policy
 
 export interface PolicyChange {
   policy: WitnessPolicy
+  approval?: GovernanceApproval
   round: number
   commits: Record<string, string>
+  ready: Record<string, string>
   stored: Record<string, string>
 }
 
@@ -162,6 +206,46 @@ export interface PolicyChain {
   heads: string[]
   current: WitnessPolicy
   epochs: Map<string, WitnessPolicy>
+  roster: string | undefined
+  ballots: Map<string, { manifest: string, roster: string, epoch: string }>
+  voterRelease: string | undefined
+}
+
+export type GovernanceApproval =
+  | { roster: string }
+  | { ballot: { id: string, manifest: string, roster: string } }
+  | { voter_release: string }
+
+export function governanceApproval(value: unknown): GovernanceApproval {
+  const entry = value as GovernanceApproval
+  const hash = (part: unknown) => typeof part === 'string' && hex.test(part)
+  requireHistory(entry && typeof entry === 'object' && Object.keys(entry).length === 1
+    && ('roster' in entry && hash(entry.roster) || 'voter_release' in entry && hash(entry.voter_release)
+      || 'ballot' in entry && entry.ballot && typeof entry.ballot === 'object'
+      && Object.keys(entry.ballot).length === 3 && typeof entry.ballot.id === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(entry.ballot.id)
+      && hash(entry.ballot.manifest) && hash(entry.ballot.roster)), 'Invalid governance approval.')
+  return entry
+}
+
+export const approvalDigest = (policyDigest: string, approval?: GovernanceApproval) =>
+  approval ? fingerprint(['cope-quorum-governance/1', policyDigest, approval]) : Promise.resolve(policyDigest)
+
+export function checkGovernance(chain: Pick<PolicyChain, 'roster' | 'ballots'>, approval: GovernanceApproval) {
+  if ('ballot' in approval) {
+    requireHistory(!chain.ballots.has(approval.ballot.id), 'This ballot ID already has a quorum decision.')
+    requireHistory(chain.roster === approval.ballot.roster, 'A ballot must use the current approved roster.')
+  }
+  if ('roster' in approval) requireHistory(chain.roster !== approval.roster, 'The roster is already approved.')
+}
+
+export async function authorizedBallot(chain: PolicyChain | null | undefined, manifest: Manifest) {
+  const entry = chain?.ballots.get(manifest.id)
+  const policy = chain?.epochs.get(manifest.vote_history?.epoch ?? '')
+  requireHistory(entry && policy && entry.epoch === manifest.vote_history?.epoch
+    && entry.roster === manifest.roster && entry.manifest === await fingerprint(manifest),
+  'The pinned verifier quorum has not approved this exact ballot and roster.')
+  return policy
 }
 
 export function policyChangeStatement(origin: string, head: string, previous: string, next: string) {
@@ -172,7 +256,7 @@ export function policyChangeStatement(origin: string, head: string, previous: st
 export const validPolicyRound = (round: unknown): round is number =>
   typeof round === 'number' && Number.isInteger(round) && round >= 0 && round <= 0x7fffffff
 
-export const policyVoteStatement = (phase: 'prepare' | 'commit' | 'store', origin: string, head: string,
+export const policyVoteStatement = (phase: 'prepare' | 'commit' | 'ready' | 'store', origin: string, head: string,
   round: number, digest: string) => [`cope-quorum-policy-${phase}/1`, origin, head, round, digest]
 
 export const policyRetryStatement = (origin: string, head: string, round: number,
@@ -197,28 +281,40 @@ export async function verifyPolicyChain(value: unknown, origin: string): Promise
   const raw = value as PolicyBundle
   const bundle = raw && typeof raw === 'object' && Object.hasOwn(raw, 'initial')
     ? raw : { initial: witnessPolicy(value), changes: [] }
-  requireHistory(Object.keys(bundle).length === 2 && Array.isArray(bundle.changes) && bundle.changes.length <= 128,
+  requireHistory(Object.keys(bundle).length === 2 && Array.isArray(bundle.changes) && bundle.changes.length <= maxPolicyChanges,
     'Invalid witness policy history.')
   let current = witnessPolicy(bundle.initial)
   let digest = await fingerprint(current)
   let head = await fingerprint(['cope-quorum-witness-policy-anchor/1', origin, digest])
   const heads = [head]
   const epochs = new Map([[head, current]])
+  const ballots: PolicyChain['ballots'] = new Map()
+  let roster: string | undefined
+  let voterRelease: string | undefined
   for (const change of bundle.changes) {
-    requireHistory(change && typeof change === 'object' && Object.keys(change).length === 4
+    requireHistory(change && typeof change === 'object' && !Array.isArray(change)
+      && Object.keys(change).length === (Object.hasOwn(change, 'approval') ? 6 : 5)
       && validPolicyRound(change.round),
     'Invalid witness policy change.')
     const next = witnessPolicy(change.policy)
     const nextDigest = await fingerprint(next)
-    requireHistory(nextDigest !== digest, 'The proposed policy is identical to the current policy.')
-    await checkPolicySignatures(current, policyVoteStatement('commit', origin, head, change.round, nextDigest), change.commits)
-    await checkPolicySignatures(current, policyVoteStatement('store', origin, head, change.round, nextDigest), change.stored)
-    const statement = policyChangeStatement(origin, head, digest, nextDigest)
+    const approval = Object.hasOwn(change, 'approval') ? governanceApproval(change.approval) : undefined
+    requireHistory(approval ? nextDigest === digest : nextDigest !== digest,
+      'Approve governance separately from any change to verifier membership.')
+    if (approval) checkGovernance({ roster, ballots }, approval)
+    const proposal = await approvalDigest(nextDigest, approval)
+    await checkPolicySignatures(current, policyVoteStatement('commit', origin, head, change.round, proposal), change.commits)
+    await checkPolicySignatures(next, policyVoteStatement('ready', origin, head, change.round, proposal), change.ready)
+    await checkPolicySignatures(current, policyVoteStatement('store', origin, head, change.round, proposal), change.stored)
+    if (approval && 'roster' in approval) roster = approval.roster
+    if (approval && 'ballot' in approval) ballots.set(approval.ballot.id, { ...approval.ballot, epoch: head })
+    if (approval && 'voter_release' in approval) voterRelease = approval.voter_release
+    const statement = policyChangeStatement(origin, head, digest, proposal)
     head = await fingerprint(statement)
     heads.push(head)
     current = next
     digest = nextDigest
     epochs.set(head, current)
   }
-  return { bundle, head, heads, current, epochs }
+  return { bundle, head, heads, current, epochs, roster, ballots, voterRelease }
 }

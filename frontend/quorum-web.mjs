@@ -1,6 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fingerprint } from './src/quorum.ts'
 
 const files = new Map([
   ['/assets/verifier.js', ['quorum-web/app.js', 'text/javascript; charset=utf-8']],
@@ -64,10 +66,11 @@ export async function createWeb() {
     throw new Error('The verifier admin token must be 43–128 URL-safe characters.')
   }
   const tokenHash = token && hash(token)
-  const adminOrigin = new URL(process.env.COPE_VERIFIER_ADMIN_ORIGIN || 'http://127.0.0.1:8788')
+  const loopback = 'http://127.0.0.1:' + (process.env.COPE_VERIFIER_TRUSTED_ADMIN ? '8789' : '8788')
+  const adminOrigin = new URL(process.env.COPE_VERIFIER_ADMIN_ORIGIN || loopback)
   if (adminOrigin.href !== adminOrigin.origin + '/' || !(
-    adminOrigin.protocol === 'https:' || adminOrigin.origin === 'http://127.0.0.1:8788'
-  )) throw new Error('The verifier admin origin must be an HTTPS origin or http://127.0.0.1:8788.')
+    adminOrigin.protocol === 'https:' || adminOrigin.origin === loopback
+  )) throw new Error('Use a dedicated HTTPS verifier admin origin or ' + loopback + '.')
   const secure = adminOrigin.protocol === 'https:'
   const proxies = new Set((process.env.COPE_VERIFIER_ADMIN_PROXIES || '').split(',').map(item => item.trim()).filter(Boolean))
   if ([...proxies].some(address => !isIP(address))) throw new Error('Verifier admin proxies must be IP addresses.')
@@ -168,5 +171,59 @@ export async function createWeb() {
       send(response, error.status ?? 500, { error: error.status ? error.message : 'Could not load this verifier request.' })
       return true
     }
+  }
+}
+
+export async function createVoterWeb(chain, origin) {
+  const directory = process.env.COPE_VERIFIER_VOTER_RELEASE
+  const digest = chain?.voterRelease
+  if (!directory || !digest) return null
+  const manifest = JSON.parse(await readFile(join(directory, 'release.json'), 'utf8'))
+  const names = new Map([
+    ['vote.js', ['text/javascript; charset=utf-8', 8 * 1024 ** 2]],
+    ['semaphore-10.wasm', ['application/wasm', 16 * 1024 ** 2]],
+    ['semaphore-10.zkey', ['application/octet-stream', 32 * 1024 ** 2]],
+  ])
+  if (manifest.version !== 'cope-quorum-voter-release/1' || Object.keys(manifest).length !== 2
+    || Object.keys(manifest.files ?? {}).length !== names.size || await fingerprint(manifest) !== digest) {
+    throw new Error('The installed voting release is not the current quorum-approved release.')
+  }
+  const assets = new Map()
+  for (const [name, [type, limit]] of names) {
+    const metadata = manifest.files[name]
+    if (!metadata || Object.keys(metadata).length !== 2 || !Number.isInteger(metadata.size)
+      || metadata.size < 1 || metadata.size > limit || !hex.test(metadata.sha256)) {
+      throw new Error('Invalid voting release file metadata.')
+    }
+    const bytes = await readFile(join(directory, name))
+    if (bytes.length !== metadata.size || hash(bytes).toString('hex') !== metadata.sha256) {
+      throw new Error('A voting release file differs from the approved manifest.')
+    }
+    assets.set(name, { bytes, type })
+  }
+  const shell = await readFile(new URL('quorum-web/vote.html', import.meta.url), 'utf8')
+  const prefix = '/voting/release/' + digest + '/'
+  const integrity = 'sha256-' + Buffer.from(manifest.files['vote.js'].sha256, 'hex').toString('base64')
+  const documentHeaders = {
+    'Content-Security-Policy': "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:; style-src 'self'; connect-src 'self' https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  }
+  return (request, response, path) => {
+    if (request.method !== 'GET') return false
+    if (path === '/api/voting/policy') {
+      send(response, 200, { origin, policy: chain.bundle })
+      return true
+    }
+    if (path.startsWith(prefix)) {
+      const asset = assets.get(path.slice(prefix.length))
+      if (!asset) return false
+      send(response, 200, asset.bytes, asset.type, { 'Cache-Control': 'public, max-age=31536000, immutable' })
+      return true
+    }
+    const ballot = /^\/vote\/([0-9a-f-]{36})$/.exec(path)?.[1]
+    if (!ballot || !chain.ballots.has(ballot)) return false
+    const page = shell.replace('@@SCRIPT@@', prefix + 'vote.js').replace('@@INTEGRITY@@', integrity)
+      .replace('@@BALLOT@@', ballot).replace('@@RELEASE@@', digest)
+    send(response, 200, page, 'text/html; charset=utf-8', documentHeaders)
+    return true
   }
 }

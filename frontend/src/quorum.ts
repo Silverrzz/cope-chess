@@ -49,6 +49,8 @@ export interface BallotPackage {
   status: 'scheduled' | 'open' | 'completed'
   result: BallotResult | null
   live_tally?: VoteTally
+  settling?: boolean
+  intake?: Record<string, string>[]
 }
 
 export interface VoteEvidence {
@@ -88,14 +90,19 @@ export async function ballotScope(manifest: Manifest) {
   return BigInt('0x' + await fingerprint(['cope-quorum-ballot/1', manifest])).toString()
 }
 
-async function verifyBallotContext(manifest: Manifest, roster: Roster) {
-  requireValid(manifest && Array.isArray(manifest.options) && Array.isArray(roster?.members), 'Invalid ballot or roster.')
-  const rosterKey = manifest.roster === undefined ? 'genesis' : 'roster'
-  requireValid(roster.members.length >= 1 && roster.members.length <= 1024
+export function verifyRoster(roster: Roster) {
+  requireValid(roster && exactKeys(roster, ['members', 'root']) && Array.isArray(roster.members)
+    && roster.members.length >= 1 && roster.members.length <= 1024
     && new Set(roster.members).size === roster.members.length
     && roster.members.every(member => member !== '0' && decimal(member, field))
-    && await fingerprint(roster) === manifest[rosterKey]
     && new Group(roster.members).root.toString() === roster.root, 'Invalid ballot roster.')
+}
+
+export async function verifyBallotContext(manifest: Manifest, roster: Roster) {
+  requireValid(manifest && Array.isArray(manifest.options), 'Invalid ballot.')
+  verifyRoster(roster)
+  const rosterKey = manifest.roster === undefined ? 'genesis' : 'roster'
+  requireValid(await fingerprint(roster) === manifest[rosterKey], 'The ballot uses a different roster.')
   const options = ballotOptions(manifest)
   const subjects = ['motion', 'poll', 'engine', 'member']
   const rules = ['majority', 'unanimous_electorate', 'unanimous_decisive', 'report_only']
@@ -130,7 +137,7 @@ async function verifyBallotContext(manifest: Manifest, roster: Roster) {
   return { options, scope: await ballotScope(manifest) }
 }
 
-async function verifyVote(proof: SemaphoreProof, roster: Roster, options: string[], scope: string) {
+export async function verifyVote(proof: SemaphoreProof, roster: Roster, options: string[], scope: string) {
   requireValid(exactKeys(proof, ['merkleTreeDepth', 'merkleTreeRoot', 'nullifier', 'message', 'scope', 'points'])
     && decimal(proof.nullifier, field)
     && typeof proof.message === 'string' && /^(0|[1-9][0-9]?)$/.test(proof.message)

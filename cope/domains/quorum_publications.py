@@ -91,7 +91,7 @@ class Disclosure(Input):
 
 def closed_evidence(connection, ballot_id):
     evidence = elections.ballot_package(connection, ballot_id)
-    if evidence["status"] != "completed":
+    if evidence["status"] != "completed" or evidence.get("settling"):
         elections.fail("quorum_ballot_open", "Available after voting closes.")
     return evidence
 
@@ -99,10 +99,10 @@ def closed_evidence(connection, ballot_id):
 def publications(connection, ballot_id):
     evidence = elections.ballot_package(connection, ballot_id)
     witnesses = elections.witness_status(connection, evidence)
-    if evidence["status"] != "completed":
+    if evidence["status"] != "completed" or evidence.get("settling"):
         return {"certified": False, "witnesses": witnesses, "signatures": {}, "disclosures": []}
     options = evidence["result"]["options"]
-    disclosures = [
+    disclosures = [] if evidence["manifest"].get("vote_history") else [
         {"username": row["username"], "option": options[int(row["message"])]}
         for row in connection.execute(
             """SELECT d.username, v.proof->>'message' AS message

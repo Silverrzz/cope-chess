@@ -1,4 +1,5 @@
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--color-bg); color: var(--color-text); font: 1rem/1.55 var(--font-sans); }
 a { color: var(--color-link); text-underline-offset: .2em; }
 a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }

@@ -10,13 +10,17 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      COPE_VERIFIER_ADMIN_ORIGIN: https://quorum.nocturn9x.space
+      COPE_VERIFIER_ADMIN_ORIGIN: ${COPE_VERIFIER_ADMIN_ORIGIN:-https://quorum.nocturn9x.space}
+      COPE_VERIFIER_ADMIN_BIND: 0.0.0.0
+      COPE_VERIFIER_PUBLIC_ORIGIN: https://quorum.nocturn9x.space
       COPE_VERIFIER_ADMIN_PROXIES: 10.0.0.4,10.0.0.5
       COPE_VERIFIER_ADMIN_TOKEN_FILE: ${COPE_VERIFIER_ADMIN_TOKEN_FILE:-}
       COPE_VERIFIER_WITNESS_POLICY: ${COPE_VERIFIER_WITNESS_POLICY:-}
       COPE_VERIFIER_RELEASE_POLICY: ${COPE_VERIFIER_RELEASE_POLICY:-}
+      COPE_VERIFIER_VOTER_RELEASE: ${COPE_VERIFIER_VOTER_RELEASE:-}
     ports:
       - "10.0.0.14:8788:8788"
+      - "10.0.0.14:8789:8789"
     volumes:
       - archive:/state
       - runtime:/app/.cope-worker
@@ -30,6 +34,7 @@ services:
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev
     cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID]
     security_opt: [no-new-privileges:true]
     mem_limit: 768m
     cpus: 1.0
@@ -53,4 +58,4 @@ volumes:
   archive:
     name: cope-quorum-verifier_production_archive
   runtime:
-    name: cope-quorum-verifier_production_runtime
+    name: cope-quorum-verifier_production_supervisor_runtime

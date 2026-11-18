@@ -5,7 +5,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore
 
@@ -18,6 +18,7 @@ from cope.domains.quorum import STATE_LOCK, read_setup
 FIELD = 21888242871839275222246405745257275088548364400416034343698204186575808495617
 CURVE_FIELD = 21888242871839275222246405745257275088696311157297823662689037894645226208583
 VERIFY_SLOTS = BoundedSemaphore(2)
+SETTLEMENT = timedelta(minutes=2)
 
 
 def fail(code, message, status=409):
@@ -56,6 +57,11 @@ class Enrollment(Input):
 class BallotPublication(Input):
     draft_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     revision: int = Field(strict=True, ge=0)
+
+
+class RelayVote(Input):
+    proof: Proof
+    signatures: dict[str, str] = Field(min_length=1, max_length=64)
 
 
 def canonical(value):
@@ -141,7 +147,7 @@ def admin_status(connection):
     }
 
 
-def publish(connection, draft_id, revision, origin):
+def publish(connection, draft_id, revision, origin, *, propose=False):
     connection.execute(STATE_LOCK)
     setup = read_setup(connection)
     if setup.revision != revision:
@@ -163,11 +169,20 @@ def publish(connection, draft_id, revision, origin):
     witnesses = [witness.model_dump(exclude={"enabled"}) for witness in setup.witnesses if witness.enabled]
     from cope.domains.quorum_history import publication_policy
 
-    history = publication_policy(connection, witnesses, origin)
+    history, approved_roster, approval = publication_policy(connection, witnesses, origin, draft_id, propose=propose)
     if history:
         manifest["vote_history"] = history
     if witnesses:
         manifest["witnesses"] = witnesses
+    if propose:
+        if not history:
+            fail("quorum_history_policy", "Configure a pinned verifier policy to request quorum approval.")
+        if manifest["roster"] != approved_roster:
+            return {"approval": {"roster": manifest["roster"]}, "roster": roster}
+        return {"approval": {"ballot": {"id": draft.id, "manifest": digest(manifest), "roster": manifest["roster"]}},
+                "manifest": manifest, "roster": roster}
+    if approval and (approval["roster"] != manifest["roster"] or approval["manifest"] != digest(manifest)):
+        fail("quorum_ballot_changed", "The draft or enrolled roster differs from the one approved by the verifier quorum.")
     row = connection.execute(
         """INSERT INTO cope_quorum.ballots (id, manifest, roster, opens_at, closes_at)
            VALUES (?::uuid, ?::jsonb, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING RETURNING id""",
@@ -207,7 +222,7 @@ def build_evidence(connection, row, now):
     electorate = len(roster["members"])
     closed = now >= row["closes_at"]
     live_tally = None
-    if not closed and now >= row["opens_at"]:
+    if not closed and now >= row["opens_at"] and not manifest.get("vote_history"):
         live_tally = current_tally(connection, row["id"], ballot_options(manifest), electorate)
         closed = not manifest.get("vote_history") and live_tally["total"] == electorate
     votes = proof_rows(connection, row["id"]) if closed else []
@@ -219,6 +234,13 @@ def build_evidence(connection, row, now):
         "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
         "result": tally(manifest, votes, electorate) if closed else None,
     }
+    if closed and manifest.get("vote_history"):
+        if now < row["closes_at"] + SETTLEMENT:
+            evidence.update(settling=True, votes=[], result=None)
+        else:
+            evidence["intake"] = [item["intake"] for item in connection.execute(
+                "SELECT intake FROM cope_quorum.votes WHERE ballot_id = ?::uuid ORDER BY position", (str(row["id"]),),
+            )]
     if live_tally is not None and not closed:
         evidence["live_tally"] = live_tally
     return evidence
@@ -286,13 +308,27 @@ def directory(connection):
     return entries
 
 
-def cast_vote(connection, ballot_id, proof):
+def cast_vote(connection, ballot_id, proof, *, intake=None, origin=None):
     row = ballot(connection, ballot_id)
     manifest = row["manifest"]
+    witnessed = bool(manifest.get("vote_history"))
+    if witnessed != (intake is not None):
+        fail("quorum_relay_required", "This ballot requires votes certified by its independent verifiers." if witnessed
+             else "This ballot does not accept verifier relay votes.")
+    if witnessed:
+        from cope.domains.quorum_history import verify_policy_signatures
+        policy = {"threshold": manifest["vote_history"]["threshold"],
+                  "operators": {str(i): item["public_key"] for i, item in enumerate(manifest["witnesses"])}}
+        try:
+            verify_policy_signatures(policy, ["cope-quorum-vote-intake/1", origin, manifest["id"],
+                                              digest(manifest), digest(proof.model_dump())], intake)
+        except ValueError:
+            fail("quorum_relay_certificate", "The vote does not have enough valid verifier intake signatures.", 422)
+    deadline = row["closes_at"] + SETTLEMENT if witnessed else row["closes_at"]
     now = datetime.now(UTC)
     if now < row["opens_at"]:
         fail("quorum_voting_closed", "This ballot is outside its voting window.")
-    if now >= row["closes_at"]:
+    if now >= deadline:
         accepted = connection.execute(
             "SELECT position, proof FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?",
             (str(ballot_id), proof.nullifier),
@@ -303,7 +339,7 @@ def cast_vote(connection, ballot_id, proof):
     if int(proof.message) >= len(ballot_options(manifest)):
         fail("quorum_invalid_option", "This option is outside the frozen ballot.", 422)
     connection.commit()
-    if not proof_worker(row["roster"]["members"], proof, scope(["cope-quorum-ballot/1", manifest]))["valid"]:
+    if not witnessed and not proof_worker(row["roster"]["members"], proof, scope(["cope-quorum-ballot/1", manifest]))["valid"]:
         fail("quorum_invalid_vote", "The anonymous vote proof is invalid.", 422)
     row = ballot(connection, ballot_id, lock=" FOR UPDATE")
     accepted = connection.execute(
@@ -316,7 +352,7 @@ def cast_vote(connection, ballot_id, proof):
         if manifest.get("vote_history") and accepted["proof"] != proof.model_dump():
             fail("quorum_already_voted", "This credential already submitted a vote. Use the original submission to check its receipt.")
         return {"position": accepted["position"], "nullifier": proof.nullifier}
-    if datetime.now(UTC) >= row["closes_at"]:
+    if datetime.now(UTC) >= deadline:
         fail("quorum_voting_closed", "This ballot has closed.")
     next_position = connection.execute(
         "SELECT coalesce(max(position), 0) + 1 AS position FROM cope_quorum.votes WHERE ballot_id = ?::uuid",
@@ -325,9 +361,10 @@ def cast_vote(connection, ballot_id, proof):
     if next_position > len(row["roster"]["members"]):
         fail("quorum_voting_closed", "This ballot has closed.")
     connection.execute(
-        """INSERT INTO cope_quorum.votes (ballot_id, position, nullifier, proof)
-           VALUES (?::uuid, ?, ?, ?::jsonb)""",
-        (str(ballot_id), next_position, proof.nullifier, canonical(proof.model_dump()).decode()),
+        """INSERT INTO cope_quorum.votes (ballot_id, position, nullifier, proof, intake)
+           VALUES (?::uuid, ?, ?, ?::jsonb, ?::jsonb)""",
+        (str(ballot_id), next_position, proof.nullifier, canonical(proof.model_dump()).decode(),
+         canonical(intake).decode() if intake is not None else None),
     )
     connection.commit()
     return {"position": next_position, "nullifier": proof.nullifier}

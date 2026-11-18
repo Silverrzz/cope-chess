@@ -345,9 +345,9 @@ def _prepare_verifier(origin: str) -> tuple[str, list[str]]:
     runtime = RUNTIME / "quorum-verifier" / "v1"
     release = runtime / "bootstrap" / commit
     if not (release / "ready").is_file():
-        files = ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "quorum-policy.mjs", "quorum-web.mjs",
-                 "src/quorum.ts", "src/quorum-history.ts", "src/styles/tokens.css", "quorum-web/index.html", "quorum-web/app.js",
-                 "quorum-web/style.css")
+        files = ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-admin.mjs", "quorum-audit.mjs", "quorum-policy.mjs", "quorum-web.mjs",
+                 "src/quorum.ts", "src/quorum-history.ts", "src/quorum-relay.ts", "src/styles/tokens.css", "quorum-web/index.html", "quorum-web/app.js",
+                 "quorum-web/style.css", "quorum-web/vote.html")
         for file in files:
             destination = release / file
             destination.parent.mkdir(parents=True, exist_ok=True)

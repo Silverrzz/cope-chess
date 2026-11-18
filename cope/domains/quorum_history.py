@@ -62,7 +62,7 @@ def verify_policy_signatures(policy, statement, signatures):
         raise ValueError("Invalid policy decision signature.") from error
 
 
-def verify_policy_chain(data, origin):
+def parse_policy_chain(data, origin):
     if isinstance(data, dict) and "initial" in data:
         if data.keys() != {"initial", "changes"} or not isinstance(data["changes"], list) or len(data["changes"]) > 128:
             raise ValueError("Invalid witness policy history.")
@@ -72,35 +72,72 @@ def verify_policy_chain(data, origin):
     digest = elections.digest(policy)
     head = elections.digest(["cope-quorum-witness-policy-anchor/1", origin, digest])
     heads = [head]
+    roster = None
+    ballots = {}
+    epochs = {head: policy}
     for change in changes:
-        if (not isinstance(change, dict) or change.keys() != {"policy", "round", "commits", "stored"}
+        expected = {"policy", "round", "commits", "ready", "stored"}
+        if (not isinstance(change, dict) or change.keys() not in (expected, expected | {"approval"})
                 or type(change["round"]) is not int or not 0 <= change["round"] <= 0x7fffffff):
             raise ValueError("Invalid witness policy change.")
         new = validate_policy(change["policy"])
         new_digest = elections.digest(new)
-        if new_digest == digest:
-            raise ValueError("The proposed policy is identical to the current policy.")
+        has_approval = "approval" in change
+        if has_approval != (new_digest == digest):
+            raise ValueError("Approve governance separately from any change to verifier membership.")
+        proposal = new_digest
+        if has_approval:
+            approval = change["approval"]
+            valid_hash = lambda part: isinstance(part, str) and re.fullmatch(r"[0-9a-f]{64}", part)
+            if not isinstance(approval, dict) or len(approval) != 1:
+                raise ValueError("Invalid governance approval.")
+            if "roster" in approval and valid_hash(approval["roster"]) and approval["roster"] != roster:
+                roster = approval["roster"]
+            elif "ballot" in approval:
+                record = approval["ballot"]
+                if (not isinstance(record, dict) or record.keys() != {"id", "manifest", "roster"}
+                        or not isinstance(record["id"], str)
+                        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", record["id"])
+                        or record["id"] in ballots or not valid_hash(record["manifest"])
+                        or not valid_hash(record["roster"]) or record["roster"] != roster):
+                    raise ValueError("Invalid, duplicate, or non-current ballot approval.")
+                ballots[record["id"]] = {**record, "epoch": head}
+            elif "voter_release" not in approval or not valid_hash(approval["voter_release"]):
+                raise ValueError("Invalid governance approval.")
+            proposal = elections.digest(["cope-quorum-governance/1", new_digest, approval])
         for phase, signatures in (("commit", change["commits"]), ("store", change["stored"])):
-            verify_policy_signatures(policy, [f"cope-quorum-policy-{phase}/1", origin, head, change["round"], new_digest],
+            verify_policy_signatures(policy, [f"cope-quorum-policy-{phase}/1", origin, head, change["round"], proposal],
                                      signatures)
-        statement = ["cope-quorum-witness-policy-change/2", origin, head, digest, new_digest]
+        verify_policy_signatures(new, ["cope-quorum-policy-ready/1", origin, head, change["round"], proposal],
+                                 change["ready"])
+        statement = ["cope-quorum-witness-policy-change/2", origin, head, digest, proposal]
         head, digest, policy = elections.digest(statement), new_digest, new
         heads.append(head)
-    return policy, heads
+        epochs[head] = policy
+    return policy, heads, roster, ballots, epochs
+
+
+def verify_policy_chain(data, origin):
+    return parse_policy_chain(data, origin)[:2]
 
 
 def configured_policy(connection, origin):
+    return configured_governance(connection, origin)[:2]
+
+
+def configured_governance(connection, origin):
     existing = connection.execute("SELECT head FROM cope_quorum.witness_policy_anchor WHERE singleton").fetchone()
     path = os.environ.get("COPE_QUORUM_WITNESS_POLICY")
     text = os.environ.get("COPE_QUORUM_WITNESS_POLICY_JSON")
     if not path and not text:
         if existing:
             raise ValueError("The pinned witness policy must be configured before publishing.")
-        return None, []
-    policy, heads = verify_policy_chain(json.loads(Path(path).read_text(encoding="utf-8") if path else text), origin)
+        return None, [], None, {}, {}
+    chain = parse_policy_chain(json.loads(Path(path).read_text(encoding="utf-8") if path else text), origin)
+    heads = chain[1]
     if existing and existing["head"] not in heads:
         raise ValueError("The policy does not extend the previously approved policy.")
-    return policy, heads
+    return chain
 
 
 def recommended_policy(witnesses, selected_keys, current):
@@ -132,20 +169,30 @@ def recommended_policy(witnesses, selected_keys, current):
     return validate_policy({"threshold": threshold, "max_faulty": fault, "operators": operators})
 
 
-def publication_policy(connection, witnesses, origin):
+def publication_policy(connection, witnesses, origin, ballot_id, *, propose=False):
     try:
-        policy, heads = configured_policy(connection, origin)
+        policy, heads, roster, ballots, epochs = configured_governance(connection, origin)
     except (OSError, ValueError) as error:
         elections.fail("quorum_history_policy", f"The server's witness policy is invalid: {error}", 503)
     if policy is None:
-        return None
+        return None, None, None
+    approval = ballots.get(ballot_id)
+    if not propose and not approval:
+        elections.fail("quorum_ballot_not_approved", "The verifier quorum must approve this ballot and its roster before publication.")
+    if propose and approval:
+        elections.fail("quorum_ballot_already_approved", "The verifier quorum already approved this ballot ID.")
+    epoch = approval["epoch"] if approval else heads[-1]
+    policy = epochs[epoch]
     if sorted(witness["public_key"] for witness in witnesses) != sorted(policy["operators"].values()):
         elections.fail("quorum_history_witnesses", "Enable the witnesses in the configured policy before publishing.")
-    connection.execute(
-        """INSERT INTO cope_quorum.witness_policy_anchor (head) VALUES (?)
-           ON CONFLICT (singleton) DO UPDATE SET head = EXCLUDED.head""", (heads[-1],),
-    )
-    return {"version": VERSION, "policy": elections.digest(policy), "epoch": heads[-1], "threshold": policy["threshold"]}
+    if len({item["report_origin"] for item in witnesses if item["report_origin"]}) < policy["threshold"]:
+        elections.fail("quorum_relay_origins", "Configure a distinct HTTPS report address for at least a quorum of verifiers.")
+    if not propose:
+        connection.execute(
+            """INSERT INTO cope_quorum.witness_policy_anchor (head) VALUES (?)
+               ON CONFLICT (singleton) DO UPDATE SET head = EXCLUDED.head""", (heads[-1],),
+        )
+    return {"version": VERSION, "policy": elections.digest(policy), "epoch": epoch, "threshold": policy["threshold"]}, roster, approval
 
 
 def hashes(connection, ballot_id):
@@ -204,7 +251,7 @@ def record_checkpoint(connection, ballot_id, origin, submitted):
     if submitted.public_key not in {item["public_key"] for item in manifest.get("witnesses", [])}:
         elections.fail("quorum_unknown_witness", "This witness is not assigned to the ballot.", 403)
     now = datetime.now(UTC)
-    if now < row["opens_at"] or (submitted.phase == "closed" and now < row["closes_at"]):
+    if now < row["opens_at"] or (submitted.phase == "closed" and now < row["closes_at"] + elections.SETTLEMENT):
         elections.fail("quorum_history_phase", "This checkpoint is outside the ballot phase.")
     votes = hashes(connection, ballot_id)
     if (submitted.size > len(votes) or (submitted.phase == "closed" and submitted.size != len(votes))

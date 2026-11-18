@@ -23,7 +23,8 @@ HEX = re.compile(r"[a-f0-9]{64}")
 CHANNEL = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 REQUIRED = {"package.json", "quorum-node.mjs", "quorum-web.mjs", "src/quorum.ts",
             "src/styles/tokens.css", "quorum-web/index.html", "quorum-web/app.js", "quorum-web/style.css"}
-SOURCE_FILES = REQUIRED | {"package-lock.json", "quorum-audit.mjs", "quorum-policy.mjs", "src/quorum-history.ts"}
+SOURCE_FILES = REQUIRED | {"package-lock.json", "quorum-audit.mjs", "quorum-policy.mjs", "src/quorum-history.ts",
+                           "src/quorum-relay.ts", "quorum-web/vote.html"}
 PACKAGE_FILES = {"package.json", "package-lock.json"}
 
 
@@ -56,10 +57,10 @@ def parse_json(data):
     return json.loads(data.decode("utf-8"), object_pairs_hook=unique_keys)
 
 
-def read_json(path):
+def read_json(path, limit=MAX_MANIFEST):
     with path.open("rb") as source:
-        data = source.read(MAX_MANIFEST + 1)
-    require(len(data) <= MAX_MANIFEST, "The local update file is too large.")
+        data = source.read(limit + 1)
+    require(len(data) <= limit, "The local update file is too large.")
     value = parse_json(data)
     require(isinstance(value, dict), "The local update file must be a JSON object.")
     return value
@@ -74,14 +75,18 @@ def atomic_json(path, value):
             os.fsync(file.fileno())
             file.close()
             temporary.replace(path)
-            if os.name != "nt":
-                directory = os.open(path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+            sync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def sync_directory(path):
+    if os.name != "nt":
+        directory = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def load_policy(path):
@@ -188,6 +193,7 @@ def checked_artifact(cache, release, policy=None):
                 with temporary.open("rb") as source:
                     check_bytes(source, artifact)
                 temporary.replace(path)
+                sync_directory(cache)
             finally:
                 temporary.unlink(missing_ok=True)
     return path

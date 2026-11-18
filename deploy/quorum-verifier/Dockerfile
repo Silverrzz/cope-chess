@@ -7,15 +7,15 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y python3 openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/.cope-worker /state \
-    && chown node:node /app/.cope-worker /state
+    && chown node:node /state
 WORKDIR /app/bootstrap
 RUN mkdir -p src/styles quorum-web
 COPY --chmod=644 frontend/quorum-runtime/package.json frontend/quorum-runtime/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
-COPY --chmod=644 frontend/quorum-node.mjs frontend/quorum-web.mjs frontend/quorum-audit.mjs frontend/quorum-policy.mjs ./
+COPY --chmod=644 frontend/quorum-node.mjs frontend/quorum-admin.mjs frontend/quorum-web.mjs frontend/quorum-audit.mjs frontend/quorum-policy.mjs ./
 COPY --chmod=644 frontend/quorum-supervisor.py frontend/quorum_updates.py ./
-COPY --chmod=644 frontend/quorum-web/index.html frontend/quorum-web/app.js frontend/quorum-web/style.css ./quorum-web/
-COPY --chmod=644 frontend/src/quorum.ts frontend/src/quorum-history.ts ./src/
+COPY --chmod=644 frontend/quorum-web/index.html frontend/quorum-web/app.js frontend/quorum-web/style.css frontend/quorum-web/vote.html ./quorum-web/
+COPY --chmod=644 frontend/src/quorum.ts frontend/src/quorum-history.ts frontend/src/quorum-relay.ts ./src/
 COPY --chmod=644 frontend/src/styles/tokens.css ./src/styles/tokens.css
 RUN node --input-type=module -e '\
     import {writeFileSync} from "node:fs"; \
@@ -26,8 +26,9 @@ ENV NODE_ENV=production \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     COPE_VERIFIER_BIND=0.0.0.0 \
-    COPE_VERIFIER_ARCHIVE=/state
-USER node
-EXPOSE 8788
+    COPE_VERIFIER_ARCHIVE=/state \
+    COPE_VERIFIER_WORKER_UID=1000 \
+    COPE_VERIFIER_WORKER_GID=1000
+EXPOSE 8788 8789
 VOLUME ["/state", "/app/.cope-worker"]
 ENTRYPOINT ["python3", "/app/bootstrap/quorum-supervisor.py", "/app/bootstrap/verifier.json", "/app/.cope-worker/installer/quorum-verifier/v1"]

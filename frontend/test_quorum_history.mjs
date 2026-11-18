@@ -9,8 +9,8 @@ import { Group } from '@semaphore-protocol/group'
 import { Identity } from '@semaphore-protocol/identity'
 import { generateProof } from '@semaphore-protocol/proof'
 import { ballotScope, fingerprint, verifyBallot } from './src/quorum.ts'
-import { checkpointStatement, extendsHistory, historyDigest, historyVersion, policyVoteStatement,
-  verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, witnessPolicy } from './src/quorum-history.ts'
+import { approvalDigest, authorizedBallot, checkpointStatement, extendsHistory, historyDigest, historyVersion, intakeStatement, policyVoteStatement,
+  retainedStatement, verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, verifyRetentionReceipt, witnessPolicy } from './src/quorum-history.ts'
 
 const origin = 'https://cope.test'
 const signers = Array.from({ length: 7 }, (_, i) => {
@@ -45,6 +45,7 @@ async function evidence(withProof) {
     result: { options: ['Support', 'Oppose', 'Abstain'], counts: [votes.length, 0, 0], total: votes.length, electorate: 1, outcome } }
   const vote_hashes = await Promise.all(votes.map(fingerprint))
   const manifest_digest = await fingerprint(manifest)
+  packet.intake = vote_hashes.map(hash => signAll(intakeStatement(origin, manifest.id, manifest_digest, hash)))
   const size = votes.length
   const digest = await historyDigest(vote_hashes)
   const checkpoint = phase => ({ size, digest, signatures: signAll(checkpointStatement(origin, manifest.id, manifest_digest, phase, size, digest)) })
@@ -73,11 +74,16 @@ test('a real proof can be recorded; removing it and recomputing the tally fails 
   skip: !process.env.COPE_TEST_PROOF_ARTIFACTS && 'set COPE_TEST_PROOF_ARTIFACTS to the local depth-10 artifacts directory',
 }, async () => {
   const { packet, history } = await evidence(true)
-  const receipt = { version: 'cope-quorum-recorded-vote/1', origin, manifest: packet.manifest, proof: packet.votes[0],
+  const receipt = { version: 'cope-quorum-recorded-vote/1', origin, manifest: packet.manifest, roster: packet.roster, proof: packet.votes[0],
     vote_hash: history.vote_hashes[0], vote_hashes: history.vote_hashes, checkpoint: history.open }
   await verifyRecordedReceipt(receipt, original, origin)
   await verifyHistoryResult(packet, history, original, origin, receipt)
-  const omitted = { ...packet, votes: [], result: { ...packet.result, counts: [0, 0, 0], total: 0, outcome: 'rejected' } }
+  const relay = { version: 'cope-quorum-relayed-vote/1', origin, manifest: packet.manifest, roster: packet.roster, proof: packet.votes[0],
+    signatures: packet.intake[0], retained: signAll(retainedStatement(origin, packet.manifest.id, history.manifest_digest, history.vote_hashes[0])) }
+  assert.equal(await verifyRetentionReceipt(relay, original, origin), history.vote_hashes[0])
+  await assert.rejects(verifyRetentionReceipt({ ...relay, retained: relay.signatures }, original, origin), /signature/)
+  await assert.rejects(verifyHistoryResult({ ...packet, intake: [] }, history, original, origin), /intake certificates/)
+  const omitted = { ...packet, votes: [], intake: [], result: { ...packet.result, counts: [0, 0, 0], total: 0, outcome: 'rejected' } }
   await verifyBallot(omitted)
   await assert.rejects(verifyHistoryResult(omitted, history, original, origin, receipt), /final votes differ/)
   await assert.rejects(verifyHistoryResult(omitted,
@@ -91,18 +97,44 @@ test('policy changes need the old quorum, preserve history, and are bound to the
   const digest = await fingerprint(next)
   const commit = policyVoteStatement('commit', origin, state.head, 0, digest)
   const store = policyVoteStatement('store', origin, state.head, 0, digest)
-  const changes = (commits, stored) => ({ initial: original, changes: [{ policy: next, round: 0, commits, stored }] })
+  const ready = signAll(policyVoteStatement('ready', origin, state.head, 0, digest), signers.slice(0, 4))
+  const changes = (commits, stored) => ({ initial: original, changes: [{ policy: next, round: 0, commits, ready, stored }] })
   await assert.rejects(verifyPolicyChain(changes(signAll(commit, signers.slice(0, 2)), signAll(store)), origin), /current threshold/)
   await assert.rejects(verifyPolicyChain(changes(signAll(commit), signAll(store, [signers[0], signers[1], signers[5]])), origin), /current threshold/)
   await assert.rejects(verifyPolicyChain(changes(signAll(commit), signAll(commit)), origin), /current threshold/)
   const bundle = changes(signAll(commit), signAll(store))
+  const { [signers[3].key]: _, ...short } = ready
+  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [{ ...bundle.changes[0], ready: short }] }, origin), /threshold/)
   const updated = await verifyPolicyChain(bundle, origin)
   assert.deepEqual(updated.epochs.get(state.head), original)
   assert.deepEqual(updated.current, next)
   await assert.rejects(verifyPolicyChain(bundle, 'https://another.test'), /current threshold/)
   await assert.rejects(verifyPolicyChain({ ...bundle, initial: policyFor(3, 4, 0) }, origin), /current threshold/)
   await assert.rejects(verifyPolicyChain({ ...bundle, changes: [{ ...bundle.changes[0], round: 1 }] }, origin), /current threshold/)
-  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [...bundle.changes, ...bundle.changes] }, origin), /identical/)
+  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [...bundle.changes, ...bundle.changes] }, origin), /separately/)
+})
+
+test('the approved roster and exact ballot survive a disjoint verifier rotation', async () => {
+  const append = async (chain, policy, approval, old = signers.slice(0, 3), next = old) => {
+    const digest = await approvalDigest(await fingerprint(policy), approval)
+    const votes = (phase, keys) => signAll(policyVoteStatement(phase, origin, chain.head, 0, digest), keys)
+    return verifyPolicyChain({ initial: original, changes: [...chain.bundle.changes,
+      { policy, ...(approval && { approval }), round: 0, commits: votes('commit', old), ready: votes('ready', next),
+        stored: votes('store', old) }] }, origin)
+  }
+  const { packet } = await evidence(false)
+  const roster = await append(state, original, { roster: packet.manifest.roster })
+  packet.manifest.vote_history.epoch = roster.head
+  const ballot = { id: packet.manifest.id, manifest: await fingerprint(packet.manifest), roster: packet.manifest.roster }
+  await assert.rejects(authorizedBallot(roster, packet.manifest), /not approved/)
+  const approved = await append(roster, original, { ballot })
+  const nextKeys = signers.slice(4)
+  const successor = { threshold: 2, max_faulty: 0,
+    operators: Object.fromEntries(nextKeys.map(({ name, key }) => [name, key])) }
+  const rotated = await append(approved, successor, undefined, signers.slice(0, 3), nextKeys)
+  assert.deepEqual(await authorizedBallot(rotated, packet.manifest), original)
+  await assert.rejects(authorizedBallot(rotated, { ...packet.manifest, title: 'Different' }), /not approved/)
+  await assert.rejects(append(rotated, successor, { ballot }, nextKeys), /already has a quorum/)
 })
 
 test('even a fully signed successor must have a safe quorum of its own', async () => {
@@ -110,7 +142,8 @@ test('even a fully signed successor must have a safe quorum of its own', async (
     const digest = await fingerprint(policy)
     const commits = signAll(policyVoteStatement('commit', origin, state.head, 0, digest), signers.slice(0, 4))
     const stored = signAll(policyVoteStatement('store', origin, state.head, 0, digest), signers.slice(0, 4))
-    return { initial: original, changes: [{ policy, round: 0, commits, stored }] }
+    const ready = signAll(policyVoteStatement('ready', origin, state.head, 0, digest), signers.slice(0, policy.threshold))
+    return { initial: original, changes: [{ policy, round: 0, commits, ready, stored }] }
   }
   await assert.rejects(verifyPolicyChain(await approved(policyFor(1, 4, 0)), origin), /honest overlap/)
   const next = policyFor(5, 7, 2)
@@ -161,7 +194,9 @@ test('a 2–2 split leaves the current policy in place and operators can approve
     assert.throws(() => run('prepare', 0, 0, 'A'), /later round/)
     const prepared = await Promise.all([0, 1, 2].map(i => exchange('prepare', 1, i, 'B', retry)))
     const committed = await Promise.all([0, 1, 2].map(i => exchange('commit', 1, i, 'B', prepared)))
-    const first = await exchange('store', 1, 0, 'B', committed)
+    const ready = await Promise.all([0, 1, 2, 3].map(i => exchange('ready', 1, i, 'B', committed)))
+    assert.throws(() => run('store', 1, 0, 'B', ready.slice(0, 3)), /threshold/)
+    const first = await exchange('store', 1, 0, 'B', ready)
     const stored = [first, ...await Promise.all([1, 3].map(i => exchange('store', 1, i, 'B', [first])))]
     assert.deepEqual(JSON.parse(await readFile(join(archives[3], 'policy-decisions', state.head, '1.json'), 'utf8')),
       JSON.parse(await readFile(stored[2], 'utf8')))
@@ -183,6 +218,7 @@ test('a retry must preserve an earlier decision even if the collector withheld t
     assert.doesNotThrow(() => run('prepare', 1, 3, 'A', retry))
     assert.throws(() => run('commit', 0, 0, 'A', prepared), /later round/)
     // Once someone finds the original commits, the older decision can still be published.
-    assert.doesNotThrow(() => run('store', 0, 3, 'A', hidden))
+    const ready = await Promise.all([0, 1, 2, 3].map(i => exchange('ready', 0, i, 'A', hidden)))
+    assert.doesNotThrow(() => run('store', 0, 3, 'A', ready))
   })
 })

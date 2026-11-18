@@ -11,7 +11,8 @@ import AppIcon from '@/components/ui/AppIcon.vue'
 import QuorumTally from '@/components/public/QuorumTally.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { ballotOptions, ballotScope, fingerprint, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
-import { verifyHistoryResult, verifyRecordedReceipt, verifyPolicyChain, type PolicyChain, type FinalEvidence, type RecordedReceipt, type VoteHistory } from '@/quorum-history'
+import { authorizedBallot, verifyHistoryResult, verifyRecordedReceipt, type PolicyChain, type FinalEvidence, type RecordedReceipt, type VoteHistory } from '@/quorum-history'
+import { extendPinnedPolicy, loadPinnedPolicy, onPinChange } from '@/quorum-pins'
 import { resultLabels, resultTones, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, quorumReceiptKey, readQuorumReceipt, unlockedCredential } from '@/quorum-voter'
 
@@ -42,42 +43,39 @@ const recordedReceipt = ref<RecordedReceipt>()
 const history = ref<VoteHistory>()
 const historyVerified = ref(false)
 const historyError = ref('')
-const policyKey = 'cope-quorum-pinned-witness-policy/1'
 const pinnedChain = ref<PolicyChain>()
 const pinnedPolicy = computed(() => {
-  const digest = packet.value?.manifest.vote_history?.epoch
-  return digest ? pinnedChain.value?.epochs.get(digest) : undefined
+  const manifest = packet.value?.manifest
+  return manifest && pinnedChain.value?.ballots.has(manifest.id)
+    ? pinnedChain.value.epochs.get(manifest.vote_history?.epoch ?? '') : undefined
 })
-try {
-  const raw = localStorage.getItem(policyKey)
-  if (raw) void verifyPolicyChain(JSON.parse(raw), location.origin).then(chain => {
-    if (!pinnedChain.value) {
-      pinnedChain.value = chain
-      void loadHistory()
-    }
-  }).catch(() => {})
-} catch { /* Select an authenticated policy file to enable checks. */ }
 let historySequence = 0
 let historyTimer: ReturnType<typeof setTimeout> | undefined
 const witnessed = computed(() => Boolean(packet.value?.manifest.vote_history))
 const pendingKey = (id: string) => 'cope-quorum-submitted-proof/1/' + id
 const recordedKey = (id: string) => 'cope-quorum-recorded-receipt/1/' + id
+async function refreshPin() {
+  try {
+    const chain = await loadPinnedPolicy(location.origin)
+    if (!disposed && chain && (!pinnedChain.value || chain.heads.includes(pinnedChain.value.head))) {
+      pinnedChain.value = chain
+      historyVerified.value = false
+      void loadHistory()
+    }
+  } catch { /* Select an authenticated policy file to enable checks. */ }
+}
+const stopWatchingPin = onPinChange(location.origin, () => { void refreshPin() })
+void refreshPin()
 
 async function importPolicy(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
   try {
-    if (file.size > 2 * 1024 * 1024) throw new Error('Choose a witness policy file up to 2 MiB.')
-    const chain = await verifyPolicyChain(JSON.parse(await file.text()), location.origin)
-    const cached = localStorage.getItem(policyKey)
-    const previous = cached ? await verifyPolicyChain(JSON.parse(cached), location.origin) : pinnedChain.value
-    if (previous && !chain.heads.includes(previous.head)) throw new Error('This file does not extend your approved witness policy.')
-    localStorage.setItem(policyKey, JSON.stringify(chain.bundle))
-    pinnedChain.value = chain
+    await extendPinnedPolicy(file, location.origin, true)
     recordedReceipt.value = undefined
     historyVerified.value = false
-    void loadHistory()
+    await refreshPin()
   } catch (cause) {
     historyError.value = (cause as Error).message
   } finally {
@@ -88,7 +86,6 @@ async function importPolicy(event: Event) {
 async function loadHistory() {
   clearTimeout(historyTimer)
   const evidence = packet.value
-  const policy = pinnedPolicy.value
   const path = endpoint.value
   if (!evidence?.manifest.vote_history) return
   const sequence = ++historySequence
@@ -99,6 +96,7 @@ async function loadHistory() {
     const received = await api.get<VoteHistory>(path + '/history')
     if (!current()) return
     history.value = received
+    const policy = pinnedChain.value ? await authorizedBallot(pinnedChain.value, evidence.manifest) : undefined
     if (policy) {
       const cached = localStorage.getItem(recordedKey(id))
       if (cached && !recordedReceipt.value) {
@@ -114,7 +112,7 @@ async function loadHistory() {
         const hashes = received.vote_hashes.slice(0, received.open.size)
         if (hashes.includes(voteHash)) {
           const record: RecordedReceipt = {
-            version: 'cope-quorum-recorded-vote/1', origin: location.origin, manifest: evidence.manifest,
+            version: 'cope-quorum-recorded-vote/1', origin: location.origin, manifest: evidence.manifest, roster: evidence.roster,
             vote_hash: voteHash, proof, vote_hashes: hashes, checkpoint: received.open,
           }
           await verifyRecordedReceipt(record, policy, location.origin)
@@ -180,14 +178,16 @@ async function load() {
     const next = await api.get<BallotPackage>(path)
     if (disposed || sequence !== loadSequence) return
     const previousStatus = packet.value?.status
+    const wasSettling = packet.value?.settling
     verified.value = false
     packet.value = next
-    if (next.status !== 'completed') {
+    if (next.status !== 'completed' || next.settling) {
       const boundary = next.status === 'scheduled' ? next.manifest.opens_at : next.manifest.closes_at
       refreshTimer = setTimeout(load, Math.min(15000, Math.max(1000, Date.parse(boundary) - Date.now() + 250)))
     }
     if (next.manifest.vote_history && previousStatus !== next.status) void loadHistory()
-    if (previousStatus !== next.status && (next.status === 'completed' || next.manifest.witnesses?.length)) void loadPublications()
+    if ((previousStatus !== next.status || wasSettling !== next.settling)
+      && (next.status === 'completed' || next.manifest.witnesses?.length)) void loadPublications()
   } catch (cause) {
     if (disposed || sequence !== loadSequence) return
     if (packet.value) refreshTimer = setTimeout(load, 15000)
@@ -234,6 +234,7 @@ watch(endpoint, () => {
   void load()
 }, { immediate: true })
 onBeforeUnmount(() => {
+  stopWatchingPin()
   disposed = true
   clearTimeout(historyTimer)
   clearTimeout(refreshTimer)
@@ -250,7 +251,8 @@ async function audit() {
   try {
     if (evidence.manifest.vote_history && pinnedPolicy.value) {
       const latest = await api.get<VoteHistory>(endpoint.value + '/history')
-      await verifyHistoryResult(evidence, latest, pinnedPolicy.value, location.origin, recordedReceipt.value)
+      await verifyHistoryResult(evidence, latest, await authorizedBallot(pinnedChain.value, evidence.manifest),
+        location.origin, recordedReceipt.value)
       if (packet.value === evidence) {
         history.value = latest
         historyVerified.value = true
@@ -269,7 +271,7 @@ async function audit() {
 async function cast() {
   const evidence = packet.value
   const path = endpoint.value
-  if (busy.value || !evidence || !open.value
+  if (busy.value || !evidence || evidence.manifest.vote_history || !open.value
     || (!savedProof.value && (!credential.value || choice.value === ''))) return
   busy.value = true
   error.value = ''
@@ -278,10 +280,6 @@ async function cast() {
     const proof = savedProof.value ?? (unlocked && await generateQuorumProof(
       unlocked, evidence.roster.members, choice.value, await ballotScope(evidence.manifest)))
     if (!proof) return
-    if (evidence.manifest.vote_history && !savedProof.value) {
-      localStorage.setItem(pendingKey(evidence.manifest.id), JSON.stringify(proof))
-      if (!disposed && path === endpoint.value) savedProof.value = proof
-    }
     const response = await fetch(path + '/votes', {
       method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(proof),
     })
@@ -291,7 +289,6 @@ async function cast() {
     if (!disposed && path === endpoint.value) {
       receipt.value = proof.nullifier
       void load()
-      if (evidence.manifest.vote_history) void loadHistory()
     }
   } catch (cause) {
     error.value = (cause as Error).message
@@ -360,17 +357,30 @@ async function cast() {
         </div>
         <InlineFeedback v-if="historyVerified" tone="info" message="The tally includes all votes in the pinned witnesses’ final history." />
         <InlineFeedback v-else-if="verified" tone="info" :message="receiptCovered ? 'The tally matches the vote proofs and includes your vote.' : 'The vote proofs match the published tally.'" />
-        <p v-if="witnessed" class="muted">The result remains provisional until the opening history and closing checkpoint are verified. This check does not establish that the roster was authorized.</p>
+        <p v-if="witnessed" class="muted">The result remains provisional until the roster, ballot approval, intake certificates, and vote history are verified against your pinned policy.</p>
         <p v-else class="muted">Proof checks cover the votes supplied with the ballot. They cannot establish that the roster was authorized or every submitted vote was included.</p>
         <InlineFeedback :message="error" />
       </section>
 
+      <section v-else-if="witnessed && open" class="ballot-sheet__section section-stack">
+        <h2>Vote through an independent verifier</h2>
+        <p class="muted">Open an address you recognize. Its voting page checks the approved ballot and runs without a COPE login. Bring your encrypted voting backup.</p>
+        <ul class="ballot-sheet__list">
+          <li v-for="witness in manifest.witnesses?.filter(item => item.report_origin)" :key="witness.public_key">
+            <a :href="witness.report_origin + '/vote/' + manifest.id" target="_blank" rel="noopener noreferrer">{{ witness.name }}</a>
+            <span class="muted">{{ witness.report_origin }}</span>
+          </li>
+        </ul>
+      </section>
+      <section v-else-if="packet.settling" class="ballot-sheet__section" role="status">
+        <h2>Verifiers are settling the ballot</h2>
+        <p class="muted">Voting has closed. The verifiers are forwarding and checking the final submissions.</p>
+      </section>
       <section v-else-if="receipt || savedProof || recordedReceipt" class="ballot-sheet__section ballot-sheet__receipt" role="status">
         <AppIcon name="check-circle" :size="22" />
         <div>
           <strong>{{ recordedReceipt ? 'Vote recorded' : receipt ? 'Vote submitted' : 'Submission not confirmed' }}</strong>
           <p v-if="!witnessed" class="muted">After closing, check whether COPE included your vote in the result.</p>
-          <BaseButton v-if="witnessed && open && savedProof" :loading="busy" size="small" @click="cast">Retry same vote</BaseButton>
           <InlineFeedback :message="error" />
         </div>
       </section>
@@ -427,7 +437,7 @@ async function cast() {
         <InlineFeedback :message="historyError" />
       </section>
 
-      <section v-if="packet.result" class="ballot-sheet__section ballot-sheet__details" aria-labelledby="quorum-public-votes-title">
+      <section v-if="packet.result && !witnessed" class="ballot-sheet__section ballot-sheet__details" aria-labelledby="quorum-public-votes-title">
         <h2 id="quorum-public-votes-title">Public votes</h2>
         <ul v-if="publications?.disclosures.length" class="ballot-sheet__list">
           <li v-for="vote in publications.disclosures" :key="vote.username">

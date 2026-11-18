@@ -1,10 +1,11 @@
 import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto'
-import { mkdir, open, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { fingerprint } from './src/quorum.ts'
-import { checkPolicySignature, checkPolicySignatures, policyRetryStatement, policyVoteStatement,
-  validPolicyRound, verifyPolicyChain, witnessPolicy } from './src/quorum-history.ts'
+import { fingerprint, verifyBallotContext, verifyRoster } from './src/quorum.ts'
+import { approvalDigest, checkGovernance, checkHistoryPolicy, checkPolicySignature, checkPolicySignatures, governanceApproval, policyRetryStatement, policyVoteStatement,
+  maxPolicyChanges, validPolicyRound, verifyPolicyChain, witnessPolicy } from './src/quorum-history.ts'
+import { verifierEndpoints } from './src/quorum-relay.ts'
 
 const requirePolicy = (condition, message) => { if (!condition) throw new Error(message) }
 const digestPattern = /^[a-f0-9]{64}$/
@@ -48,6 +49,19 @@ export async function withPolicyLock(archive, head, action) {
 
 export const policyDecisionPath = (archive, head) => join(archive, 'policy-decisions', head)
 
+export async function hasStoredMembershipDecision(archive, head) {
+  const files = await readdir(policyDecisionPath(archive, head), { withFileTypes: true }).catch(error => {
+    if (error.code === 'ENOENT') return []
+    throw error
+  })
+  for (const file of files) {
+    if (!file.isFile() || !/^(0|[1-9][0-9]*)\.json$/.test(file.name)) continue
+    const decision = await optional(join(policyDecisionPath(archive, head), file.name))
+    if (decision && !decision.approval) return true
+  }
+  return false
+}
+
 export async function readPolicyDecision(archive, head, round) {
   const dir = policyDecisionPath(archive, head)
   const record = await readFile(join(dir, round + '.json'), 'utf8').catch(error => {
@@ -67,7 +81,8 @@ export async function readPolicyDecision(archive, head, round) {
 const usage = `Usage: quorum-policy.mjs <command> <origin> <current.json> <round> ...
   prepare ... <archive> <proposed.json> [retry.json...]
   commit  ... <archive> <proposed.json> <prepare.json...>
-  store   ... <archive> <proposed.json> <commit.json... | peer-stored.json>
+  ready   ... <archive> <proposed.json> <commit.json...>
+  store   ... <archive> <proposed.json> <ready.json... | peer-stored.json>
   retry   ... <archive>
   assemble ... <proposed.json> <output.json> <stored.json...>`
 
@@ -115,22 +130,48 @@ async function main() {
     && /^(0|[1-9][0-9]*)$/.test(roundText ?? '') && validPolicyRound(round)
     && (command === 'retry' && round > 0 && args.length === 1
       || command === 'prepare' && (round === 0 ? args.length === 2 : args.length >= 3)
-      || ['commit', 'store', 'assemble'].includes(command) && args.length >= 3), usage)
+      || ['commit', 'ready', 'store', 'assemble'].includes(command) && args.length >= 3), usage)
   const chain = await verifyPolicyChain(await json(currentFile), origin)
+  requirePolicy(chain.bundle.changes.length < maxPolicyChanges,
+    'The witness policy history is full. Upgrade the history format before preparing a successor.')
   const { current, head } = chain
-  const next = command === 'retry' ? null : witnessPolicy(await json(command === 'assemble' ? args[0] : args[1]))
-  const digest = next && await fingerprint(next)
-  requirePolicy(!next || digest !== await fingerprint(current), 'The proposed policy is identical to the current policy.')
+  const proposal = command === 'retry' ? null : await json(command === 'assemble' ? args[0] : args[1])
+  const approval = proposal && Object.hasOwn(proposal, 'approval') ? governanceApproval(proposal.approval) : undefined
+  const next = approval ? current : proposal ? witnessPolicy(proposal) : null
+  if (approval) {
+    checkGovernance(chain, approval)
+    if ('roster' in approval) {
+      verifyRoster(proposal.roster)
+      requirePolicy(await fingerprint(proposal.roster) === approval.roster, 'The provided roster does not match its approval digest.')
+    }
+    if ('ballot' in approval) {
+      const { manifest, roster } = proposal
+      await verifyBallotContext(manifest, roster)
+      await checkHistoryPolicy(manifest, current)
+      requirePolicy(verifierEndpoints(manifest, current).length >= current.threshold,
+        'A ballot needs at least a quorum of distinct HTTPS verifier addresses.')
+      requirePolicy(manifest.id === approval.ballot.id && manifest.roster === approval.ballot.roster
+        && manifest.vote_history.epoch === head && await fingerprint(manifest) === approval.ballot.manifest,
+      'The supplied ballot differs from the proposed approval.')
+    }
+    if ('voter_release' in approval) {
+      requirePolicy(await fingerprint(proposal.release) === approval.voter_release, 'The voter release does not match its approval digest.')
+    }
+  }
+  const digest = next && await approvalDigest(await fingerprint(next), approval)
+  requirePolicy(!next || approval || digest !== await fingerprint(current), 'The proposed policy is identical to the current policy.')
   const vote = (phase, at = round, hash = digest) => policyVoteStatement(phase, origin, head, at, hash)
   const files = args.slice(2)
-  const size = Object.keys(current.operators).length
+  const size = Object.keys((command === 'store' ? next : current).operators).length
   requirePolicy(files.length <= size, 'Too many verifier records.')
 
   if (command === 'assemble') {
     const records = await Promise.all(files.map(json))
     const commits = records[0]?.commits
+    const ready = records[0]?.ready
     const stored = signaturesFrom(records, round, digest)
-    const bundle = { initial: chain.bundle.initial, changes: [...chain.bundle.changes, { policy: next, round, commits, stored }] }
+    const bundle = { initial: chain.bundle.initial,
+      changes: [...chain.bundle.changes, { policy: next, ...(approval && { approval }), round, commits, ready, stored }] }
     await verifyPolicyChain(bundle, origin)
     await writeFile(args[1], JSON.stringify(bundle, null, 2) + '\n', { flag: 'wx' })
     return
@@ -143,20 +184,30 @@ async function main() {
     'The local verifier is not pinned to the current policy for this COPE origin.')
     const key = createPrivateKey(await readFile(join(archive, 'witness-ed25519.pem')))
     const public_key = createPublicKey(key).export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex')
-    requirePolicy(Object.values(current.operators).includes(public_key), 'This verifier is not a current operator.')
+    requirePolicy(Object.values((command === 'ready' ? next : current).operators).includes(public_key),
+      command === 'ready' ? 'This verifier is not a proposed operator.' : 'This verifier is not a current operator.')
     const attest = statement => ({ round, public_key, signature: sign(null, Buffer.from(JSON.stringify(statement)), key).toString('hex') })
+
+    if (command === 'ready') {
+      const commits = signaturesFrom(await Promise.all(files.map(json)), round, digest)
+      await checkPolicySignatures(current, vote('commit'), commits)
+      console.log(JSON.stringify({ ...attest(vote('ready')), digest, commits }))
+      return
+    }
 
     if (command === 'store') {
       const records = await Promise.all(files.map(json))
-      const commits = records.length === 1 && records[0]?.commits
-        ? records[0].commits : signaturesFrom(records, round, digest)
+      const commits = records[0]?.commits
+      const ready = records.length === 1 && records[0]?.ready
+        ? records[0].ready : signaturesFrom(records, round, digest)
       await checkPolicySignatures(current, vote('commit'), commits)
+      await checkPolicySignatures(next, vote('ready'), ready)
       const dir = policyDecisionPath(archive, head)
       await mkdir(dir, { recursive: true, mode: 0o700 })
       const target = join(dir, round + '.json')
       const previous = await optional(target)
       requirePolicy(!previous || previous.digest === digest, 'A different decision is already stored for this round.')
-      const receipt = previous ?? { ...attest(vote('store')), digest, policy: next, commits }
+      const receipt = previous ?? { ...attest(vote('store')), digest, policy: next, ...(approval && { approval, proposal }), commits, ready }
       // Publish a receipt only after this verifier has a durable copy of an
       // entire commit quorum. Peers can fetch the same record from this archive.
       await persist(target, receipt)
