@@ -7,6 +7,7 @@ that the final tally covers the complete history sealed by those witnesses.
 The pinned chain also authorizes the public roster and the exact ballot. Legacy
 ballots have only proof and tally checks. Governed voting takes place on
 independent verifier origins using an app release approved by the quorum.
+See the [Quorum protocol](PROTOCOL.md) for the wire format and trust model.
 
 The public archive starts at `/`. Existing JSON clients can keep using
 `/`, `/ballots/<uuid>` and `/ballots/<uuid>/evidence`. Use `/api/status` for
