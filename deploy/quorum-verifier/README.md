@@ -177,6 +177,13 @@ Each verifier validates the proposed policy before signing. COPE and the
 verifiers recheck each successor when reading the signed chain; even a
 unanimous approval cannot install an invalid threshold.
 
+On COPE’s **Admin → Quorum → Verifiers** page, select the exact proposed
+membership and download the suggested policy. With a configured policy,
+newly registered verifiers are staged without changing ballot publication.
+The suggestion tolerates as many faulty verifiers as possible while still
+allowing the others to reach quorum. Review the keys and use the downloaded
+file as `proposed.json` in the approval commands below.
+
 Operators exchange signed records and run the policy tool locally. Start
 at round 0 with the reviewed proposal. Each example uses a three-of-four
 policy; run the first three commands on the participating verifiers with

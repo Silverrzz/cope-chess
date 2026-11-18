@@ -4,6 +4,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -21,6 +22,10 @@ class CheckpointInput(Input):
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+class PolicyProposalInput(Input):
+    public_keys: list[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = Field(min_length=1, max_length=64)
 
 
 def validate_policy(policy):
@@ -84,20 +89,56 @@ def verify_policy_chain(data, origin):
     return policy, heads
 
 
-def publication_policy(connection, witnesses, origin):
+def configured_policy(connection, origin):
     existing = connection.execute("SELECT head FROM cope_quorum.witness_policy_anchor WHERE singleton").fetchone()
     path = os.environ.get("COPE_QUORUM_WITNESS_POLICY")
     text = os.environ.get("COPE_QUORUM_WITNESS_POLICY_JSON")
     if not path and not text:
         if existing:
-            elections.fail("quorum_history_policy", "The pinned witness policy must be configured before publishing.", 503)
-        return None
+            raise ValueError("The pinned witness policy must be configured before publishing.")
+        return None, []
+    policy, heads = verify_policy_chain(json.loads(Path(path).read_text(encoding="utf-8") if path else text), origin)
+    if existing and existing["head"] not in heads:
+        raise ValueError("The policy does not extend the previously approved policy.")
+    return policy, heads
+
+
+def recommended_policy(witnesses, selected_keys, current):
+    """Choose the most faults the selected members can tolerate without losing quorum."""
+    by_key = {witness.public_key: witness.name for witness in witnesses}
+    selected = set(selected_keys)
+    if len(selected) != len(selected_keys):
+        raise ValueError("Select each verifier only once.")
+    if not selected <= by_key.keys():
+        raise ValueError("Some selected verifiers are no longer registered. Refresh the list and try again.")
+
+    previous = current["operators"] if current else {}
+    operators = {name: key for name, key in previous.items() if key in selected}
+    used = set(previous)
+    for key in sorted(selected - set(operators.values())):
+        base = re.sub(r"[^a-z0-9]+", "-", by_key[key].lower()).strip("-") or "verifier"
+        operator = base[:32].rstrip("-")
+        suffix = 1
+        while operator in used:
+            suffix += 1
+            tail = f"-{suffix}"
+            operator = base[:32 - len(tail)].rstrip("-") + tail
+        used.add(operator)
+        operators[operator] = key
+
+    size = len(operators)
+    fault = (size - 1) // 3
+    threshold = (size + fault) // 2 + 1
+    return validate_policy({"threshold": threshold, "max_faulty": fault, "operators": operators})
+
+
+def publication_policy(connection, witnesses, origin):
     try:
-        policy, heads = verify_policy_chain(json.loads(Path(path).read_text(encoding="utf-8") if path else text), origin)
-        if existing and existing["head"] not in heads:
-            raise ValueError("The policy does not extend the previously approved policy.")
+        policy, heads = configured_policy(connection, origin)
     except (OSError, ValueError) as error:
         elections.fail("quorum_history_policy", f"The server's witness policy is invalid: {error}", 503)
+    if policy is None:
+        return None
     if sorted(witness["public_key"] for witness in witnesses) != sorted(policy["operators"].values()):
         elections.fail("quorum_history_witnesses", "Enable the witnesses in the configured policy before publishing.")
     connection.execute(

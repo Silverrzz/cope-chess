@@ -85,6 +85,15 @@ def election_call(operation, *args):
         raise HTTPException(error.status, error.message) from error
 
 
+def admin_verifier_directory(request, connection):
+    directory = published.verifier_directory(connection)
+    try:
+        policy, _ = history.configured_policy(connection, request.app.state.discord_runtime.origin)
+    except (OSError, ValueError) as error:
+        return {**directory, "policy": None, "policy_error": str(error)}
+    return {**directory, "policy": policy, "policy_error": None}
+
+
 def register_quorum_routes(app):
     @app.get("/api/quorum")
     def public_directory(request: Request, connection=Depends(database)):
@@ -188,7 +197,7 @@ def register_quorum_routes(app):
     @app.get("/api/admin/quorum/witnesses")
     def verifier_directory(request: Request, connection=Depends(database)):
         require_admin(request)
-        return published.verifier_directory(connection)
+        return admin_verifier_directory(request, connection)
 
     @app.put("/api/admin/quorum/witnesses")
     def update_witnesses(payload: WitnessUpdate, request: Request, connection=Depends(database)):
@@ -199,7 +208,20 @@ def register_quorum_routes(app):
         updated = election_call(save_setup, connection, setup.model_copy(update={"witnesses": payload.witnesses}))
         if updated is None:
             raise HTTPException(409, "Quorum settings changed. Refresh the witness list and try again.")
-        return published.verifier_directory(connection)
+        return admin_verifier_directory(request, connection)
+
+    @app.post("/api/admin/quorum/witnesses/policy-proposal")
+    def propose_witness_policy(payload: history.PolicyProposalInput, request: Request, connection=Depends(database)):
+        require_admin(request)
+        origin = request.app.state.discord_runtime.origin
+        try:
+            current, _ = history.configured_policy(connection, origin)
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, f"The configured witness policy is invalid: {error}") from error
+        try:
+            return history.recommended_policy(read_setup(connection).witnesses, payload.public_keys, current)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
 
     @app.get("/api/admin/quorum/status")
     def election_status(request: Request, connection=Depends(database)):
