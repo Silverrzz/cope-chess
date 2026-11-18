@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Quorum Verifier · COPE</title>
+  <link rel="stylesheet" href="/assets/tokens.css">
+  <link rel="stylesheet" href="/assets/verifier.css">
+  <script type="module" src="/assets/verifier.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header">
+    <div class="container bar">
+      <a class="brand" href="/">
+        <svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8.2 21h9.6M9 17.5 7.4 21h9.2L15 17.5M9 17.5h6c1.5-2.2 2.1-4.3 1.4-6.2-.8-2-2.4-3-4.8-3.3l1-3-2-2-3.2 4.2C5.9 9.1 5.5 12 7 13.5l3-1.5c1.8 1.6 1.2 3.7-1 5.5Z"/>
+        </svg>
+        <span>COPE <span class="brand-detail">/ Quorum</span></span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a id="archive-nav" href="/">Archive</a>
+        <a id="admin-nav" href="/admin">Admin</a>
+        <button id="theme" type="button" aria-label="Cycle color theme" title="Cycle color theme">Theme</button>
+      </nav>
+    </div>
+  </header>
+  <main id="main" class="container stack" tabindex="-1" aria-busy="true">
+    <p role="status">Loading verifier…</p>
+    <noscript>Enable JavaScript to use the interface, or browse the <a href="/api/status">JSON archive</a>.</noscript>
+  </main>
+  <footer class="container footer">
+    <span>COPE Quorum · Independent verifier</span>
+    <a href="/api/status">JSON archive</a>
+  </footer>
+</body>
+</html>

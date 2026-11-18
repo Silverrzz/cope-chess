@@ -7,5 +7,6 @@ secrets
 tmp
 cope.db*
 frontend/node_modules
+frontend/quorum-runtime/node_modules
 **/__pycache__
 **/*.pyc

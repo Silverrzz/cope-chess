@@ -1,8 +1,10 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createWeb, send } from './quorum-web.mjs'
 import { fingerprint, verifyBallot } from './src/quorum.ts'
 
 const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
@@ -34,11 +36,23 @@ const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'de
 console.log('Witness public key: ' + publicKey)
 let lastScan = null
 let scanErrors = 0
+const witnessPolicyFile = process.env.COPE_VERIFIER_WITNESS_POLICY
+const witnessPolicy = witnessPolicyFile ? JSON.parse(await readFile(witnessPolicyFile, 'utf8')) : null
+const witnessOperators = witnessPolicy && Object.entries(witnessPolicy.operators ?? {})
+if (witnessPolicyFile && (!witnessPolicy || witnessPolicy.threshold !== 3 || Array.isArray(witnessPolicy.operators)
+  || witnessOperators.length !== 4
+  || new Set(witnessOperators.map(([, key]) => key)).size !== 4
+  || !witnessOperators.every(([id, key]) => /^[a-z0-9][a-z0-9-]{0,31}$/.test(id)
+    && typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)))) {
+  throw new Error('The local witness policy must pin four distinct keys with a threshold of three.')
+}
+
+const witnessPolicyDigest = witnessOperators ? await fingerprint(witnessPolicy) : null
 
 async function archivedBallots() {
   const files = await readdir(archive)
   return files.filter(file => file.endsWith('.json') && uuid.test(file.slice(0, -5)))
-    .map(file => '/ballots/' + file.slice(0, -5))
+    .sort().map(file => '/ballots/' + file.slice(0, -5))
 }
 
 const appCommit = process.env.COPE_VERIFIER_BUILD_COMMIT
@@ -87,7 +101,11 @@ async function fetchEvidence(path) {
 
 async function readRecord(id) {
   try {
-    return JSON.parse(await readFile(join(archive, id + '.json'), 'utf8'))
+    const record = JSON.parse(await readFile(join(archive, id + '.json'), 'utf8'))
+    if (!witnessPolicyDigest || record.report.witness_checks?.policy_digest !== witnessPolicyDigest) {
+      delete record.report.witness_checks
+    }
+    return record
   } catch (error) {
     if (error.code === 'ENOENT') return null
     throw error
@@ -100,8 +118,14 @@ async function saveRecord(id, record) {
   await rename(file + '.new', file)
 }
 
+function matchesWitnessPolicy(witnesses) {
+  return Array.isArray(witnesses) && witnesses.length === witnessOperators.length
+    && witnessOperators.every(([, key]) => witnesses.some(item => item?.public_key === key))
+}
+
 async function publishSignature(id, record) {
-  if (!record.evidence.manifest.witnesses?.some(witness => witness.public_key === publicKey)
+  if ((witnessOperators && !matchesWitnessPolicy(record.evidence.manifest.witnesses))
+    || !record.evidence.manifest.witnesses?.some(witness => witness?.public_key === publicKey)
     || record.report.signature_published_at) return
   const { digest } = record.report
   const statement = JSON.stringify(['cope-quorum-witness-result/1', origin.origin, id, digest])
@@ -119,13 +143,36 @@ async function publishSignature(id, record) {
   await saveRecord(id, record)
 }
 
+async function checkWitnesses(id, record) {
+  if (!witnessOperators) return
+  const matches = matchesWitnessPolicy(record.evidence.manifest.witnesses)
+  const status = { policy_digest: witnessPolicyDigest, policy_matches: matches, checked: [], threshold: 3, operators: witnessOperators.length }
+  if (matches) {
+    const { signatures } = await fetchEvidence('/api/quorum/ballots/' + id + '/publications')
+    const statement = Buffer.from(JSON.stringify(['cope-quorum-witness-result/1', origin.origin, id, record.report.digest]))
+    for (const [operator, key] of witnessOperators) {
+      const signature = signatures?.[key]
+      if (typeof signature !== 'string' || !/^[a-f0-9]{128}$/.test(signature)) continue
+      const publicKey = createPublicKey({ key: Buffer.from('302a300506032b6570032100' + key, 'hex'), format: 'der', type: 'spki' })
+      if (verify(null, statement, publicKey, Buffer.from(signature, 'hex'))) status.checked.push(operator)
+    }
+  }
+  if (JSON.stringify(record.report.witness_checks) !== JSON.stringify(status)) {
+    record.report.witness_checks = status
+    await saveRecord(id, record)
+  }
+}
+
 async function observe(id) {
   const packet = await fetchEvidence('/api/quorum/ballots/' + id)
   if (packet.manifest?.id !== id) throw new Error('Ballot ID does not match the directory.')
   const digest = await fingerprint(packet)
   const existing = await readRecord(id)
   if (existing?.report.digest === digest) {
-    if (!existing.report.conflict) await publishSignature(id, existing)
+    if (!existing.report.conflict) {
+      await publishSignature(id, existing)
+      await checkWitnesses(id, existing)
+    }
     return
   }
   if (existing?.report.conflict?.digest === digest) return
@@ -142,6 +189,7 @@ async function observe(id) {
   }
   await saveRecord(id, record)
   await publishSignature(id, record)
+  await checkWitnesses(id, record)
 }
 
 async function scan() {
@@ -167,29 +215,47 @@ async function scan() {
   }
 }
 
-function send(response, status, body) {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff' })
-  response.end(JSON.stringify(body))
-}
-
-createServer(async (request, response) => {
-  if (request.method !== 'GET') return send(response, 405, { error: 'Method not allowed' })
+const web = await createWeb()
+const ready = process.env.COPE_VERIFIER_READY_FILE
+const activate = process.env.COPE_VERIFIER_ACTIVATE_FILE
+let serving = !(ready && activate)
+const server = createServer({ headersTimeout: 10000, requestTimeout: 15000 }, async (request, response) => {
   try {
-    const path = new URL(request.url, 'http://localhost').pathname
-    if (path === '/') {
-      const ballots = await archivedBallots()
-      return send(response, 200, { origin: origin.origin, public_key: publicKey, last_scan: lastScan, ballots })
-    }
+    if (!serving) return send(response, 503, { error: 'The verifier is starting.' })
+    const url = new URL(request.url, 'http://localhost')
+    const path = url.pathname
     const match = /^\/ballots\/([^/]+)(\/evidence)?$/.exec(path)
-    if (match && uuid.test(match[1])) {
-      const record = await readRecord(match[1])
-      if (record) return send(response, 200, match[2] ? record.evidence : record.report)
+    const ballotId = match && uuid.test(match[1]) ? match[1] : null
+    if (await web(request, response, path, ballotId && !match[2], url.searchParams.get('format'))) return
+    if (request.method !== 'GET') return send(response, 405, { error: 'Method not allowed' })
+    if (path === '/' || path === '/api/status') {
+      const ballots = await archivedBallots()
+      return send(response, 200, { origin: origin.origin, public_key: publicKey, last_scan: lastScan,
+        scan_errors: scanErrors, ballots, witness_policy: Boolean(witnessOperators), commit: appCommit ?? null }, undefined, { Vary: 'Accept' })
     }
-    return send(response, 404, { error: 'No verified ballot at this address' })
+    if (ballotId) {
+      const record = await readRecord(ballotId)
+      if (record) return send(response, 200, match[2] ? record.evidence : record.report, undefined, { Vary: 'Accept' })
+    }
+    return send(response, 404, { error: 'No archived ballot at this address' })
   } catch {
     return send(response, 500, { error: 'Could not read the archive' })
   }
-}).listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1', () => {
-  void scan()
-  void checkIn()
 })
+server.listen(8788, process.env.COPE_VERIFIER_BIND || '127.0.0.1')
+await new Promise(resolve => server.once('listening', resolve))
+if (ready && activate) {
+  await writeFile(ready, '', { flag: 'wx', mode: 0o600 })
+  while (true) {
+    try {
+      await readFile(activate)
+      break
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      await delay(100)
+    }
+  }
+}
+serving = true
+void scan()
+void checkIn()

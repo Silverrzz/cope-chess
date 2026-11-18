@@ -335,33 +335,36 @@ def _prepare_verifier(origin: str) -> tuple[str, list[str]]:
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not node or not npm or _run([node, "-p", "Number(process.versions.node.split('.')[0]) >= 24"], capture=True) != "true":
         raise SystemExit("Install Node.js 24 or newer with npm to run the Quorum verifier.")
-    repository = _git_value("remote", "get-url", "origin")
-    tracking = _git_value("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-    branch = tracking.removeprefix("origin/") if tracking.startswith("origin/") else _git_value("branch", "--show-current")
+    if sys.version_info < (3, 11):
+        raise SystemExit("Install Python 3.11 or newer to run the Quorum verifier.")
+    if os.environ.get("COPE_VERIFIER_RELEASE_POLICY") and not shutil.which("openssl"):
+        raise SystemExit("Install OpenSSL to verify signed Quorum releases.")
     commit = _git_value("rev-parse", "HEAD")
-    if not repository or not branch or len(commit) != 40:
-        raise SystemExit("Install the verifier from a Git branch with an origin remote.")
-    runtime = RUNTIME / "quorum-verifier"
-    release = runtime / "releases" / commit
-    release.mkdir(parents=True, exist_ok=True)
+    if len(commit) != 40:
+        raise SystemExit("Install the verifier from a reviewed Git checkout.")
+    runtime = RUNTIME / "quorum-verifier" / "v1"
+    release = runtime / "bootstrap" / commit
     if not (release / "ready").is_file():
-        files = ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "src/quorum.ts")
+        files = ("package.json", "package-lock.json", "quorum-node.mjs", "quorum-audit.mjs", "quorum-web.mjs",
+                 "src/quorum.ts", "src/styles/tokens.css", "quorum-web/index.html", "quorum-web/app.js",
+                 "quorum-web/style.css")
         for file in files:
             destination = release / file
             destination.parent.mkdir(parents=True, exist_ok=True)
-            content = subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/{file}"])
-            destination.write_bytes(content)
-        _run([npm, "--prefix", str(release), "ci", "--omit=dev", "--ignore-scripts"])
+            repo_file = "quorum-runtime/" + file if file in {"package.json", "package-lock.json"} else file
+            destination.write_bytes(subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/{repo_file}"]))
+        _run([npm, "--prefix", str(release), "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"])
         (release / "ready").touch()
-    launcher = runtime / "quorum-supervisor.py"
-    launcher.write_bytes(subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/quorum-supervisor.py"]))
-    configuration = runtime / "verifier.json"
+    for file in ("quorum-supervisor.py", "quorum_updates.py"):
+        (release / file).write_bytes(subprocess.check_output(["git", "-C", str(ROOT), "show", f"{commit}:frontend/{file}"]))
+    configuration = release / "verifier.json"
     configuration.write_text(json.dumps({
-        "origin": origin, "node": node, "npm": npm, "branch": branch, "commit": commit,
-        "repository": repository, "repository_id": _normalise_repository_url(repository),
+        "origin": origin, "node": node, "commit": commit, "bootstrap": str(release),
+        "archive": str(runtime.parent / "state"),
     }), encoding="utf-8")
     _restrict_file(configuration)
-    return origin, [sys.executable, str(launcher), str(configuration)]
+    return origin, [sys.executable, str(release / "quorum-supervisor.py"), str(configuration), str(runtime)]
+
 
 def _prepare_clients(clients: list[str], *, image_ready: bool) -> None:
     _require_command("docker")

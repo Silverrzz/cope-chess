@@ -142,6 +142,7 @@ async function continueWithCredential() {
 
 <template>
   <div class="section-stack">
+    <p class="muted">This web client uses code supplied by COPE. That code can access your credential while it is unlocked.</p>
     <div v-if="!members && unlockedCredential && action === 'default'" class="button-row">
       <span>Credential unlocked</span>
       <BaseButton size="small" variant="ghost" @click="selectAction('change-password')">Change password</BaseButton>

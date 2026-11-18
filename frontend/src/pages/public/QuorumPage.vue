@@ -121,11 +121,8 @@ onBeforeUnmount(() => {
                 </time>
                 <div v-if="ballot.result" class="ballot-card__turnout">
                   <span>{{ ballot.result.total }} of {{ ballot.result.electorate }} voted</span>
-                  <StatusBadge v-if="ballot.witnesses?.length && ballot.witnesses.every(witness => witness.signed_at)" tone="success">
-                    Certified
-                  </StatusBadge>
-                  <StatusBadge v-else-if="ballot.witnesses?.some(witness => witness.signed_at)" tone="warning">
-                    Partially verified
+                  <StatusBadge v-if="ballot.witnesses?.some(witness => witness.signed_at)" tone="neutral">
+                    Witness reports available
                   </StatusBadge>
                 </div>
               </div>

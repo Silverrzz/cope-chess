@@ -15,7 +15,6 @@ import { resultLabels, resultTones, witnessReportUrl, type WitnessStatus } from 
 import { downloadQuorumFile, generateQuorumProof, quorumReceiptKey, readQuorumReceipt, unlockedCredential } from '@/quorum-voter'
 
 interface Publications {
-  certified: boolean
   witnesses: WitnessStatus[]
   disclosures: { username: string; option: string }[]
 }
@@ -96,7 +95,7 @@ async function loadPublications() {
     if (disposed || path !== endpoint.value || sequence !== publicationSequence) return
     publications.value = data
     publicationError.value = ''
-    if (packet.value?.result && data.witnesses.length && !data.certified) publicationTimer = setTimeout(loadPublications, 30000)
+    if (packet.value?.result && data.witnesses.length && data.witnesses.some(witness => !witness.signed_at)) publicationTimer = setTimeout(loadPublications, 30000)
   } catch (cause) {
     if (!disposed && path === endpoint.value && sequence === publicationSequence) publicationError.value = (cause as Error).message
   }
@@ -203,16 +202,18 @@ async function cast() {
           <BaseButton v-if="myProof" size="small" variant="ghost" @click="downloadVoteProof">Download my vote proof</BaseButton>
         </div>
         <InlineFeedback v-if="verified" tone="info" :message="receiptCovered ? 'The tally matches the vote proofs and includes your vote.' : 'The vote proofs match the published tally.'" />
+        <p class="muted">Proof checks cover the votes supplied with the ballot. They cannot establish that the roster was authorized or every submitted vote was included.</p>
         <InlineFeedback :message="error" />
       </section>
 
       <section v-else-if="receipt" class="ballot-sheet__section ballot-sheet__receipt" role="status">
         <AppIcon name="check-circle" :size="22" />
-        <strong>Vote submitted</strong>
+        <div><strong>Vote submitted</strong><p class="muted">After closing, check whether COPE included your vote in the result.</p></div>
       </section>
 
       <section v-else-if="open" class="ballot-sheet__section section-stack" aria-labelledby="quorum-cast-title">
         <h2 id="quorum-cast-title">Cast a vote</h2>
+        <p v-if="credential" class="muted">This browser uses voting code supplied by COPE. That code can access your unlocked credential.</p>
         <QuorumCredential v-if="!credential" :members="packet.roster.members" />
         <form v-else class="section-stack" @submit.prevent="cast">
           <fieldset class="ballot-choices">
@@ -233,8 +234,8 @@ async function cast() {
       <section v-if="publications?.witnesses.length" class="ballot-sheet__section ballot-sheet__details" aria-labelledby="quorum-witnesses-title">
         <div class="ballot-sheet__toolbar">
           <h2 id="quorum-witnesses-title">Witnesses</h2>
-          <StatusBadge :tone="publications.certified ? 'success' : signedCount ? 'warning' : 'neutral'">
-            {{ publications.certified ? 'Certified' : packet.result ? signedCount + ' of ' + publications.witnesses.length + ' signed' : 'Sign after closing' }}
+          <StatusBadge tone="neutral">
+            {{ packet.result ? signedCount + ' of ' + publications.witnesses.length + ' reports available' : 'Sign after closing' }}
           </StatusBadge>
         </div>
         <ul class="ballot-sheet__list">

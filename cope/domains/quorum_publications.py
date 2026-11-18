@@ -100,7 +100,7 @@ def publications(connection, ballot_id):
     evidence = elections.ballot_package(connection, ballot_id)
     witnesses = elections.witness_status(connection, evidence)
     if evidence["status"] != "completed":
-        return {"certified": False, "witnesses": witnesses, "disclosures": []}
+        return {"certified": False, "witnesses": witnesses, "signatures": {}, "disclosures": []}
     options = evidence["result"]["options"]
     disclosures = [
         {"username": row["username"], "option": options[int(row["message"])]}
@@ -110,8 +110,15 @@ def publications(connection, ballot_id):
                WHERE d.ballot_id = ?::uuid ORDER BY d.published_at, d.nullifier""", (str(ballot_id),)
         )
     ]
-    return {"certified": bool(witnesses) and all(item["signed_at"] for item in witnesses),
-            "witnesses": witnesses, "disclosures": disclosures}
+    # These are attestations to this packet, not certification of the electorate or vote history.
+    signatures = {
+        row["public_key"]: row["signature"]
+        for row in connection.execute(
+            """SELECT public_key, signature FROM cope_quorum.witness_signatures
+               WHERE ballot_id = ?::uuid AND digest = ?""", (str(ballot_id), elections.digest(evidence)),
+        )
+    } if witnesses else {}
+    return {"certified": False, "witnesses": witnesses, "signatures": signatures, "disclosures": disclosures}
 
 
 def signature_statement(origin, ballot_id, digest):
