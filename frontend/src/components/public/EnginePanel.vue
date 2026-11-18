@@ -4,9 +4,8 @@ import { computed } from 'vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
-import TakMoveText from '@/components/chess/TakMoveText.vue'
 import { isTurn, type Variant } from '@/components/chess/chess'
-import { parseTakPosition, takMovePath, type TakSide } from '@/components/chess/tak'
+import { takMovePath } from '@/components/chess/tak'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
@@ -53,16 +52,6 @@ const pvMoves = computed(() => (props.analysis?.pv || '')
   .map((move) => props.variant === 'tak' ? move : move.toLowerCase())
   .filter((move) => props.variant === 'tak' ? takMovePath(move).length > 0 : isTurn(move)))
 const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen || 'startpos')
-const takPv = computed(() => {
-  if (props.variant !== 'tak') return []
-  const root = parseTakPosition(pvRootFen.value)
-  const rootPly = (root.fullmove - 1) * 2 + Number(root.turn === 'b')
-  return pvMoves.value.map((move, index) => {
-    const ply = rootPly + index
-    const side: TakSide = (ply % 2 === 0) !== (ply < 2) ? 'white' : 'black'
-    return { move, side }
-  })
-})
 </script>
 
 <template>
@@ -107,10 +96,7 @@ const takPv = computed(() => {
 
           <div class="analysis-line">
             <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-            <p v-if="takPv.length" class="analysis-line__tak-pv" aria-label="Principal variation moves">
-              <TakMoveText v-for="(entry, index) in takPv" :key="index" :move="entry.move" :side="entry.side" chip />
-            </p>
-            <p v-else :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
+            <p :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
           </div>
         </div>
 
@@ -351,7 +337,6 @@ const takPv = computed(() => {
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
-.analysis-line__tak-pv { display: flex; flex-wrap: wrap; gap: .24rem; }
 
 .pv-preview {
   display: grid;

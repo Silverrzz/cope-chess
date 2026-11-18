@@ -12,8 +12,6 @@ export interface TakPosition {
 }
 
 const directions: Record<string, [number, number]> = { '>': [1, 0], '<': [-1, 0], '+': [0, -1], '-': [0, 1] }
-const arrows: Record<string, string> = { '>': '→', '<': '←', '+': '↑', '-': '↓' }
-const compass: Record<string, string> = { '>': 'east', '<': 'west', '+': 'north', '-': 'south' }
 const placement = /^([FSC]?)([a-f][1-6])$/
 const spread = /^([1-6]?)([a-f][1-6])([<>+-])([1-6]*)[SC]?\*?$/
 const edges = [
@@ -63,8 +61,6 @@ export function parseTakMove(move: string) {
   const count = Number(slide?.[1] || 1)
   const drops = slide ? Array.from(slide[4] || String(count), Number) : []
   const stone = put?.[1] || ''
-  const kind = takStoneKind(stone)
-  const flattened = move.endsWith('*')
   if (direction) {
     if (drops.reduce((total, drop) => total + drop, 0) !== count) return null
     const [dx, dy] = directions[direction]!
@@ -75,10 +71,7 @@ export function parseTakMove(move: string) {
       path.push(y * TAK_SIZE + x)
     }
   }
-  const description = direction
-    ? `Carry ${count} from ${square} ${compass[direction]}. Drop ${drops.join(', ')}.${flattened ? ' Flattens a standing stone.' : ''}`
-    : `Place a ${takStoneName(kind)} on ${square}.`
-  return { square, path, drops, stone, kind, count, direction, arrow: direction ? arrows[direction] : undefined, flattened, description }
+  return { path, drops, stone, direction }
 }
 
 export function takMovePath(move: string): number[] {

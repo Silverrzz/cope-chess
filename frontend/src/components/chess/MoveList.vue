@@ -3,7 +3,6 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import { parseFen, type Variant } from './chess'
 import { parseTakPosition } from './tak'
-import TakMoveText from './TakMoveText.vue'
 
 interface MoveCell {
   ply: number
@@ -115,7 +114,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.white.isBook || undefined"
             :title="row.white.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.white.ply)"
-          ><TakMoveText v-if="variant === 'tak'" :move="row.white.label" :side="row.number === 1 ? 'black' : 'white'" /><span v-else>{{ row.white.label }}</span><small v-if="row.white.annotation" :style="{ color: row.white.annotation.color }">{{ row.white.annotation.label }}</small></button>
+          ><span>{{ row.white.label }}</span><small v-if="row.white.annotation" :style="{ color: row.white.annotation.color }">{{ row.white.annotation.label }}</small></button>
           <span v-else class="move-placeholder">...</span>
           <button
             v-if="row.black"
@@ -125,7 +124,7 @@ function scrollCurrentMoveIntoView(): void {
             :data-book="row.black.isBook || undefined"
             :title="row.black.isBook ? 'Opening book move' : undefined"
             @click="emit('update:modelValue', row.black.ply)"
-          ><TakMoveText v-if="variant === 'tak'" :move="row.black.label" :side="row.number === 1 ? 'white' : 'black'" /><span v-else>{{ row.black.label }}</span><small v-if="row.black.annotation" :style="{ color: row.black.annotation.color }">{{ row.black.annotation.label }}</small></button>
+          ><span>{{ row.black.label }}</span><small v-if="row.black.annotation" :style="{ color: row.black.annotation.color }">{{ row.black.annotation.label }}</small></button>
           <span v-else class="move-placeholder"></span>
         </li>
       </ol>
