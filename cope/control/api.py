@@ -29,6 +29,11 @@ from .registry import Input, describe_actions
 
 
 def database(request: Request):
+    if request.scope.get("cope.control.internal") is not None:
+        from cope.web.app import _database
+
+        yield from _database(request)
+        return
     connection = connect_database(request.app.state.db_path)
     try:
         yield connection

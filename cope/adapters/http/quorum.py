@@ -184,12 +184,12 @@ def register_quorum_routes(app):
         require_origin(request)
         return election_call(published.record_checkin, connection, request.app.state.discord_runtime.origin, payload)
 
-    @app.get("/api/admin/quorum/witnesses")
+    @app.get("/api/admin/quorum/witnesses", name="admin_quorum_verifier_directory")
     def verifier_directory(request: Request, connection=Depends(database)):
         require_admin(request)
         return published.verifier_directory(connection)
 
-    @app.put("/api/admin/quorum/witnesses")
+    @app.put("/api/admin/quorum/witnesses", name="admin_quorum_update_witnesses")
     def update_witnesses(payload: WitnessUpdate, request: Request, connection=Depends(database)):
         require_admin(request)
         setup = read_setup(connection)
@@ -200,12 +200,12 @@ def register_quorum_routes(app):
             raise HTTPException(409, "Quorum settings changed. Refresh the witness list and try again.")
         return published.verifier_directory(connection)
 
-    @app.get("/api/admin/quorum/status")
+    @app.get("/api/admin/quorum/status", name="admin_quorum_election_status")
     def election_status(request: Request, connection=Depends(database)):
         require_admin(request)
         return elections.admin_status(connection)
 
-    @app.post("/api/admin/quorum/publish")
+    @app.post("/api/admin/quorum/publish", name="admin_quorum_publish_ballot")
     def publish_ballot(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
         require_admin(request)
         return election_call(elections.publish, connection, payload.draft_id, payload.revision)
@@ -216,12 +216,12 @@ def register_quorum_routes(app):
         require_origin(request)
         return election_call(elections.cast_vote, connection, ballot_id, payload)
 
-    @app.get("/api/admin/quorum")
+    @app.get("/api/admin/quorum", name="admin_quorum_get_setup")
     def get_setup(request: Request, connection=Depends(database)):
         require_admin(request)
         return read_setup(connection)
 
-    @app.get("/api/admin/quorum/discord-roles")
+    @app.get("/api/admin/quorum/discord-roles", name="admin_quorum_discord_roles")
     def discord_roles(request: Request):
         require_admin(request)
         guild, token = discord_connection(request)
@@ -232,7 +232,7 @@ def register_quorum_routes(app):
                           if isinstance(role, dict) and snowflake(role.get("id"))
                           and role["id"] != guild and isinstance(role.get("name"), str)]}
 
-    @app.put("/api/admin/quorum")
+    @app.put("/api/admin/quorum", name="admin_quorum_update_setup")
     def update_setup(payload: Setup, request: Request, connection=Depends(database)):
         require_admin(request)
         guild = request.app.state.discord_runtime.read_settings()["guild_id"]

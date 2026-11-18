@@ -59,6 +59,8 @@ class BorrowedConnection:
 
 
 def _scope(path, method):
+    if path == "/api/admin/quorum" or path.startswith("/api/admin/quorum/"):
+        return "*"
     if method == "GET":
         return "*" if "/settings/access-tokens/" in path else "operations:read"
     if "/settings/access-tokens/" in path:
@@ -230,4 +232,4 @@ def install_platform_tools(server, invoke, database_url):
         server.add_tool(build_tool(name, spec), name=tool_name, title=spec.action.title,
             description=f"{spec.action.title}. {spec.method} {spec.path}. " + ("Returns current Cope data." if spec.action.read_only else "Creates a durable operation; inspect it with cope_get_operation. Reuse the same idempotency key when retrying."),
             annotations=ToolAnnotations(readOnlyHint=spec.action.read_only, destructiveHint=not spec.action.read_only,
-                openWorldHint=any(value in spec.path for value in ("repositories", "git-hosts", "environment-clone", "deployments", "updates", "dockerfile-pulls"))))
+                openWorldHint=any(value in spec.path for value in ("repositories", "git-hosts", "environment-clone", "deployments", "updates", "dockerfile-pulls", "discord-roles"))))
