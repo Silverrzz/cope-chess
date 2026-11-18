@@ -149,13 +149,15 @@ deadline. Submit early enough to receive a receipt; the platform cannot prove
 that an unacknowledged request was ever recorded. This protocol does not
 attempt to recover votes that the host refused to record.
 
-Keep the `vote-history/`, `policy-approvals/`, and `witness-policy-head`
-files with the witness key. Never run multiple copies of the same signing
+Keep `vote-history/`, `policy-rounds/`, `policy-decisions/`, and
+`witness-policy-head` with the witness key. Never run multiple copies of the same signing
 identity or let it resume signing from stale state: doing so can let it
 endorse incompatible histories. If signing state is lost, restore it from
 an independently confirmed current backup or rotate the affected key under
-the current policy before continuing. Synchronize the independent witnesses’
-clocks and review the configured fault model before using real ballots.
+the current policy before continuing. Peer copies let you recover decisions,
+but may lack that key's most recent votes or promises to leave a round.
+Synchronize the independent witnesses’ clocks and review the configured fault
+model before using real ballots.
 
 Verify an exported receipt or final evidence file without the website:
 
@@ -168,26 +170,59 @@ node frontend/quorum-audit.mjs evidence.json trusted-policy.json https://cope-ch
 The current threshold approves its successor. If the current requirement is
 three of four, three of those four distinct operators must approve the exact
 change, even if it introduces a different threshold or changes the membership
-entirely. Each operator can approve just one successor to its current policy.
-The signed statement binds the COPE origin, previous history, and both policies.
+entirely. A split vote leaves the current policy in effect. The approval
+messages bind the COPE origin, current policy head, round, and proposal.
 
-Agree on the proposal and finish active and scheduled ballots before rotating.
-On each approving verifier, use the local archive and reviewed files:
+Operators exchange signed records and run the policy tool locally. Start
+at round 0 with the reviewed proposal. Each example uses a three-of-four
+policy; run the first three commands on the participating verifiers with
+their own archive path and a separate output file for each operator.
 
 ```sh
-node frontend/quorum-policy.mjs approve https://cope-chess.live   current.json proposed.json /path/to/archive > operator-one.json
-
-# Use enough approvals to satisfy current.json.
-node frontend/quorum-policy.mjs assemble https://cope-chess.live   current.json proposed.json approved.json operator-one.json operator-two.json operator-three.json
+origin=https://cope-chess.live
+node frontend/quorum-policy.mjs prepare "$origin" current.json 0 /path/to/archive proposed.json > prepare-1.json
+node frontend/quorum-policy.mjs commit "$origin" current.json 0 /path/to/archive proposed.json prepare-{1,2,3}.json > commit-1.json
+node frontend/quorum-policy.mjs store "$origin" current.json 0 /path/to/archive proposed.json commit-{1,2,3}.json > stored-1.json
+node frontend/quorum-policy.mjs assemble "$origin" current.json 0 proposed.json approved.json stored-{1,2,3}.json
 ```
 
-Distribute the signed bundle and replace the policy on the platform and
-verifiers, then restart the verifiers and update the platform’s assigned
-witnesses. Existing pins only accept a bundle that extends the chain they
-already trust. The signing key never leaves its verifier. Historical
+If the round stalls, gather signed retry records from the current quorum and
+give them to each operator when preparing the next round:
+
+```sh
+node frontend/quorum-policy.mjs retry "$origin" current.json 1 /path/to/archive > retry-1.json
+node frontend/quorum-policy.mjs prepare "$origin" current.json 1 /path/to/archive proposed.json retry-{1,2,3}.json > prepare-1.json
+```
+
+Use the new round number throughout subsequent commands. Retry records lock
+their signers out of older rounds. A 2–2 split in round 0 can retry with
+either proposal or a new one. If the retry records include evidence that
+an earlier proposal could already have a commit quorum, the new round must
+carry the latest such proposal forward. If you find the earlier commit
+quorum, you can also store and publish that decision directly.
+
+Each `store` signer independently checks the commit quorum and saves it
+before releasing a receipt. Fetch stored copies over HTTPS at
+`/api/policy-decisions/<head>/<round>` on participating verifiers; omit the
+round to list available rounds. `store` also accepts one peer's stored
+record in place of separate commit files and verifies its commits locally.
+`assemble` requires a quorum of commits and a quorum of storage receipts.
+It does not change the policy on the platform or verifiers.
+
+Finish active and scheduled ballots before running `store`. A storing
+verifier stops starting new ballots under the old policy and can finish
+ones it already witnessed. To activate the successor, distribute the signed
+bundle and replace the policy on the platform and verifiers, then restart
+the verifiers and update the platform's assigned witnesses. Existing pins
+only accept a bundle that extends the chain they already trust. Historical
 evidence can still be audited against the policy under which it was signed.
-After approving a successor, that verifier will no longer start witnessing
-new ballots under the old policy; it can finish ones it already witnessed.
+The signing key never leaves its verifier.
+
+If a crash leaves a `.policy-<head>.lock` directory, stop the verifier,
+check that no policy command is running, and remove only the empty lock
+directory. Keep all round and decision records. Update all policy participants
+together; the one-step approval format from earlier development revisions
+does not count under this protocol.
 
 ## Pomni deployment
 

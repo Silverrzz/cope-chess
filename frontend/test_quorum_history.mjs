@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync, sign } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,7 +9,7 @@ import { Group } from '@semaphore-protocol/group'
 import { Identity } from '@semaphore-protocol/identity'
 import { generateProof } from '@semaphore-protocol/proof'
 import { ballotScope, fingerprint, verifyBallot } from './src/quorum.ts'
-import { checkpointStatement, extendsHistory, historyDigest, historyVersion, policyChangeStatement,
+import { checkpointStatement, extendsHistory, historyDigest, historyVersion, policyVoteStatement,
   verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, witnessPolicy } from './src/quorum-history.ts'
 
 const origin = 'https://cope.test'
@@ -88,35 +88,87 @@ test('a real proof can be recorded; removing it and recomputing the tally fails 
 
 test('policy changes need the old quorum, preserve history, and are bound to the origin and predecessor', async () => {
   const next = policyFor(4, 6, 1)
-  const statement = policyChangeStatement(origin, state.head, await fingerprint(original), await fingerprint(next))
-  const changes = signatures => ({ initial: original, changes: [{ policy: next, signatures }] })
-  await assert.rejects(verifyPolicyChain(changes(signAll(statement, signers.slice(0, 2))), origin), /current threshold/)
-  await assert.rejects(verifyPolicyChain(changes(signAll(statement, [signers[0], signers[1], signers[5]])), origin), /current threshold/)
-  const bundle = changes(signAll(statement))
+  const digest = await fingerprint(next)
+  const commit = policyVoteStatement('commit', origin, state.head, 0, digest)
+  const store = policyVoteStatement('store', origin, state.head, 0, digest)
+  const changes = (commits, stored) => ({ initial: original, changes: [{ policy: next, round: 0, commits, stored }] })
+  await assert.rejects(verifyPolicyChain(changes(signAll(commit, signers.slice(0, 2)), signAll(store)), origin), /current threshold/)
+  await assert.rejects(verifyPolicyChain(changes(signAll(commit), signAll(store, [signers[0], signers[1], signers[5]])), origin), /current threshold/)
+  await assert.rejects(verifyPolicyChain(changes(signAll(commit), signAll(commit)), origin), /current threshold/)
+  const bundle = changes(signAll(commit), signAll(store))
   const updated = await verifyPolicyChain(bundle, origin)
   assert.deepEqual(updated.epochs.get(state.head), original)
   assert.deepEqual(updated.current, next)
   await assert.rejects(verifyPolicyChain(bundle, 'https://another.test'), /current threshold/)
-  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [...bundle.changes, ...bundle.changes] }, origin), /current threshold/)
+  await assert.rejects(verifyPolicyChain({ ...bundle, initial: policyFor(3, 4, 0) }, origin), /current threshold/)
+  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [{ ...bundle.changes[0], round: 1 }] }, origin), /current threshold/)
+  await assert.rejects(verifyPolicyChain({ ...bundle, changes: [...bundle.changes, ...bundle.changes] }, origin), /identical/)
 })
 
-test('a verifier will not release signatures for competing policy successors', async () => {
+async function withPolicyOperators(testOperators) {
   const local = await mkdtemp(join(tmpdir(), 'cope-policy-test-'))
   try {
-    await writeFile(join(local, 'origin'), origin)
-    await writeFile(join(local, 'witness-policy-head'), state.head)
-    await writeFile(join(local, 'witness-ed25519.pem'), signers[0].privateKey.export({ type: 'pkcs8', format: 'pem' }))
-    for (const [file, policy] of [['current', original], ['next', policyFor(4, 6, 1)], ['fork', policyFor(4, 5, 1)]]) {
-      await writeFile(join(local, file+'.json'), JSON.stringify(policy))
+    const file = name => join(local, name + '.json')
+    for (const [name, policy] of [['current', original], ['A', policyFor(4, 6, 1)], ['B', policyFor(4, 5, 1)]]) {
+      await writeFile(file(name), JSON.stringify(policy))
     }
-    const approve = file => execFileSync(process.execPath, [
-      new URL('./quorum-policy.mjs', import.meta.url).pathname, 'approve', origin, join(local, 'current.json'),
-      join(local, file+'.json'), local,
+    const archives = signers.slice(0, 4).map(signer => join(local, signer.name))
+    for (const [i, archive] of archives.entries()) {
+      await mkdir(archive)
+      await writeFile(join(archive, 'origin'), origin)
+      await writeFile(join(archive, 'witness-policy-head'), state.head)
+      await writeFile(join(archive, 'witness-ed25519.pem'), signers[i].privateKey.export({ type: 'pkcs8', format: 'pem' }))
+    }
+    const command = (phase, round, ...args) => execFileSync(process.execPath, [
+      new URL('./quorum-policy.mjs', import.meta.url).pathname, phase, origin, file('current'), String(round), ...args,
     ], { stdio: ['ignore', 'pipe', 'pipe'] }).toString()
-    const signature = approve('next')
-    assert.equal(approve('next'), signature)
-    assert.throws(() => approve('fork'), /already approved a different successor/)
+    const run = (phase, round, i, proposal, inputs = []) => command(
+      phase, round, archives[i], ...(proposal ? [file(proposal)] : []), ...inputs)
+    const exchange = async (phase, round, i, proposal, inputs) => {
+      const output = file([phase, round, i, proposal].join('-'))
+      await writeFile(output, run(phase, round, i, proposal, inputs))
+      return output
+    }
+    await testOperators({ archives, file, command, run, exchange })
   } finally {
     await rm(local, { force: true, recursive: true })
   }
+}
+
+test('a 2–2 split leaves the current policy in place and operators can approve a different proposal next round', async () => {
+  await withPolicyOperators(async ({ archives, file, command, run, exchange }) => {
+    const initial = await Promise.all([0, 1, 2, 3].map(i => exchange('prepare', 0, i, i < 2 ? 'A' : 'B')))
+    assert.throws(() => run('prepare', 0, 0, 'B'), /already voted/)
+    assert.throws(() => run('commit', 0, 0, 'A', initial.slice(0, 2)), /current threshold/)
+    assert.throws(() => run('commit', 0, 0, 'A', initial.slice(0, 3)), /disagree/)
+    assert.equal(await readFile(join(archives[0], 'witness-policy-head'), 'utf8'), state.head)
+    const retry = await Promise.all([0, 1, 2].map(i => exchange('retry', 1, i)))
+    assert.throws(() => run('prepare', 1, 3, 'B', [retry[0], retry[0], retry[1]]), /duplicate/)
+    assert.throws(() => run('prepare', 0, 0, 'A'), /later round/)
+    const prepared = await Promise.all([0, 1, 2].map(i => exchange('prepare', 1, i, 'B', retry)))
+    const committed = await Promise.all([0, 1, 2].map(i => exchange('commit', 1, i, 'B', prepared)))
+    const first = await exchange('store', 1, 0, 'B', committed)
+    const stored = [first, ...await Promise.all([1, 3].map(i => exchange('store', 1, i, 'B', [first])))]
+    assert.deepEqual(JSON.parse(await readFile(join(archives[3], 'policy-decisions', state.head, '1.json'), 'utf8')),
+      JSON.parse(await readFile(stored[2], 'utf8')))
+    assert.throws(() => command('assemble', 1, file('B'), file('approved'), ...stored.slice(0, 2)), /current threshold/)
+    command('assemble', 1, file('B'), file('approved'), ...stored)
+    const updated = await verifyPolicyChain(JSON.parse(await readFile(file('approved'), 'utf8')), origin)
+    assert.deepEqual(updated.current, policyFor(4, 5, 1))
+  })
+})
+
+test('a retry must preserve an earlier decision even if the collector withheld the commit quorum', async () => {
+  await withPolicyOperators(async ({ run, exchange, file }) => {
+    const prepared = await Promise.all([0, 1, 2].map(i => exchange('prepare', 0, i, 'A')))
+    const hidden = await Promise.all([0, 1, 2].map(i => exchange('commit', 0, i, 'A', prepared)))
+    const retry = await Promise.all([0, 2, 3].map(i => exchange('retry', 1, i)))
+    assert.throws(() => run('prepare', 1, 3, 'B', retry), /must carry forward/)
+    await writeFile(file('stripped'), JSON.stringify({ ...JSON.parse(await readFile(retry[0], 'utf8')), prepared: null }))
+    assert.throws(() => run('prepare', 1, 3, 'A', [file('stripped'), ...retry.slice(1)]), /Invalid or duplicate/)
+    assert.doesNotThrow(() => run('prepare', 1, 3, 'A', retry))
+    assert.throws(() => run('commit', 0, 0, 'A', prepared), /later round/)
+    // Once someone finds the original commits, the older decision can still be published.
+    assert.doesNotThrow(() => run('store', 0, 3, 'A', hidden))
+  })
 })

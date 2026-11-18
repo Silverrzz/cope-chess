@@ -1,13 +1,14 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createWeb, send } from './quorum-web.mjs'
+import { policyDecisionPath, readPolicyDecision, withPolicyLock } from './quorum-policy.mjs'
 import { fingerprint, verifyBallot } from './src/quorum.ts'
 import { checkHistoryPacket, checkOpenQuorum, checkpointStatement, extendsHistory, historyDigest,
-  matchesWitnessPolicy, verifyHistoryResult, verifyPolicyChain } from './src/quorum-history.ts'
+  matchesWitnessPolicy, validPolicyRound, verifyHistoryResult, verifyPolicyChain } from './src/quorum-history.ts'
 
 const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
 if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
@@ -104,14 +105,7 @@ async function witnessHistory(packet, history, previous, opens, closes, policy) 
   const phase = Date.now() < closes ? 'open' : 'closed'
   if (phase === 'open') {
     if (previous?.closed || packet.status !== 'open') return
-    if (!previous) {
-      if (manifest.vote_history.epoch !== policyChain.head) return
-      const changeApproved = await readFile(join(archive, 'policy-approvals', policyChain.head + '.json'), 'utf8').catch(error => {
-        if (error.code === 'ENOENT') return null
-        throw error
-      })
-      if (changeApproved) return
-    }
+    if (!previous && manifest.vote_history.epoch !== policyChain.head) return
   }
   const digest = await historyDigest(vote_hashes)
   const key = phase + ':' + digest
@@ -130,10 +124,25 @@ async function witnessHistory(packet, history, previous, opens, closes, policy) 
     await verifyBallot(packet)
   }
   const size = vote_hashes.length
-  if (phase === 'open' && Date.now() >= closes) return
-  const signature = sign(null, Buffer.from(JSON.stringify(checkpointStatement(
-    origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex')
-  await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed' })
+  let signature
+  const recordCheckpoint = async () => {
+    if (phase === 'open' && Date.now() >= closes) return
+    signature = sign(null, Buffer.from(JSON.stringify(checkpointStatement(
+      origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex')
+    await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed' })
+  }
+  if (phase === 'open' && !previous) {
+    // Serialize the first checkpoint with storing a policy decision. Once a
+    // quorum has stored the decision, no new old-policy ballot can get a quorum.
+    await withPolicyLock(archive, policyChain.head, async () => {
+      const decision = await stat(policyDecisionPath(archive, policyChain.head)).catch(error => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
+      if (!decision) await recordCheckpoint()
+    })
+  } else await recordCheckpoint()
+  if (!signature) return
   const response = await fetch(new URL('/api/quorum/ballots/' + manifest.id + '/history/checkpoints', origin), {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
     headers: { 'Content-Type': 'application/json' },
@@ -365,6 +374,23 @@ const server = createServer({ headersTimeout: 10000, requestTimeout: 15000 }, as
       const ballots = await archivedBallots()
       return send(response, 200, { origin: origin.origin, public_key: publicKey, last_scan: lastScan,
         scan_errors: scanErrors, ballots, witness_policy: Boolean(witnessOperators), commit: appCommit ?? null }, undefined, { Vary: 'Accept' })
+    }
+    const decision = /^\/api\/policy-decisions\/([a-f0-9]{64})(?:\/(0|[1-9][0-9]*))?$/.exec(path)
+    if (decision && policyChain?.heads.includes(decision[1])) {
+      const dir = policyDecisionPath(archive, decision[1])
+      if (!decision[2]) {
+        const files = await readdir(dir).catch(error => {
+          if (error.code === 'ENOENT') return []
+          throw error
+        })
+        const rounds = files.filter(file => /^(0|[1-9][0-9]*)\.json$/.test(file))
+          .map(file => Number(file.slice(0, -5))).filter(validPolicyRound).sort((a, b) => a - b)
+        return send(response, 200, { rounds })
+      }
+      if (validPolicyRound(Number(decision[2]))) {
+        const record = await readPolicyDecision(archive, decision[1], decision[2])
+        return record ? send(response, 200, record) : send(response, 404, { error: 'No stored decision for this round' })
+      }
     }
     if (ballotId) {
       const record = await readRecord(ballotId)

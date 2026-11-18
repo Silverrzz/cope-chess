@@ -146,7 +146,9 @@ export async function checkOpenQuorum(origin: string, manifest: Manifest, policy
 
 export interface PolicyChange {
   policy: WitnessPolicy
-  signatures: Record<string, string>
+  round: number
+  commits: Record<string, string>
+  stored: Record<string, string>
 }
 
 export interface PolicyBundle {
@@ -163,7 +165,32 @@ export interface PolicyChain {
 }
 
 export function policyChangeStatement(origin: string, head: string, previous: string, next: string) {
-  return ['cope-quorum-witness-policy-change/1', origin, head, previous, next]
+  // A decision has the same epoch regardless of which round certifies it.
+  return ['cope-quorum-witness-policy-change/2', origin, head, previous, next]
+}
+
+export const validPolicyRound = (round: unknown): round is number =>
+  typeof round === 'number' && Number.isInteger(round) && round >= 0 && round <= 0x7fffffff
+
+export const policyVoteStatement = (phase: 'prepare' | 'commit' | 'store', origin: string, head: string,
+  round: number, digest: string) => [`cope-quorum-policy-${phase}/1`, origin, head, round, digest]
+
+export const policyRetryStatement = (origin: string, head: string, round: number,
+  prepared: { round: number, digest: string } | null) =>
+  ['cope-quorum-policy-retry/1', origin, head, round, prepared ? [prepared.round, prepared.digest] : null]
+
+export async function checkPolicySignature(policy: WitnessPolicy, statement: unknown[], key: string, signature: unknown) {
+  return Object.values(policy.operators).includes(key)
+    && checkSignature(key, signature, new TextEncoder().encode(JSON.stringify(statement)))
+}
+
+export async function checkPolicySignatures(policy: WitnessPolicy, statement: unknown[], signatures: Record<string, string>) {
+  requireHistory(signatures && typeof signatures === 'object' && !Array.isArray(signatures),
+    'Invalid policy decision signatures.')
+  const signers = Object.keys(signatures)
+  requireHistory(signers.length >= policy.threshold && signers.length <= Object.keys(policy.operators).length
+    && (await Promise.all(signers.map(key => checkPolicySignature(policy, statement, key, signatures[key])))).every(Boolean),
+  'The policy decision needs the current threshold of valid witness signatures.')
 }
 
 export async function verifyPolicyChain(value: unknown, origin: string): Promise<PolicyChain> {
@@ -178,18 +205,15 @@ export async function verifyPolicyChain(value: unknown, origin: string): Promise
   const heads = [head]
   const epochs = new Map([[head, current]])
   for (const change of bundle.changes) {
-    requireHistory(change && typeof change === 'object' && Object.keys(change).length === 2
-      && change.signatures && typeof change.signatures === 'object' && !Array.isArray(change.signatures),
+    requireHistory(change && typeof change === 'object' && Object.keys(change).length === 4
+      && validPolicyRound(change.round),
     'Invalid witness policy change.')
     const next = witnessPolicy(change.policy)
     const nextDigest = await fingerprint(next)
+    requireHistory(nextDigest !== digest, 'The proposed policy is identical to the current policy.')
+    await checkPolicySignatures(current, policyVoteStatement('commit', origin, head, change.round, nextDigest), change.commits)
+    await checkPolicySignatures(current, policyVoteStatement('store', origin, head, change.round, nextDigest), change.stored)
     const statement = policyChangeStatement(origin, head, digest, nextDigest)
-    const message = new TextEncoder().encode(JSON.stringify(statement))
-    const keys = Object.values(current.operators)
-    const signers = Object.keys(change.signatures)
-    requireHistory(signers.length >= current.threshold && signers.every(key => keys.includes(key))
-      && (await Promise.all(signers.map(key => checkSignature(key, change.signatures[key], message)))).every(Boolean),
-    'The policy change needs the current threshold of valid witness approvals.')
     head = await fingerprint(statement)
     heads.push(head)
     current = next

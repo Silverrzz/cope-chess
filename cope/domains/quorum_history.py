@@ -42,6 +42,21 @@ def validate_policy(policy):
     return policy
 
 
+def verify_policy_signatures(policy, statement, signatures):
+    keys = set(policy["operators"].values())
+    if (not isinstance(signatures, dict) or not signatures.keys() <= keys
+            or len(signatures) < policy["threshold"]):
+        raise ValueError("The policy decision needs the current threshold of valid witness signatures.")
+    message = elections.canonical(statement)
+    try:
+        for key, signature in signatures.items():
+            if not isinstance(signature, str) or not re.fullmatch(r"[a-f0-9]{128}", signature):
+                raise ValueError("Invalid policy decision signature.")
+            Ed25519PublicKey.from_public_bytes(bytes.fromhex(key)).verify(bytes.fromhex(signature), message)
+    except InvalidSignature as error:
+        raise ValueError("Invalid policy decision signature.") from error
+
+
 def verify_policy_chain(data, origin):
     if isinstance(data, dict) and "initial" in data:
         if data.keys() != {"initial", "changes"} or not isinstance(data["changes"], list) or len(data["changes"]) > 128:
@@ -53,25 +68,17 @@ def verify_policy_chain(data, origin):
     head = elections.digest(["cope-quorum-witness-policy-anchor/1", origin, digest])
     heads = [head]
     for change in changes:
-        if not isinstance(change, dict) or change.keys() != {"policy", "signatures"}:
+        if (not isinstance(change, dict) or change.keys() != {"policy", "round", "commits", "stored"}
+                or type(change["round"]) is not int or not 0 <= change["round"] <= 0x7fffffff):
             raise ValueError("Invalid witness policy change.")
         new = validate_policy(change["policy"])
         new_digest = elections.digest(new)
-        statement = ["cope-quorum-witness-policy-change/1", origin, head, digest, new_digest]
-        keys = set(policy["operators"].values())
-        signatures = change["signatures"]
-        if (not isinstance(signatures, dict) or not signatures.keys() <= keys
-                or len(signatures) < policy["threshold"]):
-            raise ValueError("The policy change needs the current threshold of valid witness approvals.")
-        try:
-            for key, signature in signatures.items():
-                if not isinstance(signature, str) or not re.fullmatch(r"[a-f0-9]{128}", signature):
-                    raise ValueError("Invalid policy change signature.")
-                Ed25519PublicKey.from_public_bytes(bytes.fromhex(key)).verify(
-                    bytes.fromhex(signature), elections.canonical(statement),
-                )
-        except InvalidSignature as error:
-            raise ValueError("Invalid policy change signature.") from error
+        if new_digest == digest:
+            raise ValueError("The proposed policy is identical to the current policy.")
+        for phase, signatures in (("commit", change["commits"]), ("store", change["stored"])):
+            verify_policy_signatures(policy, [f"cope-quorum-policy-{phase}/1", origin, head, change["round"], new_digest],
+                                     signatures)
+        statement = ["cope-quorum-witness-policy-change/2", origin, head, digest, new_digest]
         head, digest, policy = elections.digest(statement), new_digest, new
         heads.append(head)
     return policy, heads
