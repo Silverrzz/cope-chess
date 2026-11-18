@@ -61,8 +61,7 @@ static int run_bench(const char *native) {
     if (!input || !output) return 1;
     int ok = send_command(input, "uci") && wait_for(output, "uciok", NULL)
         && send_command(input, "setoption name Threads value 1")
-        && send_command(input, "setoption name Hash value 16")
-        && send_command(input, "setoption name OwnBook value false");
+        && send_command(input, "setoption name Hash value 16");
     double elapsed = 0.0;
     uint64_t total_nodes = 0;
     for (size_t i = 0; ok && i < sizeof(positions) / sizeof(positions[0]); i++) {
@@ -70,8 +69,9 @@ static int run_bench(const char *native) {
         uint64_t nodes = 0;
         ok = send_command(input, "ucinewgame") && send_command(input, "isready")
             && wait_for(output, "readyok", NULL) && send_command(input, positions[i])
-            && clock_gettime(CLOCK_MONOTONIC, &start) == 0 && send_command(input, "go depth 8")
+            && clock_gettime(CLOCK_MONOTONIC, &start) == 0 && send_command(input, "go movetime 1500")
             && wait_for(output, "bestmove", &nodes) && clock_gettime(CLOCK_MONOTONIC, &end) == 0;
+        fprintf(stderr, "Bench position %zu: %" PRIu64 " search nodes\n", i + 1, nodes);
         if (!ok || !nodes) { ok = 0; break; }
         total_nodes += nodes;
         elapsed += (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
@@ -102,6 +102,7 @@ int main(int argc, char **argv) {
 }
 COPE_BENCH
 RUN mkdir -p /opt/cope \
+    && sed -i 's/EngineOptions->UseBook = TRUE;/EngineOptions->UseBook = FALSE;/' Vice11/src/uci.c \
     && gcc -std=gnu11 -O3 -DNDEBUG -march=x86-64-v3 -pthread -static Vice11/src/*.c -o /opt/cope/engine-native \
     && install -Dm644 LICENSE /opt/cope/LICENSE \
     && gcc -std=c11 -O2 -static /tmp/cope-bench.c -o /opt/cope/engine \
