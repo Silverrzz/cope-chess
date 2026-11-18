@@ -167,20 +167,25 @@ def register_form_routes(app):
 
     @router.get("/responses")
     def responses(limit: int = QueryParameter(default=30, ge=1, le=100), cursor: str | None = None,
-                  form_id: str | None = None, identity=Depends(form_principal), connection=Depends(database)):
-        request = QueryRequest(query="forms.responses.list.v1", input={"limit": limit, "cursor": cursor, "form_id": form_id})
+                  form_id: str | None = None, show_closed: bool = False,
+                  identity=Depends(form_principal), connection=Depends(database)):
+        request = QueryRequest(query="forms.responses.list.v1", input={"limit": limit, "cursor": cursor, "form_id": form_id,
+                                                                      "show_closed": show_closed})
         return application_result(connection, identity, execute_query, request)
 
     @router.get("/responses/collections")
     def response_collections(limit: int = QueryParameter(default=30, ge=1, le=100), cursor: str | None = None,
-                             identity=Depends(form_principal), connection=Depends(database)):
-        request = QueryRequest(query="forms.responses.collections.v1", input={"limit": limit, "cursor": cursor})
+                             show_closed: bool = False, identity=Depends(form_principal), connection=Depends(database)):
+        request = QueryRequest(query="forms.responses.collections.v1", input={"limit": limit, "cursor": cursor,
+                                                                             "show_closed": show_closed})
         return application_result(connection, identity, execute_query, request)
 
     @router.get("/responses/mine")
     def my_submissions(limit: int = QueryParameter(default=30, ge=1, le=100), cursor: str | None = None,
-                       form_id: str | None = None, identity=Depends(form_principal), connection=Depends(database)):
-        request = QueryRequest(query="forms.responses.mine.v1", input={"limit": limit, "cursor": cursor, "form_id": form_id})
+                       form_id: str | None = None, show_closed: bool = False,
+                       identity=Depends(form_principal), connection=Depends(database)):
+        request = QueryRequest(query="forms.responses.mine.v1", input={"limit": limit, "cursor": cursor, "form_id": form_id,
+                                                                      "show_closed": show_closed})
         return application_result(connection, identity, execute_query, request)
 
     @router.get("/responses/{response_id}")
@@ -195,8 +200,8 @@ def register_form_routes(app):
 
     @router.get("/directory/list")
     def directory(limit: int = QueryParameter(default=24, ge=1, le=50), offset: int = QueryParameter(default=0, ge=0),
-                  identity=Depends(form_principal), connection=Depends(database)):
-        return application_result(connection, identity, public_results.directory, limit, offset)
+                  show_closed: bool = False, identity=Depends(form_principal), connection=Depends(database)):
+        return application_result(connection, identity, public_results.directory, limit, offset, show_closed)
 
     @router.get("/{slug}/results")
     def results(slug: str, cursor: str | None = None, limit: int = QueryParameter(default=10, ge=1, le=20),

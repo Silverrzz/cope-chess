@@ -9,14 +9,15 @@ from .definition import CONTENT_KINDS, NUMBER_KINDS
 from .storage import definition_from_json, identity, public_form_view
 
 
-def directory(connection, principal, limit: int, offset: int) -> dict:
+def directory(connection, principal, limit: int, offset: int, show_closed: bool = False) -> dict:
     rows = connection.execute(
         """SELECT f.slug, f.closed, r.definition->>'title' AS title,
                   left(r.definition->>'description', 600) AS description,
                   COALESCE(r.definition->>'response_visibility', 'private') AS response_visibility
            FROM form_definitions f JOIN form_releases r ON r.id = f.published_release
            WHERE r.definition->'listed' = 'true'::jsonb AND r.definition->>'audience' <> 'invited'
-           ORDER BY r.created_at DESC, f.id LIMIT %s OFFSET %s""", (limit + 1, offset)
+             AND (%s OR NOT f.closed)
+           ORDER BY r.created_at DESC, f.id LIMIT %s OFFSET %s""", (show_closed, limit + 1, offset)
     ).fetchall()
     return {"items": rows[:limit], "more": len(rows) > limit}
 

@@ -13,6 +13,7 @@ import { discordLogin, useDiscordSession } from '@/stores/discord'
 const route = useRoute()
 const discord = useDiscordSession()
 const formId = computed(() => typeof route.query.form === 'string' ? route.query.form : undefined)
+const showClosed = ref(false)
 const items = ref<MySubmission[]>([])
 const cursor = ref<string | null>(null)
 const loading = ref(true)
@@ -26,7 +27,7 @@ async function load(more = false) {
   needsSignIn.value = false
   error.value = ''
   try {
-    const page = await mySubmissions(formId.value, more ? cursor.value : null, signal)
+    const page = await mySubmissions(showClosed.value, formId.value, more ? cursor.value : null, signal)
     if (signal.aborted) return
     items.value = more ? [...items.value, ...page.items] : page.items
     cursor.value = page.next_cursor
@@ -45,7 +46,7 @@ async function load(more = false) {
   }
 }
 
-watch(formId, (_, __, cleanup) => {
+watch([formId, showClosed], (_, __, cleanup) => {
   const current = new AbortController()
   controller = current
   cleanup(() => current.abort())
@@ -60,6 +61,7 @@ watch(formId, (_, __, cleanup) => {
     <PageHeader title="My submissions">
       <template v-if="formId && items[0]" #description>{{ items[0].form_title }}</template>
       <template #actions>
+        <label v-if="!needsSignIn" class="switch-row"><input v-model="showClosed" type="checkbox" :disabled="loading"> <span>Show closed</span></label>
         <BaseButton v-if="formId" :to="{ name: 'my-submissions' }">All submissions</BaseButton>
         <BaseButton :to="{ name: 'forms' }">Forms</BaseButton>
       </template>

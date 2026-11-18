@@ -15,6 +15,7 @@ export interface ApplicationInputs {
   'forms.drafts.save.v1': { "document": Record<string, unknown> }
   'forms.permissions.set.v1': { "actor": string; "permissions": Array<"read" | "edit" | "review" | "responses"> }
   'forms.publish.v1': { "copy_id": string; "copy_revision": number; "keep_previous_hours"?: number; "state_version": number }
+  'forms.responses.close.v1': { "closed": boolean; "revision": number }
   'forms.review.v1': { "state_version": number; "subject_digest": string; "decision": "accepted" | "declined" | "changes_requested"; "reason"?: string }
   'forms.withdraw.v1': Record<string, never>
   'jobs.legacy_hold.v1': { "held": boolean; "reason": string }
@@ -43,6 +44,7 @@ export const applicationCommandContracts = {
   'forms.drafts.save.v1': { requiresTarget: true, requiresVersion: true },
   'forms.permissions.set.v1': { requiresTarget: true, requiresVersion: true },
   'forms.publish.v1': { requiresTarget: true, requiresVersion: true },
+  'forms.responses.close.v1': { requiresTarget: true, requiresVersion: true },
   'forms.review.v1': { requiresTarget: true, requiresVersion: true },
   'forms.withdraw.v1': { requiresTarget: true, requiresVersion: true },
   'jobs.legacy_hold.v1': { requiresTarget: true, requiresVersion: true },
@@ -69,6 +71,7 @@ export interface ApplicationOutputs {
   'forms.drafts.save.v1': { "form_id": string; "copy_id": string; "copy_revision": number; "form_version": number }
   'forms.permissions.set.v1': { "form_id": string; "actor": string; "permissions": Array<string> }
   'forms.publish.v1': { "form_id": string; "release_id": string; "release_number": number; "slug": string }
+  'forms.responses.close.v1': { "response_id": string; "closed": boolean }
   'forms.review.v1': { "response_id": string; "review_id": string; "revision": number; "decision": string }
   'forms.withdraw.v1': { "response_id": string; "withdrawn": boolean }
   'jobs.legacy_hold.v1': { "id": string; "kind": "operation" | "job"; "source": string; "source_id": string; "backend": "legacy"; "held": boolean; "ownership_generation": number; "source_present": boolean; "source_state": string | null; "cleanup_state"?: "not_recorded"; "canonical_transfer_supported"?: false }
@@ -97,13 +100,14 @@ export interface ApplicationQueryInputs {
   'forms.definition.check.v1': { "document": Record<string, unknown> }
   'forms.detail.v1': Record<string, never>
   'forms.drafts.detail.v1': Record<string, never>
-  'forms.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
+  'forms.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null; "show_closed"?: boolean }
   'forms.permissions.v1': Record<string, never>
   'forms.preview.check.v1': { "document": Record<string, unknown>; "answers": Record<string, unknown> }
   'forms.public.v1': { "slug": string }
-  'forms.responses.collections.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
+  'forms.responses.collections.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null; "show_closed"?: boolean }
   'forms.responses.detail.v1': Record<string, never>
-  'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null }
+  'forms.responses.list.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null; "show_closed"?: boolean }
+  'forms.responses.mine.v1': { "limit"?: number; "cursor"?: string | null; "form_id"?: string | null; "show_closed"?: boolean }
   'objects.removal.v1': Record<string, never>
   'tools.catalogue.v1': Record<string, never>
 }
@@ -134,6 +138,7 @@ export interface ApplicationQueryOutputs {
   'forms.responses.collections.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'forms.responses.detail.v1': Record<string, unknown>
   'forms.responses.list.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
+  'forms.responses.mine.v1': { "items": Array<Record<string, unknown>>; "total": number; "next_cursor": string | null; "basis": Record<string, unknown> }
   'objects.removal.v1': { "id": string; "type_key": string; "source": string; "source_id": string; "reason": "source_deleted" | "source_missing"; "observed_at": string; "state_version": number; "cleanup_state": "not_recorded"; "restore_supported": false }
   'tools.catalogue.v1': { "tools": Array<ApplicationSchema_query_output_tools_catalogue_v1_ToolDescription>; "recent_jobs": Array<ApplicationSchema_query_output_tools_catalogue_v1_JobSummary>; "connected_workers": number }
 }

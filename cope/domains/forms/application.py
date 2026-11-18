@@ -14,7 +14,7 @@ from .bindings import compile_binding
 from .storage import (
     checkpoint_document, create_copy, definition_from_json, form_permission, form_resolver, get_form,
     identity, insert_response_revision, new_object, object_version, pinned_release, resolve_copy,
-    response_resolver, validate_answers,
+    response_closed, response_resolver, validate_answers,
 )
 
 
@@ -39,8 +39,12 @@ class PublishForm(Input):
     state_version: int = Field(strict=True, gt=0)
 
 
-class CloseForm(Input):
+class SetClosed(Input):
     closed: StrictBool
+
+
+class SetResponseClosed(SetClosed):
+    revision: int = Field(strict=True, gt=0)
 
 
 class ArchiveDraft(Input):
@@ -78,6 +82,11 @@ class WithdrawResponse(Input):
 class WithdrawOutput(Input):
     response_id: str
     withdrawn: bool
+
+
+class CloseResponseOutput(Input):
+    response_id: str
+    closed: bool
 
 
 class DraftOutput(Input):
@@ -202,7 +211,7 @@ def publish_form(context: CommandContext, payload: PublishForm) -> Outcome:
                    {"form_id": context.target.object_id, "release_id": str(release["id"]), "release_number": number, "slug": context.target.data["slug"]})
 
 
-def close_form(context: CommandContext, payload: CloseForm) -> Outcome:
+def close_form(context: CommandContext, payload: SetClosed) -> Outcome:
     version = context.target.version
     if context.target.data["closed"] != payload.closed:
         context.connection.execute("UPDATE form_definitions SET closed = %s WHERE id = %s", (payload.closed, context.target.object_id))
@@ -263,6 +272,8 @@ def amend_response(context: CommandContext, payload: AmendResponse) -> Outcome:
     response = context.target.data
     if response["withdrawn_at"]:
         raise ApplicationError("response_withdrawn", "A withdrawn response cannot be amended.")
+    if response_closed(context.connection, context.target.object_id):
+        raise ApplicationError("response_closed", "A closed response cannot be amended.")
     form = get_form(context.connection, str(response["form_id"]))
     release = pinned_release(context.connection, str(form["id"]), str(response["release_id"]), accepting=True)
     definition = definition_from_json(release["definition"])
@@ -300,6 +311,8 @@ def review_response(context: CommandContext, payload: ReviewResponse) -> Outcome
     response = context.target.data
     if response["withdrawn_at"]:
         raise ApplicationError("response_withdrawn", "A withdrawn response cannot be admitted.")
+    if response_closed(context.connection, context.target.object_id):
+        raise ApplicationError("response_closed", "Reopen the response before reviewing it.")
     state = object_version(context.connection, context.target.object_id, "state_version", lock=True)
     if state != payload.state_version:
         raise ApplicationError("review_conflict", "Another review changed this response. Refresh before deciding.", current_version=state)
@@ -332,6 +345,21 @@ def withdraw_response(context: CommandContext, payload: WithdrawResponse) -> Out
         context.connection.execute("UPDATE application_objects SET state_version = state_version + 1 WHERE id = %s", (context.target.object_id,))
         version += 1
     return Outcome(context.target.object_id, version, {"response_id": context.target.object_id, "withdrawn": True})
+
+
+def close_response(context: CommandContext, payload: SetResponseClosed) -> Outcome:
+    response_id = context.target.object_id
+    version = context.target.version
+    if context.target.data["current_revision"] != payload.revision:
+        raise ApplicationError("response_revision_changed", "The response changed. Refresh before closing or reopening it.")
+    if response_closed(context.connection, response_id) != payload.closed:
+        version += 1
+        context.connection.execute(
+            "INSERT INTO form_response_closures(response_id, state_version, closed) VALUES (%s, %s, %s)",
+            (response_id, version, payload.closed),
+        )
+        context.connection.execute("UPDATE application_objects SET state_version = %s WHERE id = %s", (version, response_id))
+    return Outcome(response_id, version, {"response_id": response_id, "closed": payload.closed})
 
 
 def describe_form(connection, principal, target) -> dict:
@@ -387,12 +415,14 @@ def commands() -> tuple[Command, ...]:
                 resolve_archive, archive_draft, describe_archive, project_copy),
         Command("forms.publish.v1", "form", "forms:write", "content_revision", PublishForm, ReleaseOutput,
                 form_resolver("edit"), publish_form, describe_form, project_form),
-        Command("forms.close.v1", "form", "forms:write", "state_version", CloseForm, ClosedOutput,
+        Command("forms.close.v1", "form", "forms:write", "state_version", SetClosed, ClosedOutput,
                 form_resolver("edit", "state_version"), close_form, describe_form, project_form),
         Command("forms.amend.v1", "form_response", "forms:amend", "content_revision", AmendResponse, ResponseOutput,
                 response_resolver("read", owner_only=True), amend_response, describe_response, project_response),
         Command("forms.review.v1", "form_response", "forms:review", "content_revision", ReviewResponse, ReviewOutput,
                 response_resolver("review"), review_response, describe_response, project_response),
+        Command("forms.responses.close.v1", "form_response", "forms:review", "state_version", SetResponseClosed, CloseResponseOutput,
+                response_resolver("review", "state_version"), close_response, describe_response, project_response),
         Command("forms.withdraw.v1", "form_response", "forms:amend", "state_version", WithdrawResponse, WithdrawOutput,
                 response_resolver("read", "state_version", owner_only=True), withdraw_response, describe_response, project_response),
     ) + permission_commands()

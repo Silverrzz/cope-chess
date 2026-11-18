@@ -20,6 +20,7 @@ type AdminCollectionRow = Pick<FormDetail, 'id' | 'label' | 'closed' | 'publishe
 type CollectionRow = AdminCollectionRow | ResponseCollection
 
 const rows = ref<CollectionRow[]>([])
+const showClosed = ref(false)
 const cursor = ref<string | null>(null)
 const total = ref(0)
 const loading = ref(true)
@@ -34,12 +35,18 @@ async function load(more = false): Promise<void> {
   try {
     const next = more ? cursor.value : null
     const page = canEdit.value
-      ? await applicationQuery<Page<AdminCollectionRow>>('forms.list.v1', { limit: 30, cursor: next })
-      : await responseCollections(next)
+      ? await applicationQuery<Page<AdminCollectionRow>>('forms.list.v1', { limit: 30, cursor: next, show_closed: showClosed.value })
+      : await responseCollections(showClosed.value, next)
     rows.value = more ? [...rows.value, ...page.items] : page.items
     total.value = page.total; cursor.value = page.next_cursor
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load forms.' }
   finally { loading.value = false }
+}
+function changeClosedFilter() {
+  rows.value = []
+  cursor.value = null
+  total.value = 0
+  void load()
 }
 async function create(): Promise<void> {
   error.value = ''
@@ -76,7 +83,10 @@ onMounted(() => load())
     <section class="panel" :aria-busy="loading">
       <header class="panel__header">
         <h2>Collections <small v-if="total" class="muted">{{ total.toLocaleString() }}</small></h2>
-        <BaseButton size="small" variant="ghost" :loading="loading" @click="load()">Refresh</BaseButton>
+        <div class="button-row">
+          <label class="switch-row"><input v-model="showClosed" type="checkbox" :disabled="loading" @change="changeClosedFilter"> <span>Show closed</span></label>
+          <BaseButton size="small" variant="ghost" :loading="loading" @click="load()">Refresh</BaseButton>
+        </div>
       </header>
       <p v-if="loading && !rows.length" class="panel__body muted" role="status">Loading collections…</p>
       <div v-else-if="rows.length" class="table-wrap">

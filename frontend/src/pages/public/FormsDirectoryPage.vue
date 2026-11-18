@@ -8,6 +8,7 @@ import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 
 const items = ref<ListedForm[]>([])
+const showClosed = ref(false)
 const more = ref(false)
 const loading = ref(true)
 const error = ref('')
@@ -20,7 +21,7 @@ async function load(append = false) {
   loading.value = true
   error.value = ''
   try {
-    const page = await formDirectory(append ? items.value.length : 0)
+    const page = await formDirectory(showClosed.value, append ? items.value.length : 0)
     items.value = append ? [...items.value, ...page.items] : page.items
     more.value = page.more
   } catch (cause) {
@@ -30,13 +31,22 @@ async function load(append = false) {
   }
 }
 
+function changeClosedFilter() {
+  items.value = []
+  more.value = false
+  void load()
+}
+
 onMounted(() => load())
 </script>
 
 <template>
   <div class="page-container page-stack" :aria-busy="loading">
     <PageHeader title="Forms">
-      <template #actions><BaseButton :to="{ name: 'my-submissions' }">My submissions</BaseButton></template>
+      <template #actions>
+        <label class="switch-row"><input v-model="showClosed" type="checkbox" :disabled="loading" @change="changeClosedFilter"> <span>Show closed</span></label>
+        <BaseButton :to="{ name: 'my-submissions' }">My submissions</BaseButton>
+      </template>
     </PageHeader>
     <ContentState v-if="error" kind="error" compact :message="error" action-label="Try again" @action="load(items.length > 0)" />
     <ContentState v-else-if="loading && !items.length" kind="loading" compact title="Loading forms" />

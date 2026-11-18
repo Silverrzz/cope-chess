@@ -26,9 +26,10 @@ export async function formResponse(id: string, token = '', discord = false): Pro
   })
   return result.data
 }
-export type FormResponseRow = Pick<FormResponse, 'id' | 'form_id' | 'state' | 'revision' | 'created_at'> & {
+export type FormResponseRow = Pick<FormResponse, 'id' | 'form_id' | 'state' | 'state_version' | 'revision' | 'created_at'> & {
   form_title: string
   release_number: number
+  can_close: boolean
   respondent?: Respondent | null
   anonymous?: boolean
 }
@@ -44,22 +45,26 @@ export type MySubmission = Pick<FormResponseRow, 'id' | 'form_id' | 'form_title'
   updated_at: string
 }
 
-export async function mySubmissions(formId?: string, cursor?: string | null, signal?: AbortSignal): Promise<Page<MySubmission>> {
+export async function mySubmissions(showClosed: boolean, formId?: string, cursor?: string | null, signal?: AbortSignal): Promise<Page<MySubmission>> {
   const result = await api.get<{ data: Page<MySubmission> }>('/api/forms/responses/mine', {
     headers: discordHeaders,
-    query: { form_id: formId, cursor },
+    query: { form_id: formId, cursor, show_closed: showClosed },
     signal,
   })
   return result.data
 }
 
-export async function formResponses(formId: string, cursor?: string | null): Promise<Page<FormResponseRow>> {
-  const result = await api.get<{ data: Page<FormResponseRow> }>('/api/forms/responses', { query: { form_id: formId, cursor, limit: 30 } })
+export async function formResponses(formId: string, showClosed: boolean, cursor?: string | null): Promise<Page<FormResponseRow>> {
+  const result = await api.get<{ data: Page<FormResponseRow> }>('/api/forms/responses', {
+    query: { form_id: formId, cursor, show_closed: showClosed },
+  })
   return result.data
 }
 
-export async function responseCollections(cursor?: string | null): Promise<Page<ResponseCollection>> {
-  const result = await api.get<{ data: Page<ResponseCollection> }>('/api/forms/responses/collections', { query: { cursor, limit: 30 } })
+export async function responseCollections(showClosed: boolean, cursor?: string | null): Promise<Page<ResponseCollection>> {
+  const result = await api.get<{ data: Page<ResponseCollection> }>('/api/forms/responses/collections', {
+    query: { cursor, show_closed: showClosed },
+  })
   return result.data
 }
 
@@ -76,8 +81,8 @@ export type PublicResults =
   | { published: true; mode: 'summary'; total: number; fields: { id: string; label: string; answered: number; average: string | null; options: { label: string; count: number }[] }[] }
   | { published: true; mode: 'individual'; items: { id: string; answers: FormAnswers }[]; next_cursor: string | null }
 
-export function formDirectory(offset = 0) {
-  return api.get<{ items: ListedForm[]; more: boolean }>('/api/forms/directory/list', { query: { offset } })
+export function formDirectory(showClosed: boolean, offset = 0) {
+  return api.get<{ items: ListedForm[]; more: boolean }>('/api/forms/directory/list', { query: { offset, show_closed: showClosed } })
 }
 
 export function formResults(slug: string, cursor?: string | null, signal?: AbortSignal) {

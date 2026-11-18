@@ -224,6 +224,14 @@ def insert_response_revision(connection, response_id: str, revision: int, princi
     )
 
 
+def response_closed(connection, response_id: str) -> bool:
+    closure = connection.execute(
+        "SELECT closed FROM form_response_closures WHERE response_id = %s ORDER BY state_version DESC LIMIT 1",
+        (response_id,),
+    ).fetchone()
+    return bool(closure and closure["closed"])
+
+
 def response_view(connection, principal, response_id: str, *, require_scope: bool = True) -> dict:
     principal = current_principal(connection, principal)
     if require_scope:
@@ -237,7 +245,8 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
         (response["id"],),
     ).fetchall()
     latest = next((review for review in reviews if review["response_revision"] == response["current_revision"] and review["subject_digest"] == revision["subject_digest"]), None)
-    state = "withdrawn" if response["withdrawn_at"] else latest["decision"] if latest else "awaiting_review"
+    closed = response_closed(connection, response_id)
+    state = "closed" if closed else "withdrawn" if response["withdrawn_at"] else latest["decision"] if latest else "awaiting_review"
     actor = "submitter" if state == "changes_requested" else "reviewer" if state == "awaiting_review" else None
     release = pinned_release(connection, str(form["id"]), str(response["release_id"]), accepting=False)
     definition = FormDefinition.model_validate(release["definition"])
@@ -248,7 +257,7 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
         except ApplicationError:
             audience_allowed = False
     can_review = False
-    if "*" in principal.scopes or "forms:review" in principal.scopes:
+    if not closed and ("*" in principal.scopes or "forms:review" in principal.scopes):
         try:
             form_permission(connection, principal, form, "review")
             binding = compile_binding(definition)
@@ -266,7 +275,7 @@ def response_view(connection, principal, response_id: str, *, require_scope: boo
             "respondent": respondent, "anonymous": response["owner_actor"].startswith("form-anonymous:"),
             "revision": response["current_revision"], "state_version": object_version(connection, response_id, "state_version", lock=False),
             "state": state, "next_actor": actor, "answers": revision["answers"], "subject_digest": revision["subject_digest"],
-            "definition": public_definition(definition), "can_amend": bool(audience_allowed and release["eligible"] and definition.allow_amendments
+            "definition": public_definition(definition), "can_amend": bool(not closed and audience_allowed and release["eligible"] and definition.allow_amendments
                 and ("*" in principal.scopes or "forms:amend" in principal.scopes)
                 and response["owner_actor"] == principal.actor and response["withdrawn_at"] is None), "can_review": can_review,
             "reviews": [{**dict(review), "id": str(review["id"]), "created_at": review["created_at"].isoformat()} for review in reviews],

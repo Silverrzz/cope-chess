@@ -94,7 +94,7 @@ export interface FormResponse {
   release_id: string
   revision: number
   state_version: number
-  state: 'awaiting_review' | 'accepted' | 'declined' | 'changes_requested' | 'withdrawn'
+  state: 'awaiting_review' | 'accepted' | 'declined' | 'changes_requested' | 'withdrawn' | 'closed'
   next_actor: 'submitter' | 'reviewer' | null
   answers: FormAnswers
   subject_digest: string
