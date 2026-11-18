@@ -13,7 +13,7 @@ import { checkpointStatement, extendsHistory, historyDigest, historyVersion, pol
   verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, witnessPolicy } from './src/quorum-history.ts'
 
 const origin = 'https://cope.test'
-const signers = Array.from({ length: 6 }, (_, i) => {
+const signers = Array.from({ length: 7 }, (_, i) => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   return { name: 'witness-' + i, key: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'), privateKey }
 })
@@ -105,11 +105,24 @@ test('policy changes need the old quorum, preserve history, and are bound to the
   await assert.rejects(verifyPolicyChain({ ...bundle, changes: [...bundle.changes, ...bundle.changes] }, origin), /identical/)
 })
 
+test('even a fully signed successor must have a safe quorum of its own', async () => {
+  async function approved(policy) {
+    const digest = await fingerprint(policy)
+    const commits = signAll(policyVoteStatement('commit', origin, state.head, 0, digest), signers.slice(0, 4))
+    const stored = signAll(policyVoteStatement('store', origin, state.head, 0, digest), signers.slice(0, 4))
+    return { initial: original, changes: [{ policy, round: 0, commits, stored }] }
+  }
+  await assert.rejects(verifyPolicyChain(await approved(policyFor(1, 4, 0)), origin), /honest overlap/)
+  const next = policyFor(5, 7, 2)
+  assert.deepEqual((await verifyPolicyChain(await approved(next), origin)).current, next)
+})
+
 async function withPolicyOperators(testOperators) {
   const local = await mkdtemp(join(tmpdir(), 'cope-policy-test-'))
   try {
     const file = name => join(local, name + '.json')
-    for (const [name, policy] of [['current', original], ['A', policyFor(4, 6, 1)], ['B', policyFor(4, 5, 1)]]) {
+    for (const [name, policy] of [['current', original], ['A', policyFor(4, 6, 1)], ['B', policyFor(4, 5, 1)],
+      ['invalid', policyFor(1, 4, 0)]]) {
       await writeFile(file(name), JSON.stringify(policy))
     }
     const archives = signers.slice(0, 4).map(signer => join(local, signer.name))
@@ -137,6 +150,7 @@ async function withPolicyOperators(testOperators) {
 
 test('a 2–2 split leaves the current policy in place and operators can approve a different proposal next round', async () => {
   await withPolicyOperators(async ({ archives, file, command, run, exchange }) => {
+    assert.throws(() => run('prepare', 0, 0, 'invalid'), /honest overlap/)
     const initial = await Promise.all([0, 1, 2, 3].map(i => exchange('prepare', 0, i, i < 2 ? 'A' : 'B')))
     assert.throws(() => run('prepare', 0, 0, 'B'), /already voted/)
     assert.throws(() => run('commit', 0, 0, 'A', initial.slice(0, 2)), /current threshold/)

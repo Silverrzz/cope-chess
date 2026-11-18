@@ -122,10 +122,11 @@ A policy contains `operators` (a mapping of operator IDs to distinct raw
 Ed25519 public keys), a `threshold`, and optional `max_faulty`. The supported
 range is one to 64 distinct operators. For `n` operators, threshold `t` and
 fault allowance `f`, two quorums must share at least one honest witness:
-`2*t - n > f`. If `max_faulty` is omitted, the largest allowance consistent
-with that inequality is used. For example, three of four tolerates one
-faulty operator for safety; four of six also tolerates one. Meeting the safety
-condition is separate from having enough available operators to advance.
+`2*t - n > f`. One of four fails even with no faulty operators. Five of
+seven tolerates two and can still reach quorum when both withhold signatures.
+If `max_faulty` is omitted, the largest allowance consistent with safety
+is used. To also make progress with all of those operators offline, choose
+`t <= n - f`.
 Keys assigned to different IDs must actually be independently controlled.
 
 The platform exposes the full ordered vector of vote-proof hashes while voting
@@ -172,6 +173,9 @@ three of four, three of those four distinct operators must approve the exact
 change, even if it introduces a different threshold or changes the membership
 entirely. A split vote leaves the current policy in effect. The approval
 messages bind the COPE origin, current policy head, round, and proposal.
+Each verifier validates the proposed policy before signing. COPE and the
+verifiers recheck each successor when reading the signed chain; even a
+unanimous approval cannot install an invalid threshold.
 
 Operators exchange signed records and run the policy tool locally. Start
 at round 0 with the reviewed proposal. Each example uses a three-of-four
