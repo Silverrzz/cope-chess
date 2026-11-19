@@ -364,7 +364,6 @@ function reset(): void {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: none;
-  cursor: pointer;
 }
 
 .setting-toggle {
@@ -372,7 +371,6 @@ function reset(): void {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  cursor: pointer;
 }
 
 .setting-toggle input {
