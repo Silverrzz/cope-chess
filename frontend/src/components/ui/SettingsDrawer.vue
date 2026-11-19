@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch, onBeforeUnmount } from "vue";
+import { ref, watch, onBeforeUnmount } from "vue";
 
 import { useBoardTheme, type BoardTheme } from "@/composables/useBoardTheme";
 import { useTheme } from "@/composables/useTheme";
@@ -39,7 +39,7 @@ async function signOut(): Promise<void> {
 }
 let originalDarkMode = resolvedTheme.value === "dark";
 let originalPerspective = evaluationPerspective.value;
-const panel = ref<HTMLElement | null>(null);
+const dialog = ref<HTMLDialogElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
 const draftConfettiEnabled = ref(confettiEnabled.value);
 const draftEventMusicEnabled = ref(eventMusicEnabled.value);
@@ -49,8 +49,11 @@ const draftBoardAnnotations = ref(boardAnnotationsEnabled.value);
 const draftChatGameLinks = ref(chatGameLinksVisible.value);
 const draftDarkMode = ref(resolvedTheme.value === "dark");
 
-watch(open, async (isOpen) => {
-  if (!isOpen) return;
+watch(open, (isOpen) => {
+  if (!isOpen) {
+    dialog.value?.close();
+    return;
+  }
   discordError.value = "";
   void discord.load().catch(() => { discordError.value = "Could not load your Discord sign-in."; });
   originalPerspective = evaluationPerspective.value;
@@ -63,8 +66,7 @@ watch(open, async (isOpen) => {
   draftEventMusicEnabled.value = eventMusicEnabled.value;
   originalDarkMode = resolvedTheme.value === "dark";
   draftDarkMode.value = originalDarkMode;
-  await nextTick();
-  panel.value?.focus();
+  dialog.value?.showModal();
 });
 
 watch(draftPerspective, (perspective) => {
@@ -96,11 +98,6 @@ function cancel(): void {
   setTheme(originalDarkMode ? "dark" : "light");
   revertBoardTheme();
   open.value = false;
-}
-
-function toggle(): void {
-  if (open.value) cancel();
-  else open.value = true;
 }
 
 onBeforeUnmount(() => {
@@ -136,140 +133,135 @@ function reset(): void {
     title="Settings"
     aria-label="Settings"
     :aria-expanded="open"
-    @click="toggle"
+    @click="open = true"
   >
     <template #icon><AppIcon name="settings" :size="18" /></template>
     Settings
   </BaseButton>
 
-  <Teleport to="body">
-    <div v-if="open" class="settings-dismiss" @click="cancel" />
-    <aside
-      v-if="open"
-      ref="panel"
-      class="settings-drawer"
-      role="dialog"
-      aria-label="Viewer settings"
-      tabindex="-1"
-      @keydown.esc="cancel"
-    >
-      <header class="settings-drawer__header">
-        <h2>Settings</h2>
-        <BaseButton variant="ghost" size="small" icon-only aria-label="Close settings" @click="cancel">
-          <template #icon><AppIcon name="close" :size="18" /></template>
-          Close
-        </BaseButton>
-      </header>
+  <dialog
+    ref="dialog"
+    class="settings-drawer"
+    aria-label="Viewer settings"
+    @close="open && cancel()"
+    @click.self="cancel"
+  >
+    <header class="settings-drawer__header">
+      <h2>Settings</h2>
+      <BaseButton variant="ghost" size="small" icon-only aria-label="Close settings" @click="cancel">
+        <template #icon><AppIcon name="close" :size="18" /></template>
+        Close
+      </BaseButton>
+    </header>
 
-      <div class="settings-drawer__body">
-        <section class="section-stack" aria-labelledby="discord-settings-heading">
-          <h3 id="discord-settings-heading">Discord account</h3>
-          <div v-if="discord.account" class="section-stack">
-            <p><strong>{{ discord.account.display_name }}</strong> <small class="muted">@{{ discord.account.username }}</small></p>
-            <div class="button-row"><BaseButton size="small" :loading="signingOut" @click="signOut">Sign out</BaseButton></div>
-          </div>
-          <div v-else-if="discord.enabled" class="button-row">
-            <BaseButton :href="discordLogin()" size="small"><template #icon><AppIcon name="discord" :size="17" /></template>Sign in with Discord</BaseButton>
-          </div>
-          <p v-else-if="discord.loaded" class="muted">Discord sign-in is currently unavailable.</p>
-          <InlineFeedback :message="discordError" />
-        </section>
-
-        <h3>Appearance</h3>
-        <label class="setting-toggle">
-          <input v-model="draftDarkMode" type="checkbox" />
-          <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
-        </label>
-
-        <h4 class="settings-subheading">Board colours</h4>
-        <div class="preset-grid">
-          <button
-            v-for="(preset, name) in boardPresets"
-            :key="name"
-            type="button"
-            class="preset"
-            :class="{ 'preset--active': isActive(preset) }"
-            :aria-pressed="isActive(preset)"
-            @click="draft = { ...preset }"
-          >
-            <span
-              class="preset__swatch"
-              :style="{ '--swatch-light': preset.light, '--swatch-dark': preset.dark }"
-            />
-            <span class="preset__label">{{ name }}</span>
-          </button>
+    <div class="settings-drawer__body">
+      <section class="section-stack" aria-labelledby="discord-settings-heading">
+        <h3 id="discord-settings-heading">Discord account</h3>
+        <div v-if="discord.account" class="section-stack">
+          <p><strong>{{ discord.account.display_name }}</strong> <small class="muted">@{{ discord.account.username }}</small></p>
+          <div class="button-row"><BaseButton size="small" :loading="signingOut" @click="signOut">Sign out</BaseButton></div>
         </div>
-
-        <label class="colour-field">
-          <span>Light squares</span>
-          <input type="color" :value="draft.light" @input="update('light', $event)" />
-          <code>{{ draft.light }}</code>
-        </label>
-        <label class="colour-field">
-          <span>Dark squares</span>
-          <input type="color" :value="draft.dark" @input="update('dark', $event)" />
-          <code>{{ draft.dark }}</code>
-        </label>
-
-        <h3>Analysis</h3>
-        <div class="perspective-setting">
-          <span>Engine evaluations</span>
-          <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
+        <div v-else-if="discord.enabled" class="button-row">
+          <BaseButton :href="discordLogin()" size="small"><template #icon><AppIcon name="discord" :size="17" /></template>Sign in with Discord</BaseButton>
         </div>
-        <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span></label>
-        <label class="setting-toggle">
-          <input v-model="draftBoardAnnotations" type="checkbox" />
-          <span><strong>Board annotations</strong><small>Right-click to highlight squares and drag to draw arrows.</small></span>
-        </label>
+        <p v-else-if="discord.loaded" class="muted">Discord sign-in is currently unavailable.</p>
+        <InlineFeedback :message="discordError" />
+      </section>
 
-        <h3>Chat</h3>
-        <label class="setting-toggle">
-          <input v-model="draftChatGameLinks" type="checkbox" />
-          <span><strong>Show game links</strong><small>See which game someone was watching when they sent a message.</small></span>
-        </label>
+      <h3>Appearance</h3>
+      <label class="setting-toggle">
+        <input v-model="draftDarkMode" type="checkbox" />
+        <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
+      </label>
 
-        <h3>Celebrations</h3>
-        <label class="setting-toggle">
-          <input v-model="draftConfettiEnabled" type="checkbox" />
-          <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
-        </label>
-
-        <h3>Event audio</h3>
-        <label class="setting-toggle">
-          <input v-model="draftEventMusicEnabled" type="checkbox" />
-          <span><strong>Countdown music</strong><small>Play event music during the final minute of a countdown.</small></span>
-        </label>
+      <h4 class="settings-subheading">Board colours</h4>
+      <div class="preset-grid">
+        <button
+          v-for="(preset, name) in boardPresets"
+          :key="name"
+          type="button"
+          class="preset"
+          :class="{ 'preset--active': isActive(preset) }"
+          :aria-pressed="isActive(preset)"
+          @click="draft = { ...preset }"
+        >
+          <span
+            class="preset__swatch"
+            :style="{ '--swatch-light': preset.light, '--swatch-dark': preset.dark }"
+          />
+          <span class="preset__label">{{ name }}</span>
+        </button>
       </div>
 
-      <footer class="settings-drawer__footer">
-        <BaseButton variant="ghost" size="small" @click="reset">Reset</BaseButton>
-        <div class="settings-drawer__actions">
-          <BaseButton variant="secondary" size="small" @click="cancel">Cancel</BaseButton>
-          <BaseButton variant="primary" size="small" @click="save">Save</BaseButton>
-        </div>
-      </footer>
-    </aside>
-  </Teleport>
+      <label class="colour-field">
+        <span>Light squares</span>
+        <input type="color" :value="draft.light" @input="update('light', $event)" />
+        <code>{{ draft.light }}</code>
+      </label>
+      <label class="colour-field">
+        <span>Dark squares</span>
+        <input type="color" :value="draft.dark" @input="update('dark', $event)" />
+        <code>{{ draft.dark }}</code>
+      </label>
+
+      <h3>Analysis</h3>
+      <div class="perspective-setting">
+        <span>Engine evaluations</span>
+        <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
+      </div>
+      <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span></label>
+      <label class="setting-toggle">
+        <input v-model="draftBoardAnnotations" type="checkbox" />
+        <span><strong>Board annotations</strong><small>Right-click to highlight squares and drag to draw arrows.</small></span>
+      </label>
+
+      <h3>Chat</h3>
+      <label class="setting-toggle">
+        <input v-model="draftChatGameLinks" type="checkbox" />
+        <span><strong>Show game links</strong><small>See which game someone was watching when they sent a message.</small></span>
+      </label>
+
+      <h3>Celebrations</h3>
+      <label class="setting-toggle">
+        <input v-model="draftConfettiEnabled" type="checkbox" />
+        <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
+      </label>
+
+      <h3>Event audio</h3>
+      <label class="setting-toggle">
+        <input v-model="draftEventMusicEnabled" type="checkbox" />
+        <span><strong>Countdown music</strong><small>Play event music during the final minute of a countdown.</small></span>
+      </label>
+    </div>
+
+    <footer class="settings-drawer__footer">
+      <BaseButton variant="ghost" size="small" @click="reset">Reset</BaseButton>
+      <div class="settings-drawer__actions">
+        <BaseButton variant="secondary" size="small" @click="cancel">Cancel</BaseButton>
+        <BaseButton variant="primary" size="small" @click="save">Save</BaseButton>
+      </div>
+    </footer>
+  </dialog>
 </template>
 
 <style scoped>
-.settings-dismiss {
-  position: fixed;
-  inset: 0;
-  z-index: 899;
+.settings-drawer {
+  inline-size: min(21rem, 100vw);
+  max-inline-size: none;
+  block-size: 100%;
+  max-block-size: none;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-inline-start: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-md);
 }
 
-.settings-drawer {
-  position: fixed;
-  inset-block: 0;
-  inset-inline-end: 0;
-  z-index: 900;
+.settings-drawer[open] {
   display: flex;
   flex-direction: column;
-  inline-size: min(21rem, 100vw);
-  background: var(--color-surface);
-  border-inline-start: 1px solid var(--color-border);
-  box-shadow: var(--shadow-md);
 }
 
 .settings-drawer__header {
