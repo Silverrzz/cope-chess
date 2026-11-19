@@ -218,19 +218,15 @@ function reset(): void {
         <input v-model="draftBoardAnnotations" type="checkbox" role="switch" />
       </label>
 
-      <h3>Chat</h3>
+      <h3>Chat & events</h3>
       <label class="setting-toggle">
         <span><strong>Show game links</strong><small>See which game someone was watching when they sent a message.</small></span>
         <input v-model="draftChatGameLinks" type="checkbox" role="switch" />
       </label>
-
-      <h3>Celebrations</h3>
       <label class="setting-toggle">
         <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
         <input v-model="draftConfettiEnabled" type="checkbox" role="switch" />
       </label>
-
-      <h3>Event audio</h3>
       <label class="setting-toggle">
         <span><strong>Countdown music</strong><small>Play event music during the final minute of a countdown.</small></span>
         <input v-model="draftEventMusicEnabled" type="checkbox" role="switch" />
