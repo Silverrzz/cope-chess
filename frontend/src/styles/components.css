@@ -182,7 +182,6 @@ textarea.input,
   align-items: flex-start;
   gap: var(--space-3);
   color: var(--color-text);
-  cursor: pointer;
 }
 
 .switch-row > input,
