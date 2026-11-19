@@ -334,10 +334,6 @@ input[type="radio"] {
   border-top: 1px solid var(--color-border);
 }
 
-.data-table--list tbody tr:hover {
-  background: var(--color-surface-hover);
-}
-
 .data-table--list tbody th {
   color: var(--color-text);
   font-weight: 640;

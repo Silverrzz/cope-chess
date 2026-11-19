@@ -465,7 +465,6 @@ function selectRatingList(event: Event): void {
 }
 
 .ratings-table tbody tr:last-child td { border-block-end: 0; }
-.ratings-table tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
 
 .ratings-table a {
   color: inherit;

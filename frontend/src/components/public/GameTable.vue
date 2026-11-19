@@ -110,10 +110,6 @@ function gameUrl(game: GameRecord): RouteLocationRaw {
   border-block-end: 0;
 }
 
-.game-table tbody tr:hover {
-  background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent);
-}
-
 .game-table a {
   color: inherit;
   font-weight: 600;

@@ -1252,7 +1252,6 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .viewer-stage .data-panel th, .viewer-stage .data-panel td { padding: .72rem .85rem; border-block-end: 1px solid var(--color-border, #d5dbe1); text-align: start; }
 .viewer-stage .data-panel th { color: var(--color-text-muted, #607080); font-size: .63rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
 .viewer-stage .data-panel tbody tr:last-child td { border-block-end: 0; }
-.viewer-stage .data-panel tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
 .viewer-stage .rank-cell { width: 4rem; color: var(--color-text-muted, #607080); font-variant-numeric: tabular-nums; }
 .viewer-stage .number-cell { width: 7rem; font-weight: 730; font-variant-numeric: tabular-nums; }
 .standing-engine { --engine: var(--engine-alive); display: inline-grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .55rem; }
