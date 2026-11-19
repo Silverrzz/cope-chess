@@ -43,6 +43,7 @@ const root = ref<HTMLElement | null>(null)
 const menu = ref<HTMLElement | null>(null)
 const searchInput = ref<HTMLInputElement | null>(null)
 const open = ref(false)
+const inDialog = ref(false)
 const query = ref('')
 const activeGroupValue = ref<string | number | null>(null)
 const position = reactive({ top: '0px', left: '0px', width: '18rem', maxHeight: '24rem' })
@@ -173,6 +174,8 @@ watch(filteredOptions, (available) => {
 watch(activeGroup, () => void nextTick(updatePosition))
 
 onMounted(() => {
+  // Content outside a modal dialog is inert
+  inDialog.value = Boolean(root.value?.closest('dialog'))
   document.addEventListener('pointerdown', handleDocumentPointer)
   document.addEventListener('keydown', handleKeydown)
   window.addEventListener('resize', updatePosition)
@@ -210,7 +213,7 @@ onBeforeUnmount(() => {
       <AppIcon name="chevron-down" :size="16" />
     </button>
 
-    <Teleport to="body">
+    <Teleport to="body" :disabled="inDialog">
       <Transition name="option-picker-menu">
         <div
           v-if="open"
