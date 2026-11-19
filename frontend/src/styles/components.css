@@ -182,7 +182,6 @@ textarea.input,
   align-items: flex-start;
   gap: var(--space-3);
   color: var(--color-text);
-  cursor: pointer;
 }
 
 .switch-row > input,
@@ -332,10 +331,6 @@ input[type="radio"] {
 
 .data-table--list tbody tr {
   border-top: 1px solid var(--color-border);
-}
-
-.data-table--list tbody tr:hover {
-  background: var(--color-surface-hover);
 }
 
 .data-table--list tbody th {

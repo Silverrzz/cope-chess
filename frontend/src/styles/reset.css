@@ -43,6 +43,11 @@ button,
   touch-action: manipulation;
 }
 
+:is(select, input[type="checkbox"], input[type="radio"], input[type="color"]):enabled,
+label:has(:is(input[type="checkbox"], input[type="radio"]):enabled) {
+  cursor: pointer;
+}
+
 button {
   border: 0;
 }

@@ -1789,7 +1789,6 @@ function forgetManualFollowPauseGame(): void {
 .data-panel td { padding: 0.72rem 0.85rem; border-block-end: 1px solid var(--color-border, #d5dbe1); text-align: start; }
 .data-panel th { color: var(--color-text-muted, #607080); font-size: 0.63rem; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
 .data-panel tbody tr:last-child td { border-block-end: 0; }
-.data-panel tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
 .data-panel td a { color: inherit; font-weight: 700; text-decoration: none; }
 .data-panel td a:hover { color: var(--color-accent, #2f78c4); text-decoration: underline; text-underline-offset: 0.16em; }
 .pagination { align-items: center; border-top: 1px solid var(--color-border, #d5dbe1); display: flex; gap: 0.75rem; justify-content: flex-end; padding: 0.75rem 0.85rem; }
