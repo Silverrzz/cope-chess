@@ -5,6 +5,7 @@ import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import QuorumVerifiers from '@/components/admin/QuorumVerifiers.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import { downloadQuorumFile } from '@/quorum-voter'
 import type { Witness } from '@/quorum'
 
 type Subject = 'motion' | 'poll'
@@ -145,7 +146,7 @@ async function load() {
   }
 }
 
-async function save(publish = false) {
+async function save(publish: boolean | 'approval' = false) {
   if (!setup.value) return
   if (publish && (isPublished.value || !quorumForm.value?.reportValidity())) return
   busy.value = true
@@ -158,8 +159,15 @@ async function save(publish = false) {
       enrollment_role_id: role.value.trim() || null,
     } })
     notice.value = 'Quorum settings saved.'
-    if (publish) {
-      await api.post('/api/admin/quorum/publish', { body: { draft_id: selected.value, revision: setup.value.revision } })
+    const body = { draft_id: selected.value, revision: setup.value.revision }
+    if (publish === 'approval') {
+      const proposal = await api.post<{ approval: { roster?: string } }>('/api/admin/quorum/approval-proposal', { body })
+      downloadQuorumFile('quorum-approval-' + selected.value + '.json', JSON.stringify(proposal, null, 2))
+      notice.value = proposal.approval.roster
+        ? 'Roster proposal downloaded. After verifiers approve it, download the ballot proposal.'
+        : 'Ballot proposal downloaded. After verifiers approve it, you can publish the ballot.'
+    } else if (publish) {
+      await api.post('/api/admin/quorum/publish', { body })
       notice.value = 'Ballot published.'
     }
     await loadElection()
@@ -232,6 +240,7 @@ onMounted(() => { void load(); void loadRoles() })
             </div>
             <label v-if="draft.subject === 'poll'" class="field"><span>Options, one per line</span><textarea v-model="options" class="textarea" required maxlength="2020" /></label>
             <div class="button-row">
+              <BaseButton variant="ghost" :disabled="!draft.title" @click="save('approval')">Download verifier approval proposal</BaseButton>
               <BaseButton variant="primary" :disabled="!draft.title" @click="save(true)">Save and publish ballot</BaseButton>
               <BaseButton variant="ghost" size="small" @click="removeDraft">Remove draft</BaseButton>
             </div>

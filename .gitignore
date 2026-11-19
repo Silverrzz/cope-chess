@@ -18,6 +18,7 @@ dist/
 
 # Frontend dependencies and generated output
 /frontend/node_modules/
+/frontend/quorum-runtime/node_modules/
 /frontend/dist/
 /frontend/*.tsbuildinfo
 /cope/web/frontend_dist/

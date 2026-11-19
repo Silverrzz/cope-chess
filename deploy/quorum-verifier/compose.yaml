@@ -1,0 +1,61 @@
+name: cope-quorum-verifier
+services:
+  verifier:
+    image: cope-quorum-verifier:${COPE_REVISION:?Set COPE_REVISION to the reviewed checkout commit}
+    build:
+      context: ../..
+      dockerfile: deploy/quorum-verifier/Dockerfile
+      args:
+        COPE_REVISION: ${COPE_REVISION}
+    restart: unless-stopped
+    init: true
+    environment:
+      COPE_VERIFIER_ADMIN_ORIGIN: ${COPE_VERIFIER_ADMIN_ORIGIN:-https://quorum.nocturn9x.space}
+      COPE_VERIFIER_ADMIN_BIND: 0.0.0.0
+      COPE_VERIFIER_PUBLIC_ORIGIN: https://quorum.nocturn9x.space
+      COPE_VERIFIER_ADMIN_PROXIES: 10.0.0.4,10.0.0.5
+      COPE_VERIFIER_ADMIN_TOKEN_FILE: ${COPE_VERIFIER_ADMIN_TOKEN_FILE:-}
+      COPE_VERIFIER_WITNESS_POLICY: ${COPE_VERIFIER_WITNESS_POLICY:-}
+      COPE_VERIFIER_RELEASE_POLICY: ${COPE_VERIFIER_RELEASE_POLICY:-}
+      COPE_VERIFIER_VOTER_RELEASE: ${COPE_VERIFIER_VOTER_RELEASE:-}
+    ports:
+      - "10.0.0.14:8788:8788"
+      - "10.0.0.14:8789:8789"
+    volumes:
+      - archive:/state
+      - runtime:/app/.cope-worker
+      - type: bind
+        source: ${COPE_VERIFIER_CONFIG_DIR:?Set COPE_VERIFIER_CONFIG_DIR to a private directory}
+        target: /verifier-config
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 64
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8788/api/status').then(r=>r.json()).then(s=>{if(!s.last_scan||Date.now()-Date.parse(s.last_scan)>300000)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+volumes:
+  archive:
+    name: cope-quorum-verifier_production_archive
+  runtime:
+    name: cope-quorum-verifier_production_supervisor_runtime

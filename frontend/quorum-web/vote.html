@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Vote · COPE Quorum</title>
+    <link rel="stylesheet" href="/assets/tokens.css">
+    <link rel="stylesheet" href="/assets/verifier.css">
+    <script defer src="@@SCRIPT@@" integrity="@@INTEGRITY@@"></script>
+  </head>
+  <body>
+    <header class="header"><div class="bar container"><a class="brand" href="/">COPE <span class="brand-detail">Quorum verifier</span></a></div></header>
+    <main class="container stack narrow" aria-labelledby="ballot-title" id="voter" data-ballot="@@BALLOT@@" data-release="@@RELEASE@@">
+      <section class="hero stack">
+        <span class="eyebrow">Independent voting</span>
+        <h1 id="ballot-title">Checking ballot</h1>
+        <p id="rationale"></p>
+      </section>
+      <p class="muted">Your backup opens in this browser. The verifiers you submit to can see your IP address, the time, and your anonymous choice. They don’t receive your credential or Discord session.</p>
+      <p id="vote-status" role="status">Loading the approved voting app and ballot…</p>
+      <form id="vote-form" class="panel stack" hidden>
+        <label>Encrypted voting backup <input id="backup" type="file" accept=".json,application/json" required></label>
+        <label>Backup password <input id="password" type="password" autocomplete="off" maxlength="256" required></label>
+        <label>Choice <select id="choice" required></select></label>
+        <button type="submit" class="primary">Cast vote</button>
+      </form>
+      <div class="row">
+        <button id="retry" type="button" hidden>Retry same vote</button>
+        <button id="download" type="button" hidden>Download retention receipt</button>
+      </div>
+      <noscript>Enable JavaScript to verify this ballot and cast a vote.</noscript>
+    </main>
+  </body>
+</html>

@@ -91,7 +91,7 @@ class Disclosure(Input):
 
 def closed_evidence(connection, ballot_id):
     evidence = elections.ballot_package(connection, ballot_id)
-    if evidence["status"] != "completed":
+    if evidence["status"] != "completed" or evidence.get("settling"):
         elections.fail("quorum_ballot_open", "Available after voting closes.")
     return evidence
 
@@ -99,10 +99,10 @@ def closed_evidence(connection, ballot_id):
 def publications(connection, ballot_id):
     evidence = elections.ballot_package(connection, ballot_id)
     witnesses = elections.witness_status(connection, evidence)
-    if evidence["status"] != "completed":
-        return {"certified": False, "witnesses": witnesses, "disclosures": []}
+    if evidence["status"] != "completed" or evidence.get("settling"):
+        return {"certified": False, "witnesses": witnesses, "signatures": {}, "disclosures": []}
     options = evidence["result"]["options"]
-    disclosures = [
+    disclosures = [] if evidence["manifest"].get("vote_history") else [
         {"username": row["username"], "option": options[int(row["message"])]}
         for row in connection.execute(
             """SELECT d.username, v.proof->>'message' AS message
@@ -110,8 +110,15 @@ def publications(connection, ballot_id):
                WHERE d.ballot_id = ?::uuid ORDER BY d.published_at, d.nullifier""", (str(ballot_id),)
         )
     ]
-    return {"certified": bool(witnesses) and all(item["signed_at"] for item in witnesses),
-            "witnesses": witnesses, "disclosures": disclosures}
+    # These are attestations to this packet, not certification of the electorate or vote history.
+    signatures = {
+        row["public_key"]: row["signature"]
+        for row in connection.execute(
+            """SELECT public_key, signature FROM cope_quorum.witness_signatures
+               WHERE ballot_id = ?::uuid AND digest = ?""", (str(ballot_id), elections.digest(evidence)),
+        )
+    } if witnesses else {}
+    return {"certified": False, "witnesses": witnesses, "signatures": signatures, "disclosures": disclosures}
 
 
 def signature_statement(origin, ballot_id, digest):

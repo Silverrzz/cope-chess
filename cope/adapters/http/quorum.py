@@ -10,6 +10,7 @@ from cope.adapters.http.forms import require_origin
 from cope.control.api import database
 from cope.discord_bot.accounts import COOKIE, DISCORD_API, decrypt, discord_json, request_account, require_guild_role, snowflake
 from cope.domains import quorum_elections as elections
+from cope.domains import quorum_history as history
 from cope.domains import quorum_publications as published
 from cope.domains.quorum import Setup, WitnessUpdate, read_setup, save_setup
 
@@ -82,6 +83,15 @@ def election_call(operation, *args):
         return operation(*args)
     except ApplicationError as error:
         raise HTTPException(error.status, error.message) from error
+
+
+def admin_verifier_directory(request, connection):
+    directory = published.verifier_directory(connection)
+    try:
+        policy, _ = history.configured_policy(connection, request.app.state.discord_runtime.origin)
+    except (OSError, ValueError) as error:
+        return {**directory, "policy": None, "policy_error": str(error)}
+    return {**directory, "policy": policy, "policy_error": None}
 
 
 def register_quorum_routes(app):
@@ -160,7 +170,9 @@ def register_quorum_routes(app):
         account = request_account(request, connection)
         if not account:
             raise HTTPException(401, "Connect Discord to publish your vote.")
-        election_call(published.closed_evidence, connection, ballot_id)
+        evidence = election_call(published.closed_evidence, connection, ballot_id)
+        if evidence["manifest"].get("vote_history"):
+            raise HTTPException(404, "This ballot does not publish names with votes.")
         message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
         return JSONResponse({"message": message, "username": account.username}, headers={"Cache-Control": "no-store"})
 
@@ -171,6 +183,9 @@ def register_quorum_routes(app):
         account = request_account(request, connection)
         if not account:
             raise HTTPException(401, "Connect Discord to publish your vote.")
+        evidence = election_call(published.closed_evidence, connection, ballot_id)
+        if evidence["manifest"].get("vote_history"):
+            raise HTTPException(404, "This ballot does not publish names with votes.")
         message = published.disclosure_message(ballot_id, account.id, request.cookies[COOKIE])
         election_call(published.validate_disclosure, connection, ballot_id, payload, message)
         current = request_account(request, connection)
@@ -187,7 +202,7 @@ def register_quorum_routes(app):
     @app.get("/api/admin/quorum/witnesses")
     def verifier_directory(request: Request, connection=Depends(database)):
         require_admin(request)
-        return published.verifier_directory(connection)
+        return admin_verifier_directory(request, connection)
 
     @app.put("/api/admin/quorum/witnesses")
     def update_witnesses(payload: WitnessUpdate, request: Request, connection=Depends(database)):
@@ -198,7 +213,20 @@ def register_quorum_routes(app):
         updated = election_call(save_setup, connection, setup.model_copy(update={"witnesses": payload.witnesses}))
         if updated is None:
             raise HTTPException(409, "Quorum settings changed. Refresh the witness list and try again.")
-        return published.verifier_directory(connection)
+        return admin_verifier_directory(request, connection)
+
+    @app.post("/api/admin/quorum/witnesses/policy-proposal")
+    def propose_witness_policy(payload: history.PolicyProposalInput, request: Request, connection=Depends(database)):
+        require_admin(request)
+        origin = request.app.state.discord_runtime.origin
+        try:
+            current, _ = history.configured_policy(connection, origin)
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, f"The configured witness policy is invalid: {error}") from error
+        try:
+            return history.recommended_policy(read_setup(connection).witnesses, payload.public_keys, current)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
 
     @app.get("/api/admin/quorum/status")
     def election_status(request: Request, connection=Depends(database)):
@@ -208,13 +236,43 @@ def register_quorum_routes(app):
     @app.post("/api/admin/quorum/publish")
     def publish_ballot(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
         require_admin(request)
-        return election_call(elections.publish, connection, payload.draft_id, payload.revision)
+        return election_call(elections.publish, connection, payload.draft_id, payload.revision, request.app.state.discord_runtime.origin)
+
+    @app.post("/api/admin/quorum/approval-proposal")
+    def propose_approval(payload: elections.BallotPublication, request: Request, connection=Depends(database)):
+        require_admin(request)
+        return election_call(
+            lambda: elections.publish(connection, payload.draft_id, payload.revision,
+                                      request.app.state.discord_runtime.origin, propose=True),
+        )
+
+    @app.get("/api/quorum/history/ballots")
+    def history_directory(request: Request, connection=Depends(database)):
+        require_secure(request)
+        return JSONResponse(history.directory(connection), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/quorum/ballots/{ballot_id}/history")
+    def vote_history(ballot_id: UUID, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return JSONResponse(election_call(history.read_history, connection, ballot_id), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/quorum/ballots/{ballot_id}/history/checkpoints")
+    def checkpoint(ballot_id: UUID, payload: history.CheckpointInput, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(history.record_checkpoint, connection, ballot_id, request.app.state.discord_runtime.origin, payload)
 
     @app.post("/api/quorum/ballots/{ballot_id}/votes")
     def cast(ballot_id: UUID, payload: elections.Proof, request: Request, connection=Depends(database)):
         require_secure(request)
         require_origin(request)
         return election_call(elections.cast_vote, connection, ballot_id, payload)
+
+    @app.post("/api/quorum/ballots/{ballot_id}/relay-votes")
+    def relay_vote(ballot_id: UUID, payload: elections.RelayVote, request: Request, connection=Depends(database)):
+        require_secure(request)
+        return election_call(lambda: elections.cast_vote(connection, ballot_id, payload.proof,
+                             intake=payload.signatures, origin=request.app.state.discord_runtime.origin))
 
     @app.get("/api/admin/quorum")
     def get_setup(request: Request, connection=Depends(database)):

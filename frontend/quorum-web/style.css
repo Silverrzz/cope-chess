@@ -1,0 +1,50 @@
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--color-bg); color: var(--color-text); font: 1rem/1.55 var(--font-sans); }
+a { color: var(--color-link); text-underline-offset: .2em; }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+h1, h2, p, ul, dl, dd { margin: 0; }
+h1 { line-height: 1.1; font-size: clamp(1.85rem, 5vw, 3rem); letter-spacing: -.04em; }
+h2 { font-size: 1.15rem; line-height: 1.3; letter-spacing: -.015em; }
+code { font: .86rem/1.5 var(--font-mono); overflow-wrap: anywhere; }
+button, input { font: inherit; }
+input { display: block; width: 100%; border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); background: var(--color-bg); color: var(--color-text); padding: .55rem .75rem; }
+button, .button { border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-text); cursor: pointer; padding: .48rem .8rem; font-weight: 650; text-decoration: none; }
+button:hover, .button:hover { background: var(--color-surface-hover); }
+button:disabled { cursor: default; opacity: .55; }
+.primary { background: var(--color-primary); color: var(--color-on-primary); border-color: transparent; }
+.primary:hover { background: var(--color-primary-hover); }
+.container { width: min(100% - 2rem, 68rem); margin-inline: auto; }
+.header { border-bottom: 1px solid var(--color-border); background: var(--color-header); }
+.bar, nav, .row, .footer { display: flex; gap: .85rem; align-items: center; }
+.bar, .between, .footer { justify-content: space-between; }
+.bar { min-height: 4rem; flex-wrap: wrap; padding-block: .5rem; }
+nav a { text-decoration: none; padding: .38rem .5rem; color: var(--color-text-secondary); font-size: .9rem; border-radius: var(--radius-sm); }
+nav a[aria-current] { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 700; }
+.brand { display: inline-flex; align-items: center; gap: .55rem; color: var(--color-text); font-size: 1.05rem; font-weight: 800; text-decoration: none; }
+.brand svg { background: var(--color-accent-soft); color: var(--color-accent); box-sizing: content-box; padding: .35rem; border-radius: var(--radius-md); }
+.brand-detail { color: var(--color-text-muted); font-weight: 550; }
+.stack { display: grid; gap: 1rem; }
+main.stack { padding-block: clamp(1.25rem, 4vw, 2.8rem) 2rem; }
+.hero { background: linear-gradient(140deg, var(--color-accent-soft), var(--color-surface) 75%); padding: clamp(1.3rem, 4vw, 2.4rem); gap: .65rem; }
+.eyebrow { color: var(--color-accent); font-size: .72rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.panel, .hero { border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs); }
+.panel { background: var(--color-surface); padding: clamp(.9rem, 3vw, 1.35rem); }
+.muted { color: var(--color-text-muted); }
+.compact { gap: .55rem; }
+.row, .footer { flex-wrap: wrap; }
+.data { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+dt { font-size: .78rem; color: var(--color-text-muted); margin-bottom: .15rem; }
+dd { overflow-wrap: anywhere; }
+.pill { background: var(--color-accent-soft); color: var(--color-accent); border-radius: var(--radius-round); font-weight: 700; padding: .22rem .65rem; font-size: .78rem; }
+.success { color: var(--color-success); background: var(--color-success-soft); }
+.warning { color: var(--color-warning); background: var(--color-warning-soft); }
+.error { color: var(--color-danger); background: var(--color-danger-soft); border-radius: var(--radius-md); padding: .65rem .85rem; }
+.list { list-style: none; padding: 0; }
+.list > li { border-top: 1px solid var(--color-border); padding-block: .8rem; }
+.list > li:last-child { padding-bottom: 0; }
+.tally { min-inline-size: min(18rem, 100%); }
+.footer { border-top: 1px solid var(--color-border); padding-block: 1rem 2rem; color: var(--color-text-muted); font-size: .85rem; }
+.narrow { width: min(100%, 31rem); }
+.skip { position: absolute; transform: translateY(-200%); background: var(--color-surface); padding: .4rem; z-index: 1; }
+.skip:focus { transform: translateY(0); }
