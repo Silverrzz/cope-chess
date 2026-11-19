@@ -34,7 +34,7 @@ const scheduleFact = computed(() => {
   <article class="tournament-card" :class="{ 'tournament-card--compact': compact }">
     <header class="tournament-card__header">
       <div class="tournament-card__heading">
-        <h2><RouterLink :to="tournamentPath(item.record.id)">{{ item.record.name }}</RouterLink></h2>
+        <h2>{{ item.record.name }}</h2>
         <p>{{ item.format || 'Tournament' }}<span aria-hidden="true"> / </span>{{ item.time_control || 'Time control not set' }}</p>
       </div>
       <div class="tournament-card__status">
@@ -117,6 +117,8 @@ const scheduleFact = computed(() => {
 }
 
 .tournament-card__status {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-sm, 0.5rem);
@@ -131,17 +133,6 @@ const scheduleFact = computed(() => {
 .tournament-card h2 {
   font-size: 1.05rem;
   line-height: 1.25;
-}
-
-.tournament-card h2 a {
-  color: var(--color-text, #17202a);
-  text-decoration: none;
-}
-
-.tournament-card h2 a:hover {
-  color: var(--color-accent, #2f78c4);
-  text-decoration: underline;
-  text-underline-offset: 0.16em;
 }
 
 .tournament-card__heading p {
@@ -209,6 +200,12 @@ const scheduleFact = computed(() => {
   font-size: 0.78rem;
   font-weight: 700;
   text-decoration: none;
+}
+
+.tournament-card__open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
 }
 
 .tournament-card__open:hover {
