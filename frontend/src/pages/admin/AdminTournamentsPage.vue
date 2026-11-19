@@ -242,7 +242,6 @@ onMounted(load)
 .data-table { border-collapse: collapse; min-width: 66rem; width: 100%; }
 .data-table th { color: var(--color-text-muted, #64748b); font-size: .67rem; font-weight: 700; letter-spacing: .04em; padding: .65rem .8rem; text-align: left; text-transform: uppercase; }
 .data-table td { border-top: 1px solid var(--color-border, #d9e0ea); font-size: .78rem; padding: .72rem .8rem; vertical-align: middle; }
-.data-table tbody tr:hover { background: var(--color-surface-subtle, #f6f8fb); }
 .data-table td:first-child a { color: inherit; display: grid; text-decoration: none; }
 .data-table td:first-child small { color: var(--color-text-muted, #64748b); font-size: .66rem; margin-top: .18rem; }
 .progress-cell { display: grid; gap: .3rem; min-width: 7rem; }

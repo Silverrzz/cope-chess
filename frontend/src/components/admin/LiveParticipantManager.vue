@@ -215,7 +215,6 @@ function scheduleSelected(): void {
 .participant-roster__head { background: var(--color-surface, #fff); border-bottom: 1px solid var(--color-border, #d9e0ea); color: var(--color-text-muted, #64748b); font-size: .59rem; font-weight: 700; letter-spacing: .035em; min-height: 2rem; position: sticky; text-transform: uppercase; top: 0; z-index: 1; }
 .roster-row { border-bottom: 1px solid color-mix(in srgb, var(--color-border, #d9e0ea) 72%, transparent); min-height: 3.1rem; }
 .roster-row:last-child { border-bottom: 0; }
-.roster-row:hover { background: var(--color-surface-subtle, #f8fafc); }
 .roster-row--hero { background: color-mix(in srgb, var(--color-accent, #315fcc) 5%, var(--color-surface, #fff)); box-shadow: inset 3px 0 var(--color-accent, #315fcc); }
 .roster-row__identity { align-items: center; display: flex; gap: .55rem; min-width: 0; }
 .roster-row__avatar { align-items: center; background: var(--color-surface-subtle, #f8fafc); border: 1px solid var(--color-border, #d9e0ea); border-radius: .42rem; color: var(--color-text-muted, #64748b); display: inline-flex; flex: 0 0 auto; height: 1.75rem; justify-content: center; width: 1.75rem; }
