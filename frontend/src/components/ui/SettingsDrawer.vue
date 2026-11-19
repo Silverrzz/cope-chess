@@ -197,16 +197,11 @@ function reset(): void {
         </button>
       </div>
 
-      <label class="colour-field">
-        <span>Light squares</span>
-        <input type="color" :value="draft.light" @input="update('light', $event)" />
-        <code>{{ draft.light }}</code>
-      </label>
-      <label class="colour-field">
-        <span>Dark squares</span>
-        <input type="color" :value="draft.dark" @input="update('dark', $event)" />
-        <code>{{ draft.dark }}</code>
-      </label>
+      <div class="colour-field">
+        <span>Custom</span>
+        <input type="color" aria-label="Light squares" :value="draft.light" @input="update('light', $event)" />
+        <input type="color" aria-label="Dark squares" :value="draft.dark" @input="update('dark', $event)" />
+      </div>
 
       <h3>Analysis</h3>
       <div class="perspective-setting">
@@ -357,13 +352,12 @@ function reset(): void {
   align-items: center;
   gap: var(--space-3);
   color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 640;
 }
 
-.colour-field code {
-  font-family: var(--font-mono);
-  font-size: 0.8125rem;
-  color: var(--color-text-muted);
-  margin-inline-start: auto;
+.colour-field span {
+  flex: 1;
 }
 
 .colour-field input[type="color"] {
