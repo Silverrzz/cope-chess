@@ -274,6 +274,7 @@ function reset(): void {
 .settings-drawer__body {
   flex: 1;
   overflow-y: auto;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
