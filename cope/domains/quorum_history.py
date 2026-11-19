@@ -17,7 +17,7 @@ VERSION = "cope-quorum-vote-history/1"
 
 
 class CheckpointInput(Input):
-    phase: str = Field(pattern=r"^(open|closed)$")
+    phase: str = Field(pattern=r"^(open|frozen|closed)$")
     size: int = Field(strict=True, ge=0, le=1024)
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -234,7 +234,7 @@ def read_history(connection, ballot_id):
            GROUP BY phase, size, digest HAVING count(*) >= ?
            ORDER BY size DESC""", (str(ballot_id), threshold),
     )
-    result = {"manifest_digest": elections.digest(manifest), "vote_hashes": votes, "open": None, "closed": None}
+    result = {"manifest_digest": elections.digest(manifest), "vote_hashes": votes, "open": None, "frozen": None, "closed": None}
     for item in groups:
         phase, size = item["phase"], item["size"]
         if result[phase] is None and size <= len(votes) and (phase == "open" or size == len(votes)):
@@ -251,10 +251,10 @@ def record_checkpoint(connection, ballot_id, origin, submitted):
     if submitted.public_key not in {item["public_key"] for item in manifest.get("witnesses", [])}:
         elections.fail("quorum_unknown_witness", "This witness is not assigned to the ballot.", 403)
     now = datetime.now(UTC)
-    if now < row["opens_at"] or (submitted.phase == "closed" and now < row["closes_at"] + elections.SETTLEMENT):
+    if now < row["opens_at"] or (submitted.phase != "open" and now < row["closes_at"] + elections.SETTLEMENT):
         elections.fail("quorum_history_phase", "This checkpoint is outside the ballot phase.")
     votes = hashes(connection, ballot_id)
-    if (submitted.size > len(votes) or (submitted.phase == "closed" and submitted.size != len(votes))
+    if (submitted.size > len(votes) or (submitted.phase != "open" and submitted.size != len(votes))
             or history_digest(votes[:submitted.size]) != submitted.digest):
         elections.fail("quorum_history_mismatch", "This checkpoint does not match the ordered vote history.")
     try:

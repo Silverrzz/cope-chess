@@ -8,8 +8,8 @@ import { createVoterWeb, createWeb, send } from './quorum-web.mjs'
 import { hasStoredMembershipDecision, policyDecisionPath, readPolicyDecision, withPolicyLock } from './quorum-policy.mjs'
 import { fingerprint, verifyBallot, verifyBallotContext, verifyVote } from './src/quorum.ts'
 import { verifierEndpoints } from './src/quorum-relay.ts'
-import { authorizedBallot, checkHistoryPacket, checkOpenQuorum, checkPolicySignatures, checkpointStatement, extendsHistory, historyDigest,
-  intakeStatement, matchesWitnessPolicy, retainedStatement, settlementEnd, validPolicyRound, verifyHistoryResult, verifyIntake, verifyPolicyChain } from './src/quorum-history.ts'
+import { authorizedBallot, checkHistoryPacket, nextCheckpointPhase, checkPolicySignatures, checkpointStatement, extendsHistory, historyDigest,
+  intakeStatement, matchesWitnessPolicy, retainedStatement, settlementEnd, validPolicyRound, verifyHistoryResult, verifySettledVotes, verifyPolicyChain } from './src/quorum-history.ts'
 
 const origin = new URL(process.argv[2] ?? process.env.COPE_VERIFIER_ORIGIN ?? 'https://dev.cope-chess.live')
 if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) {
@@ -207,53 +207,31 @@ async function publishCheckpoint(id, checkpoint) {
   if (!response.ok) throw new Error('COPE returned HTTP ' + response.status + ' for the history checkpoint.')
 }
 
-async function witnessHistory(packet, history, previous, opens, closes, policy) {
+async function witnessHistory(packet, history, previous, closes, policy) {
   const manifest = packet.manifest
-  await checkHistoryPacket(manifest, policy, history)
+  const phase = await nextCheckpointPhase(manifest, policy, history, origin.origin, previous, Date.now())
+  if (!phase) return
   const { manifest_digest, vote_hashes } = history
-  if (Date.now() < opens) return
-  if (previous && (previous.manifest_digest !== manifest_digest || !extendsHistory(previous.vote_hashes, vote_hashes))) {
-    throw new Error('The supplied history conflicts with the checkpoint already kept by this witness.')
-  }
-
-  const phase = Date.now() < closes ? 'open' : 'closed'
-  if (phase === 'open') {
-    if (previous?.closed) return
-    if (!previous && manifest.vote_history.policy !== await fingerprint(witnessPolicy)) return
-  }
   const digest = await historyDigest(vote_hashes)
-  const recorded = previous?.[phase === 'open' ? 'opening' : 'seal']
+  const recorded = phase === 'open' ? previous?.opening : phase === 'frozen' ? previous?.freeze : previous?.seal
   if (recorded?.digest === digest) {
-    // Retry the exact durable attestation if the server lost or did not
-    // receive it. Never create a fresh open attestation after the deadline.
     if (history[phase]?.digest !== digest) await publishCheckpoint(manifest.id, recorded)
     return
   }
-  if (phase === 'closed') {
-    if (peerIntake.has(manifest.id)) return
-    if ([...relayRequests].some(token => token.startsWith(manifest.id + '/'))) return
+  if (phase === 'frozen' && previous?.opening?.digest === digest && history.open?.digest !== digest) {
+    // Help old witnesses that can only close with a complete open certificate.
+    await publishCheckpoint(manifest.id, previous.opening)
+  }
+  if (previous?.closed) return
+  if (phase !== 'closed' && !previous && manifest.vote_history.policy !== witnessPolicyDigest) return
+
+  if (phase !== 'open') {
+    if (peerIntake.has(manifest.id) || [...relayRequests].some(token => token.startsWith(manifest.id + '/'))) return
     const seen = new Set(vote_hashes)
     if ((await certifiedIntake(manifest.id)).some(vote => !seen.has(vote.hash))) {
       throw new Error('The proposed tally omits a certified vote kept by this verifier.')
     }
-    if (previous?.closed && previous.vote_hashes.length !== vote_hashes.length) {
-      throw new Error('This witness already closed a different history.')
-    }
-    try {
-      await checkOpenQuorum(origin.origin, manifest, policy, history)
-    } catch (error) {
-      if (previous?.opening?.digest !== digest) throw error
-      await publishCheckpoint(manifest.id, previous.opening)
-      return
-    }
-    const finalHashes = await Promise.all(packet.votes.map(fingerprint))
-    if (finalHashes.length !== vote_hashes.length || !extendsHistory(finalHashes, vote_hashes)) {
-      throw new Error('The final votes differ from the witnessed history.')
-    }
-    // An observer with no prior head may only seal a valid open quorum. It
-    // never creates an open attestation after the deadline.
-    await verifyBallot(packet)
-    await verifyIntake(packet, policy, origin.origin, finalHashes)
+    await verifySettledVotes(packet, history, policy, origin.origin)
   }
   const size = vote_hashes.length
   let checkpoint
@@ -261,13 +239,16 @@ async function witnessHistory(packet, history, previous, opens, closes, policy) 
     if (phase === 'open' && Date.now() >= closes) return
     checkpoint = { phase, size, digest, signature: sign(null, Buffer.from(JSON.stringify(checkpointStatement(
       origin.origin, manifest.id, manifest_digest, phase, size, digest))), privateKey).toString('hex') }
-    const opening = phase === 'open' ? checkpoint : previous?.opening
-    const seal = phase === 'closed' ? checkpoint : undefined
-    await saveJournal(manifest.id, { manifest_digest, vote_hashes, closed: phase === 'closed', opening, seal })
+    await saveJournal(manifest.id, {
+      manifest_digest, vote_hashes, closed: phase === 'closed',
+      opening: phase === 'open' ? checkpoint : previous?.opening,
+      freeze: phase === 'frozen' ? checkpoint : previous?.freeze,
+      seal: phase === 'closed' ? checkpoint : undefined,
+    })
   }
-  if (phase === 'open' && !previous) {
-    // Serialize the first checkpoint with storing a policy decision. Once a
-    // quorum has stored the decision, no new old-policy ballot can get a quorum.
+  if (phase !== 'closed' && !previous) {
+    // Neither an opening nor a freeze may start an outgoing-policy ballot
+    // after this operator has stored a membership decision.
     await withPolicyLock(archive, policyChain.head, async () => {
       if (!await hasStoredMembershipDecision(archive, policyChain.head)) await recordCheckpoint()
     })
@@ -379,12 +360,12 @@ async function governedPackage(id) {
   const archived = round === undefined ? null : await readPolicyDecision(archive, entry.epoch, round)
   const dossier = archived && JSON.parse(archived).proposal
   if (dossier?.manifest?.id === id) {
-    await authorizedBallot(policyChain, dossier.manifest)
+    await authorizedBallot(policyChain, dossier.manifest, id)
     if (await fingerprint(dossier.roster) === entry.roster) return { manifest: dossier.manifest, roster: dossier.roster }
   }
   try {
     const ballot = await fetchEvidence('/api/quorum/ballots/' + id)
-    await authorizedBallot(policyChain, ballot.manifest)
+    await authorizedBallot(policyChain, ballot.manifest, id)
     if (await fingerprint(ballot.roster) === entry.roster) return { manifest: ballot.manifest, roster: ballot.roster }
   } catch { /* The relay can only use an approved ballot and exact roster. */ }
   throw intakeStatus(503, 'This verifier cannot load the approved ballot and roster.')
@@ -473,7 +454,7 @@ async function observe(id, witnessed) {
           void recoverPeerIntake(packet, ballotPolicy).catch(() => {})
         }
       }
-      await witnessHistory(packet, finalHistory, previous, opens, closes, ballotPolicy)
+      await witnessHistory(packet, finalHistory, previous, closes, ballotPolicy)
     }
     if (Date.now() < closes || packet.status !== 'completed' || !finalHistory.closed) return
     if (previous && (previous.manifest_digest !== finalHistory.manifest_digest

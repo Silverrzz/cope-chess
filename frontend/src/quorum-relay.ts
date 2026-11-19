@@ -1,5 +1,5 @@
 import { fingerprint, type Manifest, type VoteEvidence } from './quorum.ts'
-import { checkPolicySignature, checkPolicySignatures, intakeStatement, retainedStatement, type WitnessPolicy } from './quorum-history.ts'
+import { checkPolicySignature, checkPolicySignatures, intakeStatement, retainedStatement, settlementEnd, type WitnessPolicy } from './quorum-history.ts'
 
 export function verifierEndpoints(manifest: Manifest, policy: WitnessPolicy) {
   const assigned = new Set(Object.values(policy.operators))
@@ -38,7 +38,9 @@ export async function submitToVerifiers(manifest: Manifest, policy: WitnessPolic
     }
   }))
   await checkPolicySignatures(policy, statement, signatures).catch(() => {
-    throw new Error('Too few verifiers confirmed intake. Retry the same proof before voting closes.')
+    throw new Error(Date.now() < Date.parse(manifest.closes_at)
+      ? 'Too few verifiers confirmed intake. Retry the saved vote before voting closes.'
+      : 'Voting has closed. Only verifiers that accepted this proof before closing can confirm its intake. Retry with the same file.')
   })
   const retained = retainedStatement(copeOrigin, manifest.id, manifestDigest, hash)
   const copies = await Promise.allSettled(endpoints.map(async endpoint => {
@@ -48,7 +50,9 @@ export async function submitToVerifiers(manifest: Manifest, policy: WitnessPolic
     return [endpoint.key, reply.signature] as const
   }))
   if (copies.filter(copy => copy.status === 'fulfilled').length < policy.threshold) {
-    throw new Error('Too few verifiers retained the certified vote. Retry the same proof.')
+    throw new Error(Date.now() < settlementEnd(manifest)
+      ? 'Too few verifiers retained the certified vote. Retry the saved vote.'
+      : 'Settlement has ended. Only verifiers that already retained this vote can return a receipt. Retry with the same file.')
   }
   return { proof, signatures, retained: Object.fromEntries(copies.flatMap(copy => copy.status === 'fulfilled' ? [copy.value] : [])) }
 }

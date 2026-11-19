@@ -21,6 +21,7 @@ export interface VoteHistory {
   manifest_digest: string
   vote_hashes: string[]
   open: Checkpoint | null
+  frozen?: Checkpoint | null
   closed: Checkpoint | null
 }
 export interface RecordedReceipt {
@@ -94,7 +95,7 @@ export function extendsHistory(previous: string[], next: string[]) {
 }
 
 export const historyDigest = (hashes: string[]) => fingerprint([historyVersion, hashes])
-export const checkpointStatement = (origin: string, id: string, manifestDigest: string, phase: 'open' | 'closed',
+export const checkpointStatement = (origin: string, id: string, manifestDigest: string, phase: 'open' | 'frozen' | 'closed',
   size: number, digest: string) => ['cope-quorum-history-checkpoint/1', origin, id, manifestDigest, phase, size, digest]
 export const intakeStatement = (origin: string, id: string, manifestDigest: string, voteHash: string) =>
   ['cope-quorum-vote-intake/1', origin, id, manifestDigest, voteHash]
@@ -119,7 +120,7 @@ async function checkSignature(key: string, signature: unknown, message: Uint8Arr
 }
 
 async function checkCheckpoint(origin: string, manifest: Manifest, policy: WitnessPolicy, hashes: string[],
-  phase: 'open' | 'closed', checkpoint: Checkpoint | null) {
+  phase: 'open' | 'frozen' | 'closed', checkpoint: Checkpoint | null) {
   requireHistory(checkpoint && checkpoint.size === hashes.length && checkpoint.digest === await historyDigest(hashes)
     && checkpoint.signatures && typeof checkpoint.signatures === 'object', 'The witness checkpoint is missing or covers different votes.')
   const encoded = new TextEncoder().encode(JSON.stringify(checkpointStatement(
@@ -159,9 +160,7 @@ export async function verifyRetentionReceipt(receipt: RetentionReceipt, policy: 
   return voteHash
 }
 
-export async function verifyHistoryResult(packet: BallotPackage, history: VoteHistory, policy: WitnessPolicy, origin: string,
-  receipt?: RecordedReceipt) {
-  await checkHistoryPacket(packet.manifest, policy, history)
+export async function verifySettledVotes(packet: BallotPackage, history: VoteHistory, policy: WitnessPolicy, origin: string) {
   requireHistory(packet.status === 'completed' && Date.now() >= settlementEnd(packet.manifest), 'The ballot has not settled.')
   requireHistory(Array.isArray(packet.votes) && packet.votes.length === history.vote_hashes.length,
     'The final votes differ from the witnessed vote history.')
@@ -169,21 +168,51 @@ export async function verifyHistoryResult(packet: BallotPackage, history: VoteHi
   requireHistory(extendsHistory(hashes, history.vote_hashes),
     'The final votes differ from the witnessed vote history.')
   await verifyIntake(packet, policy, origin, hashes)
-  await checkCheckpoint(origin, packet.manifest, policy, hashes, 'open', history.open)
+  await verifyBallot(packet)
+}
+
+export async function verifyHistoryResult(packet: BallotPackage, history: VoteHistory, policy: WitnessPolicy, origin: string,
+  receipt?: RecordedReceipt) {
+  await checkHistoryPacket(packet.manifest, policy, history)
+  await verifySettledVotes(packet, history, policy, origin)
+  const hashes = history.vote_hashes
+  await checkOrderQuorum(origin, packet.manifest, policy, history)
   await checkCheckpoint(origin, packet.manifest, policy, hashes, 'closed', history.closed)
   if (receipt) {
     await verifyRecordedReceipt(receipt, policy, origin)
     requireHistory(await fingerprint(receipt.manifest) === history.manifest_digest
       && extendsHistory(receipt.vote_hashes, hashes), 'The final history omits or conflicts with the recorded receipt.')
   }
-  await verifyBallot(packet)
 }
 
-// A closing witness may catch up after the deadline only from a checkpoint that already
-// carries an open quorum. Its own previously signed history must still be a prefix.
-export async function checkOpenQuorum(origin: string, manifest: Manifest, policy: WitnessPolicy, history: VoteHistory) {
+// Older ballots may already have an open certificate over the complete order.
+export async function checkOrderQuorum(origin: string, manifest: Manifest, policy: WitnessPolicy, history: VoteHistory) {
+  if (history.frozen) {
+    await checkCheckpoint(origin, manifest, policy, history.vote_hashes, 'frozen', history.frozen)
+    if (!history.open) return
+    // The open receipt still attests only the earlier prefix, never the late suffix.
+    await checkCheckpoint(origin, manifest, policy, history.vote_hashes.slice(0, history.open.size), 'open', history.open)
+  } else {
+    await checkCheckpoint(origin, manifest, policy, history.vote_hashes, 'open', history.open)
+  }
+}
+
+export async function nextCheckpointPhase(manifest: Manifest, policy: WitnessPolicy, history: VoteHistory, origin: string,
+  previous: { manifest_digest: string, vote_hashes: string[], closed: boolean, freeze?: unknown } | null, now: number) {
   await checkHistoryPacket(manifest, policy, history)
-  await checkCheckpoint(origin, manifest, policy, history.vote_hashes, 'open', history.open)
+  if (previous) {
+    requireHistory(previous.manifest_digest === history.manifest_digest && extendsHistory(previous.vote_hashes, history.vote_hashes),
+      'The supplied history conflicts with the checkpoint already kept by this witness.')
+    requireHistory(!(previous.freeze || previous.closed) || previous.vote_hashes.length === history.vote_hashes.length,
+      'The proposed order differs from the one this witness already froze or sealed.')
+  }
+  if (now < Date.parse(manifest.opens_at)) return null
+  if (now < settlementEnd(manifest)) return previous?.closed || previous?.freeze ? null : 'open'
+  if (history.frozen || history.open?.size === history.vote_hashes.length) {
+    await checkOrderQuorum(origin, manifest, policy, history)
+    return 'closed'
+  }
+  return 'frozen'
 }
 
 export interface PolicyChange {
@@ -239,10 +268,16 @@ export function checkGovernance(chain: Pick<PolicyChain, 'roster' | 'ballots'>, 
   if ('roster' in approval) requireHistory(chain.roster !== approval.roster, 'The roster is already approved.')
 }
 
-export async function authorizedBallot(chain: PolicyChain | null | undefined, manifest: Manifest) {
-  const entry = chain?.ballots.get(manifest.id)
+export function evidenceManifest(evidence: FinalEvidence | RecordedReceipt | RetentionReceipt) {
+  if (evidence.version !== 'cope-quorum-final-evidence/1') return evidence.manifest
+  requireHistory(!Object.hasOwn(evidence, 'manifest'), 'A final evidence file must contain its manifest only inside the ballot.')
+  return evidence.ballot.manifest
+}
+
+export async function authorizedBallot(chain: PolicyChain | null | undefined, manifest: Manifest, expectedId = manifest.id) {
+  const entry = chain?.ballots.get(expectedId)
   const policy = chain?.epochs.get(manifest.vote_history?.epoch ?? '')
-  requireHistory(entry && policy && entry.epoch === manifest.vote_history?.epoch
+  requireHistory(manifest.id === expectedId && entry && policy && entry.epoch === manifest.vote_history?.epoch
     && entry.roster === manifest.roster && entry.manifest === await fingerprint(manifest),
   'The pinned verifier quorum has not approved this exact ballot and roster.')
   return policy

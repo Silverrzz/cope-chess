@@ -7,7 +7,7 @@ import QuorumTally from '@/components/public/QuorumTally.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
 import { fingerprint, verifyEvidence, type BallotPackage, type VoteEvidence } from '@/quorum'
-import { authorizedBallot, verifyHistoryResult, verifyRecordedReceipt, verifyRetentionReceipt,
+import { authorizedBallot, evidenceManifest, verifyHistoryResult, verifyRecordedReceipt, verifyRetentionReceipt,
   type FinalEvidence, type RecordedReceipt, type RetentionReceipt } from '@/quorum-history'
 import { extendPinnedPolicy, loadPinnedPolicy } from '@/quorum-pins'
 import { resultLabels, resultTones } from '@/quorum-results'
@@ -58,7 +58,7 @@ async function verify() {
       if (supplied.origin !== location.origin) throw new Error('This file belongs to another COPE origin. Use the offline auditor with your trusted origin.')
       const chain = policyFile.value ? await extendPinnedPolicy(policyFile.value, location.origin) : await loadPinnedPolicy(location.origin)
       if (!chain) throw new Error('Choose a trusted witness policy file to verify witnessed evidence.')
-      const manifest = supplied.version === 'cope-quorum-final-evidence/1' ? supplied.ballot.manifest : supplied.manifest
+      const manifest = evidenceManifest(supplied)
       const policy = await authorizedBallot(chain, manifest)
       if (supplied.version === 'cope-quorum-relayed-vote/1') {
         await verifyRetentionReceipt(supplied, policy, location.origin)

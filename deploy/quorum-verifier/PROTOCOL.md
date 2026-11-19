@@ -37,7 +37,7 @@ The protocol fingerprints JSON with SHA-256 over UTF-8 compact JSON with sorted 
 | Policy retry | `["cope-quorum-policy-retry/1", O, H, R, P]`, where `P` is null or `[earlier_round, earlier_proposal_digest]`; a reported prepare certificate accompanies the signature |
 | Intake | `["cope-quorum-vote-intake/1", O, B, M, V]` |
 | Retention | `["cope-quorum-vote-retained/1", O, B, M, V]` |
-| Checkpoint | `["cope-quorum-history-checkpoint/1", O, B, M, phase, size, digest]`, where the phase is `"open"` or `"closed"` |
+| Checkpoint | `["cope-quorum-history-checkpoint/1", O, B, M, phase, size, digest]`, where the phase is `"open"`, `"frozen"`, or `"closed"` |
 | Archive report | `["cope-quorum-witness-result/1", O, B, evidence_digest]`, an attestation to one ballot evidence packet |
 
 The initial head is the fingerprint of `["cope-quorum-witness-policy-anchor/1", O, initial_policy_digest]`. For a membership change, `D` is the fingerprint of the complete proposed policy, including the threshold and fault allowance when present. A governance approval leaves the policy unchanged and sets `D` to the fingerprint of `["cope-quorum-governance/1", current_policy_digest, approval]`. The approval object is exactly one of `{"roster": roster_digest}`, `{"ballot": {"id": B, "manifest": M, "roster": roster_digest}}`, or `{"voter_release": release_digest}`. A successor head is the fingerprint of `["cope-quorum-witness-policy-change/2", O, H, current_policy_digest, D]`. The same decision at the same head gets the same successor head regardless of the round or which quorum signs.
@@ -50,7 +50,7 @@ The initial head is the fingerprint of `["cope-quorum-witness-policy-anchor/1", 
 4. **Ready and store.** A quorum of the proposed operators, pinned to the current head, verifies the outgoing commit quorum and signs readiness. For governance, those are the same operator set and threshold as before. A quorum of current operators then checks both quorums and stores the decision before issuing storage receipts. Stored records include the commits and readiness signatures, and peers can fetch and verify a stored copy to help assemble the decision.
 5. **Distribute and pin.** The approved bundle contains the outgoing commits and storage receipts and the incoming readiness signatures. Consumers recheck the policy rules and all three certificates at each link; prepare and retry records are local signing safeguards, not required in the published bundle. Assembly does not activate anything. Operators distribute the approved bundle and install it on COPE and the verifiers. COPE pins on governed publication, verifiers pin installed heads, and auditors can import a pin. A replacement bundle must contain the previously pinned head.
 
-Each head is an epoch. An approved ballot uses the head immediately **before** its approval and the witness policy at that epoch. Later roster, browser release, and membership decisions advance the head without rewriting that ballot or changing the keys used to verify its history. Before storing a membership change, finish active and scheduled ballots under the old policy. A storing operator stops starting new ballots under the outgoing policy; it can finish ballots for which it already has a journal. For a ballot no witness has started, a storage quorum blocks an opening quorum at the outgoing head under the fault assumptions. The current bundle format supports up to 128 changes.
+Each head is an epoch. An approved ballot uses the head immediately **before** its approval and the witness policy at that epoch. Later roster, browser release, and membership decisions advance the head without rewriting that ballot or changing the keys used to verify its history. Before storing a membership change, finish active and scheduled ballots under the old policy. A storing operator stops starting new ballots under the outgoing policy; it can finish ballots for which it already has a journal. For a ballot no witness has started, a storage quorum blocks a new open or frozen quorum at the outgoing head under the fault assumptions. The current bundle format supports up to 128 changes.
 
 ## From enrollment to an approved ballot
 
@@ -66,7 +66,7 @@ The voter opens a top-level `/vote/<ballot-id>` page on an independently trusted
 
 ## Intake, ordering and settlement
 
-Let `T` be the signed voting deadline and `S = T + 120 seconds` the settlement boundary. A depth-10 Semaphore proof binds an option index to the approved roster root and the ballot scope (the fingerprint of `["cope-quorum-ballot/1", manifest]`, interpreted as a decimal integer). The per-scope nullifier allows duplicate votes to be detected without identifying the roster commitment used. The browser sends an identical proof on each attempt; generating a new proof, even for the same choice, changes the fingerprint.
+Let `T` be the signed voting deadline and `S = T + 120 seconds` the settlement boundary. A depth-10 Semaphore proof binds an option index to the approved roster root and the ballot scope (the fingerprint of `["cope-quorum-ballot/1", manifest]`, interpreted as a decimal integer). The per-scope nullifier allows duplicate votes to be detected without identifying the roster commitment used. Before sending, the voter saves a recovery file containing the proof and its origin, ballot ID and manifest digest. The file reveals the choice and permits resubmission of that exact vote; it contains no credential secret. A trusted verifier can check and resume it after a reload, including after voting closes subject to the intake and retention deadlines. The browser sends an identical proof on each attempt; generating a new proof, even for the same choice, changes the fingerprint.
 
 ```mermaid
 sequenceDiagram
@@ -81,7 +81,9 @@ sequenceDiagram
     W->>C: Forward certified proofs through settlement
     C-->>W: Ordered hashes
     W->>C: Open checkpoints
-    C-->>W: Final proofs, certificates and open quorum
+    C-->>W: Frozen order, final proofs and intake certificates
+    W->>C: Frozen checkpoints if the last open quorum missed votes
+    C-->>W: Quorum over the complete order
     W->>C: Closed checkpoints after settlement
     C-->>A: Exportable evidence; also archived by verifiers
 ```
@@ -90,17 +92,19 @@ sequenceDiagram
 2. **Retention, before `S`.** The browser sends the proof plus the intake certificate back to the verifiers. Each verifies both, stores the certified proof before returning its retention signature, and tries to forward it to COPE. The browser reports retention only when it has verified both quorums. A retry can recover an already saved response for the same proof; it does not reopen intake for a new proof.
 3. **Order and settle.** COPE verifies intake certificates against the frozen keys and appends one proof per nullifier to its ordered history. It accepts certified relays until `S`; the ordinary direct vote endpoint cannot add votes to a governed ballot. Before `T` the public history shows hashes, without anonymous choices or full proofs. From `T` onward the verifier peer endpoints may disclose retained certified proofs. During the settlement window, verifiers can fetch and validate those copies from peers and retry forwarding proofs. This recovery path does not elect an order or produce a tally independently of COPE.
 
-### Open and closed checkpoints
+### Open prefixes, frozen orders and closed checkpoints
 
 For the ordered hash list `L`, the history digest is the fingerprint of `["cope-quorum-vote-history/1", L]`. From opening until `S`, a verifier can sign an **open** checkpoint for the exact supplied prefix. It persists its history and only signs extensions that retain the same manifest and hashes in the same positions. COPE presents the latest open prefix with quorum signatures, which may be shorter than the current list. Any two open quorums for the same authorized ballot have an honest signer in common, so their signed lists must be prefix-compatible.
 
-At or after `S`, a verifier can **close** only a candidate extending its own journal and already carrying an open quorum for the *entire* candidate list. A verifier that is behind can catch up from that open quorum without making a new open signature. It can resend a previously stored open attestation if COPE did not record it. Before sealing, it checks the exact ordered proof hashes, each intake certificate, every proof, duplicate nullifiers, and the recomputed result. It refuses to seal if the candidate omits a certified proof it retains. It persists its seal before publishing it and does not sign another closed history.
+At `S`, COPE stops appending votes. Certification of that order has no polling deadline. If the last open quorum missed a late relay, witnesses can now sign a **frozen** checkpoint over the complete order. Before freezing or closing, a witness checks that the order extends its journal, matches the proof hashes and includes every certified vote it retains. It verifies every proof and intake certificate, rejects duplicate nullifiers, and recomputes the result. It persists the exact frozen order before releasing its signature and cannot extend or replace it afterward. The same membership cutover guard applies to a first freeze as to a first open checkpoint.
+
+A witness can **close** only with a quorum over the entire order: either a frozen quorum, or an open quorum that already covered every vote. It persists the seal before publishing it. A shorter open receipt remains evidence only of its prefix; a frozen certificate alone is not a seal. Previously sealed ballots with complete open and closed certificates still verify.
 
 A closed quorum therefore cannot omit an exact proof held by a retention quorum: their signer sets must overlap in at least one honest retainer that would refuse the seal. An intake quorum alone does not establish that enough verifiers persisted a copy *with* the certificate. A closed quorum also cannot conflict with a previously witnessed open prefix or another closed quorum under the same assumptions. If an eligible seal cannot be formed, the protocol leaves the result provisional.
 
 ## What an auditor can check
 
-Use an independently authenticated bundle and the expected COPE origin. The verifier archive preserves checked evidence and distinguishes a first observed packet and later conflicts. A report signature on a packet is separate from the open and closed checkpoint certificates.
+Use an independently authenticated bundle and the expected COPE origin. The verifier archive preserves checked evidence and distinguishes a first observed packet and later conflicts. A report signature on a packet is separate from the history checkpoint certificates.
 
 | Evidence | Verified claim |
 | --- | --- |

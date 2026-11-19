@@ -8,8 +8,9 @@ import test from 'node:test'
 import { Group } from '@semaphore-protocol/group'
 import { Identity } from '@semaphore-protocol/identity'
 import { generateProof } from '@semaphore-protocol/proof'
+import { pendingVote, resumeVote } from './src/quorum-pending.ts'
 import { ballotScope, fingerprint, verifyBallot } from './src/quorum.ts'
-import { approvalDigest, authorizedBallot, checkpointStatement, extendsHistory, historyDigest, historyVersion, intakeStatement, policyVoteStatement,
+import { approvalDigest, authorizedBallot, checkpointStatement, evidenceManifest, extendsHistory, historyDigest, historyVersion, intakeStatement, nextCheckpointPhase, policyVoteStatement, settlementEnd,
   retainedStatement, verifyHistoryResult, verifyPolicyChain, verifyRecordedReceipt, verifyRetentionReceipt, witnessPolicy } from './src/quorum-history.ts'
 
 const origin = 'https://cope.test'
@@ -92,6 +93,45 @@ test('a real proof can be recorded; removing it and recomputing the tally fails 
   await assert.rejects(verifyRecordedReceipt({ ...receipt, proof: { ...receipt.proof, message: '1' } }, original, origin), /does not include/)
 })
 
+test('a relay ordered after the last open poll can freeze and seal without extending the open receipt', {
+  skip: !process.env.COPE_TEST_PROOF_ARTIFACTS && 'requires the depth-10 artifacts',
+}, async () => {
+  const { packet, history } = await evidence(true)
+  const { manifest } = packet
+  const end = settlementEnd(manifest)
+  const checkpoint = (phase, size, digest) => ({ size, digest, signatures:
+    signAll(checkpointStatement(origin, manifest.id, history.manifest_digest, phase, size, digest)) })
+  const empty = await historyDigest([])
+  const prefix = { ...history, vote_hashes: [], open: null, closed: null }
+  const phase = (observed, previous, now) => nextCheckpointPhase(manifest, original, observed, origin, previous, now)
+  assert.equal(await phase(prefix, null, end - 1000), 'open')
+  const journal = { manifest_digest: history.manifest_digest, vote_hashes: [], closed: false }
+  const lastPoll = { ...history, open: checkpoint('open', 0, empty), closed: null }
+  assert.equal(await phase(lastPoll, journal, end), 'frozen')
+  await assert.rejects(verifyHistoryResult(packet, lastPoll, original, origin), /checkpoint/)
+  const frozen = { ...lastPoll, frozen: checkpoint('frozen', 1, history.closed.digest) }
+  const durable = { ...journal, vote_hashes: history.vote_hashes, freeze: frozen.frozen }
+  assert.equal(await phase(frozen, durable, end + 5000), 'closed')
+  await assert.rejects(verifyHistoryResult(packet, frozen, original, origin), /checkpoint/)
+  await verifyHistoryResult(packet, { ...frozen, closed: history.closed }, original, origin)
+  assert.equal(await phase(lastPoll, durable, end + 10000), 'frozen') // republish after restart
+  await assert.rejects(phase({ ...lastPoll, vote_hashes: [...history.vote_hashes, 'a'.repeat(64)] }, durable, end), /already froze/)
+  await assert.rejects(phase(prefix, durable, end), /conflicts/)
+  await assert.rejects(phase({ ...frozen, frozen: history.closed }, journal, end), /enough valid/)
+})
+
+test('a saved vote round-trips the exact proof without the credential', {
+  skip: !process.env.COPE_TEST_PROOF_ARTIFACTS && 'requires the depth-10 artifacts',
+}, async () => {
+  const { packet } = await evidence(true)
+  const { manifest, roster, votes: [proof], result: { options } } = packet
+  const file = JSON.parse(JSON.stringify(await pendingVote(origin, manifest, proof)))
+  const restore = (site, ballot) => resumeVote(file, site, ballot, roster, options, proof.scope)
+  assert.deepEqual(await restore(origin, manifest), proof)
+  await assert.rejects(restore('https://another.test', manifest), /exact ballot/)
+  await assert.rejects(restore(origin, { ...manifest, title: 'Changed' }), /exact ballot/)
+})
+
 test('policy changes need the old quorum, preserve history, and are bound to the origin and predecessor', async () => {
   const next = policyFor(4, 6, 1)
   const digest = await fingerprint(next)
@@ -128,6 +168,15 @@ test('the approved roster and exact ballot survive a disjoint verifier rotation'
   const ballot = { id: packet.manifest.id, manifest: await fingerprint(packet.manifest), roster: packet.manifest.roster }
   await assert.rejects(authorizedBallot(roster, packet.manifest), /not approved/)
   const approved = await append(roster, original, { ballot })
+  // Distinct approved ballots can legitimately share the same roster.
+  const sibling = { ...packet.manifest, id: 'd222cd5e-91c1-4ed7-9313-33a200002a12',
+    vote_history: { ...packet.manifest.vote_history, epoch: approved.head } }
+  const both = await append(approved, original, { ballot: { ...ballot, id: sibling.id, manifest: await fingerprint(sibling) } })
+  await authorizedBallot(both, sibling, sibling.id)
+  await assert.rejects(authorizedBallot(both, sibling, ballot.id), /not approved/)
+  const final = { version: 'cope-quorum-final-evidence/1', ballot: packet }
+  assert.equal(evidenceManifest(final), packet.manifest)
+  assert.throws(() => evidenceManifest({ ...final, manifest: sibling }), /only inside the ballot/)
   const nextKeys = signers.slice(4)
   const successor = { threshold: 2, max_faulty: 0,
     operators: Object.fromEntries(nextKeys.map(({ name, key }) => [name, key])) }

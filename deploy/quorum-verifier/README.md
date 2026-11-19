@@ -154,18 +154,27 @@ During voting, only hashes are public. Voters send a proof directly to assigned
 verifiers; they can see the IP address, time, and anonymous choice. Configure
 every ingress to omit access logs for `/api/intake/`. The browser reports
 retention after it verifies a quorum of intake signatures and a quorum of
-signed retention receipts. Exported receipts reveal the choice; keep them
-private unless you intend to share it.
+signed retention receipts. Before sending, save the vote recovery file. To retry
+after a reload, open the same ballot at a trusted verifier and select **Resume a
+previously saved vote**. This reuses the proof without reopening the credential.
+Both the recovery file and the receipt reveal the choice; keep them private.
 
 Two minutes after the published voting deadline, the ballot settles. Verifiers
 stop accepting new proof submissions at the voting deadline. During the
 settlement period they can forward certified submissions or retrieve copies
 from peers. A verifier refuses to seal a tally that omits a certified vote
 it retains. It also validates the exact proofs, all intake certificates, and
-an open checkpoint quorum before sealing. Results stay provisional if COPE
+a quorum over the entire order before sealing. If the last open quorum missed
+a relay, witnesses validate the settled votes and sign a frozen checkpoint
+after the cutoff. Results stay provisional if COPE
 withholds the ordered history or a quorum cannot agree on it. The verifiers
 can recover retained proofs from one another, but currently still rely on
 COPE to publish the ordered tally and collect its checkpoints.
+
+For an existing installation, apply COPE's checkpoint migration and update at
+least a witness quorum before relying on late-relay finalization. Update offline
+auditors to check frozen checkpoints. The recovery-file voting UI takes effect
+when operators approve and install the newly built browser release.
 
 ## Independent voter sites
 

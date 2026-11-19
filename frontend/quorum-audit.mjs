@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { verifyEvidence } from './src/quorum.ts'
-import { authorizedBallot, verifyHistoryResult, verifyRecordedReceipt, verifyRetentionReceipt, verifyPolicyChain } from './src/quorum-history.ts'
+import { authorizedBallot, evidenceManifest, verifyHistoryResult, verifyRecordedReceipt, verifyRetentionReceipt, verifyPolicyChain } from './src/quorum-history.ts'
 
 try {
   const [file, policyFile, trustedOrigin, ...extra] = process.argv.slice(2)
@@ -12,7 +12,7 @@ try {
   if (['cope-quorum-final-evidence/1', 'cope-quorum-recorded-vote/1', 'cope-quorum-relayed-vote/1'].includes(evidence.version)) {
     if (!policyFile || evidence.origin !== trustedOrigin) throw new Error('Provide an independently trusted witness policy and COPE origin.')
     const chain = await verifyPolicyChain(JSON.parse(readFileSync(policyFile, 'utf8')), trustedOrigin)
-    const manifest = evidence.manifest ?? evidence.ballot.manifest
+    const manifest = evidenceManifest(evidence)
     const policy = await authorizedBallot(chain, manifest)
     if (evidence.version === 'cope-quorum-relayed-vote/1') {
       result = { kind: 'retained-vote', ballot: manifest.id, vote_hash: await verifyRetentionReceipt(evidence, policy, trustedOrigin) }
