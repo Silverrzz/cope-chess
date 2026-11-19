@@ -174,8 +174,8 @@ function reset(): void {
 
       <h3>Appearance</h3>
       <label class="setting-toggle">
-        <input v-model="draftDarkMode" type="checkbox" />
         <span><strong>Dark mode</strong><small>Use the darker colour theme across the site.</small></span>
+        <input v-model="draftDarkMode" type="checkbox" role="switch" />
       </label>
 
       <h4 class="settings-subheading">Board colours</h4>
@@ -213,28 +213,31 @@ function reset(): void {
         <span>Engine evaluations</span>
         <OptionPicker :model-value="draftPerspective" :options="[{ value: 'white', label: 'White side', description: 'Positive scores favour White' }, { value: 'side-to-move', label: 'Side to move', description: 'Positive scores favour the searching side' }]" label="Evaluation perspective" @update:model-value="draftPerspective = $event === 'side-to-move' ? 'side-to-move' : 'white'" />
       </div>
-      <label class="setting-toggle"><input v-model="draftKibitzer" type="checkbox" /><span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span></label>
       <label class="setting-toggle">
-        <input v-model="draftBoardAnnotations" type="checkbox" />
+        <span><strong>Local kibitzer</strong><small>Show a local Stockfish Lite evaluation bar beside the board.</small></span>
+        <input v-model="draftKibitzer" type="checkbox" role="switch" />
+      </label>
+      <label class="setting-toggle">
         <span><strong>Board annotations</strong><small>Right-click to highlight squares and drag to draw arrows.</small></span>
+        <input v-model="draftBoardAnnotations" type="checkbox" role="switch" />
       </label>
 
       <h3>Chat</h3>
       <label class="setting-toggle">
-        <input v-model="draftChatGameLinks" type="checkbox" />
         <span><strong>Show game links</strong><small>See which game someone was watching when they sent a message.</small></span>
+        <input v-model="draftChatGameLinks" type="checkbox" role="switch" />
       </label>
 
       <h3>Celebrations</h3>
       <label class="setting-toggle">
-        <input v-model="draftConfettiEnabled" type="checkbox" />
         <span><strong>Show confetti</strong><small>Display team celebrations when spectators cheer.</small></span>
+        <input v-model="draftConfettiEnabled" type="checkbox" role="switch" />
       </label>
 
       <h3>Event audio</h3>
       <label class="setting-toggle">
-        <input v-model="draftEventMusicEnabled" type="checkbox" />
         <span><strong>Countdown music</strong><small>Play event music during the final minute of a countdown.</small></span>
+        <input v-model="draftEventMusicEnabled" type="checkbox" role="switch" />
       </label>
     </div>
 
@@ -291,6 +294,10 @@ function reset(): void {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--color-text-muted);
+}
+
+.settings-drawer__body > h3 {
+  margin-block-start: var(--space-2);
 }
 
 .settings-drawer__footer {
@@ -376,17 +383,25 @@ function reset(): void {
 .setting-toggle {
   display: flex;
   align-items: flex-start;
+  justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
 .setting-toggle input {
-  inline-size: 1rem;
-  block-size: 1rem;
-  margin-block-start: 0.15rem;
+  appearance: none;
+  flex: none;
+  inline-size: 2.25rem;
+  block-size: 1.25rem;
+  margin: 0;
+  border-radius: var(--radius-round);
+  background: radial-gradient(circle closest-side, var(--color-on-primary) 70%, transparent 76%) 0 / 1.25rem no-repeat var(--color-border-strong);
+  transition: background var(--transition-fast);
+}
+
+.setting-toggle input:checked {
+  background-color: var(--color-primary);
+  background-position: 100%;
 }
 
 .setting-toggle span {
