@@ -511,15 +511,19 @@ defineExpose({ selectPly, focusBoard })
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--color-text, #17202a) 28%, transparent);
   border-radius: var(--radius-md, 0.5rem);
-  background: #b58863;
   box-shadow: 0 0.75rem 2.5rem color-mix(in srgb, #000 14%, transparent);
+}
+
+/* Chessground rounds its size down and leaves a gap */
+.board-mount :deep(cg-container) {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .board-mount.ninja-board {
   aspect-ratio: var(--arena-board-aspect, 1.2916667);
   border: 0;
   border-radius: 0;
-  background: transparent;
   box-shadow: none;
 }
 
