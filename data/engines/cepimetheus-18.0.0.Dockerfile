@@ -3,7 +3,8 @@ FROM gcc:14.3.0-bookworm AS builder
 WORKDIR /build
 COPY . .
 
-RUN make -j"$(nproc)" \
+RUN sed -i 's/%llu nodes %llu nps %lld ms/%llu nodes %llu nps, %lld ms/' src/uci.c \
+    && make -j"$(nproc)" \
         CC=gcc \
         BUILD_DIR=release \
         CFLAGS='$(RELEASE_FLAGS) -DNDEBUG -DNO_PEXT -march=x86-64-v3 -static -static-libgcc' \
