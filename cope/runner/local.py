@@ -71,6 +71,7 @@ from cope.db import (
     pause_game_assignment,
     record_move,
     release_event_fixture_worker,
+    requeue_resumable_paused_games,
     set_tournament_current_round_at_least,
     set_tournament_status,
     touch_service_heartbeat,
@@ -173,10 +174,13 @@ def run_tournament_service(config: RunnerServiceConfig) -> None:
 def run_tournament_matches(
     connection: sqlite3.Connection,
 ) -> RunnerReport:
+    requeued_tournaments = requeue_resumable_paused_games(connection)
     prepared = prepare_scheduled_tournaments(connection)
     tournaments_finished = finish_completed_tournaments(connection)
     command_report = process_pending_runner_commands(connection)
     connection.commit()
+    for tournament_id in requeued_tournaments:
+        publish_tournament_event(tournament_id)
     for result in prepared:
         if result.skipped_reason is None:
             publish_tournament_event(result.tournament_id)
@@ -570,10 +574,15 @@ def _start_puzzle_gauntlet_round(
     while True:
         readiness = connection.execute(
             """
-            SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (WHERE assignment.status = 'live') AS ready,
-                   COUNT(*) FILTER (WHERE game.status = 'live') AS started,
-                   MIN(game.started_at) FILTER (WHERE game.status = 'live') AS starts_at,
+            SELECT COUNT(*) FILTER (
+                     WHERE game.status NOT IN ('finished', 'abandoned')
+                   ) AS total,
+                   COUNT(*) FILTER (
+                     WHERE game.status NOT IN ('finished', 'abandoned')
+                       AND assignment.status = 'live'
+                   ) AS ready,
+                   MAX(game.status) FILTER (WHERE assignment.id = ?) AS game_status,
+                   MIN(game.started_at) FILTER (WHERE assignment.id = ?) AS starts_at,
                    (SELECT status FROM tournaments WHERE id = ?) AS tournament_status,
                    (SELECT status FROM game_assignments WHERE id = ?) AS assignment_status
             FROM puzzle_gauntlet_attempts attempt
@@ -581,18 +590,23 @@ def _start_puzzle_gauntlet_round(
             LEFT JOIN game_assignments assignment ON assignment.game_id = game.id
             WHERE attempt.puzzle_id = ?
             """,
-            (tournament_id, assignment_id, puzzle_id),
+            (assignment_id, assignment_id, tournament_id, assignment_id, puzzle_id),
         ).fetchone()
         total = 0 if readiness is None else int(readiness["total"])
         ready = 0 if readiness is None else int(readiness["ready"])
-        started = 0 if readiness is None else int(readiness["started"])
+        game_status = None if readiness is None else readiness["game_status"]
         tournament_status = None if readiness is None else readiness["tournament_status"]
         assignment_status = None if readiness is None else readiness["assignment_status"]
         if total == 0 or tournament_status not in {"running", "paused"}:
             raise RuntimeError("puzzle gauntlet round is no longer active")
         if assignment_status not in {"assigned", "acked", "live"}:
             raise RuntimeError("puzzle gauntlet assignment was withdrawn")
-        if total > 0 and started == total:
+        if game_status not in {"assigned", "live"}:
+            raise RuntimeError("puzzle gauntlet game is no longer active")
+        # A peer may finish before this runner observes the release. Read this
+        # attempt's start directly; retries get a fresh start without moving the
+        # clocks of engines already searching or waiting on completed peers.
+        if tournament_status == "running" and game_status == "live":
             starts_at = readiness["starts_at"]
             if starts_at is None:
                 raise RuntimeError("puzzle gauntlet round has no synchronized start time")
