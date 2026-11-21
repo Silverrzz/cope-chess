@@ -100,7 +100,9 @@ from cope.tournament.clock_scaling import (
     applied_clock,
     clock_reference_nps,
     game_calibration,
+    resumption_clock_scale,
     restore_scaled_clock,
+    shared_clock_scale,
 )
 from cope.version import app_version
 from cope.tournament.game_state import GameState
@@ -752,13 +754,14 @@ def run_worker_assignment_game(
     runtime_time_control = _runtime_time_control(tournament.config.time_control)
     white_control = black_control = runtime_time_control
     calibration = None
+    clock_scale = None
     if tournament.config.clock_reference_hardware_key is not None:
         calibration = game_calibration(connection, game_record.id, assignment.assignment.assignment_key)
         connection.commit()
         if calibration is None or calibration["reference_hardware_key"] != tournament.config.clock_reference_hardware_key:
             raise RuntimeError("Hardware-scaled assignment is missing its pinned clocks")
-        white_control = _runtime_time_control(applied_clock(calibration, "white", tournament.config.time_control))
-        black_control = _runtime_time_control(applied_clock(calibration, "black", tournament.config.time_control))
+        clock_scale = shared_clock_scale(calibration)
+        white_control = black_control = _runtime_time_control(applied_clock(calibration, "white", tournament.config.time_control))
         progress(
             "benchmark", "clock_calibration", "completed", "Applied pinned hardware-scaled clocks",
             metadata={key: value for key, value in calibration.items() if key not in {"game_id", "assignment_key"}},
@@ -817,9 +820,10 @@ def run_worker_assignment_game(
         black_clock = checkpoint.state.get("black_clock")
         if not isinstance(white_clock, dict) or not isinstance(black_clock, dict):
             raise RuntimeError("pause checkpoint clock state is invalid")
-        if calibration is not None:
-            white_clock = restore_scaled_clock(white_clock, checkpoint.state.get("white_worker_nps"), calibration["white_worker_nps"])
-            black_clock = restore_scaled_clock(black_clock, checkpoint.state.get("black_worker_nps"), calibration["black_worker_nps"])
+        if clock_scale is not None:
+            adjustment = resumption_clock_scale(checkpoint.state.get("shared_clock_scale"), clock_scale)
+            white_clock = restore_scaled_clock(white_clock, adjustment)
+            black_clock = restore_scaled_clock(black_clock, adjustment)
         game.white_tm.restore(white_clock)
         game.black_tm.restore(black_clock)
     relay_engine_data = _relay_engine_data(relay)
@@ -1214,9 +1218,8 @@ def run_worker_assignment_game(
                 "white_clock": game.white_tm.snapshot(),
                 "black_clock": game.black_tm.snapshot(),
                 **({
-                    "white_worker_nps": calibration["white_worker_nps"],
-                    "black_worker_nps": calibration["black_worker_nps"],
-                } if calibration is not None else {}),
+                    "shared_clock_scale": [clock_scale.numerator, clock_scale.denominator],
+                } if clock_scale is not None else {}),
             },
         )
         connection.commit()
