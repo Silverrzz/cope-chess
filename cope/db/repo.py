@@ -2464,6 +2464,13 @@ def pause_game_assignment(
         """,
         (assignment.game_id, json.dumps(state, separators=(",", ":")), now),
     )
+    # The acknowledgement can arrive after a tournament has resumed. Keep the
+    # checkpoint and move history, but release the game to the pending pool in
+    # this same transaction so an expired assignment cannot leave it live.
+    connection.execute(
+        "UPDATE games SET status = 'pending' WHERE id = ? AND status IN ('assigned', 'live')",
+        (assignment.game_id,),
+    )
 
 
 def pause_unstarted_game_assignment(
@@ -2501,6 +2508,12 @@ def resume_paused_tournament_games(
         WHERE tournament_id = ?
           AND status = 'live'
           AND EXISTS (
+            SELECT 1 FROM game_assignments assignment
+            WHERE assignment.game_id = games.id
+              AND assignment.status = 'expired'
+              AND assignment.worker_id IS NULL
+          )
+          AND EXISTS (
             SELECT 1 FROM game_pause_checkpoints checkpoint
             WHERE checkpoint.game_id = games.id
           )
@@ -2508,6 +2521,28 @@ def resume_paused_tournament_games(
         (tournament_id,),
     )
     return cursor.rowcount
+
+
+def requeue_resumable_paused_games(connection: sqlite3.Connection) -> tuple[int, ...]:
+    """Recover legacy late pause acknowledgements without resetting games."""
+    rows = connection.execute(
+        """
+        UPDATE games
+        SET status = 'pending'
+        FROM game_assignments assignment,
+             game_pause_checkpoints checkpoint,
+             tournaments tournament
+        WHERE games.id = assignment.game_id
+          AND games.id = checkpoint.game_id
+          AND games.tournament_id = tournament.id
+          AND games.status = 'live'
+          AND assignment.status = 'expired'
+          AND assignment.worker_id IS NULL
+          AND tournament.status = 'running'
+        RETURNING games.tournament_id
+        """
+    ).fetchall()
+    return tuple(sorted({int(row["tournament_id"]) for row in rows}))
 
 
 def record_game_assignment_progress(
