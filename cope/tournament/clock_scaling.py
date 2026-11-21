@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 from cope.core.benchmark import benchmark_hardware_key, parse_benchmark_nps
 from cope.core.models import IncrementTimeControl, MoveTimeControl, MovesToGoTimeControl
@@ -21,8 +22,19 @@ class GameClockCalibration:
     black: SideClock
 
 
-def _scaled_ms(milliseconds: int, reference_nps: int, worker_nps: int) -> int:
-    return (2 * milliseconds * reference_nps + worker_nps) // (2 * worker_nps)
+def _scaled_ms(milliseconds: int, scale: Fraction) -> int:
+    return (2 * milliseconds * scale.numerator + scale.denominator) // (2 * scale.denominator)
+
+
+def _shared_scale(white_reference: int, white_worker: int, black_reference: int, black_worker: int) -> Fraction:
+    return (Fraction(white_reference, white_worker) + Fraction(black_reference, black_worker)) / 2
+
+
+def shared_clock_scale(calibration) -> Fraction:
+    return _shared_scale(
+        calibration["white_reference_nps"], calibration["white_worker_nps"],
+        calibration["black_reference_nps"], calibration["black_worker_nps"],
+    )
 
 
 def _profile(connection, tournament, key, engines):
@@ -108,26 +120,28 @@ def calibrate_game(connection, tournament, game, worker, engines, hardware_score
     if reference is None:
         return None
     base = tournament.config.time_control
-    sides = []
+    scores = []
     for engine_id in (game.white_engine_id, game.black_engine_id):
         score = hardware_scores.get(engine_id)
         reference_nps = reference[engine_id]
         if score is None or score.benchmark_nps != reference_nps or score.worker_nps <= 0:
             return None
-        worker_nps = score.worker_nps
-        initial = _scaled_ms(getattr(base, "initial_ms", getattr(base, "move_time_ms", 0)), reference_nps, worker_nps)
-        base_increment = getattr(base, "increment_ms", 0)
-        increment = _scaled_ms(base_increment, reference_nps, worker_nps)
-        if initial <= 0 or (base_increment and increment <= 0):
-            return None
-        if isinstance(base, MoveTimeControl):
-            control = MoveTimeControl(move_time_ms=initial)
-        elif isinstance(base, MovesToGoTimeControl):
-            control = MovesToGoTimeControl(initial_ms=initial, moves_to_go=base.moves_to_go)
-        else:
-            control = IncrementTimeControl(initial_ms=initial, increment_ms=increment)
-        sides.append(SideClock(reference_nps, worker_nps, control))
-    white, black = sides
+        scores.append((reference_nps, score.worker_nps))
+    (white_reference, white_worker), (black_reference, black_worker) = scores
+    scale = _shared_scale(white_reference, white_worker, black_reference, black_worker)
+    initial = _scaled_ms(getattr(base, "initial_ms", getattr(base, "move_time_ms", 0)), scale)
+    base_increment = getattr(base, "increment_ms", 0)
+    increment = _scaled_ms(base_increment, scale)
+    if initial <= 0 or (base_increment and increment <= 0):
+        return None
+    if isinstance(base, MoveTimeControl):
+        control = MoveTimeControl(move_time_ms=initial)
+    elif isinstance(base, MovesToGoTimeControl):
+        control = MovesToGoTimeControl(initial_ms=initial, moves_to_go=base.moves_to_go)
+    else:
+        control = IncrementTimeControl(initial_ms=initial, increment_ms=increment)
+    white = SideClock(white_reference, white_worker, control)
+    black = SideClock(black_reference, black_worker, control)
     return GameClockCalibration(reference_key, worker_key, white, black)
 
 
@@ -168,14 +182,20 @@ def applied_clock(calibration, side, base=None):
     )
 
 
-def restore_scaled_clock(clock_state, previous_worker_nps, current_worker_nps):
-    if not isinstance(previous_worker_nps, int) or previous_worker_nps <= 0:
-        raise RuntimeError("Paused hardware-scaled game is missing its clock calibration.")
+def resumption_clock_scale(previous_scale, current_scale: Fraction) -> Fraction:
+    if not isinstance(previous_scale, list) or len(previous_scale) != 2 or any(
+        not isinstance(value, int) or value <= 0 for value in previous_scale
+    ):
+        raise RuntimeError("Paused hardware-scaled game is missing its shared clock calibration.")
+    return current_scale / Fraction(*previous_scale)
+
+
+def restore_scaled_clock(clock_state, scale: Fraction):
     field = "remaining_time" if clock_state.get("remaining_time") is not None else "remaining_move_time"
     remaining = clock_state.get(field)
     if not isinstance(remaining, int) or remaining <= 0:
         raise RuntimeError("Paused hardware-scaled game has an invalid clock.")
     return {
         **clock_state,
-        field: max(1, _scaled_ms(remaining, previous_worker_nps, current_worker_nps)),
+        field: max(1, _scaled_ms(remaining, scale)),
     }

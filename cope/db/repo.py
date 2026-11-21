@@ -2491,6 +2491,24 @@ def resume_paused_tournament_games(
     connection: sqlite3.Connection,
     tournament_id: int,
 ) -> int:
+    restarted = ()
+    tournament = get_tournament(connection, tournament_id)
+    if tournament is not None and tournament.config.clock_reference_hardware_key is not None:
+        restarted = tuple(row["id"] for row in connection.execute(
+            """
+            SELECT games.id
+            FROM games
+            JOIN game_pause_checkpoints checkpoint ON checkpoint.game_id = games.id
+            WHERE games.tournament_id = ? AND games.status IN ('pending', 'live')
+              AND checkpoint.state::jsonb -> 'shared_clock_scale' IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM game_assignments assignment WHERE assignment.game_id = games.id
+                  AND assignment.status IN ('assigned', 'acked', 'live')
+              )
+            """,
+            (tournament_id,),
+        ))
+        _reset_games_for_replay(connection, restarted, reason="game started under separate hardware-scaled clocks")
     cursor = connection.execute(
         """
         UPDATE games
@@ -2510,7 +2528,7 @@ def resume_paused_tournament_games(
         """,
         (tournament_id,),
     )
-    return cursor.rowcount
+    return len(restarted) + cursor.rowcount
 
 
 def requeue_resumable_paused_games(connection: sqlite3.Connection) -> tuple[int, ...]:
