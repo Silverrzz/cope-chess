@@ -122,7 +122,7 @@ const engineVersions = computed(() => {
     track: versionTrack(version),
   }))
   const releases = versions.filter((version) => version.track === 'releases')
-  if (releases.every((version) => numberedRelease.test(version.label.replace(numericVersion, '')))) {
+  if (releases.every((version) => /^\d/.test(version.label.replace(numericVersion, '')))) {
     releases.sort((left, right) => versionCollator.compare(right.label.replace(numericVersion, ''), left.label.replace(numericVersion, '')))
   }
   const builds = versions.filter((version) => version.track === 'builds')
