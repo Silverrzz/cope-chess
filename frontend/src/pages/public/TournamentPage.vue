@@ -404,6 +404,7 @@ async function fitArenaToViewport(): Promise<void> {
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
   const arenaStyle = getComputedStyle(arena)
   const boardAspect = Number.parseFloat(arenaStyle.getPropertyValue('--arena-board-aspect')) || 1
+  const stackedTak = hasTakReserveArea.value && boardAspect < 1
   const maximumBoardSize = 42 * rootFontSize * (hasTakReserveArea.value ? Math.max(1, boardAspect) : 1)
   const arenaWidth = arena.clientWidth
   const gap = Number.parseFloat(arenaStyle.columnGap) || 12
@@ -412,7 +413,7 @@ async function fitArenaToViewport(): Promise<void> {
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
   if (hasTakReserveArea.value) {
-    if (window.matchMedia('(max-width: 58rem)').matches) {
+    if (stackedTak) {
       widthLimit = arenaWidth
     } else if (window.matchMedia('(max-width: 96rem)').matches) {
       widthLimit = arenaWidth - 25 * rootFontSize - gap
@@ -423,7 +424,7 @@ async function fitArenaToViewport(): Promise<void> {
   }
   const fittedBoardSize = (chromeHeight: number) => Math.max(
     0,
-    Math.min(maximumBoardSize, Math.max(180, widthLimit), Math.floor((availableHeight - chromeHeight) * boardAspect)),
+    Math.min(maximumBoardSize, Math.max(180, widthLimit), stackedTak ? arenaWidth : Math.floor((availableHeight - chromeHeight) * boardAspect)),
   )
 
   const viewportPosition = currentViewportPosition()
