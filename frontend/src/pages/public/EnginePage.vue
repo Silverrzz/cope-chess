@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { enginePath, ratingPath } from '@/router/publicUrls'
-import { compareEngineVersions, engineVersionLabel } from '@/components/public/format'
+import { engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -81,6 +81,7 @@ const numberedRelease = /^\d+(?:\.\d+)*(?:[a-z])?$/i
 const buildLabel = /(?:^|[\s._-])(?:rc\d*|alpha\d*|beta\d*|dev\d*|snapshot|nightly|pre(?:release)?\d*|unreleased|placeholder|temporary|temp|modified|experimental|test\d*|obfix|cope\d*)(?=$|[\s._-])/i
 const prereleaseSuffix = /\d(?:rc|alpha|beta|pre)\d*$/i
 const randomSuffix = /-R(100|[0-9]{1,2})$/i
+const versionCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 const route = useRoute()
 const router = useRouter()
@@ -122,7 +123,7 @@ const engineVersions = computed(() => {
   }))
   const releases = versions.filter((version) => version.track === 'releases')
   if (releases.every((version) => numberedRelease.test(version.label.replace(numericVersion, '')))) {
-    releases.sort((left, right) => compareEngineVersions(left.label.replace(numericVersion, ''), right.label.replace(numericVersion, '')))
+    releases.sort((left, right) => versionCollator.compare(right.label.replace(numericVersion, ''), left.label.replace(numericVersion, '')))
   }
   const builds = versions.filter((version) => version.track === 'builds')
   return { releases, builds }
@@ -159,8 +160,7 @@ const ratedVersions = computed(() => {
   const builds = rated(engineVersions.value.builds)
   const otherBuilds = builds.filter((version) => !randomSuffix.test(version.label))
   const randomBuilds = builds.filter((version) => randomSuffix.test(version.label))
-    .sort((left, right) => compareEngineVersions(right.label.replace(randomSuffix, ''), left.label.replace(randomSuffix, ''))
-      || compareEngineVersions(left.label.toUpperCase(), right.label.toUpperCase()))
+    .sort((left, right) => versionCollator.compare(left.label, right.label))
   return { releases, builds: [...otherBuilds, ...randomBuilds] }
 })
 const ratingMode = computed<RatingMode>(() => {
@@ -376,6 +376,13 @@ async function load(): Promise<void> {
         <div class="engine-heading__identity">
           <h1>{{ data.family?.name || data.engine.name }}</h1>
           <p v-if="data.family?.author || data.engine.author">By {{ data.family?.author || data.engine.author }}</p>
+          <ul v-if="data.badges.length" class="family-badges" aria-label="Engine badges">
+            <li v-for="badge in data.badges" :key="badge.id" :title="badge.description">
+              <span aria-hidden="true">{{ badge.emoji }}</span>
+              <strong>{{ badge.name }}</strong>
+              <span v-if="badge.description" class="sr-only">{{ badge.description }}</span>
+            </li>
+          </ul>
           <div class="engine-meta">
             <EngineVersionTags :tags="data.engine.tags ?? []" />
             <span v-if="!data.family?.active || !data.engine.active" class="engine-availability">Unavailable</span>
@@ -470,12 +477,6 @@ async function load(): Promise<void> {
               </dl>
             </div>
           </section>
-          <section v-if="data.badges.length" class="panel">
-            <header><h2>Badges</h2></header>
-            <div class="badge-list">
-              <article v-for="badge in data.badges" :key="badge.id"><span aria-hidden="true">{{ badge.emoji }}</span><div><strong>{{ badge.name }}</strong><small v-if="badge.description">{{ badge.description }}</small></div></article>
-            </div>
-          </section>
           <details class="panel technical-panel">
             <summary><strong>Build details</strong><AppIcon name="chevron-down" :size="16" /></summary>
             <div class="technical-content">
@@ -506,6 +507,9 @@ async function load(): Promise<void> {
 .engine-heading__identity { min-width: 0; }
 .engine-heading h1 { font-size: clamp(2.4rem, 6vw, 4.35rem); letter-spacing: -.055em; line-height: .97; overflow-wrap: anywhere; }
 .engine-heading p { color: var(--color-text-muted); margin-block-start: .6rem; }
+.family-badges { display: flex; flex-wrap: wrap; gap: .35rem; margin: .65rem 0 0; padding: 0; list-style: none; }
+.family-badges li { display: inline-flex; align-items: center; gap: .35rem; padding: .24rem .46rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); font-size: .72rem; }
+.family-badges li > span:first-child { font-size: .9rem; }
 .engine-meta { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
 .engine-meta:not(:empty) { margin-block-start: .45rem; }
 .engine-availability { color: var(--color-text-muted); font-size: .75rem; }
@@ -553,12 +557,6 @@ async function load(): Promise<void> {
 .result-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: .35rem; }
 .result-counts dt { color: var(--color-text-muted); font-size: .68rem; }
 .result-counts dd { margin: 0; font-size: .85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.badge-list { display: grid; gap: .55rem; padding: .75rem 1rem; }
-.badge-list article { display: flex; align-items: start; gap: .55rem; }
-.badge-list article > span { font-size: 1.05rem; }
-.badge-list article > div { display: grid; gap: .08rem; }
-.badge-list strong { font-size: .78rem; }
-.badge-list small { color: var(--color-text-muted); font-size: .7rem; }
 .technical-panel summary { display: flex; align-items: center; justify-content: space-between; gap: .4rem; padding: .75rem 1rem; cursor: pointer; list-style: none; font-size: .85rem; }
 .technical-panel summary::-webkit-details-marker { display: none; }
 .technical-panel[open] summary > .app-icon { transform: rotate(180deg); }
