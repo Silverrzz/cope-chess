@@ -14,6 +14,11 @@ const toMove = computed(() => props.finished || props.roadWinner ? null : props.
 <template>
   <div class="tak-overview">
     <table class="tak-overview__stats" aria-label="Tak flat score and reserves">
+      <colgroup>
+        <col class="tak-overview__side-column">
+        <col class="tak-overview__score-column">
+        <col span="2">
+      </colgroup>
       <thead>
         <tr>
           <th scope="col"><span class="sr-only">Side</span></th>
@@ -26,7 +31,7 @@ const toMove = computed(() => props.finished || props.roadWinner ? null : props.
         <tr v-for="side in (['white', 'black'] as const)" :key="side" :class="{ 'tak-overview__turn': toMove === side }">
           <th scope="row">
             {{ side === 'white' ? 'White' : 'Black' }}
-            <span v-if="roadWinner === side" class="tak-overview__winner">Road win</span>
+            <span class="tak-overview__winner" :class="{ 'tak-overview__winner--hidden': roadWinner !== side }">Road win</span>
             <span v-if="toMove === side" class="sr-only">to move</span>
           </th>
           <td>
@@ -65,9 +70,12 @@ const toMove = computed(() => props.finished || props.roadWinner ? null : props.
 }
 .tak-overview__stats {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
 }
+.tak-overview__side-column { width: 28%; }
+.tak-overview__score-column { width: 34%; }
 .tak-overview__stats th, .tak-overview__stats td { padding: var(--space-1) .375rem; text-align: start; }
 .tak-overview__stats th:first-child { padding-inline-start: var(--space-2); }
 .tak-overview__stats :is(th, td):nth-child(n+3) { text-align: center; }
@@ -79,10 +87,11 @@ const toMove = computed(() => props.finished || props.roadWinner ? null : props.
 }
 .tak-overview__stats th, .tak-overview__score { font-weight: 650; }
 .tak-overview__stats td { white-space: nowrap; }
-.tak-overview__score { display: inline-block; min-width: 2ch; text-align: end; }
+.tak-overview__score { display: inline-block; width: 2ch; text-align: end; }
 .tak-overview__komi, .tak-overview__winner { margin-inline-start: var(--space-1); font-size: .75rem; white-space: nowrap; }
 .tak-overview__komi { color: var(--color-text-muted); }
 .tak-overview__winner { color: var(--color-success); }
+.tak-overview__winner--hidden { visibility: hidden; }
 .tak-overview__turn { background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
 .tak-overview__roads { padding-inline: var(--space-2); }
 .tak-overview__roads[aria-pressed='true'] {
@@ -90,8 +99,11 @@ const toMove = computed(() => props.finished || props.roadWinner ? null : props.
   background: var(--color-accent-soft);
   color: var(--color-accent);
 }
-@container (max-width: 20rem) {
-  .tak-overview__stats th, .tak-overview__stats td { padding-inline: var(--space-1); }
+@container (max-width: 26rem) {
+  .tak-overview__side-column, .tak-overview__score-column { width: 30%; }
+  .tak-overview__stats th, .tak-overview__stats td { padding-inline: var(--space-1); vertical-align: top; }
+  .tak-overview__score { text-align: start; }
+  .tak-overview__komi, .tak-overview__winner { display: block; margin-inline-start: 0; }
   .tak-overview__roads { padding-inline: .375rem; }
 }
 </style>
