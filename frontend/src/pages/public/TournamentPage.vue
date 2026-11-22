@@ -190,6 +190,7 @@ const standingRows = computed(() => {
 const showElo = computed(() => Boolean(data.value?.tournament.config?.rated))
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const viewerElos = computed(() => {
+  if (!publishedRating.value) return {}
   const white = viewerGame.value?.white_engine_id
   const black = viewerGame.value?.black_engine_id
   return {
@@ -1097,11 +1098,8 @@ function provisionalDelta(change: number): string {
 }
 
 function viewerEloLabel(side: 'white' | 'black'): string {
-  if (!showElo.value) return ''
   const elo = viewerElos.value[side]
-  if (!elo) return `${eloHeading.value} —`
-  const delta = elo.change === null ? '' : ` ${provisionalDelta(elo.change)}`
-  return `${eloHeading.value} ${Math.round(elo.value).toLocaleString()}${delta}`
+  return elo ? `Final Elo ${Math.round(elo.value).toLocaleString()}` : ''
 }
 
 function viewTarget(mode: ViewerMode): RouteLocationRaw {
@@ -1340,7 +1338,7 @@ function forgetManualFollowPauseGame(): void {
             :name="engineName(data.engines, viewerGame[`${side}_engine_id`], viewerGame[`${side}_name`])"
             :engine-id="viewerGame[`${side}_engine_id`]"
             :rating-text="viewerEloLabel(side)"
-            :rating-title="viewerElos[side]?.title ?? eloUnavailable"
+            :rating-title="viewerElos[side]?.title ?? ''"
             :clock="side === 'white' ? whiteClock : blackClock"
             :analysis="side === 'white' ? whiteAnalysis : blackAnalysis"
             :position-fen="currentPositionFen"
