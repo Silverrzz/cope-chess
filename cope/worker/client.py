@@ -59,7 +59,7 @@ from cope.core.protocol import (
 )
 from cope.core.stream import (
     clamp_uci_info_line,
-    is_full_uci_info_line,
+    is_search_info_line,
     worker_command_elapsed_line,
 )
 from cope.worker.update import install_worker_release
@@ -1850,7 +1850,9 @@ async def _serve_assignment(
             command_timer = _CommandTimer()
 
             info_publisher = (
-                _EngineInfoPublisher(telemetry, command, loop, command_timer)
+                _EngineInfoPublisher(
+                    telemetry, command, loop, command_timer, allow_partial=assignment.variant == "tak"
+                )
                 if command.command.startswith("go")
                 else None
             )
@@ -1976,7 +1978,9 @@ async def _serve_assignment(
 
             result = EngineCommandResult(
                 **command.model_dump(exclude={"command"}),
-                lines=_compact_search_result_lines(result_lines, command_elapsed_ms)
+                lines=_compact_search_result_lines(
+                    result_lines, command_elapsed_ms, allow_partial=assignment.variant == "tak"
+                )
                 if info_publisher is not None
                 else result_lines,
                 elapsed_ms=command_elapsed_ms,
@@ -2395,11 +2399,14 @@ class _EngineInfoPublisher:
         command: EngineCommand,
         loop,
         command_timer: _CommandTimer | None = None,
+        *,
+        allow_partial: bool = False,
     ) -> None:
         self._telemetry = telemetry
         self._command = command
         self._loop = loop
         self._command_timer = _CommandTimer() if command_timer is None else command_timer
+        self._allow_partial = allow_partial
         self._latest_line: str | None = None
         self._wake = asyncio.Event()
         self._finish_requested = asyncio.Event()
@@ -2408,7 +2415,7 @@ class _EngineInfoPublisher:
 
     def publish(self, line: str) -> None:
         line = clamp_uci_info_line(line)
-        if is_full_uci_info_line(line):
+        if is_search_info_line(line, allow_partial=self._allow_partial):
             self._loop.call_soon_threadsafe(self._offer, line)
 
     def _offer(self, line: str) -> None:
@@ -2481,12 +2488,14 @@ def _handle_engine_command_timed(
     return lines, elapsed_ms
 
 
-def _compact_search_result_lines(lines: list[str], elapsed_ms: int) -> list[str]:
+def _compact_search_result_lines(
+    lines: list[str], elapsed_ms: int, *, allow_partial: bool = False
+) -> list[str]:
     """Retain the final analysis snapshot and all non-analysis UCI output."""
     last_info: str | None = None
     result: list[str] = []
     for line in lines:
-        if is_full_uci_info_line(line):
+        if is_search_info_line(line, allow_partial=allow_partial):
             last_info = line
         elif not (line == "info" or line.startswith("info ")):
             result.append(line)

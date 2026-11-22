@@ -16,7 +16,7 @@ from cope.variants.tak import TAK_HALF_KOMI, TAK_SIZE
 
 from cope.core.stream import (
     clamp_uci_info_line,
-    is_full_uci_info_line,
+    is_search_info_line,
     parse_worker_command_elapsed,
 )
 
@@ -288,7 +288,7 @@ class EngineInstance:
 
     def _record_info_line(self, line: str) -> None:
         line = clamp_uci_info_line(line)
-        info = _parse_info_line(line, self._current_search_info)
+        info = _parse_info_line(line, self._current_search_info, allow_partial=self._protocol == "tei")
         if info is not None:
             self._current_search_info = info
             self._current_info_line = line
@@ -588,13 +588,14 @@ def _parse_search_result(
     bestmove: Turn | None = None
     search_info = initial_info or EngineSearchInfo()
     info_line = initial_info_line
+    allow_partial = getattr(board, "variant", None) == "tak"
     for line in lines:
         worker_elapsed_ms = parse_worker_command_elapsed(line)
         if worker_elapsed_ms is not None:
             if command_elapsed_ms is None:
                 command_elapsed_ms = worker_elapsed_ms
             continue
-        info = _parse_info_line(line, search_info)
+        info = _parse_info_line(line, search_info, allow_partial=allow_partial)
         if info is not None:
             search_info = info
             info_line = clamp_uci_info_line(line)
@@ -634,8 +635,10 @@ def _parse_search_result(
     )
 
 
-def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSearchInfo | None:
-    if not is_full_uci_info_line(line):
+def _parse_info_line(
+    line: str, previous: EngineSearchInfo | None, *, allow_partial: bool = False
+) -> EngineSearchInfo | None:
+    if not is_search_info_line(line, allow_partial=allow_partial):
         return None
     parts = line.split()
 
