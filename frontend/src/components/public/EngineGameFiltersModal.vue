@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { engineVersionLabel } from '@/components/public/format'
+import { compareEngineVersions, engineVersionLabel } from '@/components/public/format'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import AppIcon from '@/components/ui/AppIcon.vue'
@@ -88,7 +88,7 @@ const opponentOptions = computed(() => {
   return [...grouped.values()]
     .map((group) => ({
       ...group,
-      children: group.children.sort((left, right) => right.label.localeCompare(left.label, undefined, { numeric: true, sensitivity: 'base' })),
+      children: group.children.sort((left, right) => compareEngineVersions(left.label, right.label)),
     }))
     .sort((left, right) => left.label.localeCompare(right.label))
 })

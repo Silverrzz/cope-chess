@@ -997,11 +997,26 @@ def list_engine_families(connection: sqlite3.Connection) -> tuple[EngineRecord, 
     )
 
 
+_ENGINE_RANDOM_SUFFIX = "'-R(100|[0-9]{1,2})$'"
+_ENGINE_VERSION_DATE = "COALESCE(version.source_date, version.created_at)"
+_ENGINE_VERSION_ORDER = f"""
+    LEAST(
+        {_ENGINE_VERSION_DATE},
+        MAX({_ENGINE_VERSION_DATE}) FILTER (WHERE version.version !~ {_ENGINE_RANDOM_SUFFIX})
+            OVER (PARTITION BY version.engine_id)
+    ) DESC,
+    substring(version.version FROM {_ENGINE_RANDOM_SUFFIX})::integer NULLS FIRST,
+    {_ENGINE_VERSION_DATE} DESC,
+    version.created_at DESC,
+    version.id DESC
+"""
+
+
 def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRecord, ...]:
     return tuple(
         _engine_version_from_row(row)
         for row in connection.execute(
-            """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+            f"""SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
                       artifact.artifact_sha256, artifact.artifact_size,
                       artifact.artifact_format, artifact.entrypoint,
                       artifact.platform, artifact.storage_key,
@@ -1020,7 +1035,7 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
                FROM engine_versions version
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
-               ORDER BY engine.name, COALESCE(version.source_date, version.created_at) DESC, version.created_at DESC, version.id DESC"""
+               ORDER BY engine.name, {_ENGINE_VERSION_ORDER}"""
         )
     )
 
@@ -1029,7 +1044,7 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
     return tuple(
         _engine_version_from_row(row)
         for row in connection.execute(
-            """SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
+            f"""SELECT version.*, engine.name, engine.author, engine.active AS engine_active,
                       artifact.artifact_sha256, artifact.artifact_size,
                       artifact.artifact_format, artifact.entrypoint,
                       artifact.platform, artifact.storage_key,
@@ -1049,7 +1064,7 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
                WHERE version.engine_id = ?
-               ORDER BY COALESCE(version.source_date, version.created_at) DESC, version.created_at DESC, version.id DESC""",
+               ORDER BY {_ENGINE_VERSION_ORDER}""",
             (engine_id,),
         )
     )

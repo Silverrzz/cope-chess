@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
+import { compareEngineVersions } from '@/components/public/format'
 interface Engine {
   id: number
   engine_id: number
@@ -40,7 +41,7 @@ const groups = computed<EngineGroup[]>(() => {
   return [...grouped.values()]
     .map((group) => ({
       ...group,
-      versions: group.versions.sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true, sensitivity: 'base' })),
+      versions: group.versions.sort((left, right) => compareEngineVersions(left.version, right.version)),
     }))
     .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }))
 })

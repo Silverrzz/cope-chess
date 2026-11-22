@@ -6,6 +6,13 @@ export function engineVersionLabel(version: string | null | undefined): string {
   return ['unversioned', 'development'].includes(label.toLowerCase()) ? '' : label
 }
 
+export function compareEngineVersions(left: string, right: string): number {
+  const randomSuffix = /-R(100|[0-9]{1,2})$/
+  const leftRandom = Number(left.match(randomSuffix)?.[1] ?? -1)
+  const rightRandom = Number(right.match(randomSuffix)?.[1] ?? -1)
+  return leftRandom - rightRandom || right.localeCompare(left, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 export function recordValue<T>(record: Record<string, T> | undefined, id: Identifier): T | undefined {
   return record?.[String(id)]
 }
