@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { enginePath, ratingPath } from '@/router/publicUrls'
-import { engineVersionLabel } from '@/components/public/format'
+import { compareEngineVersions, engineVersionLabel } from '@/components/public/format'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -74,6 +74,13 @@ interface EngineResponse {
 }
 
 type FilterKey = keyof EngineGameFilters
+type RatingMode = 'releases' | 'builds' | 'version'
+
+const numericVersion = /^v\.?\s*(?=\d)/i
+const numberedRelease = /^\d+(?:\.\d+)*(?:[a-z])?$/i
+const buildLabel = /(?:^|[\s._-])(?:rc\d*|alpha\d*|beta\d*|dev\d*|snapshot|nightly|pre(?:release)?\d*|unreleased|placeholder|temporary|temp|modified|experimental|test\d*|obfix|cope\d*)(?=$|[\s._-])/i
+const prereleaseSuffix = /\d(?:rc|alpha|beta|pre)\d*$/i
+const randomSuffix = /-R(100|[0-9]{1,2})$/i
 
 const route = useRoute()
 const router = useRouter()
@@ -84,7 +91,7 @@ const loadError = ref('')
 const gameFilters = ref<EngineGameFilters>(emptyFilters())
 const filterModalOpen = ref(false)
 const selectedRatingListId = ref('')
-const ratingMode = ref<'family' | 'version'>('family')
+const requestedRatingMode = ref<RatingMode>('releases')
 const focusedPoint = ref<number | null>(null)
 const pinnedPoint = ref<number | null>(null)
 let controller: AbortController | null = null
@@ -107,35 +114,82 @@ const repositoryUrl = computed(() => data.value?.engine.distribution === 'worker
   : data.value?.engine.repository_url?.replace(/\.git$/, '') ?? '')
 const uciOptions = computed(() => Object.entries(data.value?.engine.uci_options || {}))
 const activeFilterCount = computed(() => Object.values(gameFilters.value).filter(Boolean).length)
-const versionOptions = computed(() => (data.value?.versions ?? []).map((version, index) => ({
-  value: String(version.id),
-  label: engineVersionLabel(version.version) || version.name,
-  description: `${version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'commit' ? 'Commit' : 'Release'}${index === 0 ? ' · latest' : ''}`,
-})))
+const engineVersions = computed(() => {
+  const versions = (data.value?.versions ?? []).map((version) => ({
+    ...version,
+    label: engineVersionLabel(version.version) || version.version?.trim() || 'Unversioned',
+    track: versionTrack(version),
+  }))
+  const releases = versions.filter((version) => version.track === 'releases')
+  if (releases.every((version) => numberedRelease.test(version.label.replace(numericVersion, '')))) {
+    releases.sort((left, right) => compareEngineVersions(left.label.replace(numericVersion, ''), right.label.replace(numericVersion, '')))
+  }
+  const builds = versions.filter((version) => version.track === 'builds')
+  return { releases, builds }
+})
+const versionOptions = computed(() => {
+  const choices = (versions: typeof engineVersions.value.releases) => versions.map((version) => ({
+    value: String(version.id),
+    label: version.label,
+    description: version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'release' ? 'Release source' : 'Commit',
+  }))
+  const releases = choices(engineVersions.value.releases)
+  const builds = choices(engineVersions.value.builds)
+  if (!releases.length || !builds.length) return [...releases, ...builds]
+  return [
+    { value: 'releases', label: 'Releases', children: releases },
+    { value: 'builds', label: 'Other builds', children: builds },
+  ]
+})
 const ratingListOptions = computed(() => (data.value?.version_ratings ?? []).map((list) => ({
   value: String(list.id),
   label: list.name,
   description: `${list.versions.length} rated version${list.versions.length === 1 ? '' : 's'}`,
 })))
 const selectedRating = computed(() => data.value?.ratings.find((rating) => String(rating.rating_list.id) === selectedRatingListId.value) ?? null)
+const familyRatings = computed(() => {
+  const list = data.value?.version_ratings.find((item) => String(item.id) === selectedRatingListId.value)
+  return new Map(list?.versions.map((version) => [String(version.id), version.elo]))
+})
+const ratedVersions = computed(() => {
+  const rated = (versions: typeof engineVersions.value.releases) => versions
+    .filter((version) => familyRatings.value.has(String(version.id)))
+    .reverse()
+  const releases = rated(engineVersions.value.releases)
+  const builds = rated(engineVersions.value.builds)
+  const otherBuilds = builds.filter((version) => !randomSuffix.test(version.label))
+  const randomBuilds = builds.filter((version) => randomSuffix.test(version.label))
+    .sort((left, right) => compareEngineVersions(right.label.replace(randomSuffix, ''), left.label.replace(randomSuffix, ''))
+      || compareEngineVersions(left.label.toUpperCase(), right.label.toUpperCase()))
+  return { releases, builds: [...otherBuilds, ...randomBuilds] }
+})
+const ratingMode = computed<RatingMode>(() => {
+  if (requestedRatingMode.value === 'version') return 'version'
+  if (requestedRatingMode.value === 'builds' && ratedVersions.value.builds.length) return 'builds'
+  return ratedVersions.value.releases.length || !ratedVersions.value.builds.length ? 'releases' : 'builds'
+})
+const chartLabel = computed(() => ({
+  releases: 'Elo by release',
+  builds: 'Elo by build',
+  version: 'Elo over time for this version',
+})[ratingMode.value])
 const chartHistory = computed(() => {
-  if (ratingMode.value === 'version') {
+  const mode = ratingMode.value
+  if (mode === 'version') {
     const rating = selectedRating.value
     return rating?.history.map((point) => ({
       ...point, id: engineId.value, label: formatDate(point.at), selected: false,
     })) ?? []
   }
-  const list = data.value?.version_ratings.find((item) => String(item.id) === selectedRatingListId.value)
-  const ratings = new Map(list?.versions.map((version) => [String(version.id), version.elo]))
-  return (data.value?.versions ?? []).flatMap((version) => {
+  return ratedVersions.value[mode].flatMap((version) => {
     const id = String(version.id)
-    const elo = ratings.get(id)
+    const elo = familyRatings.value.get(id)
     if (elo === undefined) return []
     return [{
       id, elo, at: version.source_date || version.created_at || '',
-      label: engineVersionLabel(version.version) || version.name, selected: id === engineId.value,
+      label: version.label, selected: id === engineId.value,
     }]
-  }).reverse()
+  })
 })
 const ratingChart = computed(() => {
   const history = chartHistory.value
@@ -246,6 +300,15 @@ function dateValue(value: string): number {
   return Date.parse(value) || 0
 }
 
+function versionTrack(version: EngineRecord): 'releases' | 'builds' {
+  const tags = version.tags?.map((tag) => tag.name.trim().toLowerCase()) ?? []
+  if (tags.some((tag) => ['experimental', 'modified', 'temporary'].includes(tag))) return 'builds'
+  if (tags.includes('release')) return 'releases'
+  const label = engineVersionLabel(version.version)
+  if (!label || randomSuffix.test(label) || buildLabel.test(label) || prereleaseSuffix.test(label)) return 'builds'
+  return version.source_kind === 'release' || numberedRelease.test(label.replace(numericVersion, '')) ? 'releases' : 'builds'
+}
+
 function selectVersion(value: string | number): void {
   const target = String(value)
   if (target !== engineId.value) void router.push(enginePath(target))
@@ -320,7 +383,7 @@ async function load(): Promise<void> {
         </div>
         <div v-if="versionOptions.length" class="version-picker">
           <span>Engine version</span>
-          <OptionPicker :model-value="engineId" :options="versionOptions" label="Engine version" icon="tag" :searchable="versionOptions.length > 7" @update:model-value="selectVersion" />
+          <OptionPicker :model-value="engineId" :options="versionOptions" label="Engine version" icon="tag" :searchable="data.versions.length > 7" @update:model-value="selectVersion" />
         </div>
       </header>
 
@@ -331,8 +394,9 @@ async function load(): Promise<void> {
           </div>
           <div class="performance-controls">
             <div class="rating-mode" role="group" aria-label="Rating history view">
-              <button type="button" :aria-pressed="ratingMode === 'family'" @click="ratingMode = 'family'">By version</button>
-              <button type="button" :aria-pressed="ratingMode === 'version'" @click="ratingMode = 'version'">Over time</button>
+              <button v-if="ratedVersions.releases.length || !ratedVersions.builds.length" type="button" :aria-pressed="ratingMode === 'releases'" @click="requestedRatingMode = 'releases'">Releases</button>
+              <button v-if="ratedVersions.builds.length" type="button" :aria-pressed="ratingMode === 'builds'" @click="requestedRatingMode = 'builds'">Other builds</button>
+              <button type="button" :aria-pressed="ratingMode === 'version'" @click="requestedRatingMode = 'version'">Over time</button>
             </div>
             <OptionPicker v-if="ratingListOptions.length > 1" v-model="selectedRatingListId" class="rating-list-picker" :options="ratingListOptions" label="Rating list" />
             <span v-else-if="ratingListOptions[0]" class="rating-list-label">{{ ratingListOptions[0].label }}</span>
@@ -343,9 +407,9 @@ async function load(): Promise<void> {
           <div class="chart-summary">
             <div class="chart-reading" aria-live="polite">
               <strong>{{ Math.round(activePoint.elo).toLocaleString() }} <small>Elo</small></strong>
-              <RouterLink v-if="ratingMode === 'family' && activePoint.id !== engineId" :to="enginePath(activePoint.id)">{{ activePoint.label }}</RouterLink>
+              <RouterLink v-if="ratingMode !== 'version' && activePoint.id !== engineId" :to="enginePath(activePoint.id)">{{ activePoint.label }}</RouterLink>
               <span v-else>{{ activePoint.label }}</span>
-              <span v-if="ratingMode === 'family' && activePoint.at" class="chart-date">{{ formatDate(activePoint.at) }}</span>
+              <span v-if="ratingMode !== 'version' && activePoint.at" class="chart-date">{{ formatDate(activePoint.at) }}</span>
             </div>
             <dl v-if="selectedRating" class="rating-facts">
               <div><dt>Current</dt><dd>{{ Math.round(selectedRating.elo).toLocaleString() }}<small v-if="selectedRating.error_margin != null"> ±{{ Math.round(selectedRating.error_margin) }}</small></dd></div>
@@ -354,13 +418,13 @@ async function load(): Promise<void> {
               <div v-if="ratingMode === 'version'"><dt>Peak</dt><dd>{{ Math.round(selectedRating.peak_elo).toLocaleString() }}</dd></div>
             </dl>
           </div>
-          <svg class="elo-chart" :viewBox="'0 0 ' + ratingChart.width + ' ' + ratingChart.height" role="group" :aria-label="ratingMode === 'family' ? 'Elo by engine version' : 'Elo over time for this version'" @mouseleave="focusedPoint = null">
+          <svg class="elo-chart" :viewBox="'0 0 ' + ratingChart.width + ' ' + ratingChart.height" role="group" :aria-label="chartLabel" @mouseleave="focusedPoint = null">
             <g v-for="tick in ratingChart.ticks" :key="tick.value">
               <line :x1="ratingChart.left" :x2="ratingChart.right" :y1="tick.y" :y2="tick.y" />
               <text :x="ratingChart.left - 8" :y="tick.y + 4" text-anchor="end">{{ tick.value }}</text>
             </g>
-            <polygon class="elo-chart__area" :points="ratingChart.area" />
-            <polyline class="elo-chart__line" :points="ratingChart.polyline" />
+            <polygon v-if="ratingMode !== 'builds'" class="elo-chart__area" :points="ratingChart.area" />
+            <polyline v-if="ratingMode !== 'builds'" class="elo-chart__line" :points="ratingChart.polyline" />
             <line class="elo-chart__guide" :x1="activePoint.x" :x2="activePoint.x" :y1="activePoint.y" :y2="ratingChart.bottom" />
             <circle v-for="(point, index) in ratingChart.points" :key="index" :cx="point.x" :cy="point.y" :r="point === activePoint ? 5 : 3" :class="{ 'chart-point--active': point === activePoint }" tabindex="0" role="button" :aria-pressed="pinnedPoint === index" :aria-label="point.label + ', ' + Math.round(point.elo) + ' Elo'" @mouseenter="focusedPoint = index" @click="pinnedPoint = index" @focus="focusedPoint = index" @blur="focusedPoint = null" @keydown.enter.prevent="pinnedPoint = index" @keydown.space.prevent="pinnedPoint = index" />
             <text :x="ratingChart.points[0]?.x" :y="ratingChart.height - 9" :text-anchor="ratingChart.end ? 'start' : 'middle'">{{ ratingChart.start }}</text>
@@ -368,7 +432,7 @@ async function load(): Promise<void> {
           </svg>
           <RouterLink v-if="selectedRatingListId" class="rating-link" :to="ratingPath(selectedRatingListId)">View rating list <AppIcon name="arrow-right" :size="13" /></RouterLink>
         </div>
-        <ContentState v-else kind="empty" compact embedded :title="ratingMode === 'family' ? 'No rated versions yet' : 'No rating history for this version'" />
+        <ContentState v-else kind="empty" compact embedded :title="ratingMode === 'version' ? 'No rating history for this version' : 'No rated versions yet'" />
       </section>
 
       <div class="engine-main">

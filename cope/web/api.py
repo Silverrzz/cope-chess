@@ -1868,7 +1868,10 @@ def register_api_routes(app: FastAPI) -> None:
             {
                 "engine": {**jsonable_encoder(engine), "tags": tags.get(engine.id, [])},
                 "family": family,
-                "versions": versions,
+                "versions": [
+                    {**jsonable_encoder(version), "tags": tags.get(version.id, [])}
+                    for version in versions
+                ],
                 "games": games,
                 "game_export_formats": game_export_formats,
                 "engines": {
