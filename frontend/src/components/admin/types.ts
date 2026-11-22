@@ -213,6 +213,7 @@ export interface FormSeed {
   name: string
   config: TournamentConfig
   engine_options: Engine[]
+  tak_engine_ids?: Id[]
   opening_suites: OpeningSuite[]
   clock_reference_profiles?: Array<{
     hardware_key: string

@@ -5,6 +5,7 @@ import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import ChessBoard from '@/components/chess/ChessBoard.vue'
 import { isTurn, type Variant } from '@/components/chess/chess'
+import { takMovePath } from '@/components/chess/tak'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
 import type { EngineAnalysis, Identifier } from './types'
@@ -48,8 +49,8 @@ const evaluation = computed(() => {
 const depth = computed(() => `${props.analysis?.depth ?? '-'}/${props.analysis?.seldepth ?? '-'}`)
 const pvMoves = computed(() => (props.analysis?.pv || '')
   .split(/\s+/)
-  .map((move) => move.toLowerCase())
-  .filter(isTurn))
+  .map((move) => props.variant === 'tak' ? move : move.toLowerCase())
+  .filter((move) => props.variant === 'tak' ? takMovePath(move).length > 0 : isTurn(move)))
 const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen || 'startpos')
 </script>
 
@@ -102,6 +103,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
         <div class="pv-preview">
           <span>PV position</span>
           <ChessBoard
+            :key="variant || 'standard'"
             :variant="variant"
             :fen="pvRootFen"
             :moves="pvMoves"

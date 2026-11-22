@@ -9,6 +9,7 @@ from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import chess
 from cope.variants import create_board, get_variant
+from cope.variants.tak import TAK_HALF_KOMI, TAK_SIZE, TAK_START
 
 from cope.db import MoveRecord
 
@@ -26,6 +27,7 @@ class PgnExportFilters:
     opponent_engine_id: int | None = None
     color: PgnColorFilter | None = None
     result: PgnResultFilter | None = None
+    ptn: bool = False
 
     def __post_init__(self) -> None:
         identifiers = (
@@ -138,6 +140,49 @@ def render_annotated_pgn(game: PgnGame) -> str:
     return f"{header_text}\n\n{movetext}"
 
 
+def render_ptn(game: PgnGame) -> str:
+    board = create_board(game.start_fen, variant="tak")
+    date, utc_time = _date_headers(game.started_at)
+    result = game.result
+    if game.termination in {"road", "flat count"} and result in {"1-0", "0-1"}:
+        symbol = "R" if game.termination == "road" else "F"
+        result = result.replace("1", symbol)
+    headers = [
+        ("Site", "COPE"), ("Event", game.event), ("Date", date), ("Time", utc_time or "??:??:??"),
+        ("Player1", game.white), ("Player2", game.black), ("Result", result),
+        ("Size", TAK_SIZE), ("Komi", f"{TAK_HALF_KOMI / 2:g}"), ("Round", game.round),
+    ]
+    if board.fen() != TAK_START:
+        headers.append(("TPS", board.fen()))
+    if game.time_control:
+        category = game.time_control.get("category")
+        if category == "increment":
+            minutes, seconds_ms = divmod(int(game.time_control["initial_ms"]), 60_000)
+            seconds = _seconds(seconds_ms)
+            seconds = f"0{seconds}" if seconds_ms < 10_000 else seconds
+            headers.append(("Clock", f"{minutes}:{seconds} +{_seconds(game.time_control['increment_ms'])}"))
+        elif category == "movetime":
+            headers.append(("MoveTime", _seconds(game.time_control["move_time_ms"])))
+        elif category == "movenodes":
+            headers.append(("NodeLimit", game.time_control["nodes"]))
+    if game.termination:
+        headers.append(("Termination", game.termination))
+    turns = []
+    for record in game.moves:
+        move = board.parse_uci(record.uci)
+        if record.ply != board.ply() + 1 or not board.is_legal(move):
+            raise ValueError(f"Game {game.id}: illegal Tak turn at ply {record.ply}")
+        if board.turn:
+            turns.append(f"{board.fullmove_number}.")
+        elif not turns:
+            turns.append(f"{board.fullmove_number}...")
+        turns.append(board.san(move))
+        board.push(move)
+    turns.append(result)
+    header_text = "\n".join(_render_header(name, value) for name, value in headers)
+    return f"{header_text}\n\n{' '.join(turns)}"
+
+
 def pgn_export_exists(
     connection: sqlite3.Connection,
     filters: PgnExportFilters,
@@ -163,6 +208,7 @@ def iter_pgn_export(
     batch_size: int = 250,
 ) -> Iterator[str]:
     after_id = 0
+    render = render_ptn if filters.ptn else render_annotated_pgn
     time_controls: dict[str, Mapping[str, Any] | None] = {}
     while True:
         rows = _list_export_games(connection, filters, after_id=after_id, limit=batch_size)
@@ -193,13 +239,13 @@ def iter_pgn_export(
                 moves=moves_by_game.get(game_id, ()),
                 variant=json.loads(raw_config).get("variant", "standard"),
             )
-            yield f"{render_annotated_pgn(game)}\n\n"
+            yield f"{render(game)}\n\n"
         after_id = game_ids[-1]
 
 
-def safe_pgn_filename(value: str, fallback: str) -> str:
+def safe_pgn_filename(value: str, fallback: str, *, extension: Literal["pgn", "ptn"] = "pgn") -> str:
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-.")
-    return f"{stem or fallback}.pgn"
+    return f"{stem or fallback}.{extension}"
 
 
 def _list_export_games(
@@ -290,6 +336,7 @@ def _export_conditions(filters: PgnExportFilters) -> tuple[list[str], list[int |
         "tournament.status <> 'draft'",
     ]
     parameters: list[int | str] = []
+    conditions.append("COALESCE(tournament.config::jsonb->>'variant', 'standard') " + ("= 'tak'" if filters.ptn else "<> 'tak'"))
     if filters.game_id is not None:
         conditions.append("game.id = ?")
         parameters.append(filters.game_id)

@@ -12,6 +12,7 @@ import { useViewerSettings } from '@/composables/useViewerSettings'
 import ChessViewer from '@/components/chess/ChessViewer.vue'
 import MoveList from '@/components/chess/MoveList.vue'
 import { applyUci, buildPositions, parseFen, positionFen, type BoardArrow } from '@/components/chess/chess'
+import { applyTakMove, buildTakPositions, parseTakPosition, takPositionText } from '@/components/chess/tak'
 import ChatPanel from '@/components/public/ChatPanel.vue'
 import ContentState from '@/components/public/ContentState.vue'
 import EnginePanel from '@/components/public/EnginePanel.vue'
@@ -109,7 +110,8 @@ const loadError = ref('')
 const selectedPly = ref(0)
 const orientation = ref<'white' | 'black'>('white')
 const { kibitzerEnabled } = useViewerSettings()
-const supportsKibitzer = computed(() => !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
+const isTak = computed(() => data.value?.tournament.config?.variant === 'tak')
+const supportsKibitzer = computed(() => !isTak.value && !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
 const currentPositionPly = ref(0)
 const kibitzerHistory = ref<Record<string, Record<number, KibitzerEvaluation>>>({})
@@ -203,10 +205,10 @@ const pickerGameId = computed(() => {
 const gamePgnDownloadUrl = computed(() => {
   const game = viewerGame.value
   return game?.status === 'finished'
-    ? `/api/pgn?game_id=${encodeURIComponent(String(game.id))}`
+    ? `/api/${isTak.value ? 'ptn' : 'pgn'}?game_id=${encodeURIComponent(String(game.id))}`
     : ''
 })
-const tournamentPgnDownloadUrl = computed(() => `/api/pgn?tournament_id=${encodeURIComponent(tournamentId.value)}`)
+const tournamentPgnDownloadUrl = computed(() => `/api/${isTak.value ? 'ptn' : 'pgn'}?tournament_id=${encodeURIComponent(tournamentId.value)}`)
 const moves = computed(() => data.value?.viewer_moves || [])
 const bookPlyCount = computed(() => moves.value.filter((move) => move.is_book).length)
 const opening = computed(() => data.value?.opening || { name: 'Start position', fen: 'startpos' })
@@ -250,6 +252,7 @@ const blackAnalysis = computed(() => analysisForSide('black'))
 const whiteClock = computed(() => clockForSide('white'))
 const blackClock = computed(() => clockForSide('black'))
 const suggestedMoves = computed<BoardArrow[]>(() => {
+  if (isTak.value) return []
   const positions = buildPositions(opening.value.fen, moves.value.map((move) => move.uci), data.value?.tournament.config?.variant)
   const viewedPly = Math.max(0, Math.min(selectedPly.value, moves.value.length))
   const viewedFen = positionFen(positions[viewedPly]!)
@@ -284,7 +287,7 @@ const headerTimeControl = computed(() => timeControlLabel(data.value?.tournament
 const activeSide = computed<'white' | 'black' | null>(() => {
   if (isLatestPly.value && clockRuntime.value?.running) return clockRuntime.value.activeSide
   if (!viewerGame.value) return null
-  return parseFen(currentPositionFen.value).turn === 'w' ? 'white' : 'black'
+  return positionSide(currentPositionFen.value)
 })
 
 watch(tournamentId, (id) => {
@@ -342,7 +345,7 @@ watch(headingElement, (next, previous) => {
   scheduleArenaFit()
 }, { flush: 'post' })
 
-watch([arenaElement, boardColumnElement, viewerMode], () => scheduleArenaFit(), { flush: 'post' })
+watch([arenaElement, boardColumnElement, viewerMode, isTak], () => scheduleArenaFit(), { flush: 'post' })
 
 onMounted(() => {
   headingResizeObserver = new ResizeObserver(scheduleArenaFit)
@@ -398,16 +401,29 @@ async function fitArenaToViewport(): Promise<void> {
 
   const viewerChrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height)
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-  const maximumBoardSize = 42 * rootFontSize
+  const arenaStyle = getComputedStyle(arena)
+  const boardAspect = Number.parseFloat(arenaStyle.getPropertyValue('--arena-board-aspect')) || 1
+  const stackedTak = isTak.value && boardAspect < 1
+  const maximumBoardSize = 42 * rootFontSize * (isTak.value ? Math.max(1, boardAspect) : 1)
   const arenaWidth = arena.clientWidth
-  const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
+  const gap = Number.parseFloat(arenaStyle.columnGap) || 12
   const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
-  const widthLimit = window.innerWidth > 1152
+  let widthLimit = window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
+  if (isTak.value) {
+    if (stackedTak) {
+      widthLimit = arenaWidth
+    } else if (window.matchMedia('(max-width: 96rem)').matches) {
+      widthLimit = arenaWidth - 25 * rootFontSize - gap
+    } else {
+      const activityRem = Number.parseFloat(arenaStyle.getPropertyValue('--arena-activity-rem'))
+      widthLimit = arenaWidth - (22 + activityRem) * rootFontSize - 2 * gap
+    }
+  }
   const fittedBoardSize = (chromeHeight: number) => Math.max(
     0,
-    Math.min(maximumBoardSize, Math.max(180, widthLimit), Math.floor(availableHeight - chromeHeight)),
+    Math.min(maximumBoardSize, Math.max(180, widthLimit), stackedTak ? arenaWidth : Math.floor((availableHeight - chromeHeight) * boardAspect)),
   )
 
   const viewportPosition = currentViewportPosition()
@@ -614,11 +630,13 @@ function applyCrossTableMove(payload: GameMoveEvent): void {
     scheduleSnapshotRefresh()
     return
   }
-  const nextPosition = applyUci(parseFen(game.fen), payload.move.uci, data.value.tournament.config?.variant)
-  const activeSide = nextPosition.turn === 'w' ? 'white' : 'black'
+  const fen = isTak.value
+    ? takPositionText(applyTakMove(parseTakPosition(game.fen), payload.move.uci))
+    : positionFen(applyUci(parseFen(game.fen), payload.move.uci, data.value.tournament.config?.variant))
+  const activeSide = positionSide(fen)
   const moverSide = payload.ply % 2 === 1 ? 'white' : 'black'
   Object.assign(game, {
-    fen: positionFen(nextPosition),
+    fen,
     last_move: payload.move.uci,
     ply: payload.ply,
     evaluations: {
@@ -934,20 +952,20 @@ function analysisForSide(side: 'white' | 'black'): EngineAnalysis {
   const moveIndex = latestMoveIndexForSide(side, selectedPly.value)
   const move = moveIndex >= 0 ? moves.value[moveIndex] : undefined
   if (!move) return {}
+  const precedingMoves = moves.value.slice(0, moveIndex).map((item) => item.uci)
   const analysis: EngineAnalysis = {
     nps: moveNps(move),
     eval: moveEvaluation(move),
-    root_fen: positionFen(buildPositions(
-      opening.value.fen,
-      moves.value.slice(0, moveIndex).map((item) => item.uci),
-      data.value?.tournament.config?.variant,
-    ).at(-1)!),
+    root_fen: isTak.value
+      ? takPositionText(buildTakPositions(opening.value.fen, precedingMoves).at(-1)!)
+      : positionFen(buildPositions(opening.value.fen, precedingMoves, data.value?.tournament.config?.variant).at(-1)!),
   }
   if (move.depth !== undefined) analysis.depth = move.depth
   if (move.seldepth !== undefined) analysis.seldepth = move.seldepth
   if (move.nodes !== undefined) analysis.nodes = move.nodes
   if (move.hashfull !== undefined) analysis.hashfull = move.hashfull
   if (move.pv_san !== undefined) analysis.pv_san = move.pv_san
+  if (move.pv !== undefined) analysis.pv = move.pv
   const info = move.info_line || move.pv
   if (info !== undefined) analysis.info = info
   return analysis
@@ -971,8 +989,12 @@ function latestMoveIndexForSide(side: 'white' | 'black', ply: number): number {
 }
 
 function moveSide(index: number): 'white' | 'black' {
-  const first = parseFen(opening.value.fen).turn === 'w' ? 'white' : 'black'
+  const first = positionSide(opening.value.fen)
   return index % 2 === 0 ? first : first === 'white' ? 'black' : 'white'
+}
+
+function positionSide(fen: string): 'white' | 'black' {
+  return (isTak.value ? parseTakPosition(fen).turn : parseFen(fen).turn) === 'w' ? 'white' : 'black'
 }
 
 function pvMoves(value: string | null | undefined): string[] {
@@ -1218,7 +1240,7 @@ function forgetManualFollowPauseGame(): void {
               <RouterLink :to="viewTarget('cross')" :aria-current="viewerMode === 'cross' ? 'page' : undefined">Multi-View</RouterLink>
             </nav>
             <div v-if="gameTotal" class="pgn-downloads">
-              <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament PGN</a>
+              <a class="pgn-download" :href="tournamentPgnDownloadUrl" download>Tournament {{ isTak ? 'PTN' : 'PGN' }}</a>
               <a v-if="viewerMode === 'focus' && gamePgnDownloadUrl" class="pgn-download" :href="gamePgnDownloadUrl" download>This game</a>
             </div>
           </div>
@@ -1250,9 +1272,9 @@ function forgetManualFollowPauseGame(): void {
 
       <p v-if="loadError" class="inline-error" role="alert">{{ loadError }} <button type="button" @click="loadDetail(true)">Try again</button></p>
 
-      <TournamentCrossTable v-if="viewerMode === 'cross'" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
+      <TournamentCrossTable v-if="viewerMode === 'cross'" :variant="data.tournament.config?.variant" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
 
-      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer, 'arena--tak-reserves': isTak }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
             v-for="side in (['black', 'white']) as ('white' | 'black')[]"
@@ -1276,6 +1298,7 @@ function forgetManualFollowPauseGame(): void {
             :variant="data.tournament.config?.variant"
             :opening="isPreparing ? preparedOpening : opening"
             :moves="isPreparing ? [] : moves"
+            :finished="viewerGame.status === 'finished'"
             :model-value="isPreparing ? 0 : selectedPly"
             :arrows="isPreparing ? [] : suggestedMoves"
             :label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)} replay`"
@@ -1291,6 +1314,7 @@ function forgetManualFollowPauseGame(): void {
             :moves="moves.map((move) => move.san || move.uci)"
             :uci-moves="moves.map((move) => move.uci)"
             :fen="opening.fen"
+            :variant="data.tournament.config?.variant"
             :book-plies="bookPlyCount"
             :model-value="selectedPly"
             @update:model-value="selectedPly = $event"
@@ -1639,11 +1663,17 @@ function forgetManualFollowPauseGame(): void {
 
 .arena {
   display: grid;
-  grid-template-columns: minmax(22rem, 26rem) var(--arena-board-size) minmax(28rem, 1fr);
+  grid-template-columns: minmax(22rem, 26rem) var(--arena-board-size) minmax(calc(var(--arena-activity-rem, 28) * 1rem), 1fr);
   gap: clamp(0.7rem, 1.5vw, 1.2rem);
   align-items: start;
   height: var(--arena-content-height);
   min-height: 0;
+}
+
+.arena--tak-reserves {
+  --arena-board-aspect: 1.2916667;
+  --arena-activity-rem: 24;
+  min-width: 0;
 }
 
 .engine-column,
@@ -1834,6 +1864,7 @@ function forgetManualFollowPauseGame(): void {
   .tournament-heading__actions,
   .tournament-heading__pickers { flex: 0 0 auto; }
   .arena { grid-template-columns: 1fr; }
+  .arena--tak-reserves { --arena-board-aspect: .8571429; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
   .engine-column .game-evaluation { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }

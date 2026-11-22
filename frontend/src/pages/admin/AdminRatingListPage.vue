@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
@@ -25,6 +25,11 @@ const listName = ref('')
 const description = ref('')
 const hardwareScaled = ref(false)
 const monthlyRefresh = ref(false)
+
+watch(listVariant, (value) => {
+  if (value !== 'standard') hardwareScaled.value = false
+})
+
 const rulesLocked = computed(() => Boolean(data.value?.tournaments.length || data.value?.ratings.length))
 const onlyBestVersions = ref(false)
 const displayedRatings = computed(() => {
@@ -103,8 +108,8 @@ onMounted(load)
         <p v-if="rulesLocked">Variant, clock mode, and results window are locked while the list has rated results.</p>
       </div>
       <label class="field"><span>List name</span><input v-model="listName" class="input" maxlength="120" required /></label>
-      <label class="field"><span>Variant</span><VariantPicker v-model="listVariant" :disabled="rulesLocked || !!pending" /></label>
-      <label class="field"><span>Clock mode</span><select v-model="hardwareScaled" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true">Hardware-scaled only</option></select></label>
+      <label class="field"><span>Variant</span><VariantPicker v-model="listVariant" allow-tak :disabled="rulesLocked || !!pending" /></label>
+      <label class="field"><span>Clock mode</span><select v-model="hardwareScaled" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true" :disabled="listVariant !== 'standard'">Hardware-scaled only</option></select></label>
       <label class="field"><span>Results window</span><select v-model="monthlyRefresh" class="input" :disabled="rulesLocked || !!pending"><option :value="false">Cumulative</option><option :value="true">Latest monthly edition</option></select></label>
       <label class="field description-field"><span>Public description</span><textarea v-model="description" class="input" maxlength="2000" rows="3" /></label>
       <div class="details-actions"><button class="button button--secondary" :disabled="!!pending || !listName.trim()">{{ pending === 'details' ? 'Saving…' : 'Save details' }}</button></div>

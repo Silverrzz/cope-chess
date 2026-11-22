@@ -14,7 +14,7 @@ from cope.db import (
     list_engine_records,
     list_opening_suites,
 )
-from cope.db.repo import validate_tournament_variant
+from cope.db.repo import validate_tournament_variant, variant_engine_version_ids
 from cope.variants import VARIANTS
 
 
@@ -125,8 +125,9 @@ def _validated_tournament_config(
         validate_tournament_variant(connection, submitted)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    for engine_id in submitted.participants:
-        _validate_engine_variant(connection, records[engine_id], submitted.variant)
+    if submitted.variant != "tak":
+        for engine_id in submitted.participants:
+            _validate_engine_variant(connection, records[engine_id], submitted.variant)
     return submitted
 
 
@@ -175,6 +176,7 @@ def _tournament_form_payload(
         "config": config,
         "participants": participants,
         "engine_options": engines,
+        "tak_engine_ids": sorted(variant_engine_version_ids(connection, "tak")),
         "opening_suites": list_opening_suites(connection),
         "clock_reference_profiles": list_benchmark_hardware(connection),
         "variants": [dict(id=v.id, name=v.name, rules_revision=v.rules_revision) for v in VARIANTS.values()],

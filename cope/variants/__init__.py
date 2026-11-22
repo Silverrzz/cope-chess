@@ -6,11 +6,12 @@ from typing import Literal
 import chess
 
 from .duck import DuckBoard, DuckTurn
+from .tak import TAK_CAPS, TAK_FLATS, TAK_HALF_KOMI, TAK_START, TakBoard, TakMove
 
 
-VariantId = Literal["standard", "dfrc", "duck", "duck960"]
-Position = chess.Board | DuckBoard
-Turn = chess.Move | DuckTurn
+VariantId = Literal["standard", "dfrc", "duck", "duck960", "tak"]
+Position = chess.Board | DuckBoard | TakBoard
+Turn = chess.Move | DuckTurn | TakMove
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,13 +22,18 @@ class VariantDefinition:
     chess960: bool = False
     duck: bool = False
     requires_openings: bool = False
+    engine_protocol: Literal["uci", "tei"] = "uci"
 
     def board(self, fen: str | None = None) -> Position:
+        if self.engine_protocol == "tei":
+            return TakBoard(TAK_START if not fen or fen == "startpos" else fen)
         fen = chess.STARTING_FEN if not fen or fen == "startpos" else fen
         return DuckBoard(fen, chess960=self.chess960) if self.duck else chess.Board(fen, chess960=self.chess960)
 
-    def uci_options(self) -> dict[str, str | bool]:
-        options: dict[str, str | bool] = {}
+    def uci_options(self) -> dict[str, str | int | bool]:
+        if self.engine_protocol == "tei":
+            return {"HalfKomi": TAK_HALF_KOMI, "Flats": TAK_FLATS, "Caps": TAK_CAPS}
+        options: dict[str, str | int | bool] = {}
         options["UCI_Variant"] = "duck" if self.duck else "chess"
         options["UCI_Chess960"] = self.chess960
         return options
@@ -43,6 +49,7 @@ VARIANTS = {item.id: item for item in (
     VariantDefinition("dfrc", "DFRC", "chess1", chess960=True, requires_openings=True),
     VariantDefinition("duck", "Duck", "duck1", duck=True),
     VariantDefinition("duck960", "Duck960", "duck1", chess960=True, duck=True, requires_openings=True),
+    VariantDefinition("tak", "Tak 6×6 +2", "tak1", engine_protocol="tei"),
 )}
 
 

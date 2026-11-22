@@ -12,10 +12,11 @@ from typing import Protocol, runtime_checkable
 
 import chess
 from cope.variants import Position, Turn
+from cope.variants.tak import TAK_HALF_KOMI, TAK_SIZE
 
 from cope.core.stream import (
     clamp_uci_info_line,
-    is_full_uci_info_line,
+    is_search_info_line,
     parse_worker_command_elapsed,
 )
 
@@ -75,10 +76,11 @@ class EngineCommandTransport(Protocol):
 
 
 class EngineInstance:
-    def __init__(self, id, host, options: dict[str, str | int | bool] | None = None):
+    def __init__(self, id, host, options: dict[str, str | int | bool] | None = None, *, protocol: str = "uci"):
         self._name = id
         self._host = host
         self._options = dict(options or {})
+        self._protocol = protocol
         self._process: subprocess.Popen[str] | None = None
         self._stdout_buffer = ""
         self._io_lock = threading.Lock()
@@ -117,11 +119,12 @@ class EngineInstance:
         self._info_listener = listener
 
     def start_new_game(self):
+        reset = f"teinewgame {TAK_SIZE}" if self._protocol == "tei" else "ucinewgame"
         if self._is_remote():
             self._ensure_engine_started()
             for name, value in self._configured_options().items():
                 self._send_remote_command(setoption_command(name, value))
-            self._send_remote_command("ucinewgame")
+            self._send_remote_command(reset)
             self._read_remote_until_token("isready", "readyok")
             return
 
@@ -129,7 +132,7 @@ class EngineInstance:
         for name, value in self._configured_options().items():
             self._send_uci_command(setoption_command(name, value))
 
-        self._send_uci_command("ucinewgame")
+        self._send_uci_command(reset)
         self._send_uci_command("isready")
         self._read_until_token("readyok")
 
@@ -285,7 +288,7 @@ class EngineInstance:
 
     def _record_info_line(self, line: str) -> None:
         line = clamp_uci_info_line(line)
-        info = _parse_info_line(line, self._current_search_info)
+        info = _parse_info_line(line, self._current_search_info, allow_partial=self._protocol == "tei")
         if info is not None:
             self._current_search_info = info
             self._current_info_line = line
@@ -311,9 +314,9 @@ class EngineInstance:
         if self._is_remote():
             if self._started:
                 return
-            output = self._send_remote_command("uci")
-            if "uciok" not in output.lines:
-                raise RuntimeError(f"{self._name} did not complete UCI initialization")
+            output = self._send_remote_command(self._protocol)
+            if f"{self._protocol}ok" not in output.lines:
+                raise RuntimeError(f"{self._name} did not complete {self._protocol.upper()} initialization")
             self._remember_options(output.lines)
             self._read_remote_until_token("isready", "readyok")
             self._started = True
@@ -323,8 +326,8 @@ class EngineInstance:
             process = self._ensure_process()
             if self._started:
                 return
-            self._send_raw("uci")
-            self._remember_options(self._read_until_token("uciok"))
+            self._send_raw(self._protocol)
+            self._remember_options(self._read_until_token(f"{self._protocol}ok"))
             self._send_raw("isready")
             self._read_until_token("readyok")
             self._started = True
@@ -338,6 +341,17 @@ class EngineInstance:
 
     def _configured_options(self) -> dict[str, str | int | bool]:
         options = dict(self._options)
+        if self._protocol == "tei":
+            komi = self._advertised_options.get("halfkomi", "")
+            choices = re.findall(r"(?:default|var) (-?\d+)", komi)
+            bounds = re.search(r"min (-?\d+) max (-?\d+)", komi)
+            if str(TAK_HALF_KOMI) not in choices and not (
+                bounds and int(bounds[1]) <= TAK_HALF_KOMI <= int(bounds[2])
+            ):
+                raise RuntimeError(f"{self._name} does not advertise +2 komi")
+            if "threads" not in self._advertised_options and options.get("Threads", 1) != 1:
+                raise RuntimeError(f"{self._name} does not advertise Threads")
+            return {name: value for name, value in options.items() if name.lower() in self._advertised_options}
         duck = options.get("UCI_Variant") == "duck"
         if duck:
             declaration = self._advertised_options.get("uci_variant", "")
@@ -574,13 +588,14 @@ def _parse_search_result(
     bestmove: Turn | None = None
     search_info = initial_info or EngineSearchInfo()
     info_line = initial_info_line
+    allow_partial = getattr(board, "variant", None) == "tak"
     for line in lines:
         worker_elapsed_ms = parse_worker_command_elapsed(line)
         if worker_elapsed_ms is not None:
             if command_elapsed_ms is None:
                 command_elapsed_ms = worker_elapsed_ms
             continue
-        info = _parse_info_line(line, search_info)
+        info = _parse_info_line(line, search_info, allow_partial=allow_partial)
         if info is not None:
             search_info = info
             info_line = clamp_uci_info_line(line)
@@ -620,8 +635,10 @@ def _parse_search_result(
     )
 
 
-def _parse_info_line(line: str, previous: EngineSearchInfo | None) -> EngineSearchInfo | None:
-    if not is_full_uci_info_line(line):
+def _parse_info_line(
+    line: str, previous: EngineSearchInfo | None, *, allow_partial: bool = False
+) -> EngineSearchInfo | None:
+    if not is_search_info_line(line, allow_partial=allow_partial):
         return None
     parts = line.split()
 

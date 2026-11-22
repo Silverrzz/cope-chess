@@ -23,6 +23,7 @@ from cope.db import (
     list_rating_lists,
     list_rating_rows,
 )
+from cope.db.repo import variant_engine_version_ids
 
 LOG = logging.getLogger(__name__)
 
@@ -70,13 +71,15 @@ def register_tournament_tools_routes(app: FastAPI) -> None:
             for engine in engine_records.values()
             if _engine_is_tournament_ready(connection, engine)
         }
+        form = _tournament_form_payload(web_app, request, connection)
+        tak_engine_ids = set(form["tak_engine_ids"])
         rating_lists = []
         for rating_list in list_rating_lists(connection):
             engines = []
             unavailable_engines = 0
             for row in list_rating_rows(connection, rating_list.id):
                 engine_id = row.engine.engine_id
-                if engine_id not in eligible_engine_ids:
+                if engine_id not in eligible_engine_ids or (rating_list.variant == "tak" and engine_id not in tak_engine_ids):
                     unavailable_engines += 1
                     continue
                 engines.append(
@@ -98,7 +101,6 @@ def register_tournament_tools_routes(app: FastAPI) -> None:
                     "unavailable_engines": unavailable_engines,
                 }
             )
-        form = _tournament_form_payload(web_app, request, connection)
         form["engine_options"] = [
             engine for engine in form["engine_options"]
             if engine.id in eligible_engine_ids
@@ -124,12 +126,17 @@ def register_tournament_tools_routes(app: FastAPI) -> None:
             or not _engine_is_tournament_ready(connection, hero)
         ):
             raise HTTPException(status_code=422, detail="Choose an available hero engine.")
+        tak_engine_ids = variant_engine_version_ids(connection, "tak") if rating_list.variant == "tak" else None
+        if tak_engine_ids is not None and hero.id not in tak_engine_ids:
+            raise HTTPException(status_code=422, detail="Choose a hero with recorded Tak support.")
         engine_records = {engine.id: engine for engine in list_engine_records(connection)}
         candidates = []
         for row in list_rating_rows(connection, payload.rating_list_id):
             engine_id = row.engine.engine_id
             record = engine_records.get(engine_id)
             if engine_id == payload.hero_engine_id or record is None:
+                continue
+            if tak_engine_ids is not None and engine_id not in tak_engine_ids:
                 continue
             if not _engine_is_tournament_ready(connection, record):
                 continue

@@ -14,6 +14,7 @@ const props = withDefaults(defineProps<{
   label?: string
   arrows?: BoardArrow[]
   rings?: string[]
+  finished?: boolean
 }>(), {
   opening: null,
   moves: () => [],
@@ -38,6 +39,7 @@ const uciMoves = computed(() => props.moves.map((move) => move.uci).filter(Boole
 const sanMoves = computed(() => props.moves.map((move) => move.san || move.uci))
 const opening = computed<OpeningRecord>(() => props.opening || { name: 'Start position', fen: 'startpos' })
 const bookPlyTotal = computed(() => opening.value.book_moves?.length || 0)
+const positionFormat = computed(() => props.variant === 'tak' ? 'TPS' : 'FEN')
 const hasOpeningName = computed(() => {
   const name = opening.value.name.trim().toLowerCase()
   return Boolean(name) && name !== '?' && name !== 'opening'
@@ -88,6 +90,7 @@ function fallbackCopy(value: string): void {
 <template>
   <div class="viewer-shell" :data-orientation="orientation">
     <ChessBoard
+      :key="variant || 'standard'"
       :variant="variant"
       :fen="opening.fen"
       :moves="uciMoves"
@@ -97,6 +100,7 @@ function fallbackCopy(value: string): void {
       :label="label"
       :arrows="arrows"
       :rings="rings"
+      :finished="finished"
       @update:model-value="selectPly"
       @position="currentFen = $event.fen; emit('position', $event)"
     />
@@ -106,15 +110,15 @@ function fallbackCopy(value: string): void {
         v-if="hasOpeningName"
         class="viewer-meta__copy viewer-meta__copy--opening"
         type="button"
-        :title="`Copy opening${opening.fen === 'startpos' ? '' : ' and starting FEN'}`"
+        :title="`Copy opening${opening.fen === 'startpos' ? '' : ` and starting ${positionFormat}`}`"
         @click="copy(opening.fen === 'startpos' ? opening.name : `${opening.name} | ${opening.fen}`, 'Opening')"
       >
         <span>Opening</span>
         <strong>{{ opening.name }}</strong>
         <small v-if="bookPlyTotal">{{ bookPlyTotal }} book plies from its start position</small>
       </button>
-      <button class="viewer-meta__copy viewer-meta__copy--fen" type="button" title="Copy current FEN" @click="copy(currentFen, 'FEN')">
-        <span>Current FEN</span>
+      <button class="viewer-meta__copy viewer-meta__copy--fen" type="button" :title="`Copy current ${positionFormat}`" @click="copy(currentFen, positionFormat)">
+        <span>Current {{ positionFormat }}</span>
         <code>{{ currentFen }}</code>
       </button>
       <button class="viewer-meta__flip" type="button" :aria-label="`Flip board, ${orientation} is currently at the bottom`" @click="flipBoard">

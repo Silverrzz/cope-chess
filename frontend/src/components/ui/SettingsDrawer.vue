@@ -104,7 +104,11 @@ function toggle(): void {
 }
 
 onBeforeUnmount(() => {
-  if (open.value) { evaluationPerspective.value = originalPerspective; revertBoardTheme(); setTheme(originalDarkMode ? "dark" : "light"); }
+  if (open.value) {
+    evaluationPerspective.value = originalPerspective;
+    revertBoardTheme();
+    setTheme(originalDarkMode ? "dark" : "light");
+  }
 });
 
 function isActive(preset: BoardTheme): boolean {

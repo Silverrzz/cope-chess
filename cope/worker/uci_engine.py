@@ -199,8 +199,8 @@ class UciEngineProcess:
                 return []
 
             self._send(command)
-            if command == "uci":
-                return self._read_until(lambda line: line == "uciok")
+            if command in {"uci", "tei"}:
+                return self._read_until(lambda line: line == f"{command}ok")
             if command == "isready":
                 return self._read_until(lambda line: line == "readyok")
             if command.startswith("go"):

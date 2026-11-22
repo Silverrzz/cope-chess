@@ -198,7 +198,7 @@ from cope.web.engine_sources import (
 )
 from cope.web.openings import format_opening, parse_opening_input
 from cope.variants import VariantId
-from cope.db.repo import get_tournament_game, reorder_rating_lists, set_rating_list_variant, update_rating_list
+from cope.db.repo import get_tournament_game, reorder_rating_lists, set_rating_list_variant, update_rating_list, variant_engine_version_ids
 from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
@@ -1851,12 +1851,20 @@ def register_api_routes(app: FastAPI) -> None:
             opponent_id=opponent_id,
             side_filter=side,
         )
+        game_export_formats = [
+            extension for extension in ("pgn", "ptn")
+            if pgn_export_exists(connection, PgnExportFilters(
+                engine_id=engine_id, rating_list_id=rating_list_id,
+                opponent_engine_id=opponent_id, color=side, result=result, ptn=extension == "ptn",
+            ))
+        ]
         return _json(
             {
                 "engine": {**jsonable_encoder(engine), "tags": tags.get(engine.id, [])},
                 "family": family,
                 "versions": versions,
                 "games": games,
+                "game_export_formats": game_export_formats,
                 "engines": {
                     version.id: web_app._engine_display_name(version.name, version.version)
                     for version in engine_records
@@ -1883,6 +1891,7 @@ def register_api_routes(app: FastAPI) -> None:
         )
 
     @app.get("/api/pgn")
+    @app.get("/api/ptn")
     def public_pgn_export(
         request: Request,
         game_id: int | None = Query(default=None, gt=0),
@@ -1894,6 +1903,8 @@ def register_api_routes(app: FastAPI) -> None:
         result: Literal["win", "draw", "loss"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
+        ptn = request.url.path.endswith("/ptn")
+        extension = "ptn" if ptn else "pgn"
         try:
             filters = PgnExportFilters(
                 game_id=game_id,
@@ -1903,6 +1914,7 @@ def register_api_routes(app: FastAPI) -> None:
                 opponent_engine_id=opponent_id,
                 color=side,
                 result=result,
+                ptn=ptn,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1939,11 +1951,11 @@ def register_api_routes(app: FastAPI) -> None:
         if not pgn_export_exists(connection, filters):
             raise HTTPException(
                 status_code=409,
-                detail="No completed games match these PGN filters.",
+                detail=f"No completed games match these {extension.upper()} filters.",
             )
 
         if game is not None:
-            filename = f"cope-game-{game.id}.pgn"
+            filename = f"cope-game-{game.id}.{extension}"
         else:
             filename_parts = []
             if tournament is not None:
@@ -1963,6 +1975,7 @@ def register_api_routes(app: FastAPI) -> None:
             filename = safe_pgn_filename(
                 "-".join(filename_parts) if filename_parts else "cope-all-games",
                 "cope-games",
+                extension=extension,
             )
 
         database_url = request.app.state.db_path
@@ -1976,7 +1989,7 @@ def register_api_routes(app: FastAPI) -> None:
 
         return StreamingResponse(
             content(),
-            media_type="application/x-chess-pgn; charset=utf-8",
+            media_type="text/plain; charset=utf-8" if ptn else "application/x-chess-pgn; charset=utf-8",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Cache-Control": "no-store",
@@ -4905,11 +4918,17 @@ def _live_tournament_roster_payload(
     else:
         reason = ""
     participant_ids = set(tournament.config.participants)
+    eligible_ids = (
+        variant_engine_version_ids(connection, tournament.config.variant)
+        if editable and tournament.config.variant != "standard"
+        else None
+    )
     available_engines = (
         [
             engine
             for engine in list_engine_records(connection)
             if engine.id not in participant_ids
+            and (eligible_ids is None or engine.id in eligible_ids)
             and _engine_is_tournament_ready(connection, engine)
         ]
         if editable

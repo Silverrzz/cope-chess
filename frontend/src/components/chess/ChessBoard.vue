@@ -12,6 +12,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
+import TakNinjaBoard from './TakNinjaBoard.vue'
+import TakOverview from './TakOverview.vue'
+import { buildTakPositions, takPositionText, takReserves, takRoadWinner } from './tak'
 
 import {
   buildPositions,
@@ -47,6 +50,7 @@ const props = withDefaults(defineProps<{
   arrows?: BoardArrow[]
   rings?: string[]
   lastMove?: string
+  finished?: boolean
   editMode?: 'move' | 'place' | 'disabled'
 }>(), {
   fen: 'startpos',
@@ -81,14 +85,24 @@ const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
 const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
-const currentFen = computed(() => positionFen(position.value))
+const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
+const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
+const previousTakPosition = computed(() => takPositions.value[clampPly(selectedPly.value) - 1])
+const roadWinner = computed(() => takPosition.value && props.controls && !props.compact ? takRoadWinner(takPosition.value) : null)
+const showRoads = ref(true)
+const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
 const keyboardSquareDescription = computed(() => {
   const square = keyboardSquare.value
   if (!square) return ''
   const piece = readGroundFen(currentFen.value).get(square)
   return `${square}, ${piece ? `${piece.color} ${piece.role}` : 'empty'}`
 })
-const material = computed(() => materialSummary(position.value))
+const material = computed(() => {
+  if (!takPosition.value) return materialSummary(position.value)
+  const { white, black } = takReserves(takPosition.value)
+  return { white: `${white.flats} flats, ${white.caps} capstones`, black: `${black.flats} flats, ${black.caps} capstones`,
+    label: `Reserves ${white.flats}+${white.caps} / ${black.flats}+${black.caps}` }
+})
 const lastMove = computed(() => props.lastMove || (selectedPly.value > 0 ? props.moves[selectedPly.value - 1] ?? '' : ''))
 const status = computed(() => {
   if (!props.moves.length) return props.lastMove ? 'Current position' : 'Start position'
@@ -98,6 +112,7 @@ const status = computed(() => {
 })
 
 const positionDescription = computed(() => {
+  if (takPosition.value) return `${status.value}. ${takPosition.value.turn === 'w' ? 'White' : 'Black'} to move. ${material.value.label}.`
   const side = position.value.turn === 'w' ? 'White' : 'Black'
   const duck = position.value.duckSquare
   const duckLabel = duck === null ? '' : ` Neutral duck on ${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}.`
@@ -394,12 +409,15 @@ defineExpose({ selectPly, focusBoard })
   <section
     ref="viewer"
     class="chess-viewer"
-    :class="{ 'chess-viewer--compact': compact }"
+    :class="{ 'chess-viewer--compact': compact, 'chess-viewer--tak': takPosition }"
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
+    <TakOverview v-if="takPosition && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roadWinner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
+      <TakNinjaBoard v-if="takPosition" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads" :compact="compact" :label="label" />
       <div
+        v-else
         ref="board"
         class="board-mount"
         :role="editMode && editMode !== 'disabled' ? 'group' : 'img'"
@@ -441,7 +459,7 @@ defineExpose({ selectPly, focusBoard })
         </button>
       </div>
       <p class="board-controls__status" aria-live="polite">{{ status }}</p>
-      <p class="material" :title="`White ${material.white}, Black ${material.black}`">{{ material.label }}</p>
+      <p v-if="!takPosition" class="material" :title="`White ${material.white}, Black ${material.black}`">{{ material.label }}</p>
     </div>
 
     <p class="sr-only">{{ positionDescription }}</p>
@@ -497,6 +515,14 @@ defineExpose({ selectPly, focusBoard })
   box-shadow: 0 0.75rem 2.5rem color-mix(in srgb, #000 14%, transparent);
 }
 
+.board-mount.ninja-board {
+  aspect-ratio: var(--arena-board-aspect, 1.2916667);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .board-controls {
   display: grid;
   grid-template-columns: auto minmax(7rem, 1fr) auto;
@@ -550,12 +576,15 @@ defineExpose({ selectPly, focusBoard })
 .board-controls__status {
   text-align: center;
 }
+.chess-viewer--tak .board-controls { grid-template-columns: auto minmax(0, 1fr); }
+.chess-viewer--tak .board-controls__status { grid-column: auto; grid-row: auto; text-align: end; }
 
 .material {
   white-space: nowrap;
 }
 
 .chess-viewer--compact .board-mount {
+  aspect-ratio: 1;
   border-radius: var(--radius-sm, 0.35rem);
   box-shadow: none;
 }

@@ -276,8 +276,15 @@ class TournamentConfig(StrictModel):
         object.__setattr__(self, "rules_revision", variant.rules_revision)
         if variant.requires_openings and self.opening_suite_id is None:
             raise ValueError(f"{variant.name} tournaments require a starting-position suite")
-        if variant.duck and (self.adjudication.draw is not None or self.adjudication.resign is not None):
-            raise ValueError("Duck tournaments do not support evaluation adjudication")
+        if (variant.duck or variant.id == "tak") and (self.adjudication.draw is not None or self.adjudication.resign is not None):
+            raise ValueError(f"{variant.name} tournaments do not support evaluation adjudication")
+        if variant.id == "tak":
+            if self.opening_suite_id is not None:
+                raise ValueError("Tak tournaments currently use the empty starting board")
+            if isinstance(self.time_control, MovesToGoTimeControl):
+                raise ValueError("Tak tournaments require increment, move time, or move nodes")
+            if {name.lower() for name in self.uci_options} & {"halfkomi", "flats", "caps"}:
+                raise ValueError("The Tak ruleset controls komi and reserves")
         if any(name.strip().lower() in {"uci_variant", "uci_chess960", "duck960"} for name in self.uci_options):
             raise ValueError("Variant options are controlled by the tournament variant")
         expected: dict[TournamentFormat, type[StrictModel]] = {

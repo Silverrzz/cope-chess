@@ -539,7 +539,7 @@ onBeforeUnmount(() => {
               <div class="more-menu__items" @click="moreMenu?.removeAttribute('open')">
                 <button v-if="data.tournament.status !== 'draft'" type="button" :disabled="!!pending" @click="beginRename">Rename tournament</button>
                 <button type="button" :disabled="copyingDetails" @click="copyDetails">{{ copyingDetails ? 'Copying…' : detailsCopied ? 'Copied' : 'Copy details' }}</button>
-                <a :href="`/api/pgn?tournament_id=${encodeURIComponent(id)}`" download>Download PGN</a>
+                <a :href="`/api/${data.tournament.config.variant === 'tak' ? 'ptn' : 'pgn'}?tournament_id=${encodeURIComponent(id)}`" download>Download {{ data.tournament.config.variant === 'tak' ? 'PTN' : 'PGN' }}</a>
                 <button v-if="data.capabilities.unschedulable" type="button" :disabled="!!pending" @click="unschedule">{{ pending === 'unschedule' ? 'Working…' : 'Return to draft' }}</button>
                 <button v-if="data.actions.abort" class="more-menu__danger" type="button" :disabled="!!pending" @click="changeStatus('abort')">{{ pending === 'abort' ? 'Working…' : 'Abort tournament' }}</button>
                 <button v-if="!['scheduled', 'running'].includes(data.tournament.status) && !data.commits.some((item) => ['pending','claimed','applied'].includes(item.status))" class="more-menu__danger" type="button" :disabled="!!pending" @click="remove">{{ pending === 'delete' ? 'Deleting…' : 'Delete tournament' }}</button>

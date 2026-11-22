@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import VariantPicker from '@/components/admin/VariantPicker.vue'
@@ -38,6 +38,10 @@ const description = ref('')
 const variant = ref<Variant>('standard')
 const hardwareScaled = ref(true)
 const monthlyRefresh = ref(false)
+
+watch(variant, (value) => {
+  if (value !== 'standard') hardwareScaled.value = false
+})
 
 const totalRatedEngines = computed(() => (data.value?.rating_lists ?? []).reduce((sum, item) => sum + item.engine_versions, 0))
 
@@ -111,8 +115,8 @@ onMounted(load)
     <form v-if="showCreate" class="panel create-list" @submit.prevent="createList">
       <label><span>List name</span><input v-model="name" class="input" maxlength="120" autofocus placeholder="e.g. Classical" /></label>
       <label><span>Description</span><input v-model="description" class="input" maxlength="2000" /></label>
-      <label><span>Variant</span><VariantPicker v-model="variant" /></label>
-      <label ><span>Clock mode</span><select v-model="hardwareScaled" class="input"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true">Hardware-scaled only</option></select></label>
+      <label><span>Variant</span><VariantPicker v-model="variant" allow-tak /></label>
+      <label><span>Clock mode</span><select v-model="hardwareScaled" class="input"><option :value="false">Mixed, including historical fixed clocks</option><option :value="true" :disabled="variant !== 'standard'">Hardware-scaled only</option></select></label>
       <label><span>Results window</span><select v-model="monthlyRefresh" class="input"><option :value="false">Cumulative</option><option :value="true">Latest monthly edition</option></select></label>
       <div><button class="button button--ghost" type="button" @click="showCreate = false">Cancel</button><button class="button button--primary" :disabled="pending">{{ pending ? 'Creating…' : 'Create list' }}</button></div>
     </form>

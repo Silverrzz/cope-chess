@@ -64,6 +64,7 @@ interface EngineResponse {
   family: EngineFamily
   versions: EngineRecord[]
   games: GameRecord[]
+  game_export_formats: Array<'pgn' | 'ptn'>
   engines: Record<string, string>
   engine_options: EngineOption[]
   record: EngineRecordSummary
@@ -162,15 +163,17 @@ const mostPlayedOpponent = computed(() => {
   const top = [...counts.entries()].sort((left, right) => right[1] - left[1])[0]
   return top ? { name: data.value.engines[top[0]] || `Engine ${top[0]}`, games: top[1] } : null
 })
-const pgnDownloadUrl = computed(() => {
+const gameExports = computed(() => {
   const parameters = new URLSearchParams({ engine_id: engineId.value })
   if (gameFilters.value.result) parameters.set('result', gameFilters.value.result)
   if (gameFilters.value.ratingListId) parameters.set('rating_list_id', gameFilters.value.ratingListId)
   if (gameFilters.value.opponentId) parameters.set('opponent_id', gameFilters.value.opponentId)
   if (gameFilters.value.side) parameters.set('side', gameFilters.value.side)
-  return `/api/pgn?${parameters.toString()}`
+  return (data.value?.game_export_formats ?? []).map((format) => ({
+    href: `/api/${format}?${parameters.toString()}`,
+    label: activeFilterCount.value ? `Download filtered ${format.toUpperCase()}` : `Download all ${format.toUpperCase()}s`,
+  }))
 })
-const pgnDownloadLabel = computed(() => activeFilterCount.value ? 'Download filtered PGN' : 'Download all PGNs')
 const activeFilterChips = computed<Array<{ key: FilterKey; label: string }>>(() => {
   const chips: Array<{ key: FilterKey; label: string }> = []
   const filters = gameFilters.value
@@ -359,7 +362,7 @@ async function load(): Promise<void> {
       </div>
 
       <details class="panel technical-panel">
-        <summary><span><AppIcon name="info" :size="17" /><strong>Version details</strong><small>{{ data.engine.distribution === 'worker_local' ? 'Worker-local availability' : 'Source and build' }}, and {{ uciOptions.length }} custom UCI option{{ uciOptions.length === 1 ? '' : 's' }}</small></span><AppIcon name="chevron-down" :size="17" /></summary>
+        <summary><span><AppIcon name="info" :size="17" /><strong>Version details</strong><small>{{ data.engine.distribution === 'worker_local' ? 'Worker-local availability' : 'Source and build' }}, and {{ uciOptions.length }} custom engine option{{ uciOptions.length === 1 ? '' : 's' }}</small></span><AppIcon name="chevron-down" :size="17" /></summary>
         <div class="technical-content">
           <dl>
             <div v-if="engineVersionLabel(data.engine.version)"><dt>Version</dt><dd>{{ engineVersionLabel(data.engine.version) }}</dd></div>
@@ -375,7 +378,7 @@ async function load(): Promise<void> {
         <header>
           <div><h2 id="engine-games-title">Recent games</h2><p>{{ gamesDescription }}</p></div>
           <div class="games-panel__actions">
-            <BaseButton :href="pgnDownloadUrl" size="small" :disabled="!data.record.games || (Boolean(activeFilterCount) && !data.games.length)" download><template #icon><AppIcon name="download" :size="15" /></template>{{ pgnDownloadLabel }}</BaseButton>
+            <BaseButton v-for="download in gameExports" :key="download.href" :href="download.href" size="small" :disabled="gamesLoading" download><template #icon><AppIcon name="download" :size="15" /></template>{{ download.label }}</BaseButton>
             <BaseButton class="filter-trigger" size="small" :disabled="gamesLoading" :aria-expanded="filterModalOpen" aria-haspopup="dialog" @click="filterModalOpen = true"><template #icon><AppIcon name="filter" :size="15" /></template>Filters<template v-if="activeFilterCount" #trailing><span class="filter-trigger__count">{{ activeFilterCount }}</span></template></BaseButton>
           </div>
         </header>

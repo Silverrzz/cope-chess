@@ -113,6 +113,28 @@ def is_full_uci_info_line(line: str) -> bool:
     return True
 
 
+def is_search_info_line(line: str, *, allow_partial: bool = False) -> bool:
+    if is_full_uci_info_line(line):
+        return True
+    if not allow_partial:
+        return False
+    parts = line.split()
+    if not parts or parts[0] != "info" or parts[1:2] == ["string"] or "pv" not in parts:
+        return False
+    pv_index = parts.index("pv")
+    if pv_index + 1 >= len(parts):
+        return False
+    fields = parts[1:pv_index]
+    if "multipv" in fields:
+        index = fields.index("multipv") + 1
+        if fields[index:index + 1] != ["1"]:
+            return False
+    return any(
+        key in {"depth", "nodes", "nps"} and value.isdecimal()
+        for key, value in zip(fields, fields[1:])
+    )
+
+
 def worker_command_elapsed_line(elapsed_ms: int) -> str:
     return f"{WORKER_COMMAND_ELAPSED_PREFIX}{max(elapsed_ms, 0)}"
 

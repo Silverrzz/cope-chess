@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 
-import { parseFen } from './chess'
+import { parseFen, type Variant } from './chess'
+import { parseTakPosition } from './tak'
 
 interface MoveCell {
   ply: number
@@ -20,6 +21,7 @@ const props = withDefaults(defineProps<{
   moves?: string[]
   uciMoves?: string[]
   fen?: string | null
+  variant?: Variant | undefined
   bookPlies?: number
   modelValue?: number
   title?: string
@@ -40,7 +42,7 @@ const emit = defineEmits<{
 
 const list = ref<HTMLElement | null>(null)
 const rows = computed<MoveRow[]>(() => {
-  const start = parseFen(props.fen)
+  const start = props.variant === 'tak' ? parseTakPosition(props.fen) : parseFen(props.fen)
   const result: MoveRow[] = []
   let number = start.fullmove
   let side = start.turn
@@ -92,11 +94,14 @@ function scrollCurrentMoveIntoView(): void {
 </script>
 
 <template>
-  <section class="move-list" aria-labelledby="move-list-title">
+  <section class="move-list" :class="{ 'move-list--tak': variant === 'tak' }" aria-labelledby="move-list-title">
     <header class="move-list__header">
       <h2 id="move-list-title">{{ title }}</h2>
       <span>{{ moves.length }} plies<template v-if="bookPlies"> / {{ bookPlies }} book</template></span>
     </header>
+    <div v-if="variant === 'tak' && rows.length" class="tak-move-headings" aria-hidden="true">
+      <span></span><span>White</span><span>Black</span>
+    </div>
     <div v-if="rows.length" ref="list" class="move-list__scroll" tabindex="0">
       <ol class="move-list__rows">
         <li v-for="row in rows" :key="`${row.number}-${row.white?.ply || row.black?.ply}`" class="move-row">
@@ -259,4 +264,17 @@ function scrollCurrentMoveIntoView(): void {
   font-size: 0.85rem;
   text-align: center;
 }
+
+.tak-move-headings {
+  display: grid;
+  grid-template-columns: 2.25rem repeat(2, minmax(0, 1fr));
+  padding: .42rem .35rem .22rem;
+  color: var(--color-text-muted, #607080);
+  font-size: .66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.tak-move-headings span { padding-inline: .5rem; }
+.move-list--tak .move-row { padding-block: .08rem; }
+.move-list--tak .move-row button { margin-inline-end: .22rem; padding-block: .3rem; }
 </style>

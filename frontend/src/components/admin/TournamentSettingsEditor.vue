@@ -45,8 +45,10 @@ function patch(patchValue: Partial<TournamentSettings>): void {
 
 function setVariant(variant: Variant): void {
   const duck = variant === 'duck' || variant === 'duck960'
-  patch({ variant, rules_revision: duck ? 'duck1' : 'chess1', opening_suite_id: null,
-    adjudication: duck ? { ...model.value.adjudication, draw: null, resign: null } : model.value.adjudication })
+  const tak = variant === 'tak'
+  patch({ variant, rules_revision: tak ? 'tak1' : duck ? 'duck1' : 'chess1', opening_suite_id: null,
+    adjudication: duck || tak ? { ...model.value.adjudication, draw: null, resign: null } : model.value.adjudication })
+  if (tak && model.value.time_control.category === 'movestogo') setTimeControl('increment')
 }
 
 function setFormat(format: TournamentFormat): void {
@@ -133,7 +135,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
 
 <template>
   <div class="settings-editor">
-    <label v-if="allowFormat && allowOpeningSuite" class="field"><span class="field__label">Variant</span><VariantPicker :model-value="model.variant || 'standard'" @update:model-value="setVariant" /></label>
+    <label v-if="allowFormat && allowOpeningSuite" class="field"><span class="field__label">Variant</span><VariantPicker :model-value="model.variant || 'standard'" allow-tak @update:model-value="setVariant" /></label>
     <fieldset v-if="allowFormat" class="form-section">
       <legend>Format</legend>
       <div class="field-grid field-grid--wide">
@@ -185,7 +187,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
           <select class="input" :value="model.time_control.category" @change="setTimeControl(($event.target as HTMLSelectElement).value as TimeControlCategory)">
             <option value="increment">Clock with increment</option>
             <option value="movetime">Fixed time per move</option>
-            <option value="movestogo">Clock for a move quota</option>
+            <option v-if="model.variant !== 'tak'" value="movestogo">Clock for a move quota</option>
             <option value="movenodes">Nodes per move</option>
           </select>
         </label>
@@ -227,7 +229,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
     <fieldset v-if="!structureOnly" class="form-section">
       <legend>Adjudication</legend>
       <label class="choice-row">
-        <input type="checkbox" :disabled="model.variant?.startsWith('duck')" :checked="model.adjudication.draw !== null" @change="setDrawAdjudication(($event.target as HTMLInputElement).checked)">
+        <input type="checkbox" :disabled="model.variant === 'tak' || model.variant?.startsWith('duck')" :checked="model.adjudication.draw !== null" @change="setDrawAdjudication(($event.target as HTMLInputElement).checked)">
         <span>
           <strong>Draw agreement</strong>
           <small>End the game as a draw after both engines remain within the configured evaluation range.</small>
@@ -249,7 +251,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
       </div>
 
       <label class="choice-row">
-        <input type="checkbox" :disabled="model.variant?.startsWith('duck')" :checked="model.adjudication.resign !== null" @change="setWinAdjudication(($event.target as HTMLInputElement).checked)">
+        <input type="checkbox" :disabled="model.variant === 'tak' || model.variant?.startsWith('duck')" :checked="model.adjudication.resign !== null" @change="setWinAdjudication(($event.target as HTMLInputElement).checked)">
         <span>
           <strong>Win adjudication</strong>
           <small>End the game when both engines consistently evaluate the same side beyond the configured threshold.</small>
@@ -282,7 +284,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
           <input class="input" type="number" min="0" step="1" :value="model.concurrency" @input="patch({ concurrency: Number(($event.target as HTMLInputElement).value) })">
           <small>0 means unlimited; workers share their available cores and memory automatically.</small>
         </label>
-        <label v-if="allowOpeningSuite" class="field">
+        <label v-if="allowOpeningSuite && model.variant !== 'tak'" class="field">
           <span class="field__label">Opening suite</span>
           <select class="input" :value="model.opening_suite_id ?? ''" @change="patch({ opening_suite_id: Number(($event.target as HTMLSelectElement).value) || null })">
             <option value="">No opening suite</option>

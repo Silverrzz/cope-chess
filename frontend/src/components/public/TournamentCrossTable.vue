@@ -5,9 +5,11 @@ import { clockLabel, engineName, gameHref, statusLabel } from './format'
 import type { CrossTableGame } from './types'
 import CrossTableBoard from './CrossTableBoard.vue'
 import StreamIndicator from './StreamIndicator.vue'
+import type { Variant } from '@/components/chess/chess'
 
 const props = defineProps<{
   games: CrossTableGame[]
+  variant?: Variant | undefined
   engines?: Record<string, string>
   streamState: 'connecting' | 'live' | 'reconnecting' | 'closed'
 }>()
@@ -94,7 +96,7 @@ function boardLabel(game: CrossTableGame): string {
           </span>
         </div>
 
-        <CrossTableBoard :fen="game.fen" :last-move="game.last_move || null" :label="boardLabel(game)" />
+        <CrossTableBoard :variant="variant" :fen="game.fen" :last-move="game.last_move || null" :label="boardLabel(game)" />
 
         <div class="cross-game__player" :class="{ active: game.running && game.active_side === 'white' }">
           <span class="cross-game__piece cross-game__piece--white" aria-hidden="true"></span>
