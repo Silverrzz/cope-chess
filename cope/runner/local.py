@@ -390,7 +390,7 @@ def _fair_worker_tournaments(
         stranded_threads = max(0, remaining_threads - int(remaining_memory / cheapest_per_thread))
         return stranded_threads, active.get(tournament.id, 0) * resource.threads
 
-    return sorted(tournaments, key=lambda tournament: (tournament.config.variant == "tak", *allocation_order(tournament)))
+    return sorted(tournaments, key=allocation_order)
 
 
 def _next_tournament_worker_assignment(
