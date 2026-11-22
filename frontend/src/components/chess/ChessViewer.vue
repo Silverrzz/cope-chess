@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue'
 
 import type { MoveRecord, OpeningRecord } from '@/components/public/types'
-import { useViewerSettings } from '@/composables/useViewerSettings'
 
 import ChessBoard from './ChessBoard.vue'
 import type { BoardArrow, Color, Variant } from './chess'
@@ -31,7 +30,6 @@ const emit = defineEmits<{
 }>()
 
 const orientation = ref<Color>('white')
-const { takBoardStyle } = useViewerSettings()
 const ply = ref(props.modelValue ?? props.moves.length)
 const currentFen = ref(props.opening?.fen || 'startpos')
 const copied = ref('')
@@ -94,7 +92,6 @@ function fallbackCopy(value: string): void {
     <ChessBoard
       :key="variant || 'standard'"
       :variant="variant"
-      :embed-tak="variant === 'tak' && takBoardStyle === 'discord'"
       :fen="opening.fen"
       :moves="uciMoves"
       :san-moves="sanMoves"

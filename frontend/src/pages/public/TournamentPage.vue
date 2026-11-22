@@ -109,9 +109,8 @@ const loading = ref(true)
 const loadError = ref('')
 const selectedPly = ref(0)
 const orientation = ref<'white' | 'black'>('white')
-const { kibitzerEnabled, takBoardStyle } = useViewerSettings()
+const { kibitzerEnabled } = useViewerSettings()
 const isTak = computed(() => data.value?.tournament.config?.variant === 'tak')
-const hasTakReserveArea = computed(() => isTak.value && takBoardStyle.value === 'discord')
 const supportsKibitzer = computed(() => !isTak.value && !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
 const currentPositionPly = ref(0)
@@ -346,7 +345,7 @@ watch(headingElement, (next, previous) => {
   scheduleArenaFit()
 }, { flush: 'post' })
 
-watch([arenaElement, boardColumnElement, viewerMode, hasTakReserveArea], () => scheduleArenaFit(), { flush: 'post' })
+watch([arenaElement, boardColumnElement, viewerMode, isTak], () => scheduleArenaFit(), { flush: 'post' })
 
 onMounted(() => {
   headingResizeObserver = new ResizeObserver(scheduleArenaFit)
@@ -404,15 +403,15 @@ async function fitArenaToViewport(): Promise<void> {
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
   const arenaStyle = getComputedStyle(arena)
   const boardAspect = Number.parseFloat(arenaStyle.getPropertyValue('--arena-board-aspect')) || 1
-  const stackedTak = hasTakReserveArea.value && boardAspect < 1
-  const maximumBoardSize = 42 * rootFontSize * (hasTakReserveArea.value ? Math.max(1, boardAspect) : 1)
+  const stackedTak = isTak.value && boardAspect < 1
+  const maximumBoardSize = 42 * rootFontSize * (isTak.value ? Math.max(1, boardAspect) : 1)
   const arenaWidth = arena.clientWidth
   const gap = Number.parseFloat(arenaStyle.columnGap) || 12
   const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
   let widthLimit = window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
-  if (hasTakReserveArea.value) {
+  if (isTak.value) {
     if (stackedTak) {
       widthLimit = arenaWidth
     } else if (window.matchMedia('(max-width: 96rem)').matches) {
@@ -1275,7 +1274,7 @@ function forgetManualFollowPauseGame(): void {
 
       <TournamentCrossTable v-if="viewerMode === 'cross'" :variant="data.tournament.config?.variant" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
 
-      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer, 'arena--tak-reserves': hasTakReserveArea }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer, 'arena--tak-reserves': isTak }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
             v-for="side in (['black', 'white']) as ('white' | 'black')[]"

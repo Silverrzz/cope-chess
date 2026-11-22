@@ -12,10 +12,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
-import TakBoard from './TakBoard.vue'
 import TakNinjaBoard from './TakNinjaBoard.vue'
 import TakOverview from './TakOverview.vue'
-import { buildTakPositions, takPositionText, takReserves, takRoads } from './tak'
+import { buildTakPositions, takPositionText, takReserves, takRoadWinner } from './tak'
 
 import {
   buildPositions,
@@ -47,7 +46,6 @@ const props = withDefaults(defineProps<{
   controls?: boolean
   coordinates?: boolean
   compact?: boolean
-  embedTak?: boolean
   label?: string
   arrows?: BoardArrow[]
   rings?: string[]
@@ -90,7 +88,7 @@ const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
 const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
 const previousTakPosition = computed(() => takPositions.value[clampPly(selectedPly.value) - 1])
-const roads = computed(() => takPosition.value ? takRoads(takPosition.value) : null)
+const roadWinner = computed(() => takPosition.value && props.controls && !props.compact ? takRoadWinner(takPosition.value) : null)
 const showRoads = ref(true)
 const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
 const keyboardSquareDescription = computed(() => {
@@ -415,12 +413,9 @@ defineExpose({ selectPly, focusBoard })
     :aria-label="label"
     :tabindex="controls ? 0 : undefined"
   >
-    <TakOverview v-if="takPosition && roads && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roads.winner" :finished="Boolean(finished && selectedPly === moves.length)" />
+    <TakOverview v-if="takPosition && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roadWinner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
-      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads" :compact="compact">
-        <TakBoard :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
-      </TakNinjaBoard>
-      <TakBoard v-else-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
+      <TakNinjaBoard v-if="takPosition" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads" :compact="compact" :label="label" />
       <div
         v-else
         ref="board"

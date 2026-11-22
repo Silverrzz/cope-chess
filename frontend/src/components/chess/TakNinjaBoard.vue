@@ -11,6 +11,7 @@ const props = defineProps<{
   coordinates: boolean
   showRoads: boolean
   compact: boolean
+  label: string
 }>()
 
 const origin = 'https://ptn.ninja'
@@ -28,7 +29,7 @@ function send(action: string, value?: unknown): void {
   frame.value?.contentWindow?.postMessage({ action, value }, origin)
 }
 
-function fallback(): void {
+function markUnavailable(): void {
   window.clearTimeout(deadline)
   window.clearInterval(handshake)
   visible.value = false
@@ -62,7 +63,7 @@ function updatePosition(forceSnapshot = false): void {
   } else {
     send('SET_CURRENT_PTN', `[Size "${TAK_SIZE}"]\n[Komi "${TAK_KOMI}"]\n[TPS "${props.tps}"]\n`)
     send('HIGHLIGHT_SQUARES', squares)
-    deadline = window.setTimeout(fallback, visible.value ? 4000 : 10000)
+    deadline = window.setTimeout(markUnavailable, visible.value ? 4000 : 10000)
   }
 }
 
@@ -122,14 +123,14 @@ function handshakeOnLoad(): void {
   visible.value = false
   window.clearTimeout(deadline)
   window.clearInterval(handshake)
-  deadline = window.setTimeout(fallback, 10000)
+  deadline = window.setTimeout(markUnavailable, 10000)
   handshake = window.setInterval(() => send('GET_THEME'), 350)
   send('GET_THEME')
 }
 
 onMounted(() => {
   window.addEventListener('message', onMessage)
-  deadline = window.setTimeout(fallback, 12000)
+  deadline = window.setTimeout(markUnavailable, 12000)
 })
 
 onBeforeUnmount(() => {
@@ -146,28 +147,37 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
 
 <template>
   <div class="ninja-board" :class="{ 'ninja-board--compact': compact }">
-    <div class="ninja-board__fallback"><slot /></div>
+    <p v-if="!visible" class="ninja-board__status" role="status">{{ failed ? 'Tak board unavailable' : 'Loading Tak board…' }}</p>
     <iframe
       v-if="!failed"
       class="ninja-board__frame"
       :class="{ 'ninja-board__frame--visible': visible }"
       :src="origin + '/'"
-      title="PTN Ninja Discord board"
-      aria-hidden="true"
+      :title="`${label} · PTN Ninja`"
       tabindex="-1"
       sandbox="allow-scripts allow-same-origin"
       referrerpolicy="no-referrer"
       ref="frame"
       @load="handshakeOnLoad"
-      @error="fallback"
+      @error="markUnavailable"
     />
   </div>
 </template>
 
 <style scoped>
-.ninja-board { position: relative; container-type: size; }
-.ninja-board__fallback { position: absolute; inset: 0; display: grid; place-items: center; }
-.ninja-board__fallback :deep(.tak-board) { width: min(100cqw, 100cqh); }
+.ninja-board { position: relative; }
+.ninja-board__status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: .25rem;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: .75rem;
+  text-align: center;
+}
 .ninja-board__frame {
   --ptn-ninja-content-ratio: .9;
   position: absolute;

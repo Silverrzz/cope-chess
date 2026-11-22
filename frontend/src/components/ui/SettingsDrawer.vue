@@ -17,7 +17,6 @@ const {
   kibitzerEnabled, setKibitzerEnabled,
   boardAnnotationsEnabled, setBoardAnnotationsEnabled,
   chatGameLinksVisible, setChatGameLinksVisible,
-  takBoardStyle, setTakBoardStyle,
   confettiEnabled, setConfettiEnabled,
   eventMusicEnabled, setEventMusicEnabled,
 } = useViewerSettings();
@@ -40,13 +39,11 @@ async function signOut(): Promise<void> {
 }
 let originalDarkMode = resolvedTheme.value === "dark";
 let originalPerspective = evaluationPerspective.value;
-let originalTakBoardStyle = takBoardStyle.value;
 const panel = ref<HTMLElement | null>(null);
 const draft = ref<BoardTheme>({ ...theme.value });
 const draftConfettiEnabled = ref(confettiEnabled.value);
 const draftEventMusicEnabled = ref(eventMusicEnabled.value);
 const draftPerspective = ref(evaluationPerspective.value);
-const draftTakBoardStyle = ref(takBoardStyle.value);
 const draftKibitzer = ref(kibitzerEnabled.value);
 const draftBoardAnnotations = ref(boardAnnotationsEnabled.value);
 const draftChatGameLinks = ref(chatGameLinksVisible.value);
@@ -58,8 +55,6 @@ watch(open, async (isOpen) => {
   void discord.load().catch(() => { discordError.value = "Could not load your Discord sign-in."; });
   originalPerspective = evaluationPerspective.value;
   draftPerspective.value = originalPerspective;
-  originalTakBoardStyle = takBoardStyle.value;
-  draftTakBoardStyle.value = originalTakBoardStyle;
   draftKibitzer.value = kibitzerEnabled.value;
   draftBoardAnnotations.value = boardAnnotationsEnabled.value;
   draftChatGameLinks.value = chatGameLinksVisible.value;
@@ -76,10 +71,6 @@ watch(draftPerspective, (perspective) => {
   if (open.value) evaluationPerspective.value = perspective;
 });
 
-watch(draftTakBoardStyle, (style) => {
-  if (open.value) takBoardStyle.value = style;
-});
-
 watch(draftDarkMode, (dark) => {
   if (open.value) setTheme(dark ? "dark" : "light");
 });
@@ -93,7 +84,6 @@ function save(): void {
   setKibitzerEnabled(draftKibitzer.value);
   setBoardAnnotationsEnabled(draftBoardAnnotations.value);
   setChatGameLinksVisible(draftChatGameLinks.value);
-  setTakBoardStyle(draftTakBoardStyle.value);
   setBoardTheme(draft.value);
   setConfettiEnabled(draftConfettiEnabled.value);
   setEventMusicEnabled(draftEventMusicEnabled.value);
@@ -103,7 +93,6 @@ function save(): void {
 
 function cancel(): void {
   evaluationPerspective.value = originalPerspective;
-  takBoardStyle.value = originalTakBoardStyle;
   setTheme(originalDarkMode ? "dark" : "light");
   revertBoardTheme();
   open.value = false;
@@ -117,7 +106,6 @@ function toggle(): void {
 onBeforeUnmount(() => {
   if (open.value) {
     evaluationPerspective.value = originalPerspective;
-    takBoardStyle.value = originalTakBoardStyle;
     revertBoardTheme();
     setTheme(originalDarkMode ? "dark" : "light");
   }
@@ -133,7 +121,6 @@ function update(key: "light" | "dark", event: Event): void {
 
 function reset(): void {
   draft.value = { ...boardPresets.brown! };
-  draftTakBoardStyle.value = "discord";
   draftConfettiEnabled.value = true;
   draftEventMusicEnabled.value = false;
   draftDarkMode.value = true;
@@ -227,11 +214,6 @@ function reset(): void {
           <input type="color" :value="draft.dark" @input="update('dark', $event)" />
           <code>{{ draft.dark }}</code>
         </label>
-
-        <div class="perspective-setting">
-          <span>Tak board</span>
-          <OptionPicker :model-value="draftTakBoardStyle" :options="[{ value: 'discord', label: 'PTN Ninja · Discord' }, { value: 'cope', label: 'Cope', description: 'Uses the board colours above' }]" label="Tak board style" @update:model-value="draftTakBoardStyle = $event === 'cope' ? 'cope' : 'discord'" />
-        </div>
 
         <h3>Analysis</h3>
         <div class="perspective-setting">

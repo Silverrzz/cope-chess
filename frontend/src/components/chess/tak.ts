@@ -3,7 +3,6 @@ export const TAK_START = 'x6/x6/x6/x6/x6/x6 1 1'
 export const TAK_KOMI = 2
 
 export type TakSide = 'white' | 'black'
-export type TakStoneKind = 'flat' | 'wall' | 'cap'
 
 export interface TakPosition {
   stacks: string[][]
@@ -15,21 +14,17 @@ const directions: Record<string, [number, number]> = { '>': [1, 0], '<': [-1, 0]
 const placement = /^([FSC]?)([a-f][1-6])$/
 const spread = /^([1-6]?)([a-f][1-6])([<>+-])([1-6]*)[SC]?\*?$/
 const edges = [
-  { name: 'north', dx: 0, dy: -1 },
-  { name: 'east', dx: 1, dy: 0 },
-  { name: 'south', dx: 0, dy: 1 },
-  { name: 'west', dx: -1, dy: 0 },
+  { dx: 0, dy: -1 },
+  { dx: 1, dy: 0 },
+  { dx: 0, dy: 1 },
+  { dx: -1, dy: 0 },
 ] as const
 
-export function takStoneKind(stone: string): TakStoneKind {
+function takStoneKind(stone: string) {
   return stone.endsWith('C') ? 'cap' : stone.endsWith('S') ? 'wall' : 'flat'
 }
 
-export function takStoneName(kind: TakStoneKind): string {
-  return kind === 'cap' ? 'capstone' : kind === 'wall' ? 'standing stone' : 'flat stone'
-}
-
-export function takStoneSide(stone: string): TakSide {
+function takStoneSide(stone: string): TakSide {
   return stone.startsWith('1') ? 'white' : 'black'
 }
 
@@ -138,54 +133,32 @@ function neighborAt(square: number, dx: number, dy: number): number | undefined 
   return x >= 0 && y >= 0 && x < TAK_SIZE && y < TAK_SIZE ? y * TAK_SIZE + x : undefined
 }
 
-function connectingRoad(owners: Array<TakSide | null>, side: TakSide, horizontal: boolean): number[] {
+function hasConnectingRoad(owners: Array<TakSide | null>, side: TakSide, horizontal: boolean): boolean {
   const coordinate = (square: number) => horizontal ? square % TAK_SIZE : Math.floor(square / TAK_SIZE)
   const queue = owners.flatMap((owner, square) => owner === side && coordinate(square) === 0 ? [square] : [])
-  const parents = new Map<number, number | undefined>(queue.map((square) => [square, undefined]))
+  const visited = new Set(queue)
   for (const square of queue) {
-    if (coordinate(square) === TAK_SIZE - 1) {
-      const path = []
-      for (let current: number | undefined = square; current !== undefined; current = parents.get(current)) path.push(current)
-      return path.reverse()
-    }
+    if (coordinate(square) === TAK_SIZE - 1) return true
     for (const { dx, dy } of edges) {
       const next = neighborAt(square, dx, dy)
-      if (next !== undefined && owners[next] === side && !parents.has(next)) {
-        parents.set(next, square)
+      if (next !== undefined && owners[next] === side && !visited.has(next)) {
+        visited.add(next)
         queue.push(next)
       }
     }
   }
-  return []
+  return false
 }
 
-export function takRoads(position: TakPosition) {
+export function takRoadWinner(position: TakPosition): TakSide | null {
   const owners = position.stacks.map((stack) => {
     const top = stack.at(-1)
     return top && takStoneKind(top) !== 'wall' ? takStoneSide(top) : null
   })
   const mover = position.turn === 'w' ? 'black' : 'white'
   const other = mover === 'black' ? 'white' : 'black'
-  let path: number[] = []
   for (const side of [mover, other] as const) {
-    path = connectingRoad(owners, side, true)
-    if (!path.length) path = connectingRoad(owners, side, false)
-    if (path.length) break
+    if (hasConnectingRoad(owners, side, true) || hasConnectingRoad(owners, side, false)) return side
   }
-  const winner = path.length ? owners[path[0]!] ?? null : null
-  const horizontal = path.length > 0 && path[0]! % TAK_SIZE === 0 && path.at(-1)! % TAK_SIZE === TAK_SIZE - 1
-  const links = owners.map((side, square) => {
-    if (!side) return []
-    const pathIndex = path.indexOf(square)
-    return edges.flatMap(({ name, dx, dy }) => {
-      const target = neighborAt(square, dx, dy)
-      if (target !== undefined && owners[target] !== side) return []
-      const onPath = pathIndex >= 0 && (target === undefined
-        ? (pathIndex === 0 && name === (horizontal ? 'west' : 'north')) ||
-          (pathIndex === path.length - 1 && name === (horizontal ? 'east' : 'south'))
-        : target === path[pathIndex - 1] || target === path[pathIndex + 1])
-      return [{ name, side, onPath }]
-    })
-  })
-  return { links, winner, winningSquares: new Set(path) }
+  return null
 }
