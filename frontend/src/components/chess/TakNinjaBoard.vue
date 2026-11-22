@@ -10,6 +10,7 @@ const props = defineProps<{
   orientation: 'white' | 'black'
   coordinates: boolean
   showRoads: boolean
+  compact: boolean
 }>()
 
 const origin = 'https://ptn.ninja'
@@ -44,10 +45,14 @@ function updateBoardOptions(): void {
 
 function updatePosition(forceSnapshot = false): void {
   if (!themeReady || failed.value) return
-  if (!forceSnapshot && (sentPosition !== confirmedPosition || sentPosition === props.tps)) return
+  if (!forceSnapshot && sentPosition !== confirmedPosition) return
 
   const squares = takMovePath(props.lastMove).map(takSquareName)
-  const append = !forceSnapshot && visible.value && props.previousTps === confirmedPosition && squares.length > 0
+  if (!forceSnapshot && sentPosition === props.tps) {
+    if (props.compact) send('HIGHLIGHT_SQUARES', squares)
+    return
+  }
+  const append = !forceSnapshot && !props.compact && visible.value && props.previousTps === confirmedPosition && squares.length > 0
   sentPosition = props.tps
   window.clearTimeout(deadline)
   if (append) {
@@ -81,10 +86,10 @@ function onMessage(event: MessageEvent): void {
         turnIndicator: false,
         gameTimer: false,
         moveNumber: false,
-        unplayedPieces: true,
-        verticalLayout: true,
+        unplayedPieces: !props.compact,
+        verticalLayout: !props.compact,
         verticalLayoutAuto: true,
-        animateBoard: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        animateBoard: !props.compact && !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
         autoAnnotateTak: false,
         axisLabelsSmall: true,
         stackCounts: true,
@@ -133,14 +138,14 @@ onBeforeUnmount(() => {
   window.clearInterval(handshake)
 })
 
-watch(() => props.tps, () => updatePosition())
+watch([() => props.tps, () => props.lastMove], () => updatePosition())
 watch([() => props.orientation, () => props.coordinates, () => props.showRoads], () => {
   if (configured && !failed.value) updateBoardOptions()
 })
 </script>
 
 <template>
-  <div class="ninja-board">
+  <div class="ninja-board" :class="{ 'ninja-board--compact': compact }">
     <div class="ninja-board__fallback"><slot /></div>
     <iframe
       v-if="!failed"
@@ -175,4 +180,8 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
   visibility: hidden;
 }
 .ninja-board__frame--visible { visibility: visible; }
+.ninja-board--compact .ninja-board__frame {
+  width: calc(100% + 31px);
+  height: calc(100% + 34px);
+}
 </style>

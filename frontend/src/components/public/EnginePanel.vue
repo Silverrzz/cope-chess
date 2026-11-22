@@ -32,7 +32,7 @@ const props = withDefaults(defineProps<{
   loading: false,
 })
 
-const { evaluationPerspective } = useViewerSettings()
+const { evaluationPerspective, takBoardStyle } = useViewerSettings()
 const title = computed(() => props.name || (props.side === 'white' ? 'White' : 'Black'))
 const info = computed(() => props.analysis?.info || props.analysis?.pv || 'No analysis recorded')
 const evaluation = computed(() => {
@@ -105,6 +105,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
           <ChessBoard
             :key="variant || 'standard'"
             :variant="variant"
+            :embed-tak="variant === 'tak' && takBoardStyle === 'discord'"
             :fen="pvRootFen"
             :moves="pvMoves"
             :orientation="side"

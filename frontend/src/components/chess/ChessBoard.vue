@@ -417,7 +417,7 @@ defineExpose({ selectPly, focusBoard })
   >
     <TakOverview v-if="takPosition && roads && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roads.winner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
-      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads">
+      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads" :compact="compact">
         <TakBoard :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
       </TakNinjaBoard>
       <TakBoard v-else-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
@@ -589,6 +589,7 @@ defineExpose({ selectPly, focusBoard })
 }
 
 .chess-viewer--compact .board-mount {
+  aspect-ratio: 1;
   border-radius: var(--radius-sm, 0.35rem);
   box-shadow: none;
 }
