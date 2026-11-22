@@ -164,10 +164,10 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
 .ninja-board__fallback { position: absolute; inset: 0; display: grid; place-items: center; }
 .ninja-board__fallback :deep(.tak-board) { width: min(100cqw, 100cqh); }
 .ninja-board__frame {
-  --ptn-ninja-content-ratio: .91;
+  --ptn-ninja-content-ratio: .9;
   position: absolute;
   inset: 50% auto auto 50%;
-  width: calc(100% / var(--ptn-ninja-content-ratio));
+  width: calc((100% - 1px) / var(--ptn-ninja-content-ratio));
   height: calc(100% / var(--ptn-ninja-content-ratio) + 18px);
   transform: translate(-50%, -50%);
   border: 0;
