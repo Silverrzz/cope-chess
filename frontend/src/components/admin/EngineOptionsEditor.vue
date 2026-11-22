@@ -4,7 +4,7 @@ import { ref, watch } from 'vue'
 type OptionValue = string | number | boolean
 interface OptionRow { id: number; name: string; value: string; type: 'string' | 'number' | 'boolean' }
 
-const props = defineProps<{ modelValue: Record<string, OptionValue> }>()
+const props = withDefaults(defineProps<{ modelValue: Record<string, OptionValue>; protocol?: 'UCI' | 'TEI' }>(), { protocol: 'UCI' })
 const emit = defineEmits<{ 'update:modelValue': [value: Record<string, OptionValue>] }>()
 
 let nextId = 1
@@ -101,8 +101,8 @@ function remove(index: number): void {
         </button>
       </div>
     </div>
-    <p v-else class="option-editor__empty">No UCI overrides.</p>
-    <button class="button button--secondary button--small" type="button" @click="add">Add UCI option</button>
+    <p v-else class="option-editor__empty">No {{ protocol }} overrides.</p>
+    <button class="button button--secondary button--small" type="button" @click="add">Add {{ protocol }} option</button>
   </div>
 </template>
 

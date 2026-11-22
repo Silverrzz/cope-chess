@@ -198,7 +198,7 @@ from cope.web.engine_sources import (
 )
 from cope.web.openings import format_opening, parse_opening_input
 from cope.variants import VariantId
-from cope.db.repo import get_tournament_game, reorder_rating_lists, set_rating_list_variant, update_rating_list
+from cope.db.repo import get_tournament_game, reorder_rating_lists, set_rating_list_variant, update_rating_list, variant_engine_version_ids
 from cope.web.forms import form_value
 from cope.web.requests import read_form
 from cope.version import app_version
@@ -1851,12 +1851,20 @@ def register_api_routes(app: FastAPI) -> None:
             opponent_id=opponent_id,
             side_filter=side,
         )
+        game_export_formats = [
+            extension for extension in ("pgn", "ptn")
+            if pgn_export_exists(connection, PgnExportFilters(
+                engine_id=engine_id, rating_list_id=rating_list_id,
+                opponent_engine_id=opponent_id, color=side, result=result, ptn=extension == "ptn",
+            ))
+        ]
         return _json(
             {
                 "engine": {**jsonable_encoder(engine), "tags": tags.get(engine.id, [])},
                 "family": family,
                 "versions": versions,
                 "games": games,
+                "game_export_formats": game_export_formats,
                 "engines": {
                     version.id: web_app._engine_display_name(version.name, version.version)
                     for version in engine_records
@@ -4910,11 +4918,17 @@ def _live_tournament_roster_payload(
     else:
         reason = ""
     participant_ids = set(tournament.config.participants)
+    eligible_ids = (
+        variant_engine_version_ids(connection, tournament.config.variant)
+        if editable and tournament.config.variant != "standard"
+        else None
+    )
     available_engines = (
         [
             engine
             for engine in list_engine_records(connection)
             if engine.id not in participant_ids
+            and (eligible_ids is None or engine.id in eligible_ids)
             and _engine_is_tournament_ready(connection, engine)
         ]
         if editable

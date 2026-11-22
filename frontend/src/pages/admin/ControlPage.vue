@@ -4,6 +4,7 @@ import { api } from "@/api/client"
 import VariantPicker from "@/components/admin/VariantPicker.vue"
 import AdminPageHeader from "@/components/admin/AdminPageHeader.vue"
 import { errorText } from "@/components/admin/format"
+import { VARIANT_OPTIONS } from "@/components/chess/chess"
 
 interface Choice { id: number; name: string; variant?: string }
 interface Submission { id: number; name: string; version: string; submitted_at: string | null }
@@ -42,6 +43,7 @@ const context = ref<ControlContext | null>(null)
 const operations = ref<OperationSummary[]>([])
 const selected = ref<Operation | null>(null)
 const drafts = ref<DraftEngine[]>([])
+const intakeVariants = VARIANT_OPTIONS.filter(({ id }) => id !== 'standard' && id !== 'dfrc')
 const tokens = ref<Token[]>([])
 const error = ref("")
 const busy = ref(false)
@@ -76,7 +78,7 @@ async function refresh(): Promise<void> {
     if (!drafts.value.length) drafts.value = nextContext.queue.acknowledged.map((item) => ({
       queue_id: item.id, selected: false, git_host_id: nextContext.git_hosts[0]?.id ?? 0,
       repository_full_name: "", source_ref: "", recipe: { path: `${item.name}-${item.version}`.toLowerCase().replace(/[^a-z0-9._-]/g, "-") + ".Dockerfile", content: "" },
-      dfrc: "unknown", variant_capabilities: { duck: "unknown", duck960: "unknown" }, capability_evidence: "", top20: "unknown", strength_evidence: "",
+      dfrc: "unknown", variant_capabilities: Object.fromEntries(intakeVariants.map(({ id }) => [id, "unknown"])), capability_evidence: "", top20: "unknown", strength_evidence: "",
     }))
     if (selected.value) selected.value = await api.get<Operation>(`/api/admin/control/operations/${selected.value.id}`)
   } catch (cause) { if (active) error.value = errorText(cause) }
@@ -225,7 +227,7 @@ onBeforeUnmount(() => { active = false; window.clearInterval(timer) })
           <label>Source commit<input v-model="draft.source_ref" placeholder="Full 40-character commit"></label>
           <label>Dockerfile name<input v-model="draft.recipe.path"></label>
           <label>DFRC support<select v-model="draft.dfrc"><option value="unknown">Unknown</option><option value="supported">Supported</option><option value="unsupported">Unsupported</option></select></label>
-          <label v-for="variant in ['duck', 'duck960']" :key="variant">{{ variant === 'duck' ? 'Duck' : 'Duck960' }} support<select v-model="draft.variant_capabilities[variant]"><option value="unknown">Unknown</option><option value="supported">Supported</option><option value="unsupported">Unsupported</option></select></label>
+          <label v-for="variant in intakeVariants" :key="variant.id">{{ variant.name }} support<select v-model="draft.variant_capabilities[variant.id]"><option value="unknown">Unknown</option><option value="supported">Supported</option><option value="unsupported">Unsupported</option></select></label>
           <label>Capability evidence<input v-model="draft.capability_evidence" placeholder="Source or verified assessment"></label>
           <label>Expected top 20<select v-model="draft.top20"><option value="unknown">Await rating evidence</option><option value="yes">Yes</option><option value="no">No</option></select></label>
           <label>Strength evidence<input v-model="draft.strength_evidence"></label>

@@ -18,10 +18,10 @@ const origin = 'https://ptn.ninja'
 const frame = ref<HTMLIFrameElement | null>(null)
 const visible = ref(false)
 const failed = ref(false)
-let configured = false
-let themeReady = false
+let phase: 'connecting' | 'configuring' | 'ready' = 'connecting'
 let sentPosition = ''
 let confirmedPosition = ''
+let highlightedMove = ''
 let deadline: number | undefined
 let handshake: number | undefined
 
@@ -36,6 +36,11 @@ function markUnavailable(): void {
   failed.value = true
 }
 
+function waitForFrame(): void {
+  failed.value = false
+  deadline = window.setTimeout(markUnavailable, 12000)
+}
+
 function updateBoardOptions(): void {
   send('SET_UI', {
     axisLabels: props.coordinates,
@@ -45,12 +50,15 @@ function updateBoardOptions(): void {
 }
 
 function updatePosition(forceSnapshot = false): void {
-  if (!themeReady || failed.value) return
+  if (phase !== 'ready' || failed.value) return
   if (!forceSnapshot && sentPosition !== confirmedPosition) return
 
-  const squares = takMovePath(props.lastMove).map(takSquareName)
-  if (!forceSnapshot && sentPosition === props.tps) {
-    if (props.compact) send('HIGHLIGHT_SQUARES', squares)
+  const samePosition = !forceSnapshot && sentPosition === props.tps
+  if (samePosition && highlightedMove === props.lastMove) return
+  highlightedMove = props.lastMove
+  const squares = takMovePath(highlightedMove).map(takSquareName)
+  if (samePosition) {
+    send('HIGHLIGHT_SQUARES', squares)
     return
   }
   const append = !forceSnapshot && !props.compact && visible.value && props.previousTps === confirmedPosition && squares.length > 0
@@ -73,9 +81,8 @@ function onMessage(event: MessageEvent): void {
   if (!message || typeof message !== 'object') return
 
   if (message.action === 'GET_THEME') {
-    if (!configured) {
-      configured = true
-      window.clearInterval(handshake)
+    if (phase === 'connecting') {
+      phase = 'configuring'
       send('SET_UI', {
         themeID: 'discord',
         disableBoard: true,
@@ -99,11 +106,12 @@ function onMessage(event: MessageEvent): void {
       })
       updateBoardOptions()
       send('GET_THEME')
-    } else if (!themeReady && message.value?.id === 'discord') {
-      themeReady = true
+    } else if (phase === 'configuring' && message.value?.id === 'discord') {
+      phase = 'ready'
+      window.clearInterval(handshake)
       updatePosition()
     }
-  } else if (themeReady && message.action === 'GAME_STATE') {
+  } else if (phase === 'ready' && message.action === 'GAME_STATE') {
     const rendered = message.value?.tps
     if (rendered === sentPosition) {
       window.clearTimeout(deadline)
@@ -116,10 +124,10 @@ function onMessage(event: MessageEvent): void {
 
 function handshakeOnLoad(): void {
   if (failed.value) return
-  configured = false
-  themeReady = false
+  phase = 'connecting'
   sentPosition = ''
   confirmedPosition = ''
+  highlightedMove = ''
   visible.value = false
   window.clearTimeout(deadline)
   window.clearInterval(handshake)
@@ -130,7 +138,7 @@ function handshakeOnLoad(): void {
 
 onMounted(() => {
   window.addEventListener('message', onMessage)
-  deadline = window.setTimeout(markUnavailable, 12000)
+  waitForFrame()
 })
 
 onBeforeUnmount(() => {
@@ -141,13 +149,16 @@ onBeforeUnmount(() => {
 
 watch([() => props.tps, () => props.lastMove], () => updatePosition())
 watch([() => props.orientation, () => props.coordinates, () => props.showRoads], () => {
-  if (configured && !failed.value) updateBoardOptions()
+  if (phase !== 'connecting' && !failed.value) updateBoardOptions()
 })
 </script>
 
 <template>
   <div class="ninja-board" :class="{ 'ninja-board--compact': compact }">
-    <p v-if="!visible" class="ninja-board__status" role="status">{{ failed ? 'Tak board unavailable' : 'Loading Tak board…' }}</p>
+    <div v-if="!visible" class="ninja-board__status">
+      <span role="status">{{ failed ? 'Tak board unavailable' : 'Loading Tak board…' }}</span>
+      <button v-if="failed" type="button" class="button button--secondary button--small" :aria-label="`Retry ${label}`" @click="waitForFrame">Retry</button>
+    </div>
     <iframe
       v-if="!failed"
       class="ninja-board__frame"
@@ -169,8 +180,11 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
 .ninja-board__status {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .25rem;
   margin: 0;
   padding: .25rem;
   background: var(--color-surface);
@@ -178,6 +192,7 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
   font-size: .75rem;
   text-align: center;
 }
+.ninja-board--compact .ninja-board__status button { font-size: inherit; padding: .1rem .25rem; min-height: 0; }
 .ninja-board__frame {
   --ptn-ninja-content-ratio: .9;
   position: absolute;

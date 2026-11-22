@@ -17,6 +17,7 @@ import { bestVersionRatings } from '@/utils/ratings'
 interface RatingListRecord {
   id: Identifier
   name: string
+  variant?: string
   description?: string
   anchor_engine_id?: Identifier | null
 }
@@ -126,7 +127,7 @@ function selectRatingList(event: Event): void {
           <h1>Ratings</h1>
         </div>
         <div class="ratings-controls">
-          <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download PGNs</BaseButton>
+          <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download {{ data.rating_list?.variant === 'tak' ? 'PTNs' : 'PGNs' }}</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
           <label v-if="data.rating_lists.length" class="category-picker">
             <span>Rating list</span>

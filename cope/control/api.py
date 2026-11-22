@@ -149,7 +149,7 @@ def context_payload(connection, identity):
         "queue": queue_snapshot(connection), "presets": list_presets(connection),
         "engines": engines,
         "variants": [{"id": item.id, "name": item.name, "rules_revision": item.rules_revision,
-                      "chess960": item.chess960, "requires_openings": item.requires_openings,
+                      "chess960": item.chess960, "requires_openings": item.requires_openings, "engine_protocol": item.engine_protocol,
                       "uci_options": item.uci_options()} for item in VARIANTS.values()],
         "rating_lists": [asdict(item) for item in list_rating_lists(connection)],
         "opening_suites": [{"id": item.id, "name": item.name, "variant": item.variant, "rules_revision": item.rules_revision} for item in list_opening_suites(connection)],
@@ -158,7 +158,7 @@ def context_payload(connection, identity):
         "actions": describe_actions(), "intake_schema": IntakeRequest.model_json_schema(),
         "preset_schema": Preset.model_json_schema(),
         "ordering": ["standard before DFRC", "estimated game duration at 80 moves", "original submission time", "stable legacy position"],
-        "features": {"durable_operations": True, "engine_intake": True, "dfrc": True, "duck": True, "duck960": True, "oauth": False},
+        "features": {"durable_operations": True, "engine_intake": True, "dfrc": True, "duck": True, "duck960": True, "tak": True, "oauth": False},
     }
 
 

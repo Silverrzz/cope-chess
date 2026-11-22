@@ -77,13 +77,35 @@ const renamingId = ref<number | null>(null)
 
 const selectedDivisionList = computed(() => context.value?.rating_lists.find((item) => item.id === divisionListId.value) ?? null)
 const selectedGauntletList = computed(() => context.value?.rating_lists.find((item) => item.id === gauntletListId.value) ?? null)
-watch(selectedDivisionList, (list) => {
-  if (list?.variant && list.variant !== divisionSettings.value.variant) divisionSettings.value = { ...divisionSettings.value, variant: list.variant, rules_revision: list.rules_revision || (list.variant.startsWith('duck') ? 'duck1' : 'chess1'), opening_suite_id: null, adjudication: { ...divisionSettings.value.adjudication, draw: null, resign: null } }
+const gauntletHeroOptions = computed(() => {
+  const form = context.value?.form
+  if (!form) return []
+  if (selectedGauntletList.value?.variant !== 'tak') return form.engine_options
+  const eligibleIds = new Set(form.tak_engine_ids)
+  return form.engine_options.filter((engine) => eligibleIds.has(engine.id))
 })
-watch(selectedGauntletList, (list) => {
-  if (list?.variant && list.variant !== gauntletSettings.value.variant) gauntletSettings.value = { ...gauntletSettings.value, variant: list.variant, rules_revision: list.rules_revision || (list.variant.startsWith('duck') ? 'duck1' : 'chess1'), opening_suite_id: null, adjudication: { ...gauntletSettings.value.adjudication, draw: null, resign: null } }
+watch(selectedDivisionList, (list) => { divisionSettings.value = settingsForList(divisionSettings.value, list) })
+watch(selectedGauntletList, (list) => { gauntletSettings.value = settingsForList(gauntletSettings.value, list) })
+watch(gauntletHeroOptions, (engines) => {
+  if (!engines.some((engine) => engine.id === heroEngineId.value)) heroEngineId.value = engines[0]?.id ?? ''
 })
 const maxDivisions = computed(() => Math.max(1, Math.min(100, Math.floor((selectedDivisionList.value?.engines.length ?? 0) / 2))))
+
+function settingsForList(settings: TournamentSettings, list: RatingList | null): TournamentSettings {
+  if (!list?.variant || list.variant === settings.variant) return settings
+  const tak = list.variant === 'tak'
+  const time = settings.time_control
+  return {
+    ...settings,
+    variant: list.variant,
+    rules_revision: list.rules_revision || (tak ? 'tak1' : list.variant.startsWith('duck') ? 'duck1' : 'chess1'),
+    opening_suite_id: null,
+    time_control: tak && time.category === 'movestogo'
+      ? { category: 'increment', initial_ms: time.initial_ms, increment_ms: 0 }
+      : time,
+    adjudication: { ...settings.adjudication, draw: null, resign: null },
+  }
+}
 
 const divisionDrafts = computed<DivisionDraft[]>(() => {
   const engines = selectedDivisionList.value?.engines ?? []
@@ -159,7 +181,7 @@ async function load(): Promise<void> {
     divisionListId.value = initialList?.id ?? ''
     gauntletListId.value = initialList?.id ?? ''
     divisionCount.value = Math.min(4, Math.max(1, Math.floor((initialList?.engines.length ?? 0) / 2)))
-    const initialHero = response.form.engine_options[0]
+    const initialHero = gauntletHeroOptions.value[0]
     heroEngineId.value = initialHero?.id ?? ''
     if (initialHero) gauntletName.value = `${initialHero.name} ${initialHero.version} Gauntlet`
     rebuildDivisionNames()
@@ -383,7 +405,7 @@ onMounted(load)
           <div class="panel-title"><span class="step">1</span><div><h2>Build the field</h2><p>Every available engine on the list is ranked by relative Elo proximity and game coverage, with no fixed rating band.</p></div></div>
           <div class="gauntlet-grid">
             <label class="field"><span>Rating list</span><select v-model.number="gauntletListId" class="input"><option disabled value="">Select a list</option><option v-for="list in context.rating_lists" :key="list.id" :value="list.id">{{ list.name }} · {{ list.engines.length }} available</option></select></label>
-            <label class="field"><span>Hero engine</span><EngineVersionPicker v-model="heroEngineId" :engines="context.form.engine_options" placeholder="Select a hero" /></label>
+            <label class="field"><span>Hero engine</span><EngineVersionPicker v-model="heroEngineId" :engines="gauntletHeroOptions" placeholder="Select a hero" /></label>
             <label class="field"><span>Estimated hero Elo</span><input v-model.number="eloEstimate" class="input" type="number" min="-10000" max="10000" step="1"></label>
             <label class="field"><span>Gauntlet size</span><input v-model.number="gauntletSize" class="input" type="number" min="2" :max="Math.min(500, (selectedGauntletList?.engines.length ?? 0) + (selectedGauntletList?.engines.some((engine) => engine.id === heroEngineId) ? 0 : 1))" step="1"><small>Includes the hero; {{ Math.max(0, gauntletSize - 1) }} opponents will be selected.</small></label>
             <label class="field"><span>Round total</span><input v-model.number="roundTotal" class="input" type="number" min="1" step="1"><small>Each round gives the hero a colour-balanced pair against every opponent.</small></label>

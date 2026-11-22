@@ -47,7 +47,6 @@ function setVariant(variant: Variant): void {
   const duck = variant === 'duck' || variant === 'duck960'
   const tak = variant === 'tak'
   patch({ variant, rules_revision: tak ? 'tak1' : duck ? 'duck1' : 'chess1', opening_suite_id: null,
-    rated: tak ? false : model.value.rated,
     adjudication: duck || tak ? { ...model.value.adjudication, draw: null, resign: null } : model.value.adjudication })
   if (tak && model.value.time_control.category === 'movestogo') setTimeControl('increment')
 }

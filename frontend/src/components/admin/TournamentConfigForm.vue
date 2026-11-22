@@ -41,7 +41,14 @@ const clockReference = computed({
 })
 
 const selectedOpening = computed(() => props.seed.opening_suites.find((suite) => suite.id === config.value.opening_suite_id))
-const hasLocalEngines = computed(() => props.seed.engine_options.some((engine) => engine.distribution === 'worker_local'))
+const takEngineIds = computed(() => new Set(props.seed.tak_engine_ids ?? []))
+const participantOptions = computed(() => config.value.variant === 'tak'
+  ? props.seed.engine_options.filter((engine) => takEngineIds.value.has(engine.id) || config.value.participants.includes(engine.id))
+  : props.seed.engine_options)
+const participantError = computed(() => config.value.variant === 'tak' && config.value.participants.some((id) => !takEngineIds.value.has(id))
+  ? 'Remove any participants without recorded Tak support before saving.'
+  : '')
+const hasLocalEngines = computed(() => participantOptions.value.some((engine) => engine.distribution === 'worker_local'))
 const selectedParticipantNames = computed(() => props.seed.engine_options
   .filter((engine) => config.value.participants.includes(engine.id))
   .map((engine) => `${engine.name} ${engine.version}`))
@@ -65,12 +72,13 @@ watch(() => config.value.participants, (participants) => {
 
 function validate(): string {
   if (!name.value.trim()) return 'Enter a tournament name.'
+  if (participantError.value) return participantError.value
   if (config.value.participants.length < 2) return 'Select at least two participating engines.'
   if (new Set(config.value.participants).size !== config.value.participants.length) return 'Each participant can only be selected once.'
   if (!Number.isInteger(config.value.concurrency) || config.value.concurrency < 0) return 'Concurrent games must be a whole number of at least 0 (unlimited).'
   if (!Number.isInteger(config.value.engine_threads) || config.value.engine_threads < 1) return 'Engine threads must be a whole number of at least 1.'
   if (!Number.isInteger(config.value.engine_hash_mb) || config.value.engine_hash_mb < 1) return 'Engine hash must be a whole number of at least 1 MB.'
-  if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash', 'uci_variant', 'uci_chess960', 'duck960'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields instead of adding Threads or Hash as UCI overrides.'
+  if (Object.keys(config.value.uci_options ?? {}).some((name) => ['threads', 'hash', 'uci_variant', 'uci_chess960', 'duck960'].includes(name.trim().toLowerCase()))) return 'Use the tournament thread and hash fields to set Threads and Hash.'
   if (config.value.adjudication.max_moves !== null && (!Number.isInteger(config.value.adjudication.max_moves) || config.value.adjudication.max_moves < 1)) return 'Maximum moves must be a whole number of at least 1.'
   const draw = config.value.adjudication.draw
   if (draw && (!Number.isInteger(draw.min_fullmove) || draw.min_fullmove < 1)) return 'Draw adjudication must start from a whole full move of at least 1.'
@@ -140,11 +148,12 @@ function submit(): void {
           <span class="step-number" aria-hidden="true">2</span>
           <div><h2>Participants</h2></div>
         </div>
-        <ParticipantPicker v-if="seed.engine_options.length" v-model="config.participants" :engines="seed.engine_options" />
-        <p v-if="hasLocalEngines" class="local-participant-guidance">Worker-local versions do not need a benchmark. Their games wait in the queue until a connected worker reports the matching binary.</p>
-        <AdminEmptyState v-else title="No active engines">
+        <ParticipantPicker v-if="participantOptions.length" v-model="config.participants" :engines="participantOptions" />
+        <AdminEmptyState v-else :title="config.variant === 'tak' ? 'No active engines with Tak support' : 'No active engines'">
           <RouterLink class="button button--primary button--small" to="/admin/engines/new">Register an engine</RouterLink>
         </AdminEmptyState>
+        <InlineFeedback :message="participantError" />
+        <p v-if="hasLocalEngines" class="local-participant-guidance">Worker-local versions do not need a benchmark. Their games wait in the queue until a connected worker reports the matching binary.</p>
       </section>
 
       <section class="panel form-panel">
@@ -170,7 +179,7 @@ function submit(): void {
       <section class="panel form-panel">
         <div class="form-panel__heading">
           <span class="step-number" aria-hidden="true">4</span>
-          <div><h2>Engine resources and UCI options</h2></div>
+          <div><h2>Engine resources and {{ config.variant === 'tak' ? 'TEI' : 'UCI' }} options</h2></div>
         </div>
         <div class="field-grid">
           <label class="field">
@@ -186,7 +195,7 @@ function submit(): void {
           <label><input v-model="config.exclude_from_all_workers" type="checkbox"> Exclude from all workers</label>
           <p>Only workers explicitly selecting this tournament can receive its games.</p>
           <p>These options are applied to every engine for every game in this tournament.</p>
-          <EngineOptionsEditor v-model="config.uci_options" />
+          <EngineOptionsEditor v-model="config.uci_options" :protocol="config.variant === 'tak' ? 'TEI' : 'UCI'" />
         </div>
       </section>
 

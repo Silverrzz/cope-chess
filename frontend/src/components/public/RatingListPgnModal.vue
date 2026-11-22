@@ -23,7 +23,7 @@ interface Filters {
 
 const props = defineProps<{
   open: boolean
-  ratingList: { id: Identifier; name: string }
+  ratingList: { id: Identifier; name: string; variant?: string }
   engines: EngineOption[]
   opponentIdsByEngine: Record<string, number[]>
 }>()
@@ -59,13 +59,14 @@ const opponentOptions = computed(() => {
   )
 })
 const draftCount = computed(() => [draft.value.engineId, draft.value.result, draft.value.opponentId, draft.value.side].filter(Boolean).length)
+const format = computed(() => props.ratingList.variant === 'tak' ? 'PTN' : 'PGN')
 const downloadUrl = computed(() => {
   const parameters = new URLSearchParams({ rating_list_id: String(props.ratingList.id) })
   if (draft.value.engineId) parameters.set('engine_id', draft.value.engineId)
   if (draft.value.result) parameters.set('result', draft.value.result)
   if (draft.value.opponentId) parameters.set('opponent_id', draft.value.opponentId)
   if (draft.value.side) parameters.set('side', draft.value.side)
-  return `/api/pgn?${parameters.toString()}`
+  return `/api/${format.value.toLowerCase()}?${parameters.toString()}`
 })
 
 watch(() => props.open, async (open, wasOpen) => {
@@ -168,10 +169,10 @@ function restorePage(): void {
             <span class="pgn-modal__icon"><AppIcon name="download" :size="21" /></span>
             <div>
               <p>{{ ratingList.name }}</p>
-              <h2 id="rating-pgn-title">Download rating-list PGNs</h2>
+              <h2 id="rating-pgn-title">Download rating-list {{ format }}s</h2>
               <span id="rating-pgn-description">Export every committed game, or narrow the file by engine and result.</span>
             </div>
-            <button data-close-button class="pgn-modal__close" type="button" aria-label="Close PGN download" @click="emit('close')"><AppIcon name="close" :size="19" /></button>
+            <button data-close-button class="pgn-modal__close" type="button" :aria-label="`Close ${format} download`" @click="emit('close')"><AppIcon name="close" :size="19" /></button>
           </header>
 
           <div class="pgn-modal__body">
@@ -214,7 +215,7 @@ function restorePage(): void {
             <span v-else>All committed games will be included</span>
             <div>
               <BaseButton variant="ghost" @click="emit('close')">Cancel</BaseButton>
-              <BaseButton :href="downloadUrl" variant="primary" download @click="emit('close')"><template #icon><AppIcon name="download" :size="16" /></template>Download PGN</BaseButton>
+              <BaseButton :href="downloadUrl" variant="primary" download @click="emit('close')"><template #icon><AppIcon name="download" :size="16" /></template>Download {{ format }}</BaseButton>
             </div>
           </footer>
         </section>
