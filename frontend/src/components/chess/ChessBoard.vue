@@ -89,6 +89,7 @@ const positions = computed(() => buildPositions(props.fen, props.moves, props.va
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
 const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
+const previousTakPosition = computed(() => takPositions.value[clampPly(selectedPly.value) - 1])
 const roads = computed(() => takPosition.value ? takRoads(takPosition.value) : null)
 const showRoads = ref(true)
 const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
@@ -416,7 +417,7 @@ defineExpose({ selectPly, focusBoard })
   >
     <TakOverview v-if="takPosition && roads && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roads.winner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
-      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads">
+      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads">
         <TakBoard :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
       </TakNinjaBoard>
       <TakBoard v-else-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
@@ -518,6 +519,8 @@ defineExpose({ selectPly, focusBoard })
   background: #b58863;
   box-shadow: 0 0.75rem 2.5rem color-mix(in srgb, #000 14%, transparent);
 }
+
+.board-mount.ninja-board { aspect-ratio: var(--arena-board-aspect, 1.2916667); }
 
 .board-controls {
   display: grid;

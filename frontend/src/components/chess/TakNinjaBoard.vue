@@ -5,6 +5,7 @@ import { TAK_KOMI, TAK_SIZE, takMovePath, takSquareName } from './tak'
 
 const props = defineProps<{
   tps: string
+  previousTps?: string | undefined
   lastMove: string
   orientation: 'white' | 'black'
   coordinates: boolean
@@ -18,6 +19,7 @@ const failed = ref(false)
 let configured = false
 let themeReady = false
 let sentPosition = ''
+let confirmedPosition = ''
 let deadline: number | undefined
 let handshake: number | undefined
 
@@ -40,15 +42,23 @@ function updateBoardOptions(): void {
   })
 }
 
-function updatePosition(): void {
+function updatePosition(forceSnapshot = false): void {
   if (!themeReady || failed.value) return
-  if (sentPosition !== props.tps) {
-    sentPosition = props.tps
-    window.clearTimeout(deadline)
+  if (!forceSnapshot && (sentPosition !== confirmedPosition || sentPosition === props.tps)) return
+
+  const squares = takMovePath(props.lastMove).map(takSquareName)
+  const append = !forceSnapshot && visible.value && props.previousTps === confirmedPosition && squares.length > 0
+  sentPosition = props.tps
+  window.clearTimeout(deadline)
+  if (append) {
+    send('HIGHLIGHT_SQUARES', [])
+    send('APPEND_PLY', props.lastMove)
+    deadline = window.setTimeout(() => updatePosition(true), 1800)
+  } else {
+    send('SET_CURRENT_PTN', `[Size "${TAK_SIZE}"]\n[Komi "${TAK_KOMI}"]\n[TPS "${props.tps}"]\n`)
+    send('HIGHLIGHT_SQUARES', squares)
     deadline = window.setTimeout(fallback, visible.value ? 4000 : 10000)
-    send('SET_CURRENT_PTN', `[Size "${TAK_SIZE}"]\n[Komi "${TAK_KOMI}"]\n[TPS "${props.tps}"]\n\n*`)
   }
-  send('HIGHLIGHT_SQUARES', takMovePath(props.lastMove).map(takSquareName))
 }
 
 function onMessage(event: MessageEvent): void {
@@ -69,8 +79,13 @@ function onMessage(event: MessageEvent): void {
         showHeader: false,
         showToolbarAnalysis: false,
         turnIndicator: false,
+        gameTimer: false,
         moveNumber: false,
-        unplayedPieces: false,
+        unplayedPieces: true,
+        verticalLayout: true,
+        verticalLayoutAuto: true,
+        animateBoard: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        autoAnnotateTak: false,
         axisLabelsSmall: true,
         stackCounts: true,
         notifyGame: false,
@@ -84,9 +99,11 @@ function onMessage(event: MessageEvent): void {
     }
   } else if (themeReady && message.action === 'GAME_STATE') {
     const rendered = message.value?.tps
-    if (typeof rendered === 'string' && rendered.split(' ', 1)[0] === sentPosition.split(' ', 1)[0]) {
+    if (rendered === sentPosition) {
       window.clearTimeout(deadline)
+      confirmedPosition = sentPosition
       visible.value = true
+      updatePosition()
     }
   }
 }
@@ -96,6 +113,7 @@ function handshakeOnLoad(): void {
   configured = false
   themeReady = false
   sentPosition = ''
+  confirmedPosition = ''
   visible.value = false
   window.clearTimeout(deadline)
   window.clearInterval(handshake)
@@ -115,7 +133,7 @@ onBeforeUnmount(() => {
   window.clearInterval(handshake)
 })
 
-watch([() => props.tps, () => props.lastMove], updatePosition)
+watch(() => props.tps, () => updatePosition())
 watch([() => props.orientation, () => props.coordinates, () => props.showRoads], () => {
   if (configured && !failed.value) updateBoardOptions()
 })
@@ -123,7 +141,7 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
 
 <template>
   <div class="ninja-board">
-    <slot />
+    <div class="ninja-board__fallback"><slot /></div>
     <iframe
       v-if="!failed"
       class="ninja-board__frame"
@@ -142,7 +160,9 @@ watch([() => props.orientation, () => props.coordinates, () => props.showRoads],
 </template>
 
 <style scoped>
-.ninja-board { position: relative; }
+.ninja-board { position: relative; container-type: size; }
+.ninja-board__fallback { position: absolute; inset: 0; display: grid; place-items: center; }
+.ninja-board__fallback :deep(.tak-board) { width: min(100cqw, 100cqh); }
 .ninja-board__frame {
   position: absolute;
   inset: 0;

@@ -109,8 +109,9 @@ const loading = ref(true)
 const loadError = ref('')
 const selectedPly = ref(0)
 const orientation = ref<'white' | 'black'>('white')
-const { kibitzerEnabled } = useViewerSettings()
+const { kibitzerEnabled, takBoardStyle } = useViewerSettings()
 const isTak = computed(() => data.value?.tournament.config?.variant === 'tak')
+const hasTakReserveArea = computed(() => isTak.value && takBoardStyle.value === 'discord')
 const supportsKibitzer = computed(() => !isTak.value && !['duck', 'duck960'].includes(data.value?.tournament.config?.variant || 'standard'))
 const currentPositionFen = ref('startpos')
 const currentPositionPly = ref(0)
@@ -345,7 +346,7 @@ watch(headingElement, (next, previous) => {
   scheduleArenaFit()
 }, { flush: 'post' })
 
-watch([arenaElement, boardColumnElement, viewerMode], () => scheduleArenaFit(), { flush: 'post' })
+watch([arenaElement, boardColumnElement, viewerMode, hasTakReserveArea], () => scheduleArenaFit(), { flush: 'post' })
 
 onMounted(() => {
   headingResizeObserver = new ResizeObserver(scheduleArenaFit)
@@ -401,16 +402,28 @@ async function fitArenaToViewport(): Promise<void> {
 
   const viewerChrome = Math.max(0, viewer.getBoundingClientRect().height - board.getBoundingClientRect().height)
   const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
-  const maximumBoardSize = 42 * rootFontSize
+  const arenaStyle = getComputedStyle(arena)
+  const boardAspect = Number.parseFloat(arenaStyle.getPropertyValue('--arena-board-aspect')) || 1
+  const maximumBoardSize = 42 * rootFontSize * (hasTakReserveArea.value ? Math.max(1, boardAspect) : 1)
   const arenaWidth = arena.clientWidth
-  const gap = Number.parseFloat(getComputedStyle(arena).columnGap) || 12
+  const gap = Number.parseFloat(arenaStyle.columnGap) || 12
   const barWidth = kibitzerEnabled.value && supportsKibitzer.value ? 1.1 * rootFontSize : 0
-  const widthLimit = window.innerWidth > 1152
+  let widthLimit = window.innerWidth > 1152
     ? arenaWidth - 22 * rootFontSize - barWidth - gap - (window.innerWidth > 1680 ? 28 * rootFontSize + gap : 0)
     : arenaWidth - barWidth
+  if (hasTakReserveArea.value) {
+    if (window.matchMedia('(max-width: 58rem)').matches) {
+      widthLimit = arenaWidth
+    } else if (window.matchMedia('(max-width: 96rem)').matches) {
+      widthLimit = arenaWidth - 25 * rootFontSize - gap
+    } else {
+      const activityRem = Number.parseFloat(arenaStyle.getPropertyValue('--arena-activity-rem'))
+      widthLimit = arenaWidth - (22 + activityRem) * rootFontSize - 2 * gap
+    }
+  }
   const fittedBoardSize = (chromeHeight: number) => Math.max(
     0,
-    Math.min(maximumBoardSize, Math.max(180, widthLimit), Math.floor(availableHeight - chromeHeight)),
+    Math.min(maximumBoardSize, Math.max(180, widthLimit), Math.floor((availableHeight - chromeHeight) * boardAspect)),
   )
 
   const viewportPosition = currentViewportPosition()
@@ -1261,7 +1274,7 @@ function forgetManualFollowPauseGame(): void {
 
       <TournamentCrossTable v-if="viewerMode === 'cross'" :variant="data.tournament.config?.variant" :games="crossTableGames" :engines="data.engines" :stream-state="streamState" />
 
-      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
+      <section v-else-if="viewerGame" ref="arenaElement" :class="{ 'arena--kibitzer': kibitzerEnabled && supportsKibitzer, 'arena--tak-reserves': hasTakReserveArea }" class="arena" :aria-label="`${engineName(data.engines, viewerGame.white_engine_id, viewerGame.white_name)} versus ${engineName(data.engines, viewerGame.black_engine_id, viewerGame.black_name)}`">
         <div class="engine-column">
           <EnginePanel
             v-for="side in (['black', 'white']) as ('white' | 'black')[]"
@@ -1650,11 +1663,17 @@ function forgetManualFollowPauseGame(): void {
 
 .arena {
   display: grid;
-  grid-template-columns: minmax(22rem, 26rem) var(--arena-board-size) minmax(28rem, 1fr);
+  grid-template-columns: minmax(22rem, 26rem) var(--arena-board-size) minmax(calc(var(--arena-activity-rem, 28) * 1rem), 1fr);
   gap: clamp(0.7rem, 1.5vw, 1.2rem);
   align-items: start;
   height: var(--arena-content-height);
   min-height: 0;
+}
+
+.arena--tak-reserves {
+  --arena-board-aspect: 1.2916667;
+  --arena-activity-rem: 24;
+  min-width: 0;
 }
 
 .engine-column,
@@ -1845,6 +1864,7 @@ function forgetManualFollowPauseGame(): void {
   .tournament-heading__actions,
   .tournament-heading__pickers { flex: 0 0 auto; }
   .arena { grid-template-columns: 1fr; }
+  .arena--tak-reserves { --arena-board-aspect: .8571429; }
   .engine-column { grid-column: 1; grid-row: 2; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; height: auto; }
   .engine-column .game-evaluation { grid-column: 1 / -1; }
   .board-column { grid-column: 1; grid-row: 1; width: min(100%, var(--arena-board-size)); }
