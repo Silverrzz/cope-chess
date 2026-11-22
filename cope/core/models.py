@@ -279,8 +279,6 @@ class TournamentConfig(StrictModel):
         if (variant.duck or variant.id == "tak") and (self.adjudication.draw is not None or self.adjudication.resign is not None):
             raise ValueError(f"{variant.name} tournaments do not support evaluation adjudication")
         if variant.id == "tak":
-            if self.rated:
-                raise ValueError("Tak tournaments are currently unrated")
             if self.opening_suite_id is not None:
                 raise ValueError("Tak tournaments currently use the empty starting board")
             if isinstance(self.time_control, MovesToGoTimeControl):

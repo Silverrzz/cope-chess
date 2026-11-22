@@ -294,7 +294,7 @@ function patchWinAdjudication(key: 'min_abs_cp' | 'consecutive_plies', value: nu
         </label>
       </div>
       <label v-if="allowRated && !structureOnly" class="choice-row">
-        <input type="checkbox" :disabled="model.variant === 'tak'" :checked="model.rated" @change="patch({ rated: ($event.target as HTMLInputElement).checked })">
+        <input type="checkbox" :checked="model.rated" @change="patch({ rated: ($event.target as HTMLInputElement).checked })">
         <span><strong>Rated tournament</strong></span>
       </label>
     </fieldset>
