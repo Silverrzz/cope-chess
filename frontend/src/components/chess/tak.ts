@@ -78,6 +78,10 @@ export function takMovePath(move: string): number[] {
   return parseTakMove(move)?.path ?? []
 }
 
+export function takSquareName(index: number): string {
+  return `${'abcdef'[index % TAK_SIZE]}${TAK_SIZE - Math.floor(index / TAK_SIZE)}`
+}
+
 export function applyTakMove(position: TakPosition, move: string): TakPosition {
   const parsed = parseTakMove(move)
   if (!parsed || position.stacks.length !== TAK_SIZE ** 2) return position

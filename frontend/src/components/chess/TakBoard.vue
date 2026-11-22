@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import TakStone from './TakStone.vue'
-import { TAK_SIZE, parseTakMove, takRoads, takStoneKind, takStoneName, takStoneSide, type TakPosition } from './tak'
+import { TAK_SIZE, parseTakMove, takRoads, takSquareName, takStoneKind, takStoneName, takStoneSide, type TakPosition } from './tak'
 
 const props = defineProps<{
   position: TakPosition
@@ -23,14 +23,10 @@ const lastTurn = computed(() => parseTakMove(props.lastMove))
 const changed = computed(() => new Map(lastTurn.value?.path.map((square, index) => [square, index])))
 const visibleStacks = computed(() => props.position.stacks.map((stack) => stack.slice(props.compact ? -3 : -5)))
 
-function squareName(index: number): string {
-  return `${'abcdef'[index % TAK_SIZE]}${TAK_SIZE - Math.floor(index / TAK_SIZE)}`
-}
-
 function stackLabel(index: number): string {
   const stones = props.position.stacks[index] ?? []
   const names = stones.map((stone) => `${takStoneSide(stone)} ${takStoneName(takStoneKind(stone))}`)
-  return `${squareName(index)} · ${names.length ? names.join(', ') : 'empty'}`
+  return `${takSquareName(index)} · ${names.length ? names.join(', ') : 'empty'}`
 }
 </script>
 
@@ -48,8 +44,8 @@ function stackLabel(index: number): string {
         <span v-for="link in roads.links[index]" :key="link.name" class="tak-connection"
           :class="[`tak-connection--${link.name}`, `tak-connection--${link.side}`, { 'tak-connection--winning': link.onPath }]" />
       </div>
-      <span v-if="coordinates && displayIndex % TAK_SIZE === 0" class="tak-rank" aria-hidden="true">{{ squareName(index)[1] }}</span>
-      <span v-if="coordinates && displayIndex >= TAK_SIZE * (TAK_SIZE - 1)" class="tak-file" aria-hidden="true">{{ squareName(index)[0] }}</span>
+      <span v-if="coordinates && displayIndex % TAK_SIZE === 0" class="tak-rank" aria-hidden="true">{{ takSquareName(index)[1] }}</span>
+      <span v-if="coordinates && displayIndex >= TAK_SIZE * (TAK_SIZE - 1)" class="tak-file" aria-hidden="true">{{ takSquareName(index)[0] }}</span>
       <div v-if="visibleStacks[index]?.length" class="tak-stack" aria-hidden="true">
         <TakStone v-for="(stone, level) in visibleStacks[index]" :key="level" class="tak-stack__stone"
           :side="takStoneSide(stone)" :kind="takStoneKind(stone)"

@@ -13,6 +13,7 @@ import duckIcon from '@/assets/duck.svg'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import { useViewerSettings } from '@/composables/useViewerSettings'
 import TakBoard from './TakBoard.vue'
+import TakNinjaBoard from './TakNinjaBoard.vue'
 import TakOverview from './TakOverview.vue'
 import { buildTakPositions, takPositionText, takReserves, takRoads } from './tak'
 
@@ -46,6 +47,7 @@ const props = withDefaults(defineProps<{
   controls?: boolean
   coordinates?: boolean
   compact?: boolean
+  embedTak?: boolean
   label?: string
   arrows?: BoardArrow[]
   rings?: string[]
@@ -414,7 +416,10 @@ defineExpose({ selectPly, focusBoard })
   >
     <TakOverview v-if="takPosition && roads && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roads.winner" :finished="Boolean(finished && selectedPly === moves.length)" />
     <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
-      <TakBoard v-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
+      <TakNinjaBoard v-if="takPosition && roads && embedTak" class="board-mount" :tps="currentFen" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads">
+        <TakBoard :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
+      </TakNinjaBoard>
+      <TakBoard v-else-if="takPosition && roads" class="board-mount" :position="takPosition" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :compact="compact" :show-roads="showRoads" :roads="roads" :label="label" />
       <div
         v-else
         ref="board"

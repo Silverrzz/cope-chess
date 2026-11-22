@@ -29,6 +29,8 @@ const evaluationPerspective = ref<'white' | 'side-to-move'>(stored('cope-eval-pe
 const kibitzerEnabled = ref(stored('cope-kibitzer-enabled', 'true') !== 'false');
 const boardAnnotationsEnabled = ref(stored('cope-board-annotations-enabled', 'true') !== 'false');
 const chatGameLinksVisible = ref(stored('cope-chat-game-links-visible', 'true') !== 'false');
+export type TakBoardStyle = 'discord' | 'cope';
+const takBoardStyle = ref<TakBoardStyle>(stored('cope-tak-board-style', 'discord') === 'cope' ? 'cope' : 'discord');
 
 export function useViewerSettings() {
   function setEvaluationPerspective(value: 'white' | 'side-to-move'): void {
@@ -46,6 +48,10 @@ export function useViewerSettings() {
   function setChatGameLinksVisible(value: boolean): void {
     chatGameLinksVisible.value = value;
     try { localStorage.setItem('cope-chat-game-links-visible', String(value)); } catch {}
+  }
+  function setTakBoardStyle(value: TakBoardStyle): void {
+    takBoardStyle.value = value;
+    try { localStorage.setItem('cope-tak-board-style', value); } catch {}
   }
   function setConfettiEnabled(enabled: boolean): void {
     confettiEnabled.value = enabled;
@@ -71,6 +77,7 @@ export function useViewerSettings() {
     kibitzerEnabled, setKibitzerEnabled,
     boardAnnotationsEnabled, setBoardAnnotationsEnabled,
     chatGameLinksVisible, setChatGameLinksVisible,
+    takBoardStyle, setTakBoardStyle,
     confettiEnabled, setConfettiEnabled,
     eventMusicEnabled, setEventMusicEnabled,
   };
