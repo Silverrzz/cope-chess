@@ -6,12 +6,14 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
 import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
+import type { EngineVersionTag } from '@/components/engines/types'
 import ContentState from '@/components/public/ContentState.vue'
 import { errorMessage, formatDate } from '@/components/public/format'
 import RatingListPgnModal from '@/components/public/RatingListPgnModal.vue'
 import type { EngineRecord, Identifier } from '@/components/public/types'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import OptionPicker from '@/components/ui/OptionPicker.vue'
 import { bestVersionRatings } from '@/utils/ratings'
 
 interface RatingListRecord {
@@ -44,6 +46,8 @@ const data = ref<RatingsResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const onlyBestVersions = ref(true)
+const tagMode = ref<'hide' | 'show'>('hide')
+const selectedTags = ref<number[]>([])
 const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
@@ -52,10 +56,33 @@ const routeRatingList = computed(() => {
   return value ? String(value) : ''
 })
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
+const tagOptions = computed(() => {
+  const tags = new Map<number, { tag: EngineVersionTag; count: number }>()
+  for (const { engine } of data.value?.ratings ?? []) {
+    if (engine.public_hidden) continue
+    for (const tag of engine.tags ?? []) {
+      const entry = tags.get(tag.id)
+      if (entry) entry.count += 1
+      else tags.set(tag.id, { tag, count: 1 })
+    }
+  }
+  return [...tags.values()].sort((a, b) => a.tag.name.localeCompare(b.tag.name)).map(({ tag, count }) => ({
+    value: tag.id,
+    label: tag.name,
+    meta: `${count} version${count === 1 ? '' : 's'}`,
+  }))
+})
+const tagFilterLabel = computed(() => selectedTags.value.length
+  ? `${tagMode.value === 'hide' ? 'Hide' : 'Show only'} · ${selectedTags.value.length}`
+  : 'Version tags')
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   const search = String(route.query.search ?? '').trim().toLowerCase()
-  const filtered = ratings.filter((row) => !row.engine.public_hidden && (!search || `${row.engine.name} ${row.engine.version ?? ''}`.toLowerCase().includes(search)))
+  const selected = new Set(selectedTags.value)
+  const filtered = ratings.filter(({ engine }) => {
+    if (engine.public_hidden || (search && !`${engine.name} ${engine.version ?? ''}`.toLowerCase().includes(search))) return false
+    return !selected.size || (engine.tags ?? []).some((tag) => selected.has(tag.id)) === (tagMode.value === 'show')
+  })
   return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
 const representedGames = computed(() => Math.max(0, Math.round((data.value?.ratings ?? []).reduce((sum, row) => sum + row.games_played, 0) / 2)))
@@ -71,9 +98,17 @@ onBeforeUnmount(() => controller?.abort())
 watch(routeRatingList, (next, previous) => {
   if (next !== previous) {
     pgnModalOpen.value = false
+    selectedTags.value = []
     void load()
   }
 })
+
+function toggleTag(value: string | number): void {
+  const id = Number(value)
+  selectedTags.value = selectedTags.value.includes(id)
+    ? selectedTags.value.filter((tag) => tag !== id)
+    : [...selectedTags.value, id]
+}
 
 async function load(): Promise<void> {
   controller?.abort()
@@ -129,6 +164,15 @@ function selectRatingList(event: Event): void {
         <div class="ratings-controls">
           <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download {{ data.rating_list?.variant === 'tak' ? 'PTNs' : 'PGNs' }}</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
+          <OptionPicker v-if="tagOptions.length" class="tag-picker" model-value="" :selected-values="selectedTags" :options="tagOptions" :placeholder="tagFilterLabel" label="Filter by version tag" icon="tag" searchable search-placeholder="Find a tag" :disabled="loading" @toggle="toggleTag">
+            <template #menu-header>
+              <div class="tag-picker__modes">
+                <button type="button" :aria-pressed="tagMode === 'hide'" @click="tagMode = 'hide'">Hide</button>
+                <button type="button" :aria-pressed="tagMode === 'show'" @click="tagMode = 'show'">Show only</button>
+                <button type="button" class="tag-picker__clear" :disabled="!selectedTags.length" @click="selectedTags = []">Clear</button>
+              </div>
+            </template>
+          </OptionPicker>
           <label v-if="data.rating_lists.length" class="category-picker">
             <span>Rating list</span>
             <select :value="selectedRatingList" @change="selectRatingList">
@@ -201,7 +245,7 @@ function selectRatingList(event: Event): void {
           v-else
           kind="empty"
           compact
-          :title="data.rating_list ? 'No ratings yet' : 'No rating lists'"
+          :title="data.ratings.length ? 'No matching ratings' : data.rating_list ? 'No ratings yet' : 'No rating lists'"
         />
       </section>
 
@@ -242,10 +286,19 @@ function selectRatingList(event: Event): void {
 
 .ratings-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   justify-content: flex-end;
   gap: 0.9rem;
 }
+
+.tag-picker { min-width: 8.75rem; }
+.tag-picker__modes { display: flex; gap: .25rem; padding: .45rem; border-block-end: 1px solid var(--color-border); }
+.tag-picker__modes button { padding: .28rem .52rem; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-muted); cursor: pointer; font-size: .72rem; font-weight: 650; white-space: nowrap; }
+.tag-picker__modes button[aria-pressed='true'] { border-color: var(--color-border); background: var(--color-accent-soft); color: var(--color-accent); }
+.tag-picker__modes button:hover:not(:disabled) { color: var(--color-accent); }
+.tag-picker__modes .tag-picker__clear { margin-inline-start: auto; }
+.tag-picker__clear:disabled { opacity: .5; cursor: default; }
 
 .best-versions-filter {
   display: flex;

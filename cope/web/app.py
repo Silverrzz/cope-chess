@@ -3641,6 +3641,22 @@ def _tournament_index_stats(tournaments: list[dict[str, Any]]) -> dict[str, int]
     }
 
 
+def _upcoming_tournament_schedule(connection, tournament_id: int, page: int) -> dict[str, Any]:
+    page_size = 8
+    rows = connection.execute(
+        """
+        SELECT id, round, pair_index, game_number, white_engine_id, black_engine_id, status
+        FROM games
+        WHERE tournament_id = ? AND record_eligible = 1 AND status IN ('pending', 'assigned', 'live')
+        ORDER BY CASE status WHEN 'live' THEN 0 WHEN 'assigned' THEN 1 ELSE 2 END,
+                 (game_number - 1) / 2, round, pair_index, game_number, id
+        LIMIT ? OFFSET ?
+        """,
+        (tournament_id, page_size + 1, (page - 1) * page_size),
+    ).fetchall()
+    return {"games": [dict(row) for row in rows[:page_size]], "has_next": len(rows) > page_size}
+
+
 def _standings(
     connection: sqlite3.Connection,
     tournament: TournamentRecord,
@@ -3733,6 +3749,7 @@ def _standings(
         engine_id: index
         for index, engine_id in enumerate(tournament.config.participants)
     }
+    provisional = _provisional_tournament_elos(connection, tournament, head_to_head)
     rows = [
         {
             "engine_id": engine_id,
@@ -3747,6 +3764,7 @@ def _standings(
             "draws": draws[engine_id],
             "losses": losses[engine_id],
             "head_to_head": head_to_head.get(engine_id, {}),
+            "provisional_rating": provisional.get(engine_id),
             "buchholz": buchholz[engine_id],
             "bye_points": bye_points.get(engine_id, 0.0),
             "stage": stage[engine_id],
@@ -3774,6 +3792,94 @@ def _standings(
     else:
         rows.sort(key=lambda row: (-row["score_percent"], -row["points"], row["name"]))
     return rows
+
+
+def _provisional_tournament_elos(connection, tournament, head_to_head) -> dict[int, dict[str, Any]]:
+    if not head_to_head or not tournament.config.rated or tournament.status not in {"running", "paused", "finished"}:
+        return {}
+    time_control = tournament.config.time_control.model_dump_json()
+    participants = list(head_to_head)
+    rows = connection.execute(
+        """
+        WITH candidates AS (
+            SELECT rating_list_id, 0 AS priority
+            FROM engine_waiting_test_queue WHERE tournament_id = ?
+            UNION
+            SELECT rating_list_id, 0
+            FROM tournament_rating_list_commits WHERE tournament_id = ? AND status IN ('pending', 'claimed')
+            UNION
+            SELECT rating_list_id, 1 FROM control_presets
+            WHERE variant = ? AND config::jsonb -> 'time_control' = ?::jsonb
+            UNION
+            SELECT prior_commit.rating_list_id, 2
+            FROM tournament_rating_list_commits prior_commit
+            JOIN tournaments previous ON previous.id = prior_commit.tournament_id
+            WHERE prior_commit.status = 'applied'
+              AND previous.config::jsonb -> 'time_control' = ?::jsonb
+            UNION
+            SELECT id, 3 FROM rating_lists
+            WHERE variant = ? AND (SELECT COUNT(*) FROM rating_lists WHERE variant = ?) = 1
+        ), selected AS (
+            SELECT list.id, list.name
+            FROM candidates candidate
+            JOIN rating_lists list ON list.id = candidate.rating_list_id
+            JOIN rating_list_ratings rating ON rating.rating_list_id = list.id
+                AND rating.engine_id = ANY(?)
+            WHERE list.variant = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM tournament_rating_list_commits
+                  WHERE tournament_id = ? AND status = 'applied'
+              )
+            GROUP BY list.id
+            ORDER BY MIN(candidate.priority), COUNT(DISTINCT rating.engine_id) DESC,
+                     list.display_order NULLS LAST, list.id
+            LIMIT 1
+        )
+        SELECT selected.name, rating.engine_id, rating.elo
+        FROM selected
+        JOIN rating_list_ratings rating ON rating.rating_list_id = selected.id
+        WHERE rating.engine_id = ANY(?)
+        """,
+        (tournament.id, tournament.id, tournament.config.variant, time_control, time_control,
+         tournament.config.variant, tournament.config.variant, participants, tournament.config.variant,
+         tournament.id, participants),
+    ).fetchall()
+    if not rows:
+        return {}
+    ratings = {row["engine_id"]: float(row["elo"]) for row in rows}
+    list_name = rows[0]["name"]
+    estimates = {}
+    for engine_id, matchups in head_to_head.items():
+        rated = [
+            (ratings[opponent], matchup["played"], matchup["points"])
+            for opponent, matchup in matchups.items() if opponent in ratings
+        ]
+        if not rated:
+            continue
+        baseline = ratings.get(engine_id)
+        center = baseline if baseline is not None else (
+            sum(elo * played for elo, played, _ in rated) / sum(played for _, played, _ in rated)
+        )
+        played = sum(played for _, played, _ in rated)
+        score = sum(points for _, _, points in rated) + 1
+        opponents = [(elo, count) for elo, count, _ in rated] + [(center, 2)]
+        low = min(elo for elo, _ in opponents) - 800
+        high = max(elo for elo, _ in opponents) + 800
+        for _ in range(16):
+            estimate = (low + high) / 2
+            expected = sum(count / (1 + 10 ** ((elo - estimate) / 400)) for elo, count in opponents)
+            if expected < score:
+                low = estimate
+            else:
+                high = estimate
+        elo = round((low + high) / 2)
+        estimates[engine_id] = {
+            "elo": elo,
+            "change": elo - round(baseline) if baseline is not None else None,
+            "rating_list": list_name,
+            "games": played,
+        }
+    return estimates
 
 
 def _score_percent(points: float, scoring_opportunities: float) -> float:

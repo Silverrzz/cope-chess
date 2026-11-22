@@ -164,6 +164,9 @@ const activeTab = computed<TournamentTab>(() => {
   const tab = String(route.params.section || queryValue(route.query.tab))
   return ['standings', 'games', 'settings'].includes(tab) ? tab as TournamentTab : 'standings'
 })
+const schedulePage = computed(() => Math.min(10000000, Math.max(1, Math.floor(Number(queryValue(route.query.schedule_page)) || 1))))
+const requestedSchedulePage = computed(() => activeTab.value === 'games' ? schedulePage.value : undefined)
+const hasProvisionalRatings = computed(() => data.value?.standings?.some((standing) => standing.provisional_rating))
 const viewerGame = computed(() => data.value?.viewer_game || null)
 const isPreparing = computed(() => viewerGame.value?.status === 'pending' || viewerGame.value?.status === 'assigned')
 const viewerGames = computed(() => data.value?.active_games || [])
@@ -317,7 +320,7 @@ watch(routeGameId, (gameId, previousGameId) => {
 })
 
 watch(
-  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${gameResult.value}:${viewerMode.value}`,
+  () => `${tournamentId.value}:${routeGameId.value}:${gamePage.value}:${gameResult.value}:${viewerMode.value}:${requestedSchedulePage.value}`,
   () => {
     if (pendingGameNavigationId && routeGameId.value === pendingGameNavigationId) pendingGameNavigationId = ''
     void loadDetail(false)
@@ -460,6 +463,7 @@ async function loadDetail(background: boolean, preferredGameId?: Identifier): Pr
         page: gamePage.value,
         result: gameResult.value,
         cross_table: viewerMode.value === 'cross' || undefined,
+        schedule_page: requestedSchedulePage.value,
       },
       signal: request.signal,
     })
@@ -722,6 +726,12 @@ function handleSpectatorsChanged(event: Event): void {
 
 function applySnapshot(snapshot: LiveSnapshot): void {
   if (!data.value) return
+  if (requestedSchedulePage.value && (
+    snapshot.tournament?.status !== undefined && snapshot.tournament.status !== data.value.tournament.status
+    || snapshot.active_games && !sameGameSet(snapshot.active_games, data.value.active_games, true)
+    || snapshot.standings?.some((row, index) => row.played !== data.value?.standings?.[index]?.played
+      || !sameId(row.engine_id, data.value?.standings?.[index]?.engine_id))
+  )) scheduleSnapshotRefresh()
   loadError.value = ''
   if (viewerMode.value === 'cross') {
     if (snapshot.tournament) data.value.tournament = { ...data.value.tournament, ...snapshot.tournament }
@@ -1044,8 +1054,17 @@ function gameLabel(game: GameRecord): string {
 }
 
 function tabTarget(tab: TournamentTab) {
-  const { page: _, tab: _tab, game_id: _game, ...query } = route.query
+  const { page: _, tab: _tab, game_id: _game, schedule_page: _schedule, ...query } = route.query
   return { path: tournamentPath(tournamentId.value, { tab }), query }
+}
+
+function setSchedulePage(page: number): void {
+  if (page < 1 || page === schedulePage.value) return
+  void router.replace({ query: { ...route.query, schedule_page: page > 1 ? String(page) : undefined } })
+}
+
+function provisionalDelta(change: number): string {
+  return `(${change > 0 ? '+' : ''}${change.toLocaleString()})`
 }
 
 function viewTarget(mode: ViewerMode): RouteLocationRaw {
@@ -1096,10 +1115,10 @@ function updateGames(existing: GameRecord[], incoming: GameRecord[]): GameRecord
   return existing.map((game) => ({ ...game, ...byId.get(String(game.id)) } as GameRecord))
 }
 
-function sameGameSet(left: GameRecord[], right: CrossTableGame[]): boolean {
+function sameGameSet(left: GameRecord[], right: GameRecord[], compareStatus = false): boolean {
   if (left.length !== right.length) return false
-  const rightIds = new Set(right.map((game) => String(game.id)))
-  return left.every((game) => rightIds.has(String(game.id)))
+  const games = new Map(right.map((game) => [String(game.id), game.status]))
+  return left.every((game) => compareStatus ? games.get(String(game.id)) === game.status : games.has(String(game.id)))
 }
 
 function indexCrossTableGames(games: CrossTableGame[]): void {
@@ -1347,7 +1366,7 @@ function forgetManualFollowPauseGame(): void {
           <header><div><h2 id="standings-title">Standings</h2></div></header>
           <div v-if="data.standings?.length" class="table-wrap">
             <table>
-              <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
+              <thead><tr><th>Rank</th><th>Engine</th><th>Points</th><th>Score %</th><th>Played</th><th v-if="hasProvisionalRatings">Provisional Elo</th><th v-if="format === 'swiss'">Buchholz</th><th v-if="format === 'knockout'">Stage</th><th><span class="sr-only">View engine</span></th></tr></thead>
               <tbody>
                 <tr v-for="(standing, index) in data.standings" :key="standing.engine_id">
                   <td class="rank-cell">{{ index + 1 }}</td>
@@ -1355,6 +1374,13 @@ function forgetManualFollowPauseGame(): void {
                   <td class="number-cell">{{ standing.points }}</td>
                   <td class="number-cell">{{ scorePercentLabel(standing.score_percent) }}</td>
                   <td class="number-cell">{{ standing.played }}</td>
+                  <td v-if="hasProvisionalRatings" class="number-cell provisional-rating">
+                    <span v-if="standing.provisional_rating" :title="`Estimated from ${standing.provisional_rating.games} tournament games against rated opponents on ${standing.provisional_rating.rating_list}`">
+                      {{ standing.provisional_rating.elo.toLocaleString() }}
+                      <small v-if="standing.provisional_rating.change !== null" :class="{ 'rating-gain': standing.provisional_rating.change > 0, 'rating-loss': standing.provisional_rating.change < 0 }">{{ provisionalDelta(standing.provisional_rating.change) }}</small>
+                    </span>
+                    <span v-else>–</span>
+                  </td>
                   <td v-if="format === 'swiss'" class="number-cell">{{ standing.buchholz ?? 0 }}</td>
                   <td v-if="format === 'knockout'" class="number-cell">{{ standing.stage ?? 0 }}</td>
                   <td class="action-cell"><RouterLink :to="enginePath(standing.engine_id)" :aria-label="`View ${standing.name}`">View</RouterLink></td>
@@ -1366,16 +1392,43 @@ function forgetManualFollowPauseGame(): void {
           <TournamentScoreCrosstable v-if="data.standings?.length" :standings="data.standings" />
         </section>
 
-        <section v-else-if="activeTab === 'games'" class="data-panel" aria-labelledby="games-title">
-          <header><div><h2 id="games-title">Finished games</h2></div></header>
-          <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" caption="Finished tournament games" />
-          <ContentState v-else kind="empty" compact title="No finished games yet" />
-          <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
-            <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
-            <span>Page {{ gamePage.toLocaleString() }} of {{ gamePages.toLocaleString() }}</span>
-            <button type="button" :disabled="gamePage >= gamePages" @click="setGamePage(gamePage + 1)">Next</button>
-          </nav>
-        </section>
+        <div v-else-if="activeTab === 'games'" class="game-sections">
+          <section v-if="data.schedule" class="data-panel schedule-panel" aria-labelledby="schedule-title">
+            <header><div><h2 id="schedule-title">Matchup schedule</h2></div></header>
+            <div v-if="data.schedule.games.length" class="table-wrap">
+              <table>
+                <thead><tr><th>Round</th><th>{{ isTak ? 'Player 1' : 'White' }}</th><th>{{ isTak ? 'Player 2' : 'Black' }}</th><th>Status</th></tr></thead>
+                <tbody>
+                  <tr v-for="game in data.schedule.games" :key="game.id">
+                    <td class="number-cell">{{ game.round }}<small class="schedule-board" v-if="game.pair_index"> / {{ game.pair_index }}</small></td>
+                    <td><RouterLink :to="enginePath(game.white_engine_id)">{{ engineName(data.engines, game.white_engine_id) }}</RouterLink></td>
+                    <td><RouterLink :to="enginePath(game.black_engine_id)">{{ engineName(data.engines, game.black_engine_id) }}</RouterLink></td>
+                    <td>
+                      <RouterLink v-if="game.status === 'live'" class="schedule-live" :to="tournamentPath(tournamentId, { gameId: game.id })">Watch live</RouterLink>
+                      <span v-else>{{ game.status === 'assigned' ? 'Preparing' : 'Queued' }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ContentState v-else kind="empty" compact :title="schedulePage > 1 ? 'No more matchups' : 'No upcoming matchups yet'" />
+            <nav v-if="schedulePage > 1 || data.schedule.has_next" class="pagination" aria-label="Schedule pages">
+              <button type="button" :disabled="schedulePage <= 1" @click="setSchedulePage(schedulePage - 1)">Previous</button>
+              <span>Page {{ schedulePage.toLocaleString() }}</span>
+              <button type="button" :disabled="!data.schedule.has_next" @click="setSchedulePage(schedulePage + 1)">Next</button>
+            </nav>
+          </section>
+          <section class="data-panel" aria-labelledby="games-title">
+            <header><div><h2 id="games-title">Finished games</h2></div></header>
+            <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" caption="Finished tournament games" />
+            <ContentState v-else kind="empty" compact title="No finished games yet" />
+            <nav v-if="gamePages > 1" class="pagination" aria-label="Game pages">
+              <button type="button" :disabled="gamePage <= 1" @click="setGamePage(gamePage - 1)">Previous</button>
+              <span>Page {{ gamePage.toLocaleString() }} of {{ gamePages.toLocaleString() }}</span>
+              <button type="button" :disabled="gamePage >= gamePages" @click="setGamePage(gamePage + 1)">Next</button>
+            </nav>
+          </section>
+        </div>
 
         <section v-else class="data-panel settings-panel" aria-labelledby="settings-title">
           <header><div><h2 id="settings-title">Settings</h2></div></header>
@@ -1690,6 +1743,13 @@ function forgetManualFollowPauseGame(): void {
 
  .arena--kibitzer { grid-template-columns: minmax(22rem, 26rem) calc(var(--arena-board-size) + 1.1rem) minmax(28rem, 1fr); }
 .game-evaluation { min-height: 9rem; }
+.game-sections { display: grid; gap: .85rem; min-width: 0; }
+.provisional-rating { white-space: nowrap; }
+.provisional-rating small, .schedule-board { color: var(--color-text-muted); font-size: .7em; }
+.provisional-rating .rating-gain { color: var(--color-success); }
+.provisional-rating .rating-loss { color: var(--color-danger); }
+.schedule-panel td { white-space: nowrap; }
+.schedule-panel .schedule-live { color: var(--color-success); }
 .engine-column :deep(.engine-panel) { min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: .4rem; padding: .65rem; }
 .engine-column :deep(.evaluation strong) { font-size: 2rem; }
 .engine-column :deep(.engine-panel__body) { grid-template-columns: minmax(0, 1fr) 5.5rem; gap: .6rem; overflow: hidden; }
