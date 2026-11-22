@@ -15,23 +15,27 @@ interface PickerOption {
 
 const props = withDefaults(defineProps<{
   modelValue: string | number
+  selectedValues?: (string | number)[]
   options: PickerOption[]
   placeholder?: string
   label: string
   icon?: IconName
   searchable?: boolean
   searchPlaceholder?: string
+  emptyMessage?: string
   disabled?: boolean
 }>(), {
   placeholder: 'Choose an option',
   searchable: false,
   searchPlaceholder: 'Search…',
+  emptyMessage: 'No options available',
   disabled: false,
 })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string | number]
   change: [value: string | number]
+  toggle: [value: string | number]
 }>()
 
 const pickerId = useId()
@@ -48,6 +52,7 @@ function sameValue(left: string | number | null | undefined, right: string | num
 }
 
 const selected = computed(() => {
+  if (props.selectedValues) return null
   for (const option of props.options) {
     if (sameValue(option.value, props.modelValue) && !option.children?.length) return { option, parent: null as PickerOption | null }
     const child = option.children?.find((item) => sameValue(item.value, props.modelValue))
@@ -55,6 +60,12 @@ const selected = computed(() => {
   }
   return null
 })
+
+function isSelected(value: string | number): boolean {
+  return props.selectedValues
+    ? props.selectedValues.some((selected) => sameValue(value, selected))
+    : sameValue(value, props.modelValue)
+}
 
 const filteredOptions = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
@@ -73,7 +84,7 @@ const activeGroup = computed(() => filteredOptions.value.find((option) => sameVa
 const selectedSupportingText = computed(() => selected.value?.parent?.label || selected.value?.option.meta || selected.value?.option.description || '')
 
 async function show(): Promise<void> {
-  if (props.disabled || !props.options.length) return
+  if (props.disabled || (!props.options.length && !props.selectedValues)) return
   open.value = true
   query.value = ''
   activeGroupValue.value = selected.value?.parent?.value ?? null
@@ -99,6 +110,10 @@ function toggle(): void {
 
 function choose(option: PickerOption): void {
   if (option.disabled) return
+  if (props.selectedValues) {
+    emit('toggle', option.value)
+    return
+  }
   if (option.children?.length) {
     activeGroupValue.value = option.value
     void nextTick(updatePosition)
@@ -114,7 +129,7 @@ function updatePosition(): void {
   const rect = root.value.getBoundingClientRect()
   const compact = window.innerWidth <= 720
   const hasPanel = Boolean(activeGroup.value)
-  const desiredWidth = compact ? Math.min(rect.width, window.innerWidth - 16) : hasPanel ? 530 : Math.max(rect.width, 288)
+  const desiredWidth = compact && !props.selectedValues ? rect.width : hasPanel ? 530 : Math.max(rect.width, 288)
   const width = Math.min(desiredWidth, window.innerWidth - 16)
   const estimatedHeight = Math.min(384, menu.value?.offsetHeight || 340)
   const below = window.innerHeight - rect.bottom - 8
@@ -178,9 +193,9 @@ onBeforeUnmount(() => {
       class="option-picker__trigger"
       :class="{ 'option-picker__trigger--open': open, 'option-picker__trigger--icon': icon }"
       type="button"
-      :disabled="disabled || !options.length"
+      :disabled="disabled || (!options.length && !selectedValues)"
       :aria-label="label"
-      aria-haspopup="listbox"
+      aria-haspopup="dialog"
       :aria-expanded="open"
       :aria-controls="`${pickerId}-menu`"
       @click="toggle"
@@ -209,11 +224,12 @@ onBeforeUnmount(() => {
           :aria-label="label"
         >
           <div class="option-picker__primary">
+            <slot name="menu-header" />
             <label v-if="searchable" class="option-picker__search">
               <AppIcon name="search" :size="16" />
               <input ref="searchInput" v-model="query" type="search" autocomplete="off" :placeholder="searchPlaceholder" :aria-label="searchPlaceholder">
             </label>
-            <div class="option-picker__list" role="listbox" :aria-label="label">
+            <div class="option-picker__list" role="listbox" :aria-label="label" :aria-multiselectable="selectedValues ? true : undefined">
               <button
                 v-for="option in filteredOptions"
                 :key="option.value"
@@ -221,12 +237,12 @@ onBeforeUnmount(() => {
                 class="option-picker__option"
                 :class="{
                   'option-picker__option--active': sameValue(option.value, activeGroupValue),
-                  'option-picker__option--selected': sameValue(option.value, modelValue),
+                  'option-picker__option--selected': isSelected(option.value),
                 }"
                 type="button"
                 role="option"
                 :disabled="option.disabled"
-                :aria-selected="sameValue(option.value, activeGroupValue) || sameValue(option.value, modelValue)"
+                :aria-selected="sameValue(option.value, activeGroupValue) || isSelected(option.value)"
                 @click="choose(option)"
               >
                 <span>
@@ -237,9 +253,9 @@ onBeforeUnmount(() => {
                   <small>{{ option.children.length }}</small>
                   <AppIcon name="chevron-right" :size="16" />
                 </span>
-                <AppIcon v-else-if="sameValue(option.value, modelValue)" name="check" :size="16" />
+                <AppIcon v-else-if="isSelected(option.value)" name="check" :size="16" />
               </button>
-              <p v-if="!filteredOptions.length" class="option-picker__empty">No matching options</p>
+              <p v-if="!filteredOptions.length" class="option-picker__empty">{{ options.length ? 'No matching options' : emptyMessage }}</p>
             </div>
           </div>
 

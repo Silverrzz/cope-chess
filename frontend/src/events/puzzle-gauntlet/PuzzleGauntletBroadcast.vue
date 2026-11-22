@@ -126,6 +126,7 @@ const showConfettiButtons = computed(() => props.view !== "arena" && (
   (!isLive.value && !isComplete.value) || (isComplete.value && winners.value.length > 0)
 ));
 const selectedRound = computed(() => payload.value.rounds.find((round) => round.puzzle_id === selectedRoundId.value) ?? null);
+const newestRounds = computed(() => [...payload.value.rounds].sort((left, right) => right.position - left.position));
 const viewingHistory = computed(() => selectedRound.value !== null);
 const viewedPuzzle = computed<GauntletPuzzle | null>(() => {
   const round = selectedRound.value;
@@ -190,7 +191,9 @@ const moveGroups = computed(() => {
     };
   });
 });
-const rankedMoveGroups = computed(() => [...moveGroups.value].sort((left, right) => right.count - left.count || left.move.localeCompare(right.move)));
+const rankedMoveGroups = computed(() => [...moveGroups.value].sort((left, right) =>
+  right.count - left.count || (viewingHistory.value ? Number(right.solution) - Number(left.solution) : 0) || left.move.localeCompare(right.move),
+));
 const mostPopularMove = computed(() => rankedMoveGroups.value[0] ?? null);
 const proposalFieldCount = computed(() => viewingHistory.value
   ? selectedRound.value?.submissions.length ?? 0
@@ -976,14 +979,14 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
             </template>
             <template v-else>
               <header class="overview-heading"><div><span>{{ viewingHistory ? "Puzzle results" : "Field overview" }}</span><strong>{{ viewingHistory ? "Final move breakdown" : "Engine consensus" }}</strong></div></header>
-              <div class="overview-primary"><span>{{ viewingHistory ? "Most submitted move" : "Most popular move" }}</span><strong>{{ mostPopularMove?.move || "-" }}</strong><small>{{ mostPopularMove ? `${mostPopularMove.count} engine${mostPopularMove.count === 1 ? "" : "s"}` : viewingHistory ? "No final moves were recorded" : "Waiting for candidate moves" }}</small></div>
+              <div class="overview-primary" :class="{ 'solution-move': viewingHistory && mostPopularMove?.solution }"><span>{{ viewingHistory ? "Most submitted move" : "Most popular move" }}</span><strong>{{ mostPopularMove?.move || "-" }}</strong><small>{{ mostPopularMove ? `${mostPopularMove.count} engine${mostPopularMove.count === 1 ? "" : "s"}` : viewingHistory ? "No final moves were recorded" : "Waiting for candidate moves" }}</small></div>
               <div class="consensus-list">
                 <span>Move split</span>
                 <ol v-if="rankedMoveGroups.length">
-                  <li v-for="group in rankedMoveGroups" :key="group.move">
-                    <details class="move-split-group">
+                  <li v-for="group in rankedMoveGroups" :key="`${viewedPuzzle?.id}-${viewingHistory}-${group.move}`">
+                    <details class="move-split-group" :class="{ 'solution-move': viewingHistory && group.solution }" :open="viewingHistory && !group.solution">
                       <summary>
-                        <strong>{{ group.move }}</strong>
+                        <strong>{{ group.move }}<span v-if="viewingHistory && group.solution" class="sr-only"> (correct solution)</span></strong>
                         <i><span :style="{ width: `${group.count / Math.max(proposalFieldCount, 1) * 100}%` }"></span></i>
                         <small>{{ group.count }}</small>
                         <AppIcon name="chevron-down" :size="13" />
@@ -1013,7 +1016,7 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
           <section class="puzzle-log" aria-labelledby="puzzle-log-title">
             <header><h2 id="puzzle-log-title">Puzzle log</h2><span>{{ payload.rounds.length }}</span></header>
             <ol v-if="payload.rounds.length">
-              <li v-for="round in payload.rounds" :key="round.puzzle_id" :class="{ selected: selectedRound?.puzzle_id === round.puzzle_id }">
+              <li v-for="round in newestRounds" :key="round.puzzle_id" :class="{ selected: selectedRound?.puzzle_id === round.puzzle_id }">
                 <button type="button" :aria-pressed="selectedRound?.puzzle_id === round.puzzle_id" @click="selectRound(round)">
                   <span class="puzzle-log__heading"><span>{{ String(round.position + 1).padStart(2, "0") }}</span><strong>{{ round.title || `Puzzle ${round.position + 1}` }}</strong><small>{{ round.void ? "Field saved" : `${round.correct_ids.length} correct` }}</small></span>
                   <code>{{ round.fen }}</code>
@@ -1198,6 +1201,8 @@ function launchConfetti(side: "left" | "right", confettiId: string): void {
 .move-split-group summary > strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .7rem; }
 .move-split-group summary > i { height: .25rem; overflow: hidden; border-radius: 999px; background: var(--color-surface-sunken, #edf2f7); }
 .move-split-group summary > i span { display: block; height: 100%; background: var(--color-accent, #2f78c4); }
+.overview-primary.solution-move > strong, .solution-move summary > strong { color: var(--color-success, #16794b); }
+.solution-move summary > i span { background: var(--color-success, #16794b); }
 .move-split-group summary > small, .consensus-list > p { color: var(--color-text-muted, #607080); font-size: .62rem; }
 .move-split-group summary .app-icon { color: var(--color-text-muted, #607080); transition: transform 140ms ease; }
 .move-split-group[open] summary .app-icon { transform: rotate(180deg); }

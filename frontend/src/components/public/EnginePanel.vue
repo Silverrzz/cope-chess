@@ -18,6 +18,8 @@ const props = withDefaults(defineProps<{
   icon?: string
   engineId?: Identifier | null
   clock?: string
+  ratingText?: string
+  ratingTitle?: string
   analysis?: EngineAnalysis | null
   positionFen?: string | null
   active?: boolean
@@ -57,10 +59,13 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 <template>
   <article class="engine-panel" :class="[`engine-panel--${side}`, { 'engine-panel--active': active, 'engine-panel--loading': loading }]">
     <div v-if="loading" class="engine-panel__loading">
-      <strong>
-        <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
-        <template v-else>{{ title }}</template>
-      </strong>
+      <div class="engine-panel__identity">
+        <strong>
+          <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
+          <template v-else>{{ title }}</template>
+        </strong>
+        <small v-if="ratingText" class="engine-panel__rating" :title="ratingTitle">{{ ratingText }}</small>
+      </div>
       <BaseSpinner :size="22" :label="`${title} is preparing`" />
     </div>
 
@@ -73,6 +78,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
             <RouterLink v-if="engineId !== null" :to="enginePath(engineId)">{{ title }}</RouterLink>
             <template v-else>{{ title }}</template>
           </strong>
+          <small v-if="ratingText" class="engine-panel__rating" :title="ratingTitle">{{ ratingText }}</small>
         </div>
         <div class="engine-panel__time">
           <span>Time</span>
@@ -198,6 +204,13 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   display: flex;
   min-width: 0;
   flex-direction: column;
+}
+
+.engine-panel__rating {
+  padding-block-start: .12rem;
+  color: var(--color-text-muted);
+  font-size: .7rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .engine-panel__identity--icon { position: relative; min-height: 2.5rem; justify-content: center; padding-left: 3rem; }

@@ -78,11 +78,21 @@ function pointer(event: MouseEvent) {
       <line v-if="totalPlies" :x1="x(startPly + selectedPly)" :x2="x(startPly + selectedPly)" y1="6" :y2="bottom" class="replay-line" />
       <line v-if="hover !== null" :x1="x(hover)" :x2="x(hover)" y1="6" :y2="bottom" class="hover-line" />
     </svg>
+    <ul v-if="series.length" class="eval-legend" aria-label="Evaluation series">
+      <li v-for="line in series" :key="line.id" :title="line.name">
+        <span class="eval-legend__dot" :style="{ backgroundColor: line.color }" aria-hidden="true"></span>
+        <span class="eval-legend__name">{{ line.name }}</span>
+      </li>
+    </ul>
   </section>
 </template>
 <style scoped>
-.eval-panel { height: 100%; box-sizing: border-box; min-height: 0; padding: .15rem; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-surface) 94%, var(--color-text) 6%); }
-.eval-chart { display: block; width: 100%; height: 100%; min-height: 0; cursor: crosshair; }
+.eval-panel { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; min-height: 0; padding: .15rem; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-surface) 94%, var(--color-text) 6%); }
+.eval-chart { display: block; width: 100%; flex: 1 1 0; min-height: 0; cursor: crosshair; }
+.eval-legend { display: flex; justify-content: center; gap: .65rem; margin: 0; padding: .07rem .35rem .16rem; list-style: none; color: var(--color-text-muted); font-size: .65rem; }
+.eval-legend li { display: flex; align-items: center; gap: .26rem; min-width: 0; }
+.eval-legend__dot { flex: 0 0 .45rem; width: .45rem; height: .45rem; border: 1px solid #8b929c; border-radius: 50%; }
+.eval-legend__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .eval-chart text { fill: var(--color-text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .eval-chart .zero-label { fill: var(--color-text); }
 .eval-chart line { stroke: var(--color-border); stroke-width: 1; opacity: .35; }

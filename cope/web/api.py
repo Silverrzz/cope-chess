@@ -1545,6 +1545,7 @@ def register_api_routes(app: FastAPI) -> None:
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=25, le=200),
         cross_table: bool = Query(default=False),
+        schedule_page: int | None = Query(default=None, ge=1, le=10000000),
         result: Literal["draw", "decisive", "white-win", "black-win"] | None = Query(default=None),
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
@@ -1658,6 +1659,11 @@ def register_api_routes(app: FastAPI) -> None:
                     "total": total_games,
                     "pages": max(1, (total_games + page_size - 1) // page_size),
                 },
+                "schedule": (
+                    web_app._upcoming_tournament_schedule(connection, tournament.id, schedule_page)
+                    if schedule_page is not None and tournament.status in {"scheduled", "running", "paused"}
+                    else None
+                ),
                 "engines": engines,
                 "viewer_game": (
                     web_app._game_payload(viewer_game, engines, live=True)
@@ -1676,7 +1682,7 @@ def register_api_routes(app: FastAPI) -> None:
                 ),
                 "rating_summaries": (
                     web_app._tournament_rating_summaries(connection, tournament.id)
-                    if tournament.status == "finished"
+                    if tournament.config.rated and tournament.status in {"finished", "aborted"}
                     else []
                 ),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),
@@ -1886,6 +1892,7 @@ def register_api_routes(app: FastAPI) -> None:
                 "record": engine_result_summary(connection, engine_id),
                 "filter_options": engine_game_filter_options(connection, engine_id),
                 "ratings": _public_engine_ratings(connection, engine_id),
+                "version_ratings": _public_version_ratings(connection, [version.id for version in versions]),
                 "badges": list_engine_badges(connection).get(engine.engine_id, ()),
             }
         )
@@ -4758,6 +4765,25 @@ def register_api_routes(app: FastAPI) -> None:
         return _json({"message": "IP address blocked from chat."})
 
     register_event_api_routes(app)
+
+
+def _public_version_ratings(connection, version_ids: list[int]) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT rating.engine_id AS version_id, rating.elo, list.id AS rating_list_id, list.name
+        FROM rating_list_ratings rating
+        JOIN rating_lists list ON list.id = rating.rating_list_id
+        WHERE rating.engine_id = ANY(?)
+        ORDER BY list.display_order NULLS LAST, list.name, list.id, rating.engine_id
+        """,
+        (version_ids,),
+    )
+    lists: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        list_id = int(row["rating_list_id"])
+        entry = lists.setdefault(list_id, {"id": list_id, "name": row["name"], "versions": []})
+        entry["versions"].append({"id": int(row["version_id"]), "elo": float(row["elo"])})
+    return list(lists.values())
 
 
 def _public_engine_ratings(

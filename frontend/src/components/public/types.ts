@@ -11,6 +11,7 @@ export interface TournamentConfig {
   participants?: Identifier[]
   format?: string | { value?: string }
   time_control?: TimeControl
+  rated?: boolean
   [key: string]: unknown
 }
 
@@ -187,7 +188,10 @@ export interface StandingRecord {
   buchholz?: number
   bye_points?: number
   stage?: number
+  provisional_rating?: { elo: number; change: number | null; rating_list: string; games: number } | null
 }
+
+export type ScheduledGame = Pick<GameRecord, 'id' | 'round' | 'pair_index' | 'game_number' | 'white_engine_id' | 'black_engine_id' | 'status'>
 
 export interface TournamentRatingRow {
   engine_id: Identifier
@@ -276,6 +280,7 @@ export interface TournamentDetailResponse {
   games: GameRecord[]
   active_games: GameRecord[]
   cross_table_games?: CrossTableGame[]
+  schedule?: { games: ScheduledGame[]; has_next: boolean } | null
   game_pagination: GamePagination
   engines: Record<string, string>
   viewer_game: GameRecord | null

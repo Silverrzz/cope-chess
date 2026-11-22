@@ -5,6 +5,7 @@ withDefaults(defineProps<{
   message?: string
   actionLabel?: string
   compact?: boolean
+  embedded?: boolean
 }>(), {
   title: '',
   message: '',
@@ -20,7 +21,7 @@ defineEmits<{
 <template>
   <section
     class="content-state"
-    :class="[`content-state--${kind}`, { 'content-state--compact': compact }]"
+    :class="[`content-state--${kind}`, { 'content-state--compact': compact, 'content-state--embedded': embedded }]"
     :role="kind === 'error' ? 'alert' : 'status'"
     :aria-live="kind === 'loading' ? 'polite' : undefined"
     :aria-busy="kind === 'loading' || undefined"
@@ -52,6 +53,12 @@ defineEmits<{
 .content-state--compact {
   min-height: 9rem;
   padding: var(--space-lg, 1.5rem);
+}
+
+.content-state--embedded {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .content-state__spinner {
