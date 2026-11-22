@@ -135,7 +135,7 @@ const chartHistory = computed(() => {
       id, elo, at: version.source_date || version.created_at || '',
       label: engineVersionLabel(version.version) || version.name, selected: id === engineId.value,
     }]
-  }).sort((left, right) => dateValue(left.at) - dateValue(right.at))
+  }).reverse()
 })
 const ratingChart = computed(() => {
   const history = chartHistory.value
@@ -153,10 +153,11 @@ const ratingChart = computed(() => {
   const plotHeight = height - top - bottom
   const firstDate = dateValue(history[0]!.at)
   const lastDate = dateValue(history.at(-1)!.at)
+  const useDateSpacing = ratingMode.value === 'version' && lastDate > firstDate && firstDate > 0
   const points = history.map((point, index) => ({
     ...point,
     x: left + plotWidth * (history.length === 1 ? .5
-      : lastDate > firstDate && firstDate > 0 ? (dateValue(point.at) - firstDate) / (lastDate - firstDate)
+      : useDateSpacing ? (dateValue(point.at) - firstDate) / (lastDate - firstDate)
       : index / (history.length - 1)),
     y: top + ((high - point.elo) / (high - low)) * plotHeight,
   }))
@@ -174,8 +175,8 @@ const ratingChart = computed(() => {
     ticks,
     polyline: points.map((point) => `${point.x},${point.y}`).join(' '),
     area: `${points[0]!.x},${top + plotHeight} ${points.map((point) => `${point.x},${point.y}`).join(' ')} ${points.at(-1)!.x},${top + plotHeight}`,
-    start: formatDate(history[0]!.at),
-    end: points.length > 1 ? formatDate(history.at(-1)!.at) : '',
+    start: history[0]!.label,
+    end: points.length > 1 ? history.at(-1)!.label : '',
   }
 })
 const activePoint = computed(() => {
@@ -362,8 +363,8 @@ async function load(): Promise<void> {
             <polyline class="elo-chart__line" :points="ratingChart.polyline" />
             <line class="elo-chart__guide" :x1="activePoint.x" :x2="activePoint.x" :y1="activePoint.y" :y2="ratingChart.bottom" />
             <circle v-for="(point, index) in ratingChart.points" :key="index" :cx="point.x" :cy="point.y" :r="point === activePoint ? 5 : 3" :class="{ 'chart-point--active': point === activePoint }" tabindex="0" role="button" :aria-pressed="pinnedPoint === index" :aria-label="point.label + ', ' + Math.round(point.elo) + ' Elo'" @mouseenter="focusedPoint = index" @click="pinnedPoint = index" @focus="focusedPoint = index" @blur="focusedPoint = null" @keydown.enter.prevent="pinnedPoint = index" @keydown.space.prevent="pinnedPoint = index" />
-            <text :x="ratingChart.left" :y="ratingChart.height - 9">{{ ratingChart.start }}</text>
-            <text :x="ratingChart.right" :y="ratingChart.height - 9" text-anchor="end">{{ ratingChart.end }}</text>
+            <text :x="ratingChart.points[0]?.x" :y="ratingChart.height - 9" :text-anchor="ratingChart.end ? 'start' : 'middle'">{{ ratingChart.start }}</text>
+            <text v-if="ratingChart.end" :x="ratingChart.right" :y="ratingChart.height - 9" text-anchor="end">{{ ratingChart.end }}</text>
           </svg>
           <RouterLink v-if="selectedRatingListId" class="rating-link" :to="ratingPath(selectedRatingListId)">View rating list <AppIcon name="arrow-right" :size="13" /></RouterLink>
         </div>
