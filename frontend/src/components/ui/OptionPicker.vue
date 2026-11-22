@@ -22,11 +22,13 @@ const props = withDefaults(defineProps<{
   icon?: IconName
   searchable?: boolean
   searchPlaceholder?: string
+  emptyMessage?: string
   disabled?: boolean
 }>(), {
   placeholder: 'Choose an option',
   searchable: false,
   searchPlaceholder: 'Search…',
+  emptyMessage: 'No options available',
   disabled: false,
 })
 
@@ -82,7 +84,7 @@ const activeGroup = computed(() => filteredOptions.value.find((option) => sameVa
 const selectedSupportingText = computed(() => selected.value?.parent?.label || selected.value?.option.meta || selected.value?.option.description || '')
 
 async function show(): Promise<void> {
-  if (props.disabled || !props.options.length) return
+  if (props.disabled || (!props.options.length && !props.selectedValues)) return
   open.value = true
   query.value = ''
   activeGroupValue.value = selected.value?.parent?.value ?? null
@@ -191,7 +193,7 @@ onBeforeUnmount(() => {
       class="option-picker__trigger"
       :class="{ 'option-picker__trigger--open': open, 'option-picker__trigger--icon': icon }"
       type="button"
-      :disabled="disabled || !options.length"
+      :disabled="disabled || (!options.length && !selectedValues)"
       :aria-label="label"
       aria-haspopup="dialog"
       :aria-expanded="open"
@@ -253,7 +255,7 @@ onBeforeUnmount(() => {
                 </span>
                 <AppIcon v-else-if="isSelected(option.value)" name="check" :size="16" />
               </button>
-              <p v-if="!filteredOptions.length" class="option-picker__empty">No matching options</p>
+              <p v-if="!filteredOptions.length" class="option-picker__empty">{{ options.length ? 'No matching options' : emptyMessage }}</p>
             </div>
           </div>
 

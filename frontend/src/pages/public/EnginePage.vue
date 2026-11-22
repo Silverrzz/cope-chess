@@ -367,7 +367,7 @@ async function load(): Promise<void> {
           </svg>
           <RouterLink v-if="selectedRatingListId" class="rating-link" :to="ratingPath(selectedRatingListId)">View rating list <AppIcon name="arrow-right" :size="13" /></RouterLink>
         </div>
-        <ContentState v-else kind="empty" compact :title="ratingMode === 'family' ? 'No rated versions yet' : 'No rating history for this version'" />
+        <ContentState v-else kind="empty" compact embedded :title="ratingMode === 'family' ? 'No rated versions yet' : 'No rating history for this version'" />
       </section>
 
       <div class="engine-main">
@@ -388,7 +388,7 @@ async function load(): Promise<void> {
 
           <div class="games-results" :class="{ 'games-results--loading': gamesLoading }" :aria-busy="gamesLoading">
             <GameTable v-if="data.games.length" :games="data.games" :engines="data.engines" :show-round="false" caption="Recent games for this engine" />
-            <ContentState v-else kind="empty" compact :title="activeFilterCount ? 'No games match these filters' : 'No games yet'" />
+            <ContentState v-else kind="empty" compact embedded :title="activeFilterCount ? 'No games match these filters' : 'No games yet'" />
           </div>
         </section>
 

@@ -11,6 +11,7 @@ export interface TournamentConfig {
   participants?: Identifier[]
   format?: string | { value?: string }
   time_control?: TimeControl
+  rated?: boolean
   [key: string]: unknown
 }
 

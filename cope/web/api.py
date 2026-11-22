@@ -1682,7 +1682,7 @@ def register_api_routes(app: FastAPI) -> None:
                 ),
                 "rating_summaries": (
                     web_app._tournament_rating_summaries(connection, tournament.id)
-                    if tournament.status == "finished"
+                    if tournament.config.rated and tournament.status in {"finished", "aborted"}
                     else []
                 ),
                 "settings": _settings_rows(web_app._settings_view(connection, tournament)),

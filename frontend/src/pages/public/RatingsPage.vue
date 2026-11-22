@@ -47,7 +47,7 @@ const loading = ref(true)
 const loadError = ref('')
 const onlyBestVersions = ref(true)
 const tagMode = ref<'hide' | 'show'>('hide')
-const selectedTags = ref<number[]>([])
+const selectedTags = ref<(number | 'untagged')[]>([])
 const pgnModalOpen = ref(false)
 let controller: AbortController | null = null
 
@@ -58,30 +58,35 @@ const routeRatingList = computed(() => {
 const selectedRatingList = computed(() => routeRatingList.value || String(data.value?.rating_list?.id || ''))
 const tagOptions = computed(() => {
   const tags = new Map<number, { tag: EngineVersionTag; count: number }>()
+  let untagged = 0
   for (const { engine } of data.value?.ratings ?? []) {
     if (engine.public_hidden) continue
+    if (!engine.tags?.length) untagged += 1
     for (const tag of engine.tags ?? []) {
       const entry = tags.get(tag.id)
       if (entry) entry.count += 1
       else tags.set(tag.id, { tag, count: 1 })
     }
   }
-  return [...tags.values()].sort((a, b) => a.tag.name.localeCompare(b.tag.name)).map(({ tag, count }) => ({
+  const options = [...tags.values()].sort((a, b) => a.tag.name.localeCompare(b.tag.name)).map(({ tag, count }) => ({
     value: tag.id,
     label: tag.name,
     meta: `${count} version${count === 1 ? '' : 's'}`,
   }))
+  return untagged ? [...options, { value: 'untagged', label: 'Untagged', meta: `${untagged} version${untagged === 1 ? '' : 's'}` }] : options
 })
 const tagFilterLabel = computed(() => selectedTags.value.length
   ? `${tagMode.value === 'hide' ? 'Hide' : 'Show only'} · ${selectedTags.value.length}`
-  : 'Version tags')
+  : 'Filter tags')
 const displayedRatings = computed(() => {
   const ratings = data.value?.ratings ?? []
   const search = String(route.query.search ?? '').trim().toLowerCase()
   const selected = new Set(selectedTags.value)
   const filtered = ratings.filter(({ engine }) => {
     if (engine.public_hidden || (search && !`${engine.name} ${engine.version ?? ''}`.toLowerCase().includes(search))) return false
-    return !selected.size || (engine.tags ?? []).some((tag) => selected.has(tag.id)) === (tagMode.value === 'show')
+    const tags = engine.tags ?? []
+    const matches = tags.length ? tags.some((tag) => selected.has(tag.id)) : selected.has('untagged')
+    return !selected.size || matches === (tagMode.value === 'show')
   })
   return onlyBestVersions.value ? bestVersionRatings(filtered) : filtered
 })
@@ -104,7 +109,7 @@ watch(routeRatingList, (next, previous) => {
 })
 
 function toggleTag(value: string | number): void {
-  const id = Number(value)
+  const id = value === 'untagged' ? value : Number(value)
   selectedTags.value = selectedTags.value.includes(id)
     ? selectedTags.value.filter((tag) => tag !== id)
     : [...selectedTags.value, id]
@@ -164,7 +169,7 @@ function selectRatingList(event: Event): void {
         <div class="ratings-controls">
           <BaseButton size="small" :disabled="!data.rating_list || !representedGames" @click="pgnModalOpen = true"><template #icon><AppIcon name="download" :size="15" /></template>Download {{ data.rating_list?.variant === 'tak' ? 'PTNs' : 'PGNs' }}</BaseButton>
           <label class="best-versions-filter"><input v-model="onlyBestVersions" type="checkbox"> Only Best Versions</label>
-          <OptionPicker v-if="tagOptions.length" class="tag-picker" model-value="" :selected-values="selectedTags" :options="tagOptions" :placeholder="tagFilterLabel" label="Filter by version tag" icon="tag" searchable search-placeholder="Find a tag" :disabled="loading" @toggle="toggleTag">
+          <OptionPicker v-if="data.rating_list" class="tag-picker" model-value="" :selected-values="selectedTags" :options="tagOptions" :placeholder="tagFilterLabel" label="Filter by version tag" icon="tag" searchable search-placeholder="Find a tag" empty-message="No rated versions on this list" :disabled="loading" @toggle="toggleTag">
             <template #menu-header>
               <div class="tag-picker__modes">
                 <button type="button" :aria-pressed="tagMode === 'hide'" @click="tagMode = 'hide'">Hide</button>
@@ -184,12 +189,10 @@ function selectRatingList(event: Event): void {
 
       <section v-if="data.rating_list" class="category-overview" aria-label="Selected rating list summary">
         <div class="category-overview__copy">
-          <span>Selected list</span>
           <h2>{{ data.rating_list.name }}</h2>
           <p v-if="data.rating_list.description">{{ data.rating_list.description }}</p>
         </div>
         <dl>
-          <div><dt>Rating list</dt><dd>{{ data.rating_list.name }}</dd></div>
           <div><dt>Rated engines</dt><dd>{{ displayedRatings.length }}</dd></div>
           <div><dt>Games represented</dt><dd>{{ representedGames }}</dd></div>
         </dl>
@@ -245,6 +248,7 @@ function selectRatingList(event: Event): void {
           v-else
           kind="empty"
           compact
+          embedded
           :title="data.ratings.length ? 'No matching ratings' : data.rating_list ? 'No ratings yet' : 'No rating lists'"
         />
       </section>
@@ -349,16 +353,7 @@ function selectRatingList(event: Event): void {
   background: var(--color-surface, #fff);
 }
 
-.category-overview__copy > span {
-  color: var(--color-accent, #2f78c4);
-  font-size: 0.62rem;
-  font-weight: 780;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
 .category-overview h2 {
-  margin-block-start: 0.2rem;
   font-size: 1.2rem;
 }
 
@@ -371,17 +366,12 @@ function selectRatingList(event: Event): void {
 
 .category-overview dl {
   display: flex;
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--color-border, #d5dbe1);
-  border-radius: var(--radius-md, 0.5rem);
-  background: var(--color-border, #d5dbe1);
+  gap: 1rem;
 }
 
 .category-overview dl div {
-  min-width: 7rem;
-  padding: 0.72rem 0.85rem;
-  background: var(--color-surface, #fff);
+  padding-inline-start: .85rem;
+  border-inline-start: 1px solid var(--color-border);
 }
 
 .category-overview dt {
@@ -540,6 +530,5 @@ function selectRatingList(event: Event): void {
   .ratings-controls { flex-direction: column; }
   .best-versions-filter { min-height: auto; }
   .category-overview dl { display: grid; grid-template-columns: repeat(2, 1fr); }
-  .category-overview dl div:first-child { grid-column: 1 / -1; }
 }
 </style>

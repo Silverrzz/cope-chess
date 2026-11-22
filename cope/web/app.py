@@ -3795,7 +3795,7 @@ def _standings(
 
 
 def _provisional_tournament_elos(connection, tournament, head_to_head) -> dict[int, dict[str, Any]]:
-    if not head_to_head or not tournament.config.rated or tournament.status not in {"running", "paused", "finished"}:
+    if not head_to_head or not tournament.config.rated or tournament.status not in {"running", "paused", "finished", "aborted"}:
         return {}
     time_control = tournament.config.time_control.model_dump_json()
     participants = list(head_to_head)
