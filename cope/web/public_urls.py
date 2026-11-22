@@ -2,6 +2,7 @@ import re
 from urllib.parse import parse_qsl, urlencode
 
 from cope.db.events import list_event_tournament_links
+from cope.db.repo import ENGINE_VERSION_ORDER
 
 
 def public_url_catalog(connection):
@@ -39,8 +40,8 @@ def public_url_catalog(connection):
             add(("tournament", 0, id), "/tournaments", id, "tournaments")
 
     versions = connection.execute(
-        """SELECT id, engine_id FROM engine_versions WHERE NOT public_hidden
-           ORDER BY COALESCE(source_date, created_at) DESC, created_at DESC, id DESC"""
+        f"""SELECT version.id, version.engine_id FROM engine_versions version
+            WHERE NOT version.public_hidden ORDER BY {ENGINE_VERSION_ORDER}"""
     )
     for row in versions:
         id, family_id = row["id"], row["engine_id"]

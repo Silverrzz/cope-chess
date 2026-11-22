@@ -999,7 +999,7 @@ def list_engine_families(connection: sqlite3.Connection) -> tuple[EngineRecord, 
 
 _ENGINE_RANDOM_SUFFIX = "'-R(100|[0-9]{1,2})$'"
 _ENGINE_VERSION_DATE = "COALESCE(version.source_date, version.created_at)"
-_ENGINE_VERSION_ORDER = f"""
+ENGINE_VERSION_ORDER = f"""
     LEAST(
         {_ENGINE_VERSION_DATE},
         MAX({_ENGINE_VERSION_DATE}) FILTER (WHERE version.version !~ {_ENGINE_RANDOM_SUFFIX})
@@ -1035,7 +1035,7 @@ def list_engine_records(connection: sqlite3.Connection) -> tuple[EngineVersionRe
                FROM engine_versions version
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
-               ORDER BY engine.name, {_ENGINE_VERSION_ORDER}"""
+               ORDER BY engine.name, {ENGINE_VERSION_ORDER}"""
         )
     )
 
@@ -1064,7 +1064,7 @@ def list_engine_versions(connection: sqlite3.Connection, engine_id: int) -> tupl
                JOIN engines engine ON engine.id = version.engine_id
                LEFT JOIN engine_artifacts artifact ON artifact.build_hash = version.build_hash
                WHERE version.engine_id = ?
-               ORDER BY {_ENGINE_VERSION_ORDER}""",
+               ORDER BY {ENGINE_VERSION_ORDER}""",
             (engine_id,),
         )
     )
