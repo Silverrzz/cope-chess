@@ -2,7 +2,7 @@ FROM rust:1.95.0-bookworm AS builder
 
 WORKDIR /build
 COPY . .
-ADD --checksum=sha256:55a44f5850a40458f94d775a8c4c871b5462ebdbdb98d1276e3f544a316c3a9d https://drive.usercontent.google.com/download?id=1g5rChfkfhaeAG_PcJx2CX-eqmLKlyj6w&export=download&confirm=t /build/src/quantised.bin
+ADD --checksum=sha256:155d6f00dc2ec4c74a2be6dbedd6bb03496ddae24191bed1a1fcf7b0bf366ea8 https://drive.usercontent.google.com/download?id=1XErPCqwSQShm1yMW830aRcGhKre5oa1_&export=download&confirm=t /build/src/quantised.bin
 ENV CARGO_TERM_COLOR=never RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+crt-static"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
