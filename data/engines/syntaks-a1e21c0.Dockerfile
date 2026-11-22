@@ -7,7 +7,9 @@ ENV CARGO_TERM_COLOR=never RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    EVALFILE=/nets/cnet023.nnue cargo build --locked --release --target x86_64-unknown-linux-gnu \
+    sed -i 's/mask.isolate_lowest_one()/(mask \& mask.wrapping_neg())/' src/hits/common.rs \
+    && sed -i 's/pattern.isolate_lowest_one()/(pattern \& pattern.wrapping_neg())/' src/movegen.rs src/movepick.rs \
+    && EVALFILE=/nets/cnet023.nnue cargo build --locked --release --target x86_64-unknown-linux-gnu \
     && install -Dm755 target/x86_64-unknown-linux-gnu/release/syntaks /opt/cope/syntaks
 
 FROM debian:bookworm-slim
