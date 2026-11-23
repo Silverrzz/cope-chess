@@ -8,7 +8,7 @@ defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: string
 </script>
 
 <template>
-  <EventAnnouncement :detail="detail" :clock-offset-ms="clockOffsetMs" :view="view" :style="secretQueenTheme">
+  <EventAnnouncement :detail="detail" :clock-offset-ms="clockOffsetMs ?? 0" :style="secretQueenTheme">
     <template #art><SecretQueenArt /></template>
   </EventAnnouncement>
 </template>
