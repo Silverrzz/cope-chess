@@ -100,6 +100,7 @@ PY
 
 mkdir -p "$state" "$bin" "$state/installation"
 root=$(cd "$state" && pwd)
+bin=$(cd "$bin" && pwd)
 if [ "$prepare_only" = true ] && [ "$seal_image" = false ] && { [ -s "$root/worker.json" ] || [ -s "$root/worker.json.identity-key" ]; }; then
     printf 'This worker is enrolled. Use --seal-image to prepare it for cloning.\n' >&2
     exit 2
@@ -154,6 +155,57 @@ if [ -e "$bin/cope" ] && [ "$(readlink -f "$bin/cope")" != "$root/installation/c
     exit 1
 fi
 ln -sfn "$root/installation/cope-launch" "$bin/cope"
+
+python3 - "$bin" <<'PY'
+import os
+import shlex
+import sys
+from pathlib import Path
+
+directory = sys.argv[1]
+program = shlex.quote(str(Path(directory) / "cope"))
+print(f"Cope command installed at {program}")
+quoted = shlex.quote(directory)
+path = os.environ.get("PATH", "")
+if directory not in path.split(os.pathsep):
+    if os.pathsep not in directory:
+        print(f'In this shell, run: export PATH={quoted}:"$PATH"')
+    print(f"Run {program} directly to use Cope right away, for example: {program} stop")
+
+shell = Path(os.environ.get("SHELL") or "/bin/bash").name
+home = Path.home()
+if shell == "bash":
+    login = next(
+        (home / name for name in (".bash_profile", ".bash_login", ".profile") if (home / name).is_file()),
+        home / ".profile",
+    )
+    profiles = (home / ".bashrc", login)
+elif shell in {"sh", "dash"}:
+    profiles = (home / ".profile",)
+elif shell == "zsh":
+    dot_directory = Path(os.environ.get("ZDOTDIR") or home).expanduser()
+    profiles = (dot_directory / ".zprofile", dot_directory / ".zshrc")
+else:
+    profiles = ()
+
+entry = os.fsencode(
+    f'case ":${{PATH:-}}:" in\n'
+    f'    *:{quoted}:*) ;;\n'
+    f'    *) export PATH={quoted}${{PATH:+":$PATH"}} ;;\n'
+    'esac\n'
+)
+if os.pathsep not in directory:
+    for profile in profiles:
+        if profile.is_symlink() or (profile.exists() and not profile.is_file()):
+            continue
+        try:
+            if profile.is_file() and entry in profile.read_bytes():
+                continue
+            with profile.open("ab") as output:
+                output.write(b"\n\n" + entry)
+        except OSError as error:
+            print(f"Could not update {profile}: {error.strerror}", file=sys.stderr)
+PY
 
 if [ -n "$token" ]; then
     temporary_token=$(mktemp "$root/.token.XXXXXX")
