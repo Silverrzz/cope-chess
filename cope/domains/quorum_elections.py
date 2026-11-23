@@ -191,31 +191,38 @@ def proof_rows(connection, ballot_id):
     )]
 
 
-def ballot_package(connection, ballot_id):
+def ballot_package(connection, ballot_id, receipt=None):
     row = ballot(connection, ballot_id, lock=" FOR SHARE")
-    return build_evidence(connection, row, datetime.now(UTC))
+    return build_evidence(connection, row, datetime.now(UTC), receipt=receipt)
 
 
-def build_evidence(connection, row, now):
+def build_evidence(connection, row, now, *, receipt=None):
     manifest = row["manifest"]
     roster = row["roster"]
     electorate = len(roster["members"])
+    ballot_id = str(row["id"])
     closed = now >= row["closes_at"]
-    live_tally = None
-    if not closed and now >= row["opens_at"]:
-        live_tally = current_tally(connection, row["id"], ballot_options(manifest), electorate)
-        closed = live_tally["total"] == electorate
-    votes = proof_rows(connection, row["id"]) if closed else []
+    opened = now >= row["opens_at"]
+    if opened and not closed:
+        total = connection.execute(
+            "SELECT count(*) AS total FROM cope_quorum.votes WHERE ballot_id = ?::uuid", (ballot_id,),
+        ).fetchone()["total"]
+        closed = total == electorate
+    votes = proof_rows(connection, ballot_id) if closed else []
     evidence = {
         "version": "cope-quorum-evidence/1",
         "manifest": manifest,
         "roster": roster,
         "votes": votes,
-        "status": "completed" if closed else "scheduled" if now < row["opens_at"] else "open",
+        "status": "completed" if closed else "open" if opened else "scheduled",
         "result": tally(manifest, votes, electorate) if closed else None,
     }
-    if live_tally is not None and not closed:
-        evidence["live_tally"] = live_tally
+    if evidence["status"] == "open" and receipt and re.fullmatch(r"0|[1-9][0-9]{0,76}", receipt):
+        accepted = connection.execute(
+            "SELECT 1 FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?", (ballot_id, receipt),
+        ).fetchone()
+        if accepted:
+            evidence["live_tally"] = current_tally(connection, ballot_id, ballot_options(manifest), electorate)
     return evidence
 
 
@@ -277,7 +284,7 @@ def directory(connection):
     for row in connection.execute("SELECT * FROM cope_quorum.ballots ORDER BY opens_at DESC FOR SHARE"):
         evidence = build_evidence(connection, row, now)
         entries.append({**evidence["manifest"], "status": evidence["status"], "result": evidence["result"],
-                        "live_tally": evidence.get("live_tally"), "witnesses": witness_status(connection, evidence)})
+                        "witnesses": witness_status(connection, evidence)})
     return entries
 
 

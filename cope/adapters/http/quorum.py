@@ -1,7 +1,7 @@
 from urllib.error import HTTPError, URLError
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Path, Request
+from fastapi import Depends, HTTPException, Path, Request, Response
 from fastapi.responses import JSONResponse
 
 from cope.adapters.http.authentication import admin_session_role, request_is_secure_or_local
@@ -86,8 +86,9 @@ def election_call(operation, *args):
 
 def register_quorum_routes(app):
     @app.get("/api/quorum")
-    def public_directory(request: Request, connection=Depends(database)):
+    def public_directory(request: Request, response: Response, connection=Depends(database)):
         require_secure(request)
+        response.headers["Cache-Control"] = "no-store"
         setup = read_setup(connection)
         return {
             "ballots": elections.directory(connection),
@@ -127,9 +128,11 @@ def register_quorum_routes(app):
         return {"commitment": payload.commitment}
 
     @app.get("/api/quorum/ballots/{ballot_id}")
-    def ballot_package(ballot_id: UUID, request: Request, connection=Depends(database)):
+    def ballot_package(ballot_id: UUID, request: Request, response: Response, connection=Depends(database)):
         require_secure(request)
-        return election_call(elections.ballot_package, connection, ballot_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        receipt = request.headers.get("x-cope-quorum-receipt")
+        return election_call(elections.ballot_package, connection, ballot_id, receipt)
 
     @app.get("/api/quorum/ballots/{ballot_id}/publications")
     def ballot_publications(ballot_id: UUID, request: Request, connection=Depends(database)):
