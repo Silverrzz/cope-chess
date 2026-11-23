@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
-const props = defineProps<{ summary: EventSummary; current?: boolean; nowMs?: number }>();
+const props = defineProps<{ summary: EventSummary }>();
 const record = computed(() => props.summary.record);
 const completed = computed(() => record.value.status === "completed");
 const status = computed(() => {

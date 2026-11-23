@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventDetailResponse } from "@/types/events";
-const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: string }>(), { clockOffsetMs: 0 });
+const props = withDefaults(defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number }>(), { clockOffsetMs: 0 });
 const now = ref(Date.now());
 let timer: number | undefined;
 onMounted(() => { timer = window.setInterval(() => { now.value = Date.now(); }, 1000); });

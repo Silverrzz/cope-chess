@@ -7,7 +7,7 @@ defineProps<{ summary: EventSummary; current?: boolean; nowMs?: number }>();
 </script>
 
 <template>
-  <EventArchiveHero :summary="summary" :current="current" :now-ms="nowMs">
+  <EventArchiveHero :summary="summary">
     <template #title>Hand &amp;<br>Brain</template>
     <template #art><HandBrainArt /></template>
   </EventArchiveHero>
