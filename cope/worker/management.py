@@ -30,10 +30,43 @@ from .local_state import (
 from .supervisor import release_python, supervise
 
 
-COMMANDS = {"start", "stop", "config", "health", "update"}
+COMMANDS = {"help", "start", "stop", "config", "health", "update"}
+
+WORKER_HELP = """\
+Manage the local Cope worker.
+
+  cope start                      Start the worker and wait for it to connect.
+  cope stop                       Begin a safe shutdown immediately.
+  cope stop grace                 Finish active work, then shut down cleanly.
+  cope stop force                 Kill the worker and its engine processes.
+  cope config                     Show worker settings.
+  cope config --threads 8         Set the CPU thread limit.
+  cope config --memory 12GiB      Set the worker memory limit.
+  cope config --auto-update true  Enable automatic updates (the default).
+                                  Use false to disable them. The worker stalls
+                                  if Cope requires an update.
+  cope health status              Show worker health and current activity.
+  cope health doctor              Repair common local issues while stopped
+                                  and report any problems it finds.
+  cope update                     Install the available worker update.
+  cope update -i                  Show installed and available versions
+                                  and the status of any pending update.
+
+Set multiple limits with cope config --threads 8 --memory 12GiB.
+Use cope <command> --help to see all options for a command.
+"""
 
 
 def register_commands(subparsers) -> None:
+    help_parser = subparsers.add_parser(
+        "help",
+        prog="cope help",
+        help="show the worker command reference",
+        description=WORKER_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    help_parser.set_defaults(worker_help=help_parser)
+
     start = subparsers.add_parser("start", help="start the local game worker")
     start.add_argument("--foreground", action="store_true")
     start.add_argument("--boot", action="store_true", help=argparse.SUPPRESS)
@@ -317,6 +350,10 @@ def _request_running_update(home: Path, target: str, repository: str, output: st
 
 
 def run_command(args) -> int:
+    if args.role == "help":
+        args.worker_help.print_help()
+        return 0
+
     home = default_home()
     try:
         settings = WorkerSettings.read(home)
