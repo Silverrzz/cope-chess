@@ -53,8 +53,8 @@ const startLabel = computed(() => event.value.scheduled_start_at
 .secret-queen-hero h2 {
   margin: .8rem 0 1.5rem;
   color: inherit;
-  font: 900 clamp(3.25rem, 9vw, 9.5rem)/.9 Impact, "Arial Narrow", var(--font-sans);
-  letter-spacing: -.034em;
+  font: 400 clamp(3.25rem, 9vw, 9.5rem)/.9 Impact, Haettenschweiler, "Arial Narrow", var(--font-sans);
+  letter-spacing: -.01em;
   text-wrap: balance;
 }
 .secret-queen-hero__action {

@@ -71,8 +71,8 @@ const startLabel = computed(() => event.value.scheduled_start_at
 .secret-queen-page__content h1 {
   margin: 0 0 1.45rem;
   color: inherit;
-  font: 900 clamp(3.65rem, 10vw, 10rem)/.9 Impact, "Arial Narrow", var(--font-sans);
-  letter-spacing: -.034em;
+  font: 400 clamp(3.65rem, 10vw, 10rem)/.9 Impact, Haettenschweiler, "Arial Narrow", var(--font-sans);
+  letter-spacing: -.01em;
   text-wrap: balance;
 }
 .secret-queen-page__content header :is(time, p) { margin: 0; color: #eadff4; font-size: clamp(1rem, 2vw, 1.25rem); font-weight: 650; }
