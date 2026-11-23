@@ -997,6 +997,7 @@ def sanitized_export_row(dataset: str, row: dict[str, Any], selection: set[str])
     elif dataset == "engine_versions":
         row["repository_url"] = sanitized_clone_url(row.get("repository_url"))
     elif dataset == "workers":
+        row.pop("worker_identity_id", None)
         row["token_hash"] = None
         row["token_expires_at"] = None
         row["session_id"] = None
@@ -1593,6 +1594,7 @@ def imported_row(dataset: str, row: dict[str, Any], selected: set[str]) -> dict[
     elif dataset == "engine_versions":
         row["repository_url"] = sanitized_clone_url(row.get("repository_url"))
     elif dataset == "workers":
+        row.pop("worker_identity_id", None)
         row["token_hash"] = None
         row["token_expires_at"] = None
         row["session_id"] = None

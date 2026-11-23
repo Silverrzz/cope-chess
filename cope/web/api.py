@@ -43,6 +43,12 @@ from cope.chat import announce_tournament_finished
 from cope.core.models import EngineArtifactSpec, HardwareInfo, OpeningLine
 from cope.db import engine_version_tags
 from cope.db.donors import list_donor_workers, set_donor_group
+from cope.db.worker_identities import (
+    create_worker_identity,
+    list_worker_identities,
+    reset_worker_identity,
+    update_worker_identity,
+)
 from cope.environment_clone import (
     authorize_environment_export,
     clone_catalog_payload,
@@ -951,6 +957,18 @@ class WorkerPayload(BaseModel):
 
 class WorkerTokenPayload(BaseModel):
     ttl_seconds: int = Field(default=7200, ge=60, le=86_400)
+
+
+class WorkerIdentityPayload(WorkerPayload):
+    donor_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("donor_name")
+    @classmethod
+    def strip_donor_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("donor group cannot be blank")
+        return value
 
 
 class DonorGroupPayload(BaseModel):
@@ -4467,6 +4485,7 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         page: int = 1,
         per_page: int = 100,
+        include_legacy: bool = True,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
         page = max(page, 1)
@@ -4477,6 +4496,7 @@ def register_api_routes(app: FastAPI) -> None:
                 worker_server_url=web_app._request_worker_server_url(request, connection),
                 worker_limit=per_page,
                 worker_offset=(page - 1) * per_page,
+                include_legacy=include_legacy,
             )
         )
 
@@ -4523,6 +4543,56 @@ def register_api_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="One or more selected workers could not be found.")
         connection.commit()
         return _json({"workers": list_donor_workers(connection), "message": "Donor grouping updated."})
+
+    def require_worker_identity_admin(request: Request) -> None:
+        if web_app._admin_session_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Admin access is required to manage worker identities.")
+
+    @app.get("/api/admin/workers/identities")
+    def admin_worker_identities(request: Request, connection=Depends(web_app._database)):
+        require_worker_identity_admin(request)
+        return _json({"identities": list_worker_identities(connection)})
+
+    @app.post("/api/admin/workers/identities")
+    def admin_create_worker_identity(
+        payload: WorkerIdentityPayload, request: Request, connection=Depends(web_app._database)
+    ):
+        require_worker_identity_admin(request)
+        identity_id, token = create_worker_identity(connection, payload.label, payload.donor_name)
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        response = _json({"id": identity_id, "token": token}, status_code=201)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.put("/api/admin/workers/identities/{identity_id}")
+    def admin_update_worker_identity(
+        identity_id: int, payload: WorkerIdentityPayload, request: Request, connection=Depends(web_app._database)
+    ):
+        require_worker_identity_admin(request)
+        if not update_worker_identity(connection, identity_id, payload.label, payload.donor_name):
+            raise HTTPException(status_code=404, detail="Worker identity not found.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        return _json({"id": identity_id})
+
+    @app.post("/api/admin/workers/identities/{identity_id}/{action}")
+    def admin_change_worker_identity_token(
+        identity_id: int, action: Literal["rotate", "revoke"], request: Request, connection=Depends(web_app._database)
+    ):
+        require_worker_identity_admin(request)
+        changed, token, tournament_ids = reset_worker_identity(connection, identity_id, revoke=action == "revoke")
+        if not changed:
+            raise HTTPException(status_code=404, detail="Active worker identity not found.")
+        connection.commit()
+        _publish_admin_change(web_app, request)
+        for tournament_id in tournament_ids:
+            request.app.state.stream_hub.publish(
+                f"tournament.{tournament_id}", "tournament.changed", {"tournament_id": tournament_id}, source="web"
+            )
+        response = _json({"id": identity_id, "token": token})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/admin/workers/{worker_id}")
     def admin_worker(
@@ -4623,8 +4693,11 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        if get_worker(connection, worker_id) is None:
+        worker = get_worker(connection, worker_id)
+        if worker is None:
             raise HTTPException(status_code=404, detail="Worker not found.")
+        if worker.worker_identity_id is not None:
+            raise HTTPException(status_code=409, detail="Revoke this worker's shared identity from the Workers page.")
         revoke_worker(connection, worker_id)
         connection.commit()
         _publish_admin_change(web_app, request)
@@ -4636,8 +4709,11 @@ def register_api_routes(app: FastAPI) -> None:
         request: Request,
         connection: sqlite3.Connection = Depends(web_app._database),
     ):
-        if get_worker(connection, worker_id) is None:
+        worker = get_worker(connection, worker_id)
+        if worker is None:
             raise HTTPException(status_code=404, detail="Worker not found.")
+        if worker.worker_identity_id is not None:
+            raise HTTPException(status_code=409, detail="Shared identity machines are removed from the live list when they disconnect.")
         try:
             delete_worker(connection, worker_id)
         except ValueError as exc:

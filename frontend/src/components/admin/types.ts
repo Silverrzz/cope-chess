@@ -180,6 +180,7 @@ export interface Worker {
   status: string
   token_expires_at?: string | null
   session_id?: string | null
+  worker_identity_id?: number | null
   app_version?: string | null
   protocol_version?: number | null
   machine_id?: string | null

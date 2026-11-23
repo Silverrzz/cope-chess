@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -353,14 +354,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     worker_parser = subparsers.add_parser("worker", help="start a worker client")
-    worker_parser.add_argument("--server-url", default=default_worker_server_url())
+    worker_parser.add_argument("--server-url")
     worker_parser.add_argument("--token", default=os.environ.get("COPE_WORKER_TOKEN"))
     worker_parser.add_argument("--token-file", type=Path)
+    worker_parser.add_argument(
+        "--identity-token-file",
+        type=Path,
+        default=os.environ.get("COPE_WORKER_IDENTITY_TOKEN_FILE"),
+        help="file containing an approved shared worker identity token",
+    )
     worker_parser.add_argument("--session-id")
     worker_parser.add_argument(
         "--state-file",
         type=Path,
-        default=Path(".cope-worker/worker.json"),
         help="current-user-only file used to persist the reconnect session",
     )
     worker_parser.add_argument("--label-hint", default="")
@@ -653,25 +659,53 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.role == "worker":
-        from .worker.client import WorkerClientConfig, run_worker_client
+        from .worker.client import WorkerClientConfig, WorkerIdentityRejected, run_worker_client
 
         token = args.token
         if args.token_file is not None and args.token_file.expanduser().is_file():
             token = args.token_file.expanduser().read_text(encoding="utf-8").strip() or token
+        identity_token = None
+        if args.identity_token_file is not None:
+            try:
+                identity_token = args.identity_token_file.expanduser().read_text(encoding="utf-8").strip()
+            except OSError as error:
+                worker_parser.error(str(error))
+            if not identity_token:
+                worker_parser.error("worker identity token file is empty")
+        elif token and token.startswith("cope_identity_"):
+            identity_token, token = token, None
+        if identity_token and (token or args.session_id or args.machine_id):
+            worker_parser.error("worker identity credentials cannot be combined with legacy credentials or --machine-id")
+        if identity_token and not re.fullmatch(r"cope_identity_[A-Za-z0-9_-]{43}", identity_token):
+            worker_parser.error("invalid worker identity token")
         if args.session_id:
             token = None
+        state_file = args.state_file
+        if state_file is None:
+            if identity_token:
+                state_dir = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+                state_file = state_dir / "cope-worker" / "worker.json"
+            else:
+                state_file = Path(".cope-worker/worker.json")
         config = WorkerClientConfig(
-            server_url=args.server_url,
+            server_url=args.server_url or (
+                os.environ.get("COPE_WORKER_SERVER_URL", "wss://cope-chess.live/worker")
+                if identity_token else default_worker_server_url()
+            ),
             app_version=args.app_version,
             token=token,
             session_id=args.session_id,
             label_hint=args.label_hint,
             machine_id=args.machine_id,
-            state_file=args.state_file,
+            state_file=state_file,
             cpu_capacity=args.cpu_capacity,
+            identity_token=identity_token,
         )
         try:
             asyncio.run(run_worker_client(config))
+        except WorkerIdentityRejected as error:
+            LOG.error("worker registration rejected: %s", error)
+            return 78
         except KeyboardInterrupt:
             LOG.info("worker stopped")
             return 130

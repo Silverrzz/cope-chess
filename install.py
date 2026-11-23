@@ -428,8 +428,7 @@ def _configure_clients(
             else:
                 default = f"ws://benchmark-server:8703/{path}"
         if not default:
-            port = "8702" if key == "worker" else "8703"
-            default = f"ws://127.0.0.1:{port}"
+            default = "wss://cope-chess.live/worker" if key == "worker" else "ws://127.0.0.1:8703"
         settings[setting] = _prompt(f"{_target(key).label} server URL", default)
     return settings
 
@@ -443,11 +442,16 @@ def _start_host_worker(settings: dict[str, str]) -> None:
         return
     state_path = RUNTIME / "worker.json"
     token_path = RUNTIME / "worker.token"
-    if not state_path.is_file():
+    identity_file = os.environ.get("COPE_WORKER_IDENTITY_TOKEN_FILE")
+    saved_token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
+    identity_path = Path(identity_file).expanduser().resolve() if identity_file else None
+    if identity_path is None and not state_path.is_file() and not saved_token.startswith("cope_identity_"):
         token = _registration_token("worker", settings)
         token_path.write_text(token + "\n", encoding="utf-8")
         _restrict_file(token_path)
-    machine_id = _client_machine_id("worker")
+        saved_token = token
+    if identity_path is None and saved_token.startswith("cope_identity_"):
+        identity_path = token_path
     command = [
         str(_venv_executable(RUNTIME / "worker-runtime" / "venv", "cope")),
         "worker",
@@ -457,11 +461,13 @@ def _start_host_worker(settings: dict[str, str]) -> None:
         str(state_path),
         "--label-hint",
         f"{socket.gethostname()}-worker",
-        "--machine-id",
-        machine_id,
     ]
-    if not state_path.is_file():
-        command.extend(["--token-file", str(token_path)])
+    if identity_path is not None:
+        command.extend(["--identity-token-file", str(identity_path)])
+    else:
+        command.extend(["--machine-id", _client_machine_id("worker")])
+        if not state_path.is_file():
+            command.extend(["--token-file", str(token_path)])
     environment = os.environ.copy()
     environment["COPE_BUILD_VERSION"] = _build_version()
     environment["COPE_UPDATE_ROOT"] = str(RUNTIME / "update")
@@ -475,7 +481,8 @@ def _start_host_worker(settings: dict[str, str]) -> None:
         environment["COPE_UPDATE_REPOSITORY_URL"] = repository_url
     log_path = RUNTIME / "worker.log"
     print("Starting Docker-free game worker...")
-    with log_path.open("a", encoding="utf-8") as output:
+    with log_path.open("ab") as output:
+        log_start = output.tell()
         process = subprocess.Popen(
             command,
             cwd=RUNTIME,
@@ -490,14 +497,25 @@ def _start_host_worker(settings: dict[str, str]) -> None:
                 else 0
             ),
         )
-    time.sleep(1)
-    status = process.poll()
-    if status is not None:
-        detail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-        raise SystemExit(
-            f"Game worker exited during startup with status {status}."
-            + (f"\n{detail}" if detail else "")
-        )
+    deadline = time.monotonic() + 20
+    startup_log = ""
+    with log_path.open("rb") as startup:
+        startup.seek(log_start)
+        while process.poll() is None and time.monotonic() < deadline:
+            startup_log = (startup_log + startup.read().decode("utf-8", errors="replace"))[-4000:]
+            if "connected to Cope worker_id=" in startup_log:
+                break
+            time.sleep(0.2)
+        else:
+            startup_log = (startup_log + startup.read().decode("utf-8", errors="replace"))[-4000:]
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise SystemExit("Game worker did not finish connecting to Cope.\n" + startup_log)
     pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
     _restrict_file(pid_path)
     print(f"Game worker started directly on the host as process {process.pid}.")
@@ -684,7 +702,10 @@ def _registration_token(key: str, settings: dict[str, str]) -> str:
             if line.startswith("token="):
                 return line.removeprefix("token=").strip()
         raise SystemExit(f"The server did not return a {_target(key).label.lower()} token.")
-    token = getpass.getpass(f"One-time {_target(key).label.lower()} token: ").strip()
+    if key == "worker":
+        token = input("Paste your worker identity or one-time registration token: ").strip()
+    else:
+        token = getpass.getpass(f"One-time {_target(key).label.lower()} token: ").strip()
     if not token:
         raise SystemExit(f"A token is required to register the {_target(key).label.lower()}.")
     return token

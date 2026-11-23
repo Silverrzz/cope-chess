@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -703,6 +704,19 @@ class WorkerTokenHello(WorkerActiveAssignmentsMixin):
         if len(set(value)) != len(value):
             raise ValueError("worker-local engine keys must be unique")
         return value
+
+
+class WorkerIdentityHello(StrictModel):
+    identity_token: str = Field(pattern=r"^cope_identity_[A-Za-z0-9_-]{43}$")
+    instance_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    label_hint: str = Field(default="", max_length=80)
+    hw: HardwareInfo
+    app_version: str = Field(min_length=1)
+    worker_local_engine_keys: tuple[WorkerLocalEngineKey, ...] = Field(default_factory=tuple, max_length=500)
+
+    @property
+    def machine_id(self) -> str:
+        return "identity:" + hashlib.sha256(bytes.fromhex(self.instance_key)).hexdigest()
 
 
 class WorkerSessionHello(WorkerActiveAssignmentsMixin):

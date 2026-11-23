@@ -12,6 +12,7 @@ Environment=COPE_UPDATE_ROOT=/opt/cope-worker
 WorkingDirectory=/var/lib/cope-worker
 ExecStart=/opt/cope-worker/current/venv/bin/cope worker --server-url ${COPE_WORKER_SERVER_URL} --token-file /etc/cope/worker.token --state-file /var/lib/cope-worker/worker.json
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true

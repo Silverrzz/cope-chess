@@ -1085,7 +1085,7 @@ def create_app(
                 hub.unregister_internal_client(queue)
 
     @app.get("/admin/workers/events")
-    async def admin_workers_events(request: Request, page: int = 1):
+    async def admin_workers_events(request: Request, page: int = 1, include_legacy: bool = True):
         hub: StreamHub = request.app.state.stream_hub
         hub.bind_loop()
         page = max(page, 1)
@@ -1099,6 +1099,7 @@ def create_app(
                     worker_server_url=_request_worker_server_url(request, connection),
                     worker_limit=per_page,
                     worker_offset=(page - 1) * per_page,
+                    include_legacy=include_legacy,
                 )
             finally:
                 connection.close()
@@ -1783,9 +1784,14 @@ def _workers_snapshot_payload(
     worker_server_url: str | None = None,
     worker_limit: int | None = None,
     worker_offset: int = 0,
+    include_legacy: bool = True,
 ) -> dict[str, Any]:
     workers = sorted(
-        list_workers(connection),
+        (
+            worker for worker in list_workers(connection, include_inactive_identities=False)
+            if _worker_effective_status(worker) in CONNECTED_WORKER_STATUSES
+            or (include_legacy and worker.worker_identity_id is None)
+        ),
         key=lambda worker: (
             _worker_effective_status(worker) not in CONNECTED_WORKER_STATUSES,
             worker.id,
@@ -1796,13 +1802,28 @@ def _workers_snapshot_payload(
     if worker_limit is not None:
         visible_workers = visible_workers[:worker_limit]
     visible_rows = _worker_admin_rows(connection, workers=visible_workers)
+    identities = {
+        row["id"]: row["donor_name"]
+        for row in connection.execute("SELECT id, donor_name FROM worker_identities")
+    }
+    draining = {
+        row["worker_id"]
+        for row in connection.execute(
+            "SELECT worker_id FROM control_worker_settings WHERE draining AND worker_id = ANY(CAST(? AS BIGINT[]))",
+            ([worker.id for worker in visible_workers],),
+        )
+    }
     summary_rows = [
         {"worker": worker, "status": _worker_effective_status(worker)}
         for worker in workers
     ]
     return {
         "workers": [
-            _worker_admin_payload(row)
+            {
+                **_worker_admin_payload(row),
+                "donor_name": identities.get(row["worker"].worker_identity_id),
+                "draining": row["worker"].id in draining,
+            }
             for row in visible_rows
         ],
         "total_workers": len(workers),
@@ -2003,6 +2024,7 @@ def _worker_admin_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": worker.id,
         "label": worker.label,
+        "worker_identity_id": worker.worker_identity_id,
         "status": row["status"],
         "last_seen": worker.last_seen,
         "work": row["work"],
@@ -2107,7 +2129,8 @@ def _worker_record_payload(worker) -> dict[str, Any]:
         "label": worker.label,
         "token_expires_at": worker.token_expires_at,
         "status": worker.status,
-        "session_id": worker.session_id,
+        "session_id": worker.session_id if worker.worker_identity_id is None else None,
+        "worker_identity_id": worker.worker_identity_id,
         "app_version": worker.app_commit,
         "protocol_version": worker.protocol_version,
         "machine_id": worker.machine_id,
@@ -2336,6 +2359,8 @@ def _state_view(status: str, label: str, detail: str) -> dict[str, str]:
 
 
 def _worker_token_view(worker) -> dict[str, str]:
+    if worker.worker_identity_id is not None:
+        return _state_view("shared", "Worker identity", "Managed from the donor group")
     if worker.token_expires_at is None:
         if worker.status == "revoked":
             return _state_view("revoked", "Revoked", "Token removed")
@@ -2352,14 +2377,15 @@ def _worker_token_view(worker) -> dict[str, str]:
 
 def _worker_session_view(worker) -> dict[str, str]:
     if worker.session_id:
-        return _state_view("active", "Issued", _short_secret(worker.session_id))
+        detail = _short_secret(worker.session_id) if worker.worker_identity_id is None else "Machine session"
+        return _state_view("active", "Issued", detail)
     if worker.status == "minted":
         return _state_view("pending", "None", "Waiting for token use")
     return _state_view("inactive", "None", "No reconnect session")
 
 
 def _worker_launch_command(worker, worker_server_url: str) -> str | None:
-    if worker.session_id:
+    if worker.session_id and worker.worker_identity_id is None:
         command = (
             f"cope worker --server-url {_command_arg(worker_server_url)} "
             f"--session-id {_command_arg(worker.session_id)}"

@@ -51,7 +51,7 @@ install -o root -g root -m 0644 "$repo_dir/deploy/cope-worker.service" /etc/syst
 
 if [ ! -f /etc/cope/worker.env ]; then
   install -o root -g root -m 0644 /dev/null /etc/cope/worker.env
-  printf 'COPE_WORKER_SERVER_URL=wss://cope.example.com/worker\n' > /etc/cope/worker.env
+  printf 'COPE_WORKER_SERVER_URL=wss://cope-chess.live/worker\n' > /etc/cope/worker.env
   printf 'COPE_UPDATE_ROOT=/opt/cope-worker\nCOPE_UPDATE_REPOSITORY_URL=%s\n' "$repository_url" >> /etc/cope/worker.env
 fi
 if [ ! -f /etc/cope/worker.token ]; then

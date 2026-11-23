@@ -39,6 +39,7 @@ from cope.core.models import (
     ToolJobProgress,
     ToolJobPuzzleResult,
     WORKER_PROTOCOL_VERSION,
+    WorkerIdentityHello,
     WorkerResources,
     WorkerResourceTelemetry,
     WorkerSessionHello,
@@ -99,6 +100,7 @@ from cope.db import (
     upsert_worker_connection,
     worker_token_is_valid,
 )
+from cope.db.worker_identities import authenticate_worker_identity, get_or_create_identity_worker
 from cope.network import DEFAULT_WORKER_PATH, default_worker_host, default_worker_port
 from cope.runner.local import (
     next_worker_assignment,
@@ -115,6 +117,7 @@ from cope.tournament.clock_scaling import calibrate_game, game_calibration, save
 
 
 LOG = logging.getLogger("cope.worker_server")
+WorkerHello = WorkerIdentityHello | WorkerTokenHello | WorkerSessionHello
 WORKER_CONNECTION_REPLACED_CLOSE_CODE = 4001
 ASSIGNABLE_WORKER_STATUSES = {"connected", "downloading", "ready", "busy"}
 PREPARATION_FAILURE_INITIAL_BACKOFF_S = 60.0
@@ -497,12 +500,10 @@ class WorkerHandshakeServer:
                 return
 
             raw_message = await websocket.recv()
-            protocol_version, hello = decode_bootstrap_message(
-                raw_message,
-                "hello",
-                WorkerTokenHello
-                | WorkerSessionHello,
-            )
+            try:
+                protocol_version, hello = decode_bootstrap_message(raw_message, "hello", WorkerHello)
+            except ProtocolError:
+                raise ProtocolValidationError("invalid worker handshake") from None
             authenticated_worker = await asyncio.to_thread(
                 self._authenticate_worker,
                 hello,
@@ -1917,10 +1918,20 @@ class WorkerHandshakeServer:
 
     def _authenticate_worker(
         self,
-        hello: WorkerTokenHello | WorkerSessionHello,
+        hello: WorkerHello,
     ) -> WorkerRecord:
         connection = connect_database(self._config.db_path)
         try:
+            if isinstance(hello, WorkerIdentityHello):
+                identity_id = authenticate_worker_identity(connection, hello)
+                if identity_id is None:
+                    raise ProtocolValidationError("invalid or revoked worker identity")
+                worker_id = get_or_create_identity_worker(connection, identity_id, hello)
+                worker = get_worker(connection, worker_id) if worker_id is not None else None
+                if worker is None:
+                    raise ProtocolValidationError("worker instance is already registered to another identity")
+                connection.commit()
+                return worker
             if isinstance(hello, WorkerTokenHello):
                 worker = get_worker_by_token(connection, hello.token)
                 if worker is None or not worker_token_is_valid(worker):
@@ -1928,7 +1939,7 @@ class WorkerHandshakeServer:
                 return worker
 
             worker = get_worker_by_session_id(connection, hello.session_id)
-            if worker is None or worker.status == "revoked":
+            if worker is None or worker.status == "revoked" or worker.worker_identity_id is not None:
                 raise ProtocolValidationError("invalid worker session")
             return worker
         finally:
@@ -1939,19 +1950,27 @@ class WorkerHandshakeServer:
         worker: WorkerRecord,
         label: str,
         session_id: str,
-        hello: WorkerTokenHello | WorkerSessionHello,
+        hello: WorkerHello,
         *,
         protocol_version: int = WORKER_PROTOCOL_VERSION,
     ) -> WorkerRecord:
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if isinstance(hello, WorkerIdentityHello):
+                identity_id = authenticate_worker_identity(connection, hello)
+                if identity_id is None or identity_id != worker.worker_identity_id:
+                    raise ProtocolValidationError("invalid or revoked worker identity")
             connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
                 (f"worker:{worker.id}",),
             )
             self._validate_worker_machine(connection, worker, hello)
-            if isinstance(hello, WorkerTokenHello):
+            if isinstance(hello, WorkerIdentityHello):
+                current = get_worker(connection, worker.id)
+                if current is None or current.worker_identity_id != identity_id:
+                    raise ProtocolValidationError("worker instance registration changed")
+            elif isinstance(hello, WorkerTokenHello):
                 current = get_worker_by_token(connection, hello.token)
                 if (
                     current is None
@@ -1973,6 +1992,8 @@ class WorkerHandshakeServer:
                 session_id=current.session_id,
                 reason="worker session replaced",
             )
+            if current.session_id is not None:
+                release_worker_tool_jobs(connection, current.id)
             upsert_worker_connection(
                 connection,
                 worker_id=current.id,
@@ -2009,7 +2030,7 @@ class WorkerHandshakeServer:
         self,
         connection,
         worker: WorkerRecord,
-        hello: WorkerTokenHello | WorkerSessionHello,
+        hello: WorkerHello,
     ) -> None:
         connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
@@ -2095,6 +2116,16 @@ class WorkerHandshakeServer:
     def _record_worker_disconnected(self, worker: WorkerRecord) -> tuple[int, ...]:
         connection = connect_database(self._config.db_path)
         try:
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                (f"worker:{worker.id}",),
+            )
+            row = connection.execute(
+                "SELECT session_id FROM workers WHERE id = ?",
+                (worker.id,),
+            ).fetchone()
+            if row is None or row["session_id"] != worker.session_id:
+                return ()
             tournament_ids = disconnect_worker(
                 connection,
                 worker.id,
@@ -2908,9 +2939,9 @@ def _validate_worker_payload(model_type, data):
 
 
 def _hello_label(
-    hello: WorkerTokenHello | WorkerSessionHello,
+    hello: WorkerHello,
 ) -> str:
-    if isinstance(hello, WorkerTokenHello):
+    if isinstance(hello, (WorkerTokenHello, WorkerIdentityHello)):
         return hello.label_hint or "token worker"
 
     return "session worker"
@@ -2918,8 +2949,10 @@ def _hello_label(
 
 def _worker_label(
     worker: WorkerRecord,
-    hello: WorkerTokenHello | WorkerSessionHello,
+    hello: WorkerHello,
 ) -> str:
+    if isinstance(hello, WorkerIdentityHello) and hello.label_hint:
+        return hello.label_hint
     if worker.label:
         return worker.label
 

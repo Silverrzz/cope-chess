@@ -183,6 +183,7 @@ class WorkerRecord:
     core_limit: int | None
     tournament_scope: str
     last_seen: str | None
+    worker_identity_id: int | None = None
 
     @property
     def capacity(self) -> WorkerResources | None:
@@ -2816,12 +2817,17 @@ def assign_game_to_worker(
         """
         INSERT INTO game_assignments (
           game_id, assignment_key, worker_id,
-          status, sent_at, acked_at, finished_at, last_error
+          status, sent_at, acked_at, finished_at, last_error, worker_donor_name
         )
-        VALUES (?, ?, ?, 'assigned', ?, NULL, NULL, NULL)
+        VALUES (?, ?, ?, 'assigned', ?, NULL, NULL, NULL, (
+            SELECT identity.donor_name
+            FROM workers worker JOIN worker_identities identity ON identity.id = worker.worker_identity_id
+            WHERE worker.id = ?
+        ))
         ON CONFLICT(game_id) DO UPDATE SET
           assignment_key = excluded.assignment_key,
           worker_id = excluded.worker_id,
+          worker_donor_name = excluded.worker_donor_name,
           status = 'assigned',
           sent_at = excluded.sent_at,
           acked_at = NULL,
@@ -2833,6 +2839,7 @@ def assign_game_to_worker(
             assignment_key,
             worker_id,
             now,
+            worker_id,
         ),
     )
     assignment = get_game_assignment_for_game(connection, game_id)
@@ -2965,6 +2972,7 @@ def mint_worker_token_for_worker(
         WHERE id = ?
           AND status != 'revoked'
           AND session_id IS NULL
+          AND worker_identity_id IS NULL
         """,
         (hash_worker_token(token), expires_at, worker_id),
     )
@@ -3078,11 +3086,16 @@ def get_worker(connection: sqlite3.Connection, worker_id: int) -> WorkerRecord |
     return _worker_from_row(row)
 
 
-def list_workers(connection: sqlite3.Connection) -> tuple[WorkerRecord, ...]:
+def list_workers(
+    connection: sqlite3.Connection, *, include_inactive_identities: bool = True
+) -> tuple[WorkerRecord, ...]:
     return tuple(
         _worker_from_row(row)
         for row in connection.execute(
-            "SELECT * FROM workers WHERE status != 'revoked' ORDER BY id"
+            """SELECT * FROM workers WHERE status != 'revoked'
+               AND (? OR worker_identity_id IS NULL OR status IN ('connected', 'downloading', 'ready', 'busy'))
+               ORDER BY id""",
+            (include_inactive_identities,),
         )
     )
 
@@ -5635,6 +5648,7 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         core_limit=row["core_limit"],
         tournament_scope=row["tournament_scope"],
         last_seen=row["last_seen"],
+        worker_identity_id=row.get("worker_identity_id"),
     )
 
 

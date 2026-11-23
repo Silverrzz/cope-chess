@@ -8,6 +8,8 @@ import logging
 import os
 import platform
 import re
+import secrets
+import socket
 import sys
 import threading
 import time
@@ -43,6 +45,7 @@ from cope.core.models import (
     ToolJobProgress,
     ToolJobPuzzleResult,
     WorkerGameAssignment,
+    WorkerIdentityHello,
     WorkerResourceTelemetry,
     WorkerSessionHello,
     WorkerTokenHello,
@@ -82,6 +85,10 @@ TELEMETRY_BATCH_MAX_MESSAGES = 128
 RESOURCE_TELEMETRY_INTERVAL_S = 2.0
 
 
+class WorkerIdentityRejected(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class WorkerClientConfig:
     server_url: str
@@ -92,6 +99,8 @@ class WorkerClientConfig:
     machine_id: str | None = None
     state_file: Path | None = None
     cpu_capacity: int | None = None
+    identity_token: str | None = None
+    identity_instance_key: str | None = None
 
 
 class _EngineBenchmarkCache:
@@ -300,6 +309,14 @@ class _WorkerResourceTelemetryPublisher:
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
+    if config.identity_token is not None:
+        if config.state_file is None or config.token is not None or config.session_id is not None:
+            raise ValueError("worker identity requires a state file and its own token")
+        config = replace(
+            config,
+            identity_instance_key=_identity_instance_key(config.state_file),
+            label_hint=config.label_hint or socket.gethostname()[:80],
+        )
     hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
     try:
         threading.stack_size(1024 * 1024)
@@ -312,7 +329,10 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
         )
     )
     state = _WorkerConnectionState(
-        session_id=config.session_id or _read_worker_session(config.state_file),
+        session_id=(
+            None if config.identity_token is not None
+            else config.session_id or _read_worker_session(config.state_file)
+        ),
         hw=hw,
     )
     reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
@@ -329,6 +349,11 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
                     [str(restart_executable), *_restart_arguments(sys.argv[1:])],
                 )
         except ConnectionClosed as error:
+            if config.identity_token is not None and error.reason in {
+                "invalid or revoked worker identity",
+                "worker instance is already registered to another identity",
+            }:
+                raise WorkerIdentityRejected(error.reason) from None
             _log_connection_closed(error)
         except (OSError, asyncio.TimeoutError, InvalidHandshake) as error:
             LOG.warning("runner connection failed: %s", error)
@@ -373,7 +398,8 @@ async def _run_worker_connection(
         await _send_message(websocket, "hello", _build_hello(connection_config, state.hw))
         welcome = await _recv_message(websocket, "welcome", WorkerWelcome)
         state.session_id = welcome.session_id
-        _write_worker_session(config.state_file, welcome.session_id)
+        if config.identity_token is None:
+            _write_worker_session(config.state_file, welcome.session_id)
         state.connected = True
         LOG.info(
             "accepted by runner worker_id=%s session=%s",
@@ -382,6 +408,7 @@ async def _run_worker_connection(
         )
         if welcome.update is not None:
             return await _apply_worker_update(websocket, welcome.update)
+        LOG.info("connected to Cope worker_id=%s", welcome.worker_id)
         return await _serve_assignments(
             websocket,
             capacity=welcome.capacity,
@@ -395,7 +422,7 @@ def _connection_config(
     state: _WorkerConnectionState,
 ) -> WorkerClientConfig:
     """Use the durable server session after the first accepted connection."""
-    if state.session_id is None:
+    if config.identity_token is not None or state.session_id is None:
         return config
     return replace(
         config,
@@ -423,7 +450,17 @@ def _restart_arguments(arguments: list[str]) -> list[str]:
 def _build_hello(
     config: WorkerClientConfig,
     hw: HardwareInfo,
-) -> WorkerTokenHello | WorkerSessionHello:
+) -> WorkerIdentityHello | WorkerTokenHello | WorkerSessionHello:
+    if config.identity_token is not None:
+        return WorkerIdentityHello(
+            identity_token=config.identity_token,
+            instance_key=config.identity_instance_key or "",
+            label_hint=config.label_hint,
+            hw=hw,
+            app_version=config.app_version,
+            worker_local_engine_keys=discover_worker_local_engine_keys(),
+        )
+
     credential_count = sum(
         value is not None
         for value in (config.token, config.session_id)
@@ -466,6 +503,27 @@ def _read_worker_session(path: Path | None) -> str | None:
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("worker state file has no valid session id")
     return session_id
+
+
+def _identity_instance_key(state_file: Path) -> str:
+    state_file = state_file.expanduser().resolve()
+    key_file = state_file.with_name(f"{state_file.name}.identity-key")
+    try:
+        key = key_file.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        key_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = key_file.with_name(f".{key_file.name}.{uuid.uuid4().hex}")
+        try:
+            with os.fdopen(os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w") as output:
+                output.write(secrets.token_hex(32) + "\n")
+            with contextlib.suppress(FileExistsError):
+                os.link(temporary, key_file)
+        finally:
+            temporary.unlink(missing_ok=True)
+        key = key_file.read_text(encoding="ascii").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", key) is None:
+        raise ValueError(f"invalid worker identity key in {key_file}")
+    return key
 
 
 def _write_worker_session(path: Path | None, session_id: str) -> None:
@@ -2562,7 +2620,9 @@ async def _recv_message(websocket, message_type: str, data_type):
 def _message_log_context(message_type: str, data: Any) -> str:
     payload = _model_data(data)
     if message_type == "hello":
-        if payload.get("token"):
+        if payload.get("identity_token"):
+            auth = "identity"
+        elif payload.get("token"):
             auth = "token"
         else:
             auth = "session"

@@ -2,12 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api/client'
+import { describeTarget, executeCommand } from '@/api/application'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
 import InlineFeedback from '@/components/admin/InlineFeedback.vue'
 import StatusBadge from '@/components/admin/StatusBadge.vue'
+import WorkerIdentities from '@/components/admin/WorkerIdentities.vue'
 import { errorText, formatDate } from '@/components/admin/format'
 import type { DonorWorker } from '@/components/admin/types'
 import { useSessionStore } from '@/stores/session'
@@ -17,6 +19,9 @@ interface WorkerListItem {
   label: string
   status: string
   last_seen?: string | null
+  worker_identity_id?: number | null
+  donor_name?: string | null
+  draining?: boolean
   work?: { summary: string; detail?: string; meta?: string; href?: string | null; abnormal?: boolean }
   machine?: { status: string; label: string; detail?: string }
   hardware?: { reported: boolean; summary: string; detail: string; cores?: string; memory?: string }
@@ -59,10 +64,12 @@ const error = ref('')
 const streamConnected = ref(false)
 const creating = ref(false)
 const showCreate = ref(false)
+const showLegacy = ref(false)
 const label = ref('')
 const deleting = ref<number | null>(null)
 const revoking = ref<number | null>(null)
 const forgettingBenchmarker = ref<number | null>(null)
+const draining = ref<number | null>(null)
 let source: EventSource | null = null
 let refreshTimer: number | undefined
 let refreshDelay: number | undefined
@@ -95,7 +102,7 @@ function load(silent = false): Promise<void> {
   if (!silent) loading.value = true
   loadPromise = (async () => {
     try {
-      applySnapshot(await api.get<WorkerSnapshot>(`/api/admin/workers?page=${page.value}&per_page=${perPage}`))
+      applySnapshot(await api.get<WorkerSnapshot>(`/api/admin/workers?page=${page.value}&per_page=${perPage}&include_legacy=${showLegacy.value}`))
       error.value = ''
     } catch (cause) {
       error.value = errorText(cause)
@@ -117,7 +124,7 @@ function scheduleLoad(): void {
 
 function connectStream(): void {
   source?.close()
-  source = new EventSource(`/admin/workers/events?page=${page.value}`)
+  source = new EventSource(`/admin/workers/events?page=${page.value}&include_legacy=${showLegacy.value}`)
   source.addEventListener('open', () => { streamConnected.value = true })
   source.addEventListener('error', () => {
     streamConnected.value = false
@@ -142,6 +149,31 @@ async function changePage(nextPage: number): Promise<void> {
   page.value = Math.min(Math.max(nextPage, 1), totalPages.value)
   await load()
   connectStream()
+}
+
+async function toggleLegacy(): Promise<void> {
+  showLegacy.value = !showLegacy.value
+  await changePage(1)
+}
+
+async function setDrain(worker: WorkerListItem): Promise<void> {
+  draining.value = worker.id
+  try {
+    const command = 'agents.set_drain.v1'
+    const target = await describeTarget(command, worker.id)
+    await executeCommand({
+      command,
+      target: target.object_id,
+      expected_version: target.version,
+      idempotency_key: crypto.randomUUID(),
+      input: { draining: !worker.draining },
+    })
+    await load(true)
+  } catch (cause) {
+    toast.error(cause)
+  } finally {
+    draining.value = null
+  }
 }
 
 async function createWorker(): Promise<void> {
@@ -237,9 +269,10 @@ onBeforeUnmount(() => {
 <template>
   <div class="admin-page page-stack">
     <AdminPageHeader title="Workers">
-      <template #actions><button class="button button--primary" type="button" @click="showCreate = !showCreate">New machine worker</button></template>
+      <template #actions><button class="button button--secondary" type="button" @click="toggleLegacy">{{ showLegacy ? 'Show connected workers' : 'Show legacy registrations' }}</button><button v-if="showLegacy" class="button button--secondary" type="button" @click="showCreate = !showCreate">Register legacy worker</button></template>
     </AdminPageHeader>
     <InlineFeedback :message="error" />
+    <WorkerIdentities v-if="session.user?.role === 'admin'" />
 
     <form v-if="showCreate" class="panel create-worker" @submit.prevent="createWorker">
       <div><h2>Register a machine</h2><p>CPU and memory capacity are detected when the worker connects.</p></div>
@@ -262,17 +295,17 @@ onBeforeUnmount(() => {
           <thead><tr><th>Machine worker</th><th>Status</th><th>Capacity</th><th>Machine</th><th>Last seen</th><th><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             <tr v-for="worker in workers" :key="worker.id" :class="{ 'worker-row--warning': worker.work?.abnormal }">
-              <td><RouterLink :to="`/admin/workers/${worker.id}`"><strong>{{ worker.label }}</strong><small>#{{ worker.id }}</small></RouterLink></td>
+              <td><RouterLink :to="`/admin/workers/${worker.id}`"><strong>{{ worker.label }}</strong><small>#{{ worker.id }}<template v-if="worker.donor_name"> · {{ worker.donor_name }}</template></small></RouterLink></td>
               <td><StatusBadge :status="worker.status" /></td>
               <td><span>{{ worker.hardware?.summary ?? 'Not reported' }}</span><small>{{ worker.hardware?.detail }}</small></td>
               <td><span class="state-label">{{ worker.machine?.label ?? 'Unknown' }}</span></td>
               <td>{{ formatDate(worker.last_seen) }}</td>
-              <td class="row-actions"><RouterLink class="button button--ghost button--small" :to="`/admin/workers/${worker.id}`">Open</RouterLink><button class="button button--danger button--small" type="button" :disabled="revoking === worker.id" @click="revoke(worker)">{{ revoking === worker.id ? 'Revoking…' : 'Revoke' }}</button><button class="icon-button icon-button--danger" type="button" :disabled="deleting === worker.id" :aria-label="`Delete ${worker.label}`" @click="remove(worker)"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" /></svg></button></td>
+              <td class="row-actions"><RouterLink class="button button--ghost button--small" :to="`/admin/workers/${worker.id}`">Open</RouterLink><button v-if="worker.worker_identity_id" class="button button--secondary button--small" type="button" :disabled="draining === worker.id" @click="setDrain(worker)">{{ worker.draining ? 'Resume' : 'Drain' }}</button><template v-else><button class="button button--danger button--small" type="button" :disabled="revoking === worker.id" @click="revoke(worker)">{{ revoking === worker.id ? 'Revoking…' : 'Revoke' }}</button><button class="icon-button icon-button--danger" type="button" :disabled="deleting === worker.id" :aria-label="`Delete ${worker.label}`" @click="remove(worker)"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" /></svg></button></template></td>
             </tr>
           </tbody>
         </table>
       </div>
-      <AdminEmptyState v-else title="No machine workers registered"><button class="button button--primary button--small" type="button" @click="showCreate = true">New machine worker</button></AdminEmptyState>
+      <AdminEmptyState v-else :title="showLegacy ? 'No machine workers registered' : 'No workers connected'" />
       <nav v-if="totalPages > 1" class="worker-pagination" aria-label="Worker pages">
         <button class="button button--ghost button--small" type="button" :disabled="page <= 1" @click="changePage(page - 1)">Previous</button>
         <span>Page {{ page }} of {{ totalPages }}</span>

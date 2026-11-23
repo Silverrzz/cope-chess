@@ -4,7 +4,7 @@ from __future__ import annotations
 def record_game_donor(connection, game_id: int, threads: int | None) -> None:
     worker = connection.execute(
         """
-        SELECT worker.id, worker.label
+        SELECT worker.id, worker.label, assignment.worker_donor_name AS donor_name
         FROM game_assignments assignment
         JOIN workers worker ON worker.id = assignment.worker_id
         WHERE assignment.game_id = ?
@@ -22,12 +22,13 @@ def record_game_donor(connection, game_id: int, threads: int | None) -> None:
     )
     connection.execute(
         """
-        INSERT INTO hardware_donor_games (game_id, worker_id, thread_count)
-        VALUES (?, ?, ?)
+        INSERT INTO hardware_donor_games (game_id, worker_id, thread_count, donor_name)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT (game_id) DO UPDATE SET
-            worker_id = EXCLUDED.worker_id, thread_count = EXCLUDED.thread_count
+            worker_id = EXCLUDED.worker_id, thread_count = EXCLUDED.thread_count,
+            donor_name = EXCLUDED.donor_name
         """,
-        (game_id, worker["id"], threads),
+        (game_id, worker["id"], threads, worker["donor_name"]),
     )
 
 
@@ -42,8 +43,8 @@ def preserve_worker_donor_history(connection, worker_id: int) -> None:
     )
     connection.execute(
         """
-        INSERT INTO hardware_donor_games (game_id, worker_id)
-        SELECT game.id, assignment.worker_id
+        INSERT INTO hardware_donor_games (game_id, worker_id, donor_name)
+        SELECT game.id, assignment.worker_id, assignment.worker_donor_name
         FROM game_assignments assignment
         JOIN games game ON game.id = assignment.game_id
         WHERE assignment.worker_id = ? AND game.status = 'finished' AND game.result IS NOT NULL
@@ -61,6 +62,7 @@ def list_donor_workers(connection) -> list[dict]:
                profile.donor_name, worker.id IS NULL AS retired
         FROM workers worker
         FULL JOIN hardware_donor_workers profile ON profile.worker_id = worker.id
+        WHERE worker.worker_identity_id IS NULL
         ORDER BY retired, lower(COALESCE(worker.label, profile.worker_label)), id
         """
     ).fetchall()
@@ -75,6 +77,7 @@ def set_donor_group(connection, worker_ids: list[int], name: str | None) -> bool
         FROM workers worker
         FULL JOIN hardware_donor_workers profile ON profile.worker_id = worker.id
         WHERE COALESCE(worker.id, profile.worker_id) = ANY(CAST(? AS BIGINT[]))
+          AND worker.worker_identity_id IS NULL
         ORDER BY COALESCE(worker.id, profile.worker_id)
         ON CONFLICT (worker_id) DO UPDATE SET
             worker_label = EXCLUDED.worker_label, donor_name = EXCLUDED.donor_name
@@ -108,6 +111,7 @@ def donor_leaderboard(connection) -> dict:
                        WHEN profile.historical_styx_cpu IS NOT NULL THEN policy.fallback_worker
                        ELSE COALESCE(recorded.worker_id, policy.fallback_worker)
                    END AS worker_id,
+                   credit.donor_name,
                    COUNT(*) AS games,
                    COUNT(runtime.seconds) AS timed_games,
                    SUM(runtime.seconds * COALESCE(credit.thread_count, tournament.threads)) / 3600 AS cpu_hours
@@ -154,14 +158,15 @@ def donor_leaderboard(connection) -> dict:
                        END AS seconds
             ) runtime
             WHERE game.status = 'finished' AND game.result IS NOT NULL
-            GROUP BY 1
+            GROUP BY 1, 2
         ), named_totals AS (
             SELECT CASE
+                       WHEN totals.donor_name IS NOT NULL THEN 'donor:' || lower(totals.donor_name)
                        WHEN totals.worker_id IS NULL THEN NULL
                        WHEN profile.donor_name IS NOT NULL THEN 'donor:' || lower(profile.donor_name)
                        ELSE 'worker:' || totals.worker_id
                    END AS donor_key,
-                   COALESCE(profile.donor_name, NULLIF(btrim(worker.label), ''),
+                   COALESCE(totals.donor_name, profile.donor_name, NULLIF(btrim(worker.label), ''),
                             NULLIF(btrim(profile.worker_label), ''), 'Worker #' || totals.worker_id) AS name,
                    totals.games, totals.timed_games, totals.cpu_hours
             FROM worker_totals totals
