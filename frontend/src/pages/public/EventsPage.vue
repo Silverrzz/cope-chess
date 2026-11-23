@@ -16,6 +16,8 @@ const nowMs = ref(Date.now());
 const clockOffsetMs = ref(0);
 let timer: number | undefined;
 
+const liveEvents = computed(() => (response.value?.events ?? []).filter((event) => ["live", "intermission"].includes(event.record.status)));
+const upcomingEvents = computed(() => (response.value?.events ?? []).filter((event) => ["announced", "scheduled", "postponed"].includes(event.record.status)));
 const pastEvents = computed(() => (response.value?.events ?? []).filter((event) => ["completed", "cancelled"].includes(event.record.status)));
 const visibleEvents = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
@@ -62,9 +64,14 @@ function eventComponent(event: EventSummary) {
     <template v-else-if="response">
       <h1 class="sr-only">Events</h1>
 
-      <section v-if="response.current" class="upcoming-section" aria-labelledby="upcoming-events-title">
-        <div class="section-heading section-header page-container"><h2 id="upcoming-events-title">Upcoming event</h2></div>
-        <component :is="eventComponent(response.current)" :summary="response.current" :current="true" :now-ms="nowMs" />
+      <section v-if="liveEvents.length" class="upcoming-section" aria-labelledby="live-events-title">
+        <div class="section-heading section-header page-container"><h2 id="live-events-title">Live events</h2></div>
+        <component v-for="event in liveEvents" :is="eventComponent(event)" :key="event.record.id" :summary="event" :current="true" :now-ms="nowMs" />
+      </section>
+
+      <section v-if="upcomingEvents.length" class="upcoming-section" aria-labelledby="upcoming-events-title">
+        <div class="section-heading section-header page-container"><h2 id="upcoming-events-title">Upcoming events</h2></div>
+        <component v-for="event in upcomingEvents" :is="eventComponent(event)" :key="event.record.id" :summary="event" :current="true" :now-ms="nowMs" />
       </section>
 
       <section class="archive-section" aria-labelledby="event-archive-title">

@@ -2,76 +2,75 @@
 import { computed } from "vue";
 import { RouterLink } from "vue-router";
 
+import AppIcon from "@/components/ui/AppIcon.vue";
 import { localDateFormatter, timestampDate } from "@/utils/time";
 import type { EventSummary } from "@/types/events";
-import SecretQueenSignal from "./SecretQueenSignal.vue";
+import SecretQueenArt from "./SecretQueenArt.vue";
 
-const props = defineProps<{ summary: Pick<EventSummary, "record">; current?: boolean }>();
+const props = defineProps<{ summary: EventSummary; current?: boolean }>();
 const event = computed(() => props.summary.record);
-const dateFormat = localDateFormatter({ day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
-const startLabel = computed(() => event.value.scheduled_start_at
-  ? dateFormat.format(timestampDate(event.value.scheduled_start_at))
-  : "Date TBD");
+const dateFormat = localDateFormatter({ weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+const timestamp = computed(() => props.current
+  ? event.value.scheduled_start_at
+  : event.value.finished_at ?? event.value.scheduled_start_at);
 </script>
 
 <template>
   <RouterLink class="secret-queen-hero" :to="{ name: 'event', params: { slug: event.slug } }">
-    <SecretQueenSignal class="secret-queen-hero__art" />
-    <div class="secret-queen-hero__content">
-      <time v-if="event.scheduled_start_at" :datetime="event.scheduled_start_at">{{ startLabel }}</time>
-      <span v-else-if="current">{{ startLabel }}</span>
-      <h2>{{ event.title }}</h2>
-      <span class="secret-queen-hero__action">View event <span aria-hidden="true">↗</span></span>
+    <div class="page-container secret-queen-hero__layout">
+      <div>
+        <h2>{{ event.title }}</h2>
+        <p v-if="event.summary" class="secret-queen-hero__summary">{{ event.summary }}</p>
+        <div class="secret-queen-hero__meta">
+          <time v-if="timestamp" :datetime="timestamp">{{ dateFormat.format(timestampDate(timestamp)) }}</time>
+          <span v-else-if="current">Date TBD</span>
+          <strong>View event <AppIcon name="arrow-right" :size="17" /></strong>
+        </div>
+      </div>
+      <SecretQueenArt class="secret-queen-hero__art" />
     </div>
   </RouterLink>
 </template>
 
 <style scoped>
 .secret-queen-hero {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  align-items: center;
-  min-height: clamp(25rem, 65vh, 42rem);
-  overflow: hidden;
-  padding: clamp(1.25rem, 6vw, 6rem);
-  color: #f7f5fa;
-  background: #08060c;
+  display: block;
+  border-block: 1px solid #342642;
+  background: linear-gradient(115deg, #0b0910 36%, #180f23);
+  color: #faf7ff;
   text-decoration: none;
 }
-.secret-queen-hero__art { --queen-signal-inset: 0 -5% 0 30%; z-index: -2; }
-.secret-queen-hero::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  content: "";
-  background: linear-gradient(96deg, #08060c 9%, #08060c 24%, #08060ce0 41%, transparent 75%);
+.secret-queen-hero__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(1.75rem, 4vw, 4rem);
+  min-height: clamp(25rem, 55vh, 35rem);
+  padding-block: clamp(2.75rem, 7vw, 6rem);
 }
-.secret-queen-hero__content { width: fit-content; max-width: 100%; }
-.secret-queen-hero__content > time,
-.secret-queen-hero__content > span:first-child { color: #ded1ef; font-size: .88rem; }
+.secret-queen-hero__art { min-height: 100%; }
 .secret-queen-hero h2 {
-  margin: .8rem 0 1.5rem;
-  color: inherit;
-  font: 400 clamp(3.25rem, 9vw, 9.5rem)/.9 Impact, Haettenschweiler, "Arial Narrow", var(--font-sans);
-  letter-spacing: -.01em;
+  font-size: clamp(3rem, 6.7vw, 7rem);
+  font-weight: 820;
+  letter-spacing: -.065em;
+  line-height: .98;
   text-wrap: balance;
 }
-.secret-queen-hero__action {
-  display: inline-flex;
+.secret-queen-hero__summary { margin-top: 1.25rem; color: #d3c9dc; font-size: clamp(1rem, 1.6vw, 1.2rem); }
+.secret-queen-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
-  padding: .62rem .88rem;
-  border: 1px solid #f7f5fa;
-  color: #f7f5fa;
-  font-size: .84rem;
-  font-weight: 700;
+  gap: .7rem 1.55rem;
+  margin-top: 1.7rem;
+  color: #c8b9d9;
+  font-size: .9rem;
 }
-.secret-queen-hero:hover .secret-queen-hero__action { background: #f7f5fa; color: #08060c; }
+.secret-queen-hero__meta strong { display: inline-flex; align-items: center; gap: .5rem; color: #e8d6ff; }
+.secret-queen-hero:hover strong { text-decoration: underline; text-underline-offset: .22em; }
 .secret-queen-hero:focus-visible { outline: 2px solid #c5a3ff; outline-offset: -4px; }
-@media (max-width: 42rem) {
-  .secret-queen-hero { align-items: end; }
-  .secret-queen-hero__art { --queen-signal-inset: -3% -38% 0 0; }
-  .secret-queen-hero::before { background: linear-gradient(0deg, #08060c 0%, #08060ce0 27%, transparent 78%); }
+@media (max-width: 38rem) {
+  .secret-queen-hero__layout { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .secret-queen-hero__art { width: min(100%, 18rem); justify-self: center; }
 }
 </style>
