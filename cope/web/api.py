@@ -2335,9 +2335,9 @@ def register_api_routes(app: FastAPI) -> None:
                     {
                         "id": "platform",
                         "label": "Full platform",
-                        "description": "Update services, workers, benchmarkers, and the database.",
+                        "description": "Deploy platform services and database migrations, then release the update to clients.",
                         "scope": "Entire fleet",
-                        "impact": "Waits for active work",
+                        "impact": "Services restart together. Clients update independently.",
                     },
                     {
                         "id": "dockerfiles",

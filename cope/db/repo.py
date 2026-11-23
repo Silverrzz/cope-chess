@@ -4803,6 +4803,8 @@ def set_deployment_target_commit(
     job_id: int,
     target_commit: str,
     repository_url: str,
+    *,
+    activate_clients: bool = True,
 ) -> None:
     now = utc_now()
     connection.execute(
@@ -4819,9 +4821,25 @@ def set_deployment_target_commit(
         SET target_commit = ?, repository_url = ?,
             status = CASE WHEN target_kind = 'benchmarker' THEN 'pending' ELSE 'waiting' END,
             detail = '', updated_at = ?
-        WHERE job_id = ? AND status = 'pending'
+        WHERE job_id = ? AND status = 'pending' AND (? OR target_kind = 'server')
         """,
-        (target_commit, repository_url, now, job_id),
+        (target_commit, repository_url, now, job_id, activate_clients),
+    )
+
+
+def publish_deployment_clients(connection: sqlite3.Connection, job_id: int) -> None:
+    connection.execute(
+        """
+        UPDATE deployment_targets AS client
+        SET target_commit = server.target_commit, repository_url = server.repository_url,
+            status = CASE WHEN client.status = 'pending' THEN 'waiting' ELSE client.status END,
+            updated_at = ?
+        FROM deployment_targets AS server
+        WHERE client.job_id = ? AND server.job_id = client.job_id
+          AND server.target_kind = 'server' AND client.target_kind != 'server'
+          AND client.target_commit IS NULL
+        """,
+        (utc_now(), job_id),
     )
 
 

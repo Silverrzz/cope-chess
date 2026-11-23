@@ -340,11 +340,6 @@ def main(argv: list[str] | None = None) -> int:
         default=float(os.environ.get("COPE_UPDATE_POLL_INTERVAL_S", "2")),
     )
     updater_parser.add_argument(
-        "--worker-wait-s",
-        type=float,
-        default=float(os.environ.get("COPE_UPDATE_WORKER_WAIT_S", "1800")),
-    )
-    updater_parser.add_argument(
         "--service-wait-s",
         type=float,
         default=float(os.environ.get("COPE_UPDATE_SERVICE_WAIT_S", "180")),
@@ -587,7 +582,6 @@ def main(argv: list[str] | None = None) -> int:
                 default_ref=args.default_ref,
                 compose_project=args.compose_project,
                 poll_interval_s=args.poll_interval_s,
-                worker_wait_s=args.worker_wait_s,
                 service_wait_s=args.service_wait_s,
                 allow_rollback=args.allow_rollback,
                 image_name=args.image_name,

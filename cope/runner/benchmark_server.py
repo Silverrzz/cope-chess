@@ -47,6 +47,7 @@ from cope.db import (
     get_benchmarker_by_token,
     get_engine_artifact,
     reconcile_benchmarker_deployment,
+    benchmarker_deployment_target,
     record_benchmark_progress,
     register_benchmarker_connection,
     reset_benchmark_service_state,
@@ -509,13 +510,11 @@ class BenchmarkServer:
                 )
             connection = connect_database(self._config.db_path)
             try:
-                target = reconcile_benchmarker_deployment(
-                    connection,
-                    benchmarker.id,
-                    benchmarker.app_commit or "",
-                )
-                if target is None:
-                    connection.commit()
+                target = benchmarker_deployment_target(connection, benchmarker.id)
+                if (
+                    target is None or target.job_id != command.job_id
+                    or target.target_commit != command.target_commit or target.status == "succeeded"
+                ):
                     return
                 mapped = {
                     "accepted": "updating",

@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,26 +18,21 @@ from urllib.parse import urlsplit
 
 from cope.db import (
     DEFAULT_DATABASE_URL,
-    activate_benchmarker_deployment_targets,
     claim_dockerfile_pull_job,
     claim_deployment_job,
-    defer_offline_deployment_verifiers,
     connect_database,
     database_schema_version,
     fail_interrupted_deployment_jobs,
     fail_interrupted_dockerfile_pull_jobs,
-    get_benchmarker,
-    get_worker,
-    list_deployment_targets,
     list_service_heartbeats,
     set_deployment_target_commit,
     touch_service_heartbeat,
     sync_engine_dockerfiles,
     update_dockerfile_pull_job,
     update_deployment_job_status,
-    update_deployment_target_status,
     update_server_deployment_target,
 )
+from cope.db.repo import publish_deployment_clients
 from cope.version import app_version
 from cope.storage_maintenance import maintain_storage
 
@@ -44,7 +40,9 @@ from cope.storage_maintenance import maintain_storage
 LOG = logging.getLogger("cope.updater")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,199}$")
-PLATFORM_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server", "clone-runner", "control-runner")
+REQUIRED_SERVICES = ("web", "scheduler", "worker-server", "benchmark-server")
+PLATFORM_SERVICES = (*REQUIRED_SERVICES, "control-runner", "clone-runner")
+AUXILIARY_SERVICES = {"clone-runner"}
 
 
 def _default_compose_files() -> tuple[Path, ...]:
@@ -63,7 +61,6 @@ class UpdaterConfig:
     default_ref: str = "main"
     compose_project: str = ""
     poll_interval_s: float = 2.0
-    worker_wait_s: float = 1800.0
     service_wait_s: float = 180.0
     allow_rollback: bool = False
     image_name: str = field(
@@ -321,15 +318,8 @@ def _run_deployment(
             dockerfiles_installed = True
             _set_job_status(config, job_id, "migrating")
             _compose(config, source_dir, "run", "--rm", "migrate")
-            _set_job_status(config, job_id, "updating_workers")
-            _prepare_worker_targets(config, job_id)
-            _wait_for_workers(config, job_id)
-            _prepare_benchmarker_targets(config, job_id)
-            _activate_benchmarker_targets(config, job_id)
-            _wait_for_benchmarkers(config, job_id)
         _set_job_status(config, job_id, "restarting")
         _set_server_target(config, job_id, "restarting")
-        restart_started_at = datetime.now(UTC)
         restart_attempted = True
         services = (
             ("web",)
@@ -337,33 +327,18 @@ def _run_deployment(
             else _platform_services(config, source_dir)
         )
         deployed_services = services
-        _compose(
-            config,
-            source_dir,
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            *services,
-        )
+        _restart_services(config, source_dir, services)
+        restarted_at = datetime.now(UTC)
         if not web_only:
             _reload_caddy(config, source_dir)
         _set_job_status(config, job_id, "verifying")
         _wait_for_services(
             config,
             target_commit,
-            restart_started_at,
-            expected=set(services),
+            restarted_at,
+            expected=set(services) - AUXILIARY_SERVICES,
         )
-        if not web_only:
-            _wait_for_client_reconnections(config, job_id)
-        _set_server_target(
-            config,
-            job_id,
-            "succeeded",
-            current_commit=target_commit,
-        )
-        _set_job_status(config, job_id, "succeeded")
+        _publish_deployment(config, job_id, target_commit)
         LOG.info(
             "deployment completed job_id=%s scope=%s commit=%s",
             job_id,
@@ -404,15 +379,7 @@ def _run_deployment(
                         if web_only
                         else _platform_services(config, source_dir)
                     )
-                    _compose(
-                        config,
-                        source_dir,
-                        "up",
-                        "-d",
-                        "--no-deps",
-                        "--force-recreate",
-                        *rollback_services,
-                    )
+                    _restart_services(config, source_dir, rollback_services)
                     _remove_compose_service_containers(
                         config,
                         tuple(
@@ -510,202 +477,14 @@ def _resolve_target_commit(source_dir: Path, requested_ref: str) -> str:
     raise RuntimeError(f"could not resolve deployment ref {requested_ref!r}")
 
 
-def _prepare_worker_targets(config: UpdaterConfig, job_id: int) -> None:
-    connection = connect_database(config.db_path)
-    try:
-        for target in list_deployment_targets(connection, job_id):
-            if target.target_kind != "worker" or target.target_id is None:
-                continue
-            worker = get_worker(connection, target.target_id)
-            if worker is None or worker.status == "revoked":
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    detail="Worker is unavailable and will update on its next connection.",
-                )
-            elif worker.status not in {"connected", "downloading", "ready", "busy"}:
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    current_commit=worker.app_commit,
-                    detail="Worker is offline and will update before accepting new work.",
-                )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _wait_for_workers(config: UpdaterConfig, job_id: int) -> None:
-    deadline = time.monotonic() + max(config.worker_wait_s, 1.0)
-    while True:
-        connection = connect_database(config.db_path)
-        try:
-            targets = [
-                target
-                for target in list_deployment_targets(connection, job_id)
-                if target.target_kind == "worker"
-            ]
-            failed = [target for target in targets if target.status == "failed"]
-            active = [
-                target
-                for target in targets
-                if target.status in {"pending", "waiting", "updating"}
-            ]
-            if failed:
-                labels = ", ".join(target.label for target in failed)
-                raise RuntimeError(f"worker update failed: {labels}")
-            if not active:
-                return
-            if time.monotonic() >= deadline:
-                blocked: list[str] = []
-                for target in active:
-                    worker = (
-                        get_worker(connection, target.target_id)
-                        if target.target_id is not None
-                        else None
-                    )
-                    if worker is None or worker.status not in {
-                        "connected",
-                        "downloading",
-                        "ready",
-                        "busy",
-                    }:
-                        update_deployment_target_status(
-                            connection,
-                            target.id,
-                            "deferred",
-                            current_commit=None if worker is None else worker.app_commit,
-                            detail="Worker is offline and will update before accepting new work.",
-                        )
-                    else:
-                        blocked.append(target.label)
-                        update_deployment_target_status(
-                            connection,
-                            target.id,
-                            "failed",
-                            current_commit=worker.app_commit,
-                            detail="Worker did not drain and update before the deployment timeout.",
-                        )
-                connection.commit()
-                if blocked:
-                    raise RuntimeError(
-                        f"workers did not drain before the update timeout: {', '.join(blocked)}"
-                    )
-                return
-        finally:
-            connection.close()
-        time.sleep(2.0)
-
-
-def _prepare_benchmarker_targets(config: UpdaterConfig, job_id: int) -> None:
-    connection = connect_database(config.db_path)
-    try:
-        for target in list_deployment_targets(connection, job_id):
-            if target.target_kind != "benchmarker" or target.target_id is None:
-                continue
-            benchmarker = get_benchmarker(connection, target.target_id)
-            if benchmarker is None or benchmarker.status == "revoked":
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    detail="Benchmarker is unavailable and will update on its next connection.",
-                )
-            elif benchmarker.status not in {"connected", "busy"}:
-                update_deployment_target_status(
-                    connection,
-                    target.id,
-                    "deferred",
-                    current_commit=benchmarker.app_commit,
-                    detail="Benchmarker is offline and will update before accepting new work.",
-                )
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _activate_benchmarker_targets(config: UpdaterConfig, job_id: int) -> None:
-    connection = connect_database(config.db_path)
-    try:
-        activate_benchmarker_deployment_targets(connection, job_id)
-        connection.commit()
-    finally:
-        connection.close()
-
-
-def _wait_for_benchmarkers(config: UpdaterConfig, job_id: int) -> None:
-    deadline = time.monotonic() + max(config.worker_wait_s, 1.0)
-    while True:
-        connection = connect_database(config.db_path)
-        try:
-            targets = [
-                target
-                for target in list_deployment_targets(connection, job_id)
-                if target.target_kind == "benchmarker"
-            ]
-            failed = [target for target in targets if target.status == "failed"]
-            active = [
-                target
-                for target in targets
-                if target.status in {"pending", "waiting", "updating", "restarting"}
-            ]
-            if failed:
-                labels = ", ".join(target.label for target in failed)
-                raise RuntimeError(f"benchmarker update failed: {labels}")
-            if not active:
-                return
-            if time.monotonic() >= deadline:
-                blocked: list[str] = []
-                for target in active:
-                    benchmarker = (
-                        get_benchmarker(connection, target.target_id)
-                        if target.target_id is not None
-                        else None
-                    )
-                    if benchmarker is None or benchmarker.status not in {
-                        "connected",
-                        "busy",
-                    }:
-                        update_deployment_target_status(
-                            connection,
-                            target.id,
-                            "deferred",
-                            current_commit=(
-                                None if benchmarker is None else benchmarker.app_commit
-                            ),
-                            detail="Benchmarker is offline and will update before accepting new work.",
-                        )
-                    else:
-                        blocked.append(target.label)
-                        update_deployment_target_status(
-                            connection,
-                            target.id,
-                            "failed",
-                            current_commit=benchmarker.app_commit,
-                            detail="Benchmarker did not drain and update before the deployment timeout.",
-                        )
-                connection.commit()
-                if blocked:
-                    raise RuntimeError(
-                        "benchmarkers did not drain before the update timeout: "
-                        + ", ".join(blocked)
-                    )
-                return
-        finally:
-            connection.close()
-        time.sleep(2.0)
-
-
 def _wait_for_services(
     config: UpdaterConfig,
     target_commit: str,
     restart_started_at: datetime,
     *,
-    expected: set[str] | None = None,
+    expected: set[str],
 ) -> None:
-    expected = expected or set(PLATFORM_SERVICES)
+    heartbeats = {}
     deadline = time.monotonic() + max(config.service_wait_s, 1.0)
     while time.monotonic() < deadline:
         connection = connect_database(config.db_path)
@@ -738,36 +517,6 @@ def _wait_for_services(
     raise RuntimeError(f"updated services did not become ready: {', '.join(missing)}")
 
 
-def _wait_for_client_reconnections(config: UpdaterConfig, job_id: int) -> None:
-    deadline = time.monotonic() + max(config.service_wait_s, 1.0)
-    while True:
-        connection = connect_database(config.db_path)
-        try:
-            defer_offline_deployment_verifiers(connection, job_id)
-            connection.commit()
-            active = [
-                target
-                for target in list_deployment_targets(connection, job_id)
-                if target.target_kind in {"worker", "benchmarker", "verifier"}
-                and target.status in {"pending", "waiting", "updating", "restarting"}
-            ]
-            if not active:
-                return
-            if time.monotonic() >= deadline:
-                for target in active:
-                    update_deployment_target_status(
-                        connection,
-                        target.id,
-                        "deferred",
-                        detail="Client release is installed and will reconcile on reconnect.",
-                    )
-                connection.commit()
-                return
-        finally:
-            connection.close()
-        time.sleep(2.0)
-
-
 def _heartbeat_ready(
     heartbeat: dict[str, str] | None,
     target_commit: str,
@@ -795,7 +544,19 @@ def _set_target_commit(
             job_id,
             target_commit,
             repository_url,
+            activate_clients=False,
         )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _publish_deployment(config: UpdaterConfig, job_id: int, target_commit: str) -> None:
+    connection = connect_database(config.db_path)
+    try:
+        update_server_deployment_target(connection, job_id, "succeeded", current_commit=target_commit)
+        publish_deployment_clients(connection, job_id)
+        update_deployment_job_status(connection, job_id, "succeeded")
         connection.commit()
     finally:
         connection.close()
@@ -844,6 +605,7 @@ def _compose(
     source_dir: Path,
     *arguments: str,
     check: bool = True,
+    timeout: float | None = None,
 ) -> str:
     environment = os.environ.copy()
     environment["COPE_HOST_SOURCE_DIR"] = _host_source_dir(source_dir)
@@ -871,17 +633,35 @@ def _compose(
         check=check,
         capture=True,
         environment=environment,
+        timeout=timeout,
     )
 
 
 def _platform_services(config: UpdaterConfig, source_dir: Path) -> tuple[str, ...]:
     available = set(_compose(config, source_dir, "config", "--services").splitlines())
     services = tuple(service for service in PLATFORM_SERVICES if service in available)
-    required = {"web", "scheduler", "worker-server", "benchmark-server"}
+    required = set(REQUIRED_SERVICES)
     if not required.issubset(services):
         missing = ", ".join(sorted(required - set(services)))
         raise RuntimeError(f"compose configuration is missing required services: {missing}")
     return services
+
+
+def _restart_services(config: UpdaterConfig, source_dir: Path, services: tuple[str, ...]) -> None:
+    essential = tuple(service for service in services if service not in AUXILIARY_SERVICES)
+    auxiliary = tuple(service for service in services if service in AUXILIARY_SERVICES)
+    arguments = ("up", "-d", "--no-deps", "--force-recreate")
+
+    def restart_auxiliary() -> None:
+        try:
+            _compose(config, source_dir, *arguments, *auxiliary, timeout=20)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            LOG.exception("could not restart auxiliary services: %s", ", ".join(auxiliary))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        if auxiliary:
+            pool.submit(restart_auxiliary)
+        _compose(config, source_dir, *arguments, *essential)
 
 
 def _remove_compose_service_containers(
@@ -1118,6 +898,7 @@ def _run(
     check: bool = True,
     capture: bool = False,
     environment: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> str:
     LOG.info("running command=%s", " ".join(command))
     result = subprocess.run(
@@ -1126,6 +907,7 @@ def _run(
         check=False,
         text=True,
         env=environment,
+        timeout=timeout,
     )
     if check and result.returncode != 0:
         detail = _command_failure_detail(result.stderr or result.stdout or "")

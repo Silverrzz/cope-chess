@@ -199,7 +199,7 @@ async function queueUpdate(): Promise<void> {
     },
     platform: {
       title: "Deploy the full platform?",
-      message: `Build ${target}, migrate the database, and update every platform service and client. Active games and benchmarks will finish before their clients restart.`,
+      message: `Build ${target}, migrate the database, and restart the platform services together. Workers and benchmarkers may disconnect briefly and will update independently.`,
     },
     dockerfiles: {
       title: "Refresh engine definitions?",

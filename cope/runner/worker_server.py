@@ -93,6 +93,7 @@ from cope.db import (
     reset_tool_jobs,
     release_event_fixture_worker,
     reconcile_worker_deployment,
+    worker_deployment_target,
     set_service_endpoint,
     touch_workers_seen,
     touch_service_heartbeat,
@@ -1958,13 +1959,11 @@ class WorkerHandshakeServer:
                 raise ProtocolValidationError("worker update status does not match the deployment")
             connection = connect_database(self._config.db_path)
             try:
-                target = reconcile_worker_deployment(
-                    connection,
-                    worker.id,
-                    worker.app_commit or "",
-                )
-                if target is None:
-                    connection.commit()
+                target = worker_deployment_target(connection, worker.id)
+                if (
+                    target is None or target.job_id != command.job_id
+                    or target.target_commit != command.target_commit or target.status == "succeeded"
+                ):
                     return
                 mapped = {
                     "accepted": "updating",
