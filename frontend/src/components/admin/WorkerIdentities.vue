@@ -15,7 +15,8 @@ interface Identity {
 }
 
 const endpoint = '/api/admin/workers/identities'
-const installer = `curl -fsSL ${window.location.origin}/install-worker.sh | sh -s -- --server ${window.location.origin}`
+const origin = window.location.origin
+const installer = `curl -fsSL '${origin}/install-worker.sh' | sh -s -- --host '${origin}'`
 const { confirm } = useConfirm()
 const toast = useToast()
 const identities = ref<Identity[]>([])
@@ -77,10 +78,10 @@ async function changeToken(identity: Identity, action: 'rotate' | 'revoke'): Pro
   }
 }
 
-async function copyToken(): Promise<void> {
+async function copy(value: string, message: string): Promise<void> {
   try {
-    await navigator.clipboard.writeText(token.value)
-    toast.success('Identity token copied.')
+    await navigator.clipboard.writeText(value)
+    toast.success(message)
   } catch (cause) {
     toast.error(cause)
   }
@@ -114,13 +115,12 @@ onMounted(async () => {
       </div>
     </form>
     <div v-if="token" class="identity-token">
-      <p>Save this token to a private file. Use the same file on each installation of this identity. The token is shown once.</p>
+      <p>This token is shown once. Share the token or install command privately.</p>
       <code>{{ token }}</code>
-      <p>New installations can paste the token when prompted by the installer.</p>
-      <code>{{ installer }}</code>
       <p>Use <code>cope config --token-file /path/to/token</code> on existing installations, then run <code>cope start</code>.</p>
       <div class="identity-actions">
-        <button class="button button--secondary button--small" type="button" @click="copyToken">Copy token</button>
+        <button class="button button--primary button--small" type="button" @click="copy(`${installer} --token '${token}'`, 'Install command copied.')">Copy install command</button>
+        <button class="button button--secondary button--small" type="button" @click="copy(token, 'Identity token copied.')">Copy token</button>
         <button class="button button--ghost button--small" type="button" @click="token = ''">Done</button>
       </div>
     </div>

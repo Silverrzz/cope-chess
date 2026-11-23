@@ -6,17 +6,22 @@ site=${COPE_WORKER_INSTALL_ORIGIN:-https://cope-chess.live}
 state=${COPE_WORKER_HOME:-${XDG_STATE_HOME:-"$HOME/.local/state"}/cope-worker}
 bin=${COPE_WORKER_BIN_DIR:-"$HOME/.local/bin"}
 token_file=
+token=
 prepare_only=false
 container=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --server)
-            site=${2%/}
+        --host|--server)
+            site=${2:?"$1 requires a Cope host"}
+            shift 2
+            ;;
+        --token)
+            token=${2:?"--token requires a worker token"}
             shift 2
             ;;
         --token-file)
-            token_file=$2
+            token_file=${2:?"--token-file requires a file"}
             shift 2
             ;;
         --prepare-only)
@@ -28,21 +33,45 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         *)
-            printf 'Usage: sh -s -- [--server HTTPS_ORIGIN] [--token-file FILE] [--prepare-only] [--container]\n' >&2
+            printf 'Usage: sh -s -- [--host HOST] [--token TOKEN | --token-file FILE] [--prepare-only] [--container]\n' >&2
             exit 2
             ;;
     esac
 done
 
-case "$site" in
-    https://*) ;;
-    *) printf 'The worker installer requires an HTTPS Cope origin.\n' >&2; exit 2 ;;
+if [ -n "$token" ] && [ -n "$token_file" ]; then
+    printf 'Use either --token or --token-file.\n' >&2
+    exit 2
+fi
+case "$token" in
+    *[!A-Za-z0-9_-]*) printf 'Invalid worker token.\n' >&2; exit 2 ;;
 esac
 
 for program in curl python3 git; do
     command -v "$program" >/dev/null || { printf '%s is required to install Cope.\n' "$program" >&2; exit 1; }
 done
 python3 -c 'import sys; sys.exit("Cope requires Python 3.11 or later.") if sys.version_info < (3, 11) else None'
+site=$(python3 - "$site" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+value = sys.argv[1]
+message = "Use a Cope hostname, HTTPS origin, or wss:// worker URL."
+try:
+    parsed = urlsplit(value if "://" in value else "https://" + value)
+    port = parsed.port
+except ValueError:
+    sys.exit(message)
+if (
+    parsed.scheme not in {"https", "wss"} or not parsed.hostname
+    or any(char.isspace() for char in value) or parsed.username is not None
+    or parsed.path.rstrip("/") not in {"", "/worker"} or parsed.query or parsed.fragment
+    or port == 0
+):
+    sys.exit(message)
+print(urlunsplit(("https", parsed.netloc, "", "", "")))
+PY
+)
 
 mkdir -p "$state" "$bin" "$state/installation"
 root=$(cd "$state" && pwd)
@@ -101,6 +130,15 @@ if [ -e "$bin/cope" ] && [ "$(readlink -f "$bin/cope")" != "$root/installation/c
 fi
 ln -sfn "$root/installation/cope-launch" "$bin/cope"
 
+if [ -n "$token" ]; then
+    temporary_token=$(mktemp "$root/.token.XXXXXX")
+    trap 'rm -f -- "$temporary_token"' 0
+    printf '%s\n' "$token" > "$temporary_token"
+    token_file="$root/token"
+    mv -f -- "$temporary_token" "$token_file"
+    trap - 0
+    unset token
+fi
 if [ -n "$token_file" ]; then
     "$bin/cope" config --server "$site/worker" --token-file "$token_file"
 else
@@ -117,7 +155,7 @@ fi
 
 if [ -z "$token_file" ] && [ ! -s "$root/token" ] && [ ! -s "$root/worker.json" ] && ! "$bin/cope" config --output json | python3 -c 'import json, os, sys; sys.exit(not os.path.isfile(json.load(sys.stdin).get("token_file") or ""))'; then
     if ! ( : </dev/tty ) 2>/dev/null; then
-        printf 'Pass --token-file FILE or use --prepare-only for an image.\n' >&2
+        printf 'Pass --token TOKEN or --token-file FILE, or use --prepare-only for an image.\n' >&2
         exit 2
     fi
     printf 'Paste your Cope worker token: ' >/dev/tty
