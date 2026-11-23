@@ -8,6 +8,7 @@ import hmac
 import ipaddress
 import math
 import re
+import shlex
 import sqlite3
 import threading
 import time
@@ -23,7 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 import chess
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -712,10 +713,17 @@ def create_app(
         return response
 
     @app.get("/install-worker.sh", include_in_schema=False)
-    def worker_installer():
+    def worker_installer(request: Request):
         from importlib.resources import files
 
-        return FileResponse(str(files("cope.worker").joinpath("install.sh")), media_type="text/x-shellscript")
+        origin = urlunsplit(("https", request.url.netloc, "", "", ""))
+        script = files("cope.worker").joinpath("install.sh").read_text(encoding="utf-8")
+        shebang, _, body = script.partition("\n")
+        return PlainTextResponse(
+            f"{shebang}\nCOPE_WORKER_INSTALL_ORIGIN={shlex.quote(origin)}\n{body}",
+            media_type="text/x-shellscript",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/health/ready", include_in_schema=False)
     def health_ready():
@@ -1281,6 +1289,7 @@ def _is_spa_request(request: Request) -> bool:
         "/audio",
         "/docs",
         "/internal",
+        "/install-worker.sh",
         "/openapi.json",
         "/redoc",
         "/mcp",

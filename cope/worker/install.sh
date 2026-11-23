@@ -2,7 +2,7 @@
 set -eu
 umask 077
 
-site=https://cope-chess.live
+site=${COPE_WORKER_INSTALL_ORIGIN:-https://cope-chess.live}
 state=${COPE_WORKER_HOME:-${XDG_STATE_HOME:-"$HOME/.local/state"}/cope-worker}
 bin=${COPE_WORKER_BIN_DIR:-"$HOME/.local/bin"}
 token_file=
