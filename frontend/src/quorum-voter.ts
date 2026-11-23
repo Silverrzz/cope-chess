@@ -1,6 +1,8 @@
 import { shallowRef } from 'vue'
 import { Identity } from '@semaphore-protocol/identity'
 import type { SemaphoreProof } from '@semaphore-protocol/proof'
+import api from '@/api/client'
+import type { BallotPackage } from '@/quorum'
 
 export const credentialStorage = 'cope-quorum-credential-v1'
 export type Credential = { secret: string; commitment: string }
@@ -15,6 +17,12 @@ export function readQuorumReceipt(ballotId: string) {
   } catch {
     return ''
   }
+}
+
+export function loadQuorumBallot(path: string, receipt: string) {
+  return api.get<BallotPackage>(path, receipt ? {
+    credentials: 'omit', headers: { 'X-Cope-Quorum-Receipt': receipt },
+  } : undefined)
 }
 
 const sessionKey = 'cope-quorum-unlocked-v1'

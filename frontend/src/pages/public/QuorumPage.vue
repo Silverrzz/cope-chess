@@ -11,7 +11,7 @@ import PageHeader from '@/components/ui/PageHeader.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import type { BallotResult, Manifest, VoteTally } from '@/quorum'
 import { resultLabels, resultTones, type WitnessStatus } from '@/quorum-results'
-import { readQuorumReceipt } from '@/quorum-voter'
+import { loadQuorumBallot, readQuorumReceipt } from '@/quorum-voter'
 
 interface BallotSummary {
   id: string
@@ -21,7 +21,7 @@ interface BallotSummary {
   status: 'scheduled' | 'open' | 'completed'
   rule: Manifest['rule']
   result: BallotResult | null
-  live_tally: VoteTally | null
+  live_tally?: VoteTally
   witnesses: WitnessStatus[]
 }
 
@@ -60,10 +60,21 @@ async function load() {
   try {
     const directory = await api.get<{ ballots: BallotSummary[]; eligibility_check_available: boolean }>('/api/quorum')
     if (disposed) return
-    submittedBallots.value = new Set(directory.ballots
-      .filter(ballot => ballot.status === 'open' && readQuorumReceipt(ballot.id))
-      .map(ballot => ballot.id))
-    ballots.value = directory.ballots
+    const submitted = new Set<string>()
+    const entries = await Promise.all(directory.ballots.map(async ballot => {
+      const receipt = ballot.status === 'open' ? readQuorumReceipt(ballot.id) : ''
+      if (!receipt) return ballot
+      submitted.add(ballot.id)
+      try {
+        const { live_tally } = await loadQuorumBallot('/api/quorum/ballots/' + encodeURIComponent(ballot.id), receipt)
+        return live_tally ? { ...ballot, live_tally } : ballot
+      } catch {
+        return ballot
+      }
+    }))
+    if (disposed) return
+    submittedBallots.value = submitted
+    ballots.value = entries
     enrollmentAvailable.value = directory.eligibility_check_available
     if (enrollmentAvailable.value && route.query.credential === '1') {
       openCredential()
@@ -111,7 +122,7 @@ onBeforeUnmount(() => {
               </StatusBadge>
             </header>
             <QuorumTally v-if="ballot.result" :result="ballot.result" />
-            <QuorumTally v-else-if="ballot.live_tally" :result="ballot.live_tally" :poll="ballot.rule === 'report_only'" live />
+            <QuorumTally v-else-if="submittedBallots.has(ballot.id) && ballot.live_tally" :result="ballot.live_tally" :poll="ballot.rule === 'report_only'" live />
             <footer class="ballot-card__footer">
               <div class="ballot-card__meta muted">
                 <time v-if="!ballot.result || ballot.result.total !== ballot.result.electorate"

@@ -2,6 +2,7 @@ import type { ApiErrorPayload, ApiFieldError, QueryParams } from "@/types/api";
 
 export interface RequestOptions {
   body?: unknown;
+  credentials?: RequestCredentials | undefined;
   headers?: HeadersInit | undefined;
   query?: QueryParams | undefined;
   signal?: AbortSignal | undefined;
@@ -141,7 +142,7 @@ async function request<T>(method: string, path: string, options: RequestOptions 
   const init: RequestInit = {
     method,
     headers,
-    credentials: "same-origin",
+    credentials: options.credentials ?? "same-origin",
   };
   if (body !== undefined) init.body = body;
   if (options.signal) init.signal = options.signal;

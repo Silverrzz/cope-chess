@@ -12,7 +12,7 @@ import QuorumTally from '@/components/public/QuorumTally.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
 import { resultLabels, resultTones, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
-import { downloadQuorumFile, generateQuorumProof, quorumReceiptKey, readQuorumReceipt, unlockedCredential } from '@/quorum-voter'
+import { downloadQuorumFile, generateQuorumProof, loadQuorumBallot, quorumReceiptKey, readQuorumReceipt, unlockedCredential } from '@/quorum-voter'
 
 interface Publications {
   certified: boolean
@@ -68,7 +68,7 @@ async function load() {
   const sequence = ++loadSequence
   const path = endpoint.value
   try {
-    const next = await api.get<BallotPackage>(path)
+    const next = await loadQuorumBallot(path, receipt.value)
     if (disposed || sequence !== loadSequence) return
     const previousStatus = packet.value?.status
     verified.value = false
@@ -184,7 +184,7 @@ async function cast() {
         <p class="ballot-sheet__rationale">{{ manifest.rationale }}</p>
       </header>
 
-      <div v-if="open && packet.live_tally" class="ballot-sheet__section">
+      <div v-if="open && receipt && packet.live_tally" class="ballot-sheet__section">
         <QuorumTally :result="packet.live_tally" :poll="manifest.rule === 'report_only'" live />
       </div>
 
