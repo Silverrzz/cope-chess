@@ -11,6 +11,7 @@ from . import engine_relay as _engine_relay
 from . import puzzle_gauntlet as _puzzle_gauntlet
 from . import duck_vs_fish as _duck_vs_fish
 from . import engine_hand_brain as _engine_hand_brain
+from . import secret_queen as _secret_queen
 
 __all__ = [
     "EventModule",

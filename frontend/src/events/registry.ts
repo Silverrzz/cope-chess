@@ -11,6 +11,9 @@ import EngineRelayControlRoom from "./engine-relay/EngineRelayControlRoom.vue";
 import PuzzleGauntletArchiveHero from "./puzzle-gauntlet/PuzzleGauntletArchiveHero.vue";
 import PuzzleGauntletBroadcast from "./puzzle-gauntlet/PuzzleGauntletBroadcast.vue";
 import PuzzleGauntletControlRoom from "./puzzle-gauntlet/PuzzleGauntletControlRoom.vue";
+import SecretQueenControlRoom from "./secret-queen/SecretQueenControlRoom.vue";
+import SecretQueenHero from "./secret-queen/SecretQueenHero.vue";
+import SecretQueenPage from "./secret-queen/SecretQueenPage.vue";
 
 import type { EventHandlerState } from "@/types/events";
 
@@ -69,4 +72,11 @@ registerEventComponents("engine-hand-brain", 1, {
   publicPresentation: "immersive",
   archive: HandBrainHero,
   admin: HandBrainControlRoom,
+});
+
+registerEventComponents("secret-queen", 1, {
+  public: SecretQueenPage,
+  publicPresentation: "immersive",
+  archive: SecretQueenHero,
+  admin: SecretQueenControlRoom,
 });
