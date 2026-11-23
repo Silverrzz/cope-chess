@@ -7,7 +7,6 @@ import { errorText } from "@/components/admin/format";
 import { useToast } from "@/composables/useToast";
 import type { EventDetailResponse } from "@/types/events";
 import { timestampDate } from "@/utils/time";
-import SecretQueenHero from "./SecretQueenHero.vue";
 
 const props = defineProps<{ detail: EventDetailResponse }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -16,7 +15,6 @@ const localStart = ref("");
 const published = ref(false);
 const saving = ref(false);
 const error = ref("");
-const previewOpen = ref(false);
 const editable = computed(() => ["draft", "announced", "scheduled"].includes(props.detail.event.status));
 
 watch(() => props.detail.event, event => {
@@ -63,10 +61,6 @@ async function save(): Promise<void> {
       <button class="button button--primary" type="submit" :disabled="saving">{{ saving ? "Saving…" : "Save announcement" }}</button>
     </form>
     <p v-else>The announcement is locked after the event starts.</p>
-    <button class="button button--secondary" type="button" :aria-expanded="previewOpen" @click="previewOpen = !previewOpen">
-      {{ previewOpen ? "Hide Events hero" : "Preview Events hero" }}
-    </button>
-    <SecretQueenHero v-if="previewOpen" :summary="{ record: detail.event }" current />
   </section>
 </template>
 
@@ -75,5 +69,4 @@ async function save(): Promise<void> {
 .announcement-settings h2 { margin: 0; font-size: 1.15rem; }
 .announcement-settings form { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; }
 .announcement-settings__visibility { display: flex; align-items: center; gap: .5rem; min-height: 2.25rem; }
-.announcement-settings :deep(.secret-queen-hero) { width: 100%; }
 </style>
