@@ -22,6 +22,7 @@ const competitors = computed(() => props.detail.cast.filter(member => member.par
 <template>
   <div class="event-announcement-page">
     <section class="event-announcement-stage" aria-labelledby="event-announcement-title">
+      <div v-if="$slots.backdrop" class="event-announcement-backdrop" aria-hidden="true"><slot name="backdrop" /></div>
       <div class="event-announcement-content">
         <div class="event-announcement-emblem"><slot name="art" /></div>
         <header class="event-announcement-heading"><span class="event-announcement-kicker">Engine event</span><h1 id="event-announcement-title"><slot name="title">{{ event.title }}</slot></h1></header>
@@ -46,6 +47,8 @@ const competitors = computed(() => props.detail.cast.filter(member => member.par
 <style scoped>
 .event-announcement-page { margin-block: calc(0px - clamp(var(--space-6), 4vw, var(--space-12))) -3rem; color: var(--event-view-text, #fff0f3); background: var(--event-view-background, #14090f); }
 .event-announcement-stage { display: grid; grid-template-rows: 1fr auto; min-height: calc(100dvh - var(--header-height, 4rem) - 1px); background: radial-gradient(ellipse at 50% 35%, var(--event-view-stage-glow, #51112780), transparent 65%); border-bottom: 1px solid var(--event-view-border, #ff729326); }
+.event-announcement-stage:has(.event-announcement-backdrop) { position: relative; isolation: isolate; }
+.event-announcement-backdrop { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
 .event-announcement-content { display: flex; flex-direction: column; justify-content: center; align-items: center; width: min(100%, 72rem); margin-inline: auto; padding: 2rem 1.25rem; box-sizing: border-box; }
 .event-announcement-emblem { width: clamp(6rem, 17dvh, 9rem); margin-bottom: .75rem; }
 .event-announcement-heading { text-align: center; }

@@ -25,6 +25,7 @@ const date = computed(() => {
 
 <template>
   <RouterLink class="event-archive-hero" :to="{ name: 'event', params: { slug: record.slug } }" :aria-label="`${completed ? 'View results for' : 'Open'} ${record.title}`">
+    <slot name="backdrop" />
     <div class="event-hero-copy">
       <span class="event-hero-kicker"><AppIcon name="trophy" :size="16" />{{ status }}</span>
       <h2><slot name="title">{{ record.title }}</slot></h2>
