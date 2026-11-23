@@ -160,8 +160,8 @@ const ratedVersions = computed(() => {
   const builds = rated(engineVersions.value.builds)
   const otherBuilds = builds.filter((version) => !randomSuffix.test(version.label))
   const randomBuilds = builds.filter((version) => randomSuffix.test(version.label))
-    .sort((left, right) => versionCollator.compare(left.label, right.label))
-  return { releases, builds: [...otherBuilds, ...randomBuilds] }
+    .sort((left, right) => familyRatings.value.get(String(left.id))! - familyRatings.value.get(String(right.id))!)
+  return { releases, builds: [...randomBuilds, ...otherBuilds] }
 })
 const ratingMode = computed<RatingMode>(() => {
   if (requestedRatingMode.value === 'version') return 'version'
