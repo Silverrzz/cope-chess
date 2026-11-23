@@ -671,9 +671,23 @@ class HardwareInfo(StrictModel):
         return self.ram_mb or self.ram_gb * 1024
 
 
+class WorkerControlSettings(StrictModel):
+    threads: int | None = Field(default=None, gt=0, le=1_000_000)
+    memory_mb: int | None = Field(default=None, gt=0, le=2**31 - 1)
+    draining: bool = False
+    auto_update: bool = True
+
+
+class WorkerControlState(StrictModel):
+    settings: WorkerControlSettings
+    capacity: WorkerResources
+    held_by_server: bool = False
+
+
 class WorkerActiveAssignmentsMixin(StrictModel):
     active_assignment_ids: list[int] = Field(default_factory=list)
     machine_id: str = Field(min_length=8, max_length=128)
+    control: WorkerControlSettings | None = None
 
     @field_validator("active_assignment_ids")
     @classmethod
@@ -713,6 +727,7 @@ class WorkerIdentityHello(StrictModel):
     hw: HardwareInfo
     app_version: str = Field(min_length=1)
     worker_local_engine_keys: tuple[WorkerLocalEngineKey, ...] = Field(default_factory=tuple, max_length=500)
+    control: WorkerControlSettings | None = None
 
     @property
     def machine_id(self) -> str:
@@ -748,7 +763,7 @@ class WorkerUpdateCommand(StrictModel):
 class WorkerUpdateStatus(StrictModel):
     job_id: int = Field(gt=0)
     target_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
-    status: Literal["accepted", "installing", "restarting", "failed"]
+    status: Literal["accepted", "installing", "restarting", "deferred", "failed"]
     detail: str = Field(default="", max_length=4000)
 
 
@@ -834,6 +849,7 @@ class WorkerWelcome(StrictModel):
     heartbeat_interval_ms: int = Field(gt=0)
     capacity: WorkerResources
     update: WorkerUpdateCommand | None = None
+    control: WorkerControlState | None = None
 
 
 class BenchmarkerTokenHello(StrictModel):

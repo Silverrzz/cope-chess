@@ -40,6 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser = argparse.ArgumentParser(prog="python -m cope")
     subparsers = parser.add_subparsers(dest="role", required=True)
+    from .worker.management import COMMANDS as WORKER_COMMANDS, register_commands, run_command
+
+    register_commands(subparsers)
 
     application_parser = subparsers.add_parser("application", help="inspect and execute explicit application commands")
     application_parser.add_argument("action", choices=("catalog", "describe", "execute", "query", "query-catalog", "views", "snapshot", "batch"))
@@ -371,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     worker_parser.add_argument("--label-hint", default="")
     worker_parser.add_argument("--app-version", default=_default_app_version())
+    worker_parser.add_argument("--managed-home", type=Path, help=argparse.SUPPRESS)
     worker_parser.add_argument(
         "--machine-id",
         help="stable machine identity override for containers or isolated environments",
@@ -462,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if args.role in WORKER_COMMANDS:
+        return run_command(args)
 
     if args.role == "control-runner":
         from .control.runner import run_control_runner
@@ -700,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
             state_file=state_file,
             cpu_capacity=args.cpu_capacity,
             identity_token=identity_token,
+            managed_home=args.managed_home,
         )
         try:
             asyncio.run(run_worker_client(config))

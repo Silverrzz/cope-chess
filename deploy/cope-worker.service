@@ -9,11 +9,15 @@ User=cope-worker
 Group=cope-worker
 EnvironmentFile=/etc/cope/worker.env
 Environment=COPE_UPDATE_ROOT=/opt/cope-worker
+Environment=COPE_WORKER_HOME=/var/lib/cope-worker
+Environment=COPE_WORKER_TOKEN_FILE=/etc/cope/worker.token
 WorkingDirectory=/var/lib/cope-worker
-ExecStart=/opt/cope-worker/current/venv/bin/cope worker --server-url ${COPE_WORKER_SERVER_URL} --token-file /etc/cope/worker.token --state-file /var/lib/cope-worker/worker.json
-Restart=always
+ExecStart=/opt/cope-worker/current/venv/bin/cope start --foreground
+Restart=on-failure
 RestartPreventExitStatus=78
 RestartSec=5
+KillMode=mixed
+TimeoutStopSec=25
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

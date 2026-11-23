@@ -21,7 +21,7 @@ from urllib.parse import quote
 from urllib.parse import urlsplit, urlunsplit
 
 import chess
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -679,6 +679,43 @@ def create_app(
                 "version": app_version(),
             }
         )
+
+    @app.get("/api/worker-release", include_in_schema=False)
+    def worker_release(connection=Depends(_database)):
+        from cope.db.repo import list_service_heartbeats
+
+        services = {row["service"]: row for row in list_service_heartbeats(connection)}
+        worker = services.get("worker-server")
+        revision = (worker or {}).get("app_version")
+        protocol = None
+        for service, info in services.items():
+            name = re.fullmatch(r"worker-control:(\d+)", service)
+            seen = _parse_utc_datetime(info["last_seen"])
+            if name and info["app_version"] == revision and seen is not None:
+                if 0 <= (datetime.now(UTC) - seen).total_seconds() <= WORKER_RECENT_SECONDS:
+                    protocol = int(name[1])
+        target = connection.execute(
+            """SELECT target.repository_url
+               FROM deployment_targets target JOIN deployment_jobs job ON job.id = target.job_id
+               WHERE target.target_kind = 'server' AND target.target_commit = ?
+                 AND job.scope = 'platform' AND job.status = 'succeeded'
+               ORDER BY job.id DESC LIMIT 1""",
+            (revision,),
+        ).fetchone()
+        response = JSONResponse({
+            "commit": revision if target else None,
+            "repository_url": target["repository_url"] if target else None,
+            "protocol": protocol,
+            "managed_control": protocol is not None,
+        })
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/install-worker.sh", include_in_schema=False)
+    def worker_installer():
+        from importlib.resources import files
+
+        return FileResponse(str(files("cope.worker").joinpath("install.sh")), media_type="text/x-shellscript")
 
     @app.get("/health/ready", include_in_schema=False)
     def health_ready():

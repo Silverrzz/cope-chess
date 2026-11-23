@@ -46,7 +46,7 @@ ENTRYPOINT ["cope"]
 FROM common-system AS worker-runtime
 ARG COPE_BUILD_VERSION=0.1.0
 ENV COPE_BUILD_VERSION=${COPE_BUILD_VERSION} \
-    COPE_DISABLE_CLIENT_UPDATES=1 \
+    COPE_WORKER_HOME=/var/lib/cope-worker \
     COPE_WORKER_ENGINE_DIR=/var/lib/cope-worker/engines
 COPY pyproject.toml MANIFEST.in ./
 COPY cope/ ./cope/
@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 USER cope
 VOLUME ["/var/lib/cope-worker"]
 ENTRYPOINT ["cope"]
-CMD ["worker", "--state-file", "/var/lib/cope-worker/worker.json"]
+CMD ["start", "--foreground"]
 
 FROM docker-system AS runtime
 ENV COPE_DATABASE_URL=postgresql://cope@db:5432/cope

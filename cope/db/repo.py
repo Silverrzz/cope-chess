@@ -184,14 +184,20 @@ class WorkerRecord:
     tournament_scope: str
     last_seen: str | None
     worker_identity_id: int | None = None
+    client_threads: int | None = None
+    client_memory_mb: int | None = None
+    client_draining: bool = False
+    client_auto_update: bool = True
 
     @property
     def capacity(self) -> WorkerResources | None:
         if self.hw is None:
             return None
+        threads = self.hw.logical_cores
+        memory_mb = worker_memory_capacity_mb(self.hw.total_ram_mb)
         return WorkerResources(
-            threads=min(self.hw.logical_cores, self.core_limit or self.hw.logical_cores),
-            hash_mb=worker_memory_capacity_mb(self.hw.total_ram_mb),
+            threads=min(threads, self.core_limit or threads, self.client_threads or threads),
+            hash_mb=min(memory_mb, self.client_memory_mb or memory_mb),
         )
 
 
@@ -4523,7 +4529,8 @@ def create_deployment_job(
             )
             SELECT ?, 'worker', id, label, app_commit, 'pending', ?
             FROM workers
-            WHERE status != 'revoked' AND NOT (id = ANY(CAST(? AS BIGINT[])))
+            WHERE status != 'revoked' AND client_auto_update
+              AND NOT (id = ANY(CAST(? AS BIGINT[])))
             ORDER BY id
             """,
             (job_id, now, list(exclude_worker_ids)),
@@ -5649,6 +5656,10 @@ def _worker_from_row(row: sqlite3.Row) -> WorkerRecord:
         tournament_scope=row["tournament_scope"],
         last_seen=row["last_seen"],
         worker_identity_id=row.get("worker_identity_id"),
+        client_threads=row.get("client_threads"),
+        client_memory_mb=row.get("client_memory_mb"),
+        client_draining=row.get("client_draining", False),
+        client_auto_update=row.get("client_auto_update", True),
     )
 
 

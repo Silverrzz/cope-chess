@@ -1,0 +1,47 @@
+services:
+  worker:
+    image: ${COPE_WORKER_IMAGE:-cope-worker:local}
+    build:
+      context: .
+      target: worker-runtime
+      args:
+        COPE_BUILD_VERSION: ${COPE_BUILD_VERSION:-local}
+    init: true
+    restart: on-failure
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 25s
+    environment:
+      COPE_WORKER_SERVER_URL: ${COPE_WORKER_SERVER_URL:-wss://cope-chess.live/worker}
+      COPE_WORKER_TOKEN_FILE: /run/secrets/worker-token
+      COPE_WORKER_THREADS: ${COPE_WORKER_THREADS:-auto}
+      COPE_WORKER_MEMORY: ${COPE_WORKER_MEMORY:-auto}
+      COPE_WORKER_AUTO_UPDATE: ${COPE_WORKER_AUTO_UPDATE:-true}
+      COPE_WORKER_MANAGED_ENV: ${COPE_WORKER_MANAGED_ENV:-0}
+    secrets:
+      - source: worker-token
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    tmpfs:
+      - /tmp
+    volumes:
+      - worker-state:/var/lib/cope-worker
+      - worker-engines:/var/lib/cope-worker/engines
+    healthcheck:
+      test: ["CMD", "cope", "health", "status", "--ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+secrets:
+  worker-token:
+    environment: COPE_WORKER_COMPOSE_SECRET
+
+volumes:
+  worker-state:
+  worker-engines:

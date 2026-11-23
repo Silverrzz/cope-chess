@@ -44,6 +44,8 @@ from cope.core.models import (
     ToolJobFailed,
     ToolJobProgress,
     ToolJobPuzzleResult,
+    WORKER_PROTOCOL_VERSION,
+    WorkerControlState,
     WorkerGameAssignment,
     WorkerIdentityHello,
     WorkerResourceTelemetry,
@@ -67,6 +69,9 @@ from cope.core.stream import (
 )
 from cope.worker.update import install_worker_release
 
+from .cgroups import cpu_quota_threads, memory_limit_and_use
+from .local_state import locked, read_json, write_json
+from .runtime import ManagedWorker
 from .uci_engine import (
     EnginePreparationError,
     UciEngineProcess,
@@ -101,6 +106,7 @@ class WorkerClientConfig:
     cpu_capacity: int | None = None
     identity_token: str | None = None
     identity_instance_key: str | None = None
+    managed_home: Path | None = None
 
 
 class _EngineBenchmarkCache:
@@ -219,8 +225,7 @@ class _WorkerResourceSampler:
         memory_total = float(virtual_memory.total)
         memory_used = float(virtual_memory.used)
         memory_available = float(virtual_memory.available)
-        cgroup_limit = _linux_memory_limit_bytes()
-        cgroup_used = _linux_memory_used_bytes()
+        cgroup_limit, cgroup_used = memory_limit_and_use()
         if (
             cgroup_limit is not None
             and cgroup_used is not None
@@ -269,10 +274,13 @@ class _WorkerResourceSampler:
 
 
 class _WorkerResourceTelemetryPublisher:
-    def __init__(self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future) -> None:
+    def __init__(
+        self, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future, managed: ManagedWorker | None = None
+    ) -> None:
         self._websocket = websocket
         self._send_lock = send_lock
         self._sampler = _WorkerResourceSampler()
+        self._managed = managed
         self._closing = False
         self._task = asyncio.create_task(self._run(), name="worker-resource-telemetry")
 
@@ -299,6 +307,8 @@ class _WorkerResourceTelemetryPublisher:
                 LOG.warning("worker resource sampling failed: %s", error)
                 await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
                 continue
+            if self._managed is not None:
+                self._managed.sample(telemetry)
             await _send_message(
                 self._websocket,
                 "worker_resource_telemetry",
@@ -308,7 +318,32 @@ class _WorkerResourceTelemetryPublisher:
             await asyncio.sleep(RESOURCE_TELEMETRY_INTERVAL_S)
 
 
+def _restart_worker(executable: Path, target: str) -> None:
+    os.environ["COPE_BUILD_VERSION"] = target
+    os.environ["COPE_UPDATE_ROOT"] = str(executable.parents[4])
+    os.execv(str(executable), [str(executable), *_restart_arguments(sys.argv[1:])])
+
+
+def _install_requested_release(managed: ManagedWorker, request: dict) -> tuple[Path, str] | None:
+    target = request["target_commit"]
+    managed.report("updating", target=target)
+    try:
+        with locked(managed.home / "update.lock"):
+            executable = install_worker_release(target_commit=target, repository_url=request["repository_url"])
+    except Exception as error:
+        detail = str(error) or type(error).__name__
+        write_json(managed.home / "update-result.json", {"target": target, "error": detail})
+        managed.report("update_failed", detail=detail, target=target)
+        return None
+    finally:
+        with locked(managed.home / "control.lock"):
+            if read_json(managed.home / "update.json") == request:
+                (managed.home / "update.json").unlink()
+    return executable, target
+
+
 async def run_worker_client(config: WorkerClientConfig) -> None:
+    managed = ManagedWorker(config.managed_home, config.app_version) if config.managed_home is not None else None
     if config.identity_token is not None:
         if config.state_file is None or config.token is not None or config.session_id is not None:
             raise ValueError("worker identity requires a state file and its own token")
@@ -317,7 +352,7 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
             identity_instance_key=_identity_instance_key(config.state_file),
             label_hint=config.label_hint or socket.gethostname()[:80],
         )
-    hw = _detect_hardware(cpu_capacity=config.cpu_capacity)
+    hw = _detect_hardware(cpu_capacity=None if managed is not None else config.cpu_capacity)
     try:
         threading.stack_size(1024 * 1024)
     except (RuntimeError, ValueError):
@@ -337,25 +372,37 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
     )
     reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
     while True:
+        if managed is not None and managed.stop_mode():
+            return
+        if managed is not None and (request := managed.update_request()):
+            if request["target_commit"] == config.app_version:
+                (managed.home / "update.json").unlink(missing_ok=True)
+            else:
+                prepared = await asyncio.to_thread(_install_requested_release, managed, request)
+                if prepared is not None:
+                    _restart_worker(*prepared)
         state.connected = False
         try:
-            restart = await _run_worker_connection(config, state)
+            restart = await _run_worker_connection(config, state, managed)
             if restart is not None:
-                restart_executable, target_commit = restart
-                os.environ["COPE_BUILD_VERSION"] = target_commit
-                os.environ["COPE_UPDATE_ROOT"] = str(restart_executable.parents[4])
-                os.execv(
-                    str(restart_executable),
-                    [str(restart_executable), *_restart_arguments(sys.argv[1:])],
-                )
+                _restart_worker(*restart)
         except ConnectionClosed as error:
             if config.identity_token is not None and error.reason in {
                 "invalid or revoked worker identity",
                 "worker instance is already registered to another identity",
             }:
+                if managed is not None:
+                    managed.report("blocked", detail=error.reason)
                 raise WorkerIdentityRejected(error.reason) from None
+            if managed is not None:
+                stalled = error.reason == "worker update required; automatic updates disabled"
+                managed.report("stalled" if stalled else "reconnecting", detail=error.reason)
+                if stalled:
+                    return
             _log_connection_closed(error)
         except (OSError, asyncio.TimeoutError, InvalidHandshake) as error:
+            if managed is not None:
+                managed.report("reconnecting", detail=str(error) or type(error).__name__)
             LOG.warning("runner connection failed: %s", error)
         except ProtocolValidationError as error:
             LOG.warning("runner protocol error; reconnecting: %s", error)
@@ -366,7 +413,12 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
         if state.connected:
             reconnect_delay_s = RECONNECT_INITIAL_DELAY_S
         LOG.info("reconnecting to runner in %.1fs", reconnect_delay_s)
-        await asyncio.sleep(reconnect_delay_s)
+        if managed is None:
+            await asyncio.sleep(reconnect_delay_s)
+        else:
+            retry_at = asyncio.get_running_loop().time() + reconnect_delay_s
+            while not managed.stop_mode() and not managed.update_request() and asyncio.get_running_loop().time() < retry_at:
+                await asyncio.sleep(0.25)
         reconnect_delay_s = min(reconnect_delay_s * 2, RECONNECT_MAX_DELAY_S)
 
 
@@ -380,8 +432,39 @@ class _WorkerConnectionState:
 async def _run_worker_connection(
     config: WorkerClientConfig,
     state: _WorkerConnectionState,
+    managed: ManagedWorker | None = None,
 ) -> tuple[Path, str] | None:
     connection_config = _connection_config(config, state)
+    hello_control = None
+    hw = state.hw
+    if managed is not None:
+        from .management import fetch_release
+
+        try:
+            release = await asyncio.to_thread(fetch_release, config.server_url)
+        except (OSError, ValueError):
+            release = {}
+        desired = managed.control()
+        required = release.get("protocol")
+        if release.get("commit") and isinstance(required, int) and required != WORKER_PROTOCOL_VERSION:
+            if desired.auto_update and release.get("repository_url"):
+                return await asyncio.to_thread(
+                    _install_requested_release, managed,
+                    {"target_commit": release["commit"], "repository_url": release["repository_url"]},
+                )
+            detail = "Update required. Run cope update."
+            managed.report("stalled", detail=detail, required_version=release["commit"])
+            raise WorkerIdentityRejected(detail)
+        if release.get("managed_control"):
+            hello_control = desired
+        elif desired.threads is not None:
+            new_limit = min(desired.threads, hw.logical_cores)
+            hw = hw.model_copy(update={
+                "physical_cores": min(hw.physical_cores, new_limit), "logical_cores": new_limit,
+            })
+        if managed.stop_mode() in {"safe", "force"}:
+            return None
+        managed.report("connecting", server=config.server_url)
     LOG.info(
         "connecting to runner url=%s app_version=%s",
         connection_config.server_url,
@@ -395,7 +478,8 @@ async def _run_worker_connection(
         close_timeout=5,
         max_queue=256,
     ) as websocket:
-        await _send_message(websocket, "hello", _build_hello(connection_config, state.hw))
+        hello = _build_hello(connection_config, hw).model_copy(update={"control": hello_control})
+        await _send_message(websocket, "hello", hello.model_dump(mode="json", exclude_none=True))
         welcome = await _recv_message(websocket, "welcome", WorkerWelcome)
         state.session_id = welcome.session_id
         if config.identity_token is None:
@@ -407,13 +491,16 @@ async def _run_worker_connection(
             _redact_secret(welcome.session_id),
         )
         if welcome.update is not None:
-            return await _apply_worker_update(websocket, welcome.update)
+            return await _apply_worker_update(websocket, welcome.update, managed)
         LOG.info("connected to Cope worker_id=%s", welcome.worker_id)
         return await _serve_assignments(
             websocket,
             capacity=welcome.capacity,
             server_url=connection_config.server_url,
             credential=welcome.session_id,
+            managed=managed,
+            initial_control=welcome.control,
+            worker_id=welcome.worker_id,
         )
 
 
@@ -548,11 +635,23 @@ def _write_worker_session(path: Path | None, session_id: str) -> None:
 async def _apply_worker_update(
     websocket,
     update: WorkerUpdateCommand,
-) -> tuple[Path, str]:
+    managed: ManagedWorker | None = None,
+) -> tuple[Path, str] | None:
     status_fields = {
         "job_id": update.job_id,
         "target_commit": update.target_commit,
     }
+    if managed is not None:
+        if not managed.control().auto_update:
+            detail = "Update required. Run cope update."
+            managed.report("stalled", detail=detail, required_version=update.target_commit)
+            await _send_message(
+                websocket, "worker_update_status",
+                WorkerUpdateStatus(**status_fields, status="deferred", detail=detail),
+            )
+            await websocket.close(code=1000, reason="worker update deferred")
+            return None
+        managed.report("updating", target=update.target_commit)
     await _send_message(
         websocket,
         "worker_update_status",
@@ -608,6 +707,9 @@ async def _serve_assignments(
     capacity: WorkerResources,
     server_url: str,
     credential: str,
+    managed: ManagedWorker | None = None,
+    initial_control: WorkerControlState | None = None,
+    worker_id: int | None = None,
 ) -> tuple[Path, str] | None:
     queues: dict[int, asyncio.Queue] = {}
     assignments: dict[int, WorkerGameAssignment] = {}
@@ -618,12 +720,14 @@ async def _serve_assignments(
     benchmark_cache = _EngineBenchmarkCache()
     fatal = asyncio.get_running_loop().create_future()
     telemetry = _WorkerTelemetryBatcher(websocket, send_lock, fatal)
+    control = _LocalConnectionControl(initial_control)
     resource_telemetry: _WorkerResourceTelemetryPublisher | None = None
     try:
         resource_telemetry = _WorkerResourceTelemetryPublisher(
             websocket,
             send_lock,
             fatal,
+            managed,
         )
     except Exception as error:
         LOG.warning("worker resource telemetry is unavailable: %s", error)
@@ -647,6 +751,12 @@ async def _serve_assignments(
         if error is not None and not fatal.done():
             fatal.set_exception(error)
 
+    watcher = None
+    if managed is not None:
+        watcher = asyncio.create_task(
+            _watch_managed_worker(managed, websocket, send_lock, fatal, control, capacity,
+                                  assignments, tool_jobs, worker_id)
+        )
     try:
         return await _route_assignment_messages(
             websocket,
@@ -664,8 +774,13 @@ async def _serve_assignments(
             fatal=fatal,
             assignment_done=assignment_done,
             tool_job_done=tool_job_done,
+            control=control,
+            managed=managed,
         )
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
         active_tasks = (*tasks.values(), *tool_tasks.values())
         for task in active_tasks:
             task.cancel()
@@ -678,6 +793,84 @@ async def _serve_assignments(
         if fatal.done():
             with contextlib.suppress(Exception):
                 fatal.exception()
+
+
+@dataclass
+class _LocalConnectionControl:
+    acknowledged: WorkerControlState | None
+    drained: bool = False
+
+
+async def _watch_managed_worker(
+    managed: ManagedWorker, websocket, send_lock: asyncio.Lock, fatal: asyncio.Future,
+    control: _LocalConnectionControl, capacity: WorkerResources,
+    assignments: dict[int, WorkerGameAssignment], tool_jobs: dict[int, ToolJobAssignment],
+    worker_id: int | None,
+) -> None:
+    previous = control.acknowledged.settings if control.acknowledged is not None else None
+    last_sent = 0.0
+    try:
+        while not fatal.done():
+            mode = managed.stop_mode()
+            updating = bool(managed.update_request())
+            if mode in {"safe", "force"} or (control.drained and (mode == "grace" or updating)):
+                if mode == "safe" and control.acknowledged is not None:
+                    with contextlib.suppress(TimeoutError, ConnectionClosed):
+                        await asyncio.wait_for(
+                            _send_message(
+                                websocket, "worker_control",
+                                managed.control().model_copy(update={"draining": True}), lock=send_lock,
+                            ),
+                            timeout=1,
+                        )
+                managed.report("stopping" if mode else "updating", worker_id=worker_id)
+                fatal.set_result(None)
+                return
+            requested = managed.control()
+            acknowledged = control.acknowledged
+            now = asyncio.get_running_loop().time()
+            if acknowledged is not None and (requested != previous or now - last_sent >= 5):
+                await _send_message(websocket, "worker_control", requested, lock=send_lock)
+                previous = requested
+                last_sent = now
+            effective = acknowledged.capacity if acknowledged is not None else capacity
+            reserved_threads = sum(item.required_resources.threads for item in assignments.values())
+            reserved_memory = sum(item.required_resources.hash_mb for item in assignments.values())
+            detail = None
+            drain_unavailable = mode == "grace" and acknowledged is None
+            update_unavailable = updating and acknowledged is None
+            if drain_unavailable:
+                detail = "The server cannot acknowledge a graceful drain. Use cope stop to return unfinished work."
+            elif update_unavailable:
+                detail = "Stop the worker before updating because the server cannot acknowledge a graceful drain."
+            elif acknowledged is not None and acknowledged.settings != requested:
+                detail = "Waiting for Cope to accept the local settings"
+            elif acknowledged is None and (requested.memory_mb is not None or requested.threads != capacity.threads):
+                detail = "The connected gateway does not support live limit changes"
+            elif reserved_threads > effective.threads or reserved_memory > effective.hash_mb:
+                detail = "Scaling down as current work finishes"
+            held = acknowledged is not None and acknowledged.held_by_server
+            if held and detail is None:
+                detail = "Held by Cope"
+            memory_blocked = effective.hash_mb <= 1
+            if memory_blocked and detail is None:
+                detail = "No engine memory budget after the system reserve"
+            managed.report(
+                "drain_unavailable" if drain_unavailable else "update_unavailable" if update_unavailable
+                else "draining" if mode == "grace" or updating
+                else "busy" if assignments or tool_jobs else "blocked" if held or memory_blocked else "ready",
+                worker_id=worker_id, active_games=len(assignments), active_tools=len(tool_jobs),
+                game_ids=[item.assignment.game_id for item in assignments.values()],
+                tool_ids=list(tool_jobs), configured_threads=requested.threads or "auto",
+                configured_memory_mb=requested.memory_mb or "auto",
+                effective_threads=effective.threads, effective_memory_mb=effective.hash_mb,
+                reserved_threads=reserved_threads, reserved_memory_mb=reserved_memory,
+                auto_update=requested.auto_update, detail=detail, **managed.metrics,
+            )
+            await asyncio.sleep(0.3)
+    except Exception as error:
+        if not fatal.done():
+            fatal.set_exception(error)
 
 
 async def _route_assignment_messages(
@@ -697,6 +890,8 @@ async def _route_assignment_messages(
     fatal: asyncio.Future,
     assignment_done,
     tool_job_done,
+    control: _LocalConnectionControl,
+    managed: ManagedWorker | None,
 ) -> tuple[Path, str] | None:
     while True:
         receive = asyncio.create_task(_recv_envelope(websocket))
@@ -709,13 +904,20 @@ async def _route_assignment_messages(
             with contextlib.suppress(asyncio.CancelledError):
                 await receive
             fatal.result()
+            return None
 
         envelope = receive.result()
+        if envelope.type == "worker_control_ack":
+            control.acknowledged = WorkerControlState.model_validate(envelope.data)
+            continue
+        if envelope.type == "worker_drained":
+            control.drained = True
+            continue
         if envelope.type == "worker_update":
             if tasks or tool_tasks:
                 raise ProtocolValidationError("runner requested an update during active work")
             update = WorkerUpdateCommand.model_validate(envelope.data)
-            return await _apply_worker_update(websocket, update)
+            return await _apply_worker_update(websocket, update, managed)
         if envelope.type == "assignment":
             assignment = WorkerGameAssignment.model_validate(envelope.data)
             assignment_id = assignment.assignment.assignment_id
@@ -744,7 +946,7 @@ async def _route_assignment_messages(
                 item.required_resources.hash_mb for item in assignments.values()
             )
             required = assignment.required_resources
-            if (
+            if control.acknowledged is None and (
                 used_threads + required.threads > capacity.threads
                 or used_hash_mb + required.hash_mb > capacity.hash_mb
             ):
@@ -785,7 +987,7 @@ async def _route_assignment_messages(
                     send_lock=send_lock,
                     server_url=server_url,
                     credential=credential,
-                    capacity=capacity,
+                    capacity=control.acknowledged.capacity if control.acknowledged is not None else capacity,
                 ),
                 name=f"worker-tool-job-{job.job_id}",
             )
@@ -2726,7 +2928,7 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
                     cpu_ids = {int(cpu_id) for cpu_id in affinity}
                     logical_cores = len(cpu_ids)
         total_ram = psutil.virtual_memory().total
-        cgroup_limit = _linux_memory_limit_bytes()
+        cgroup_limit, _ = memory_limit_and_use()
         if cgroup_limit is not None:
             total_ram = min(total_ram, cgroup_limit)
         ram_mb = max(1, total_ram // (1024**2))
@@ -2748,7 +2950,7 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
                 // system_logical_cores,
             ),
         )
-    cpu_quota = _linux_cpu_quota()
+    cpu_quota = cpu_quota_threads()
     usable_physical_cores = (
         detected_physical_cores
         if cpu_quota is None
@@ -2789,49 +2991,6 @@ def _detect_hardware(*, cpu_capacity: int | None = None) -> HardwareInfo:
     return hw
 
 
-def _linux_memory_limit_bytes() -> int | None:
-    if sys.platform != "linux":
-        return None
-    paths = (
-        Path("/sys/fs/cgroup/memory.max"),
-        Path("/sys/fs/cgroup/memory.limit_in_bytes"),
-        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-    )
-    limits: list[int] = []
-    for path in paths:
-        try:
-            value = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if value == "max":
-            continue
-        try:
-            limit = int(value)
-        except ValueError:
-            continue
-        if 0 < limit < 1 << 60:
-            limits.append(limit)
-    return min(limits) if limits else None
-
-
-def _linux_memory_used_bytes() -> int | None:
-    if sys.platform != "linux":
-        return None
-    paths = (
-        Path("/sys/fs/cgroup/memory.current"),
-        Path("/sys/fs/cgroup/memory.usage_in_bytes"),
-        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
-    )
-    for path in paths:
-        try:
-            value = int(path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            continue
-        if value >= 0:
-            return value
-    return None
-
-
 def _process_cpu_ids() -> set[int] | None:
     get_affinity = getattr(os, "sched_getaffinity", None)
     if get_affinity is None:
@@ -2859,38 +3018,6 @@ def _linux_physical_core_count(cpu_ids: set[int] | None) -> int | None:
             return None
         sibling_groups.add(sibling_group)
     return len(sibling_groups) or None
-
-
-def _linux_cpu_quota() -> int | None:
-    if platform.system() != "Linux":
-        return None
-    try:
-        quota_text, period_text = Path("/sys/fs/cgroup/cpu.max").read_text(
-            encoding="ascii"
-        ).split()
-        if quota_text != "max":
-            quota = int(quota_text)
-            period = int(period_text)
-            if quota > 0 and period > 0:
-                return max(1, quota // period)
-    except (OSError, ValueError):
-        pass
-    try:
-        quota = int(
-            Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-            .read_text(encoding="ascii")
-            .strip()
-        )
-        period = int(
-            Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
-            .read_text(encoding="ascii")
-            .strip()
-        )
-    except (OSError, ValueError):
-        return None
-    if quota <= 0 or period <= 0:
-        return None
-    return max(1, quota // period)
 
 
 def _detect_machine_id() -> str:

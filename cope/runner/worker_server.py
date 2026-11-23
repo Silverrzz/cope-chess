@@ -39,6 +39,8 @@ from cope.core.models import (
     ToolJobProgress,
     ToolJobPuzzleResult,
     WORKER_PROTOCOL_VERSION,
+    WorkerControlSettings,
+    WorkerControlState,
     WorkerIdentityHello,
     WorkerResources,
     WorkerResourceTelemetry,
@@ -113,7 +115,7 @@ from cope.runner.events import (
     start_event_publisher,
 )
 from cope.tournament.engine_instance import EngineCommandOutput
-from cope.tournament.clock_scaling import calibrate_game, game_calibration, save_game_calibration
+from cope.tournament.clock_scaling import calibrate_game, save_game_calibration
 
 
 LOG = logging.getLogger("cope.worker_server")
@@ -297,6 +299,9 @@ def _register_worker_endpoint(config: WorkerServerConfig) -> None:
             port=config.port,
             path=DEFAULT_WORKER_PATH,
         )
+        touch_service_heartbeat(
+            connection, f"worker-control:{WORKER_PROTOCOL_VERSION}", config.expected_app_version or "dev"
+        )
         connection.commit()
     finally:
         connection.close()
@@ -304,6 +309,20 @@ def _register_worker_endpoint(config: WorkerServerConfig) -> None:
 
 class WorkerConnectionInactive(RuntimeError):
     pass
+
+
+@dataclass
+class WorkerSessionControl:
+    state: WorkerControlState | None = None
+    drain_reported: bool = False
+
+    @property
+    def draining(self) -> bool:
+        return self.state is not None and self.state.settings.draining
+
+    @property
+    def auto_update(self) -> bool:
+        return self.state is None or self.state.settings.auto_update
 
 
 class WorkerHandshakeServer:
@@ -449,6 +468,9 @@ class WorkerHandshakeServer:
                 "worker-server",
                 self._config.expected_app_version or "dev",
             )
+            touch_service_heartbeat(
+                connection, f"worker-control:{WORKER_PROTOCOL_VERSION}", self._config.expected_app_version or "dev"
+            )
             connection.commit()
         finally:
             connection.close()
@@ -508,12 +530,15 @@ class WorkerHandshakeServer:
                 self._authenticate_worker,
                 hello,
             )
-            update = await asyncio.to_thread(
-                self._worker_update_command,
-                authenticated_worker.id,
-                hello.app_version,
-            )
+            update = None
+            if hello.control is None or (hello.control.auto_update and not hello.control.draining):
+                update = await asyncio.to_thread(
+                    self._worker_update_command, authenticated_worker.id, hello.app_version,
+                    isinstance(hello, WorkerIdentityHello),
+                )
             if protocol_version != WORKER_PROTOCOL_VERSION and update is None:
+                if hello.control is not None and not hello.control.auto_update:
+                    raise ProtocolValidationError("worker update required; automatic updates disabled")
                 raise ProtocolValidationError(
                     "worker protocol is incompatible and no deployment update is available"
                 )
@@ -537,11 +562,15 @@ class WorkerHandshakeServer:
                 heartbeat_interval_ms=self._config.heartbeat_interval_ms,
                 capacity=capacity,
                 update=update,
+                control=(
+                    await asyncio.to_thread(self._read_worker_control, worker, hello.control)
+                    if hello.control is not None else None
+                ),
             )
             await _send_message(
                 websocket,
                 "welcome",
-                welcome,
+                welcome.model_dump(mode="json", exclude_none=True),
                 protocol_version=protocol_version,
             )
             previous = self._connections.get(worker.id)
@@ -563,7 +592,7 @@ class WorkerHandshakeServer:
                 )
                 return
             await self._wake_workers()
-            await self._serve_worker(websocket, worker)
+            await self._serve_worker(websocket, worker, WorkerSessionControl(welcome.control))
         except ProtocolError as error:
             LOG.warning("closing connection reason=%s", error)
             await websocket.close(code=error.close_code, reason=_close_reason(error))
@@ -592,7 +621,9 @@ class WorkerHandshakeServer:
         self,
         websocket: WebSocketServerProtocol,
         worker: WorkerRecord,
+        control: WorkerSessionControl | None = None,
     ) -> None:
+        control = control or WorkerSessionControl()
         wake_generation = self._work_generation
         inboxes: dict[int, asyncio.Queue] = {}
         assignment_identities: dict[int, tuple[str, int]] = {}
@@ -614,18 +645,20 @@ class WorkerHandshakeServer:
                 retired_assignments,
                 tool_inboxes,
                 tool_identities,
+                control,
+                send_lock,
             ),
             name=f"worker-receiver-{worker.id}",
         )
         worker_status = "connected"
         try:
             while True:
-                pending_update = await asyncio.to_thread(
-                    self._worker_update_command,
-                    worker.id,
-                    worker.app_commit or "",
-                )
-                while pending_update is None and not websocket.closed:
+                pending_update = None
+                if control.auto_update and not control.draining:
+                    pending_update = await asyncio.to_thread(
+                        self._worker_update_command, worker.id, worker.app_commit or ""
+                    )
+                while pending_update is None and not websocket.closed and not control.draining:
                     if not assignments and not tool_jobs:
                         tool_job = await asyncio.to_thread(
                             self._claim_next_tool_job,
@@ -713,7 +746,10 @@ class WorkerHandshakeServer:
                             )
                         worker_status = "busy"
 
-                if pending_update is not None and not assignments and not tool_jobs:
+                if control.draining and not assignments and not tool_jobs and not control.drain_reported:
+                    await _send_message(websocket, "worker_drained", {}, lock=send_lock)
+                    control.drain_reported = True
+                if pending_update is not None and not assignments and not tool_jobs and control.auto_update and not control.draining:
                     receiver.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await receiver
@@ -881,9 +917,23 @@ class WorkerHandshakeServer:
         retired_assignments: dict[tuple[int, str], tuple[int, float]],
         tool_inboxes: dict[int, asyncio.Queue],
         tool_identities: dict[int, str],
+        control: WorkerSessionControl,
+        send_lock: asyncio.Lock,
     ) -> None:
         while True:
             envelope = decode_envelope(await websocket.recv())
+            if envelope.type == "worker_control" and control.state is not None:
+                settings = _validate_worker_payload(WorkerControlSettings, envelope.data)
+                old = control.state
+                if settings == old.settings:
+                    control.state = await asyncio.to_thread(self._read_worker_control, worker, settings)
+                else:
+                    control.state = await asyncio.to_thread(self._set_worker_control, worker, settings)
+                    control.drain_reported = False
+                await _send_message(websocket, "worker_control_ack", control.state, lock=send_lock)
+                if old != control.state:
+                    await self._wake_workers()
+                continue
             if envelope.type == "worker_resource_telemetry":
                 try:
                     telemetry = WorkerResourceTelemetry.model_validate(envelope.data)
@@ -1017,8 +1067,9 @@ class WorkerHandshakeServer:
     def _claim_next_tool_job(self, worker: WorkerRecord) -> ToolJobAssignment | None:
         connection = connect_database(self._config.db_path)
         try:
+            worker = self._validate_assignable_worker(connection, worker)
             drain = connection.execute("SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)).fetchone()
-            if drain is not None and drain["draining"]:
+            if worker.client_draining or (drain is not None and drain["draining"]):
                 connection.commit()
                 return None
             capacity = worker.capacity
@@ -1836,9 +1887,35 @@ class WorkerHandshakeServer:
         self,
         worker_id: int,
         app_commit: str,
+        initialise_identity_target: bool = False,
     ) -> WorkerUpdateCommand | None:
         connection = connect_database(self._config.db_path)
         try:
+            revision = self._config.expected_app_version
+            if initialise_identity_target and revision and revision != app_commit:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (f"worker-update:{worker_id}",),
+                )
+                connection.execute(
+                    """INSERT INTO deployment_targets (
+                           job_id, target_kind, target_id, label, repository_url, target_commit,
+                           current_commit, status, updated_at
+                       )
+                       SELECT job.id, 'worker', worker.id, worker.label, server.repository_url,
+                              server.target_commit, ?, 'waiting', CAST(now() AS TEXT)
+                       FROM workers worker
+                       JOIN deployment_targets server ON server.target_kind = 'server' AND server.target_commit = ?
+                       JOIN deployment_jobs job ON job.id = server.job_id
+                       WHERE worker.id = ? AND job.scope = 'platform' AND job.status = 'succeeded'
+                         AND server.repository_url IS NOT NULL
+                         AND NOT EXISTS (
+                             SELECT 1 FROM deployment_targets previous
+                             WHERE previous.target_kind = 'worker' AND previous.target_id = worker.id
+                         )
+                       ORDER BY job.id DESC LIMIT 1""",
+                    (app_commit, revision, worker_id),
+                )
             target = reconcile_worker_deployment(connection, worker_id, app_commit)
             if target is None:
                 connection.commit()
@@ -1893,6 +1970,7 @@ class WorkerHandshakeServer:
                     "accepted": "updating",
                     "installing": "updating",
                     "restarting": "restarting",
+                    "deferred": "deferred",
                     "failed": "failed",
                 }[status.status]
                 update_deployment_target_status(
@@ -1914,6 +1992,9 @@ class WorkerHandshakeServer:
                 return
             if status.status == "failed":
                 await websocket.close(code=1011, reason="worker update failed")
+                return
+            if status.status == "deferred":
+                await websocket.close(code=1000, reason="worker update deferred")
                 return
 
     def _authenticate_worker(
@@ -2004,6 +2085,7 @@ class WorkerHandshakeServer:
                 machine_id=hello.machine_id,
                 hw=hello.hw,
             )
+            self._write_worker_control(connection, worker.id, session_id, hello.control or WorkerControlSettings())
             replace_worker_engine_discoveries(
                 connection,
                 current.id,
@@ -2025,6 +2107,59 @@ class WorkerHandshakeServer:
             hello.worker_local_engine_keys,
         )
         return current
+
+    @staticmethod
+    def _write_worker_control(connection, worker_id: int, session_id: str, settings: WorkerControlSettings) -> None:
+        changed = connection.execute(
+            """UPDATE workers
+               SET client_threads = ?, client_memory_mb = ?, client_draining = ?, client_auto_update = ?
+               WHERE id = ? AND session_id = ?""",
+            (settings.threads, settings.memory_mb, settings.draining, settings.auto_update, worker_id, session_id),
+        ).rowcount
+        if not changed:
+            raise WorkerConnectionInactive("worker session is no longer current")
+        if not settings.auto_update:
+            connection.execute(
+                """UPDATE deployment_targets SET status = 'deferred', detail = 'Automatic updates disabled.',
+                          updated_at = CAST(now() AS TEXT)
+                   WHERE target_kind = 'worker' AND target_id = ? AND status IN ('pending', 'waiting')""",
+                (worker_id,),
+            )
+
+    @staticmethod
+    def _worker_control_state(connection, worker: WorkerRecord, settings: WorkerControlSettings) -> WorkerControlState:
+        drain = connection.execute(
+            "SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)
+        ).fetchone()
+        capacity = worker.capacity
+        if capacity is None:
+            raise ProtocolValidationError("worker capacity is unavailable")
+        return WorkerControlState(settings=settings, capacity=capacity, held_by_server=bool(drain and drain["draining"]))
+
+    def _read_worker_control(self, worker: WorkerRecord, settings: WorkerControlSettings) -> WorkerControlState:
+        connection = connect_database(self._config.db_path)
+        try:
+            current = get_worker(connection, worker.id)
+            if current is None or current.session_id != worker.session_id:
+                raise WorkerConnectionInactive("worker session is no longer current")
+            return self._worker_control_state(connection, current, settings)
+        finally:
+            connection.close()
+
+    def _set_worker_control(self, worker: WorkerRecord, settings: WorkerControlSettings) -> WorkerControlState:
+        connection = connect_database(self._config.db_path)
+        try:
+            if worker.session_id is None:
+                raise WorkerConnectionInactive("worker session is unavailable")
+            self._write_worker_control(connection, worker.id, worker.session_id, settings)
+            current = get_worker(connection, worker.id)
+            if current is None:
+                raise WorkerConnectionInactive("worker session is no longer current")
+            state = self._worker_control_state(connection, current, settings)
+            connection.commit()
+            return state
+        finally:
+            connection.close()
 
     def _validate_worker_machine(
         self,

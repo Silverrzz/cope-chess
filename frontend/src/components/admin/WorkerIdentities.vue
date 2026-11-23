@@ -15,6 +15,7 @@ interface Identity {
 }
 
 const endpoint = '/api/admin/workers/identities'
+const installer = `curl -fsSL ${window.location.origin}/install-worker.sh | sh -s -- --server ${window.location.origin}`
 const { confirm } = useConfirm()
 const toast = useToast()
 const identities = ref<Identity[]>([])
@@ -115,7 +116,9 @@ onMounted(async () => {
     <div v-if="token" class="identity-token">
       <p>Save this token to a private file. Use the same file on each installation of this identity. The token is shown once.</p>
       <code>{{ token }}</code>
-      <p>Start the worker with <code>cope worker --identity-token-file /path/to/token</code>. For dev or a custom server, also set <code>--server-url</code>.</p>
+      <p>New installations can paste the token when prompted by the installer.</p>
+      <code>{{ installer }}</code>
+      <p>Use <code>cope config --token-file /path/to/token</code> on existing installations, then run <code>cope start</code>.</p>
       <div class="identity-actions">
         <button class="button button--secondary button--small" type="button" @click="copyToken">Copy token</button>
         <button class="button button--ghost button--small" type="button" @click="token = ''">Done</button>

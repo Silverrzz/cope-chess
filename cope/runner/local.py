@@ -264,7 +264,7 @@ def next_worker_assignment(
     excluded_game_ids: frozenset[int] = frozenset(),
 ) -> WorkerGameAssignment | None:
     drain = connection.execute("SELECT draining FROM control_worker_settings WHERE worker_id = ?", (worker.id,)).fetchone()
-    if drain is not None and drain["draining"]:
+    if worker.client_draining or (drain is not None and drain["draining"]):
         return None
     available_resources = _worker_available_resources(
         connection,
