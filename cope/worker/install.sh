@@ -9,6 +9,8 @@ token_file=
 token=
 prepare_only=false
 container=false
+autostart=false
+seal_image=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -28,12 +30,21 @@ while [ "$#" -gt 0 ]; do
             prepare_only=true
             shift
             ;;
+        --autostart)
+            autostart=true
+            shift
+            ;;
+        --seal-image)
+            seal_image=true
+            prepare_only=true
+            shift
+            ;;
         --container)
             container=true
             shift
             ;;
         *)
-            printf 'Usage: sh -s -- [--host HOST] [--token TOKEN | --token-file FILE] [--prepare-only] [--container]\n' >&2
+            printf 'Usage: sh -s -- [--host HOST] [--token TOKEN | --token-file FILE] [--prepare-only | --seal-image] [--autostart | --container]\n' >&2
             exit 2
             ;;
     esac
@@ -46,6 +57,20 @@ fi
 case "$token" in
     *[!A-Za-z0-9_-]*) printf 'Invalid worker token.\n' >&2; exit 2 ;;
 esac
+if [ "$container" = true ] && { [ "$autostart" = true ] || [ "$seal_image" = true ]; }; then
+    printf 'Use --autostart and --seal-image with a native worker.\n' >&2
+    exit 2
+fi
+if [ "$autostart" = true ]; then
+    if ! command -v systemctl >/dev/null || ! systemctl show --property=Version --value >/dev/null 2>&1; then
+        printf 'Autostart requires a running systemd. Otherwise, configure the provider to run cope start --foreground --boot.\n' >&2
+        exit 2
+    fi
+    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null; then
+        printf 'Autostart needs sudo to register the system service for the installing user.\n' >&2
+        exit 2
+    fi
+fi
 
 for program in curl python3 git; do
     command -v "$program" >/dev/null || { printf '%s is required to install Cope.\n' "$program" >&2; exit 1; }
@@ -75,8 +100,8 @@ PY
 
 mkdir -p "$state" "$bin" "$state/installation"
 root=$(cd "$state" && pwd)
-if [ "$prepare_only" = true ] && { [ -s "$root/worker.json" ] || [ -s "$root/worker.json.identity-key" ]; }; then
-    printf 'Prepare the image with a fresh COPE_WORKER_HOME before enrolling a machine.\n' >&2
+if [ "$prepare_only" = true ] && [ "$seal_image" = false ] && { [ -s "$root/worker.json" ] || [ -s "$root/worker.json.identity-key" ]; }; then
+    printf 'This worker is enrolled. Use --seal-image to prepare it for cloning.\n' >&2
     exit 2
 fi
 metadata=$(curl --fail --silent --show-error "$site/api/worker-release")
@@ -148,8 +173,102 @@ if [ "$container" = true ]; then
     "$bin/cope" config --compose-file "$release_dir/source/compose.worker.yaml"
 fi
 
+if [ "$autostart" = true ] || [ "$seal_image" = true ]; then
+    "$bin/cope" config --output json | python3 -c '
+import json, re, sys
+from pathlib import Path
+
+settings = json.load(sys.stdin)
+if settings.get("compose_file"):
+    sys.exit("Use these options with a native worker, without a Compose file configured.")
+if sys.argv[2] == "true":
+    token_file = Path(settings.get("token_file") or Path(sys.argv[1]) / "token").expanduser()
+    try:
+        shared_token = re.fullmatch(r"cope_identity_[A-Za-z0-9_-]{43}", token_file.read_text().strip())
+    except (OSError, UnicodeError):
+        shared_token = False
+    if not shared_token:
+        sys.exit("Sealing an image requires a shared Cope worker identity token.")
+' "$root" "$seal_image"
+fi
+
+if [ "$autostart" = true ]; then
+    run_as_root() {
+        if [ "$worker_uid" -eq 0 ]; then
+            "$@"
+        else
+            sudo -- "$@"
+        fi
+    }
+    worker_uid=$(id -u)
+    unit_name="cope-worker-user-$worker_uid.service"
+    unit_path="/etc/systemd/system/$unit_name"
+    description="Description=Cope worker installed for UID $worker_uid"
+    if [ -L "$unit_path" ] || { [ -e "$unit_path" ] && ! grep -Fxq "$description" "$unit_path"; }; then
+        printf 'A different service already uses %s.\n' "$unit_path" >&2
+        exit 1
+    fi
+    unit=$(mktemp "$root/.autostart.XXXXXX")
+    trap 'rm -f -- "$unit"' 0
+    python3 - "$root/installation/cope-launch" "$worker_uid" "$description" > "$unit" <<'PY'
+import sys
+
+launcher, uid, description = sys.argv[1:]
+if any(ord(char) < 32 for char in launcher):
+    sys.exit("The worker installation path contains unsupported control characters.")
+launcher = '"' + launcher.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+print(f"""[Unit]
+{description}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User={uid}
+ExecStart=:/bin/sh {launcher} start --foreground --boot
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=25
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target""")
+PY
+    run_as_root install -o root -g root -m 0644 "$unit" "$unit_path"
+    run_as_root systemctl daemon-reload
+    run_as_root systemctl enable "$unit_name"
+    rm -f -- "$unit"
+    trap - 0
+    printf 'Autostart enabled with %s.\n' "$unit_name"
+fi
+
+if [ "$seal_image" = true ]; then
+    "$bin/cope" stop grace
+    python3 - "$root" <<'PY'
+import fcntl
+import sys
+from contextlib import ExitStack
+from pathlib import Path
+
+root = Path(sys.argv[1])
+with ExitStack() as locks:
+    try:
+        for filename in ("launch.lock", "control.lock", "supervisor.lock"):
+            handle = locks.enter_context((root / filename).open("a+"))
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("Worker changed state while sealing the image. Stop it and retry.")
+    for filename in ("worker.json", "worker.json.identity-key", "desired.json", "status.json"):
+        (root / filename).unlink(missing_ok=True)
+PY
+    printf 'Cope is stopped and ready for image capture. Each clone will get a new machine identity.\n'
+    exit 0
+fi
+
 if [ "$prepare_only" = true ]; then
-    printf 'Cope installed at %s/cope. Supply the worker token at first boot.\n' "$bin"
+    printf 'Cope installed at %s/cope without starting a worker.\n' "$bin"
     exit 0
 fi
 

@@ -66,11 +66,16 @@ def is_running(home: Path) -> bool:
         return True
 
 
-def request_stop(home: Path, mode: str) -> None:
+def request_stop(home: Path, mode: str, *, persist: bool = True) -> None:
     with locked(home / "control.lock"):
-        current = read_json(home / "stop.json").get("mode")
-        if STOP_ORDER.get(current, 0) < STOP_ORDER[mode]:
-            write_json(home / "stop.json", {"mode": mode})
+        current = read_json(home / "stop.json")
+        current_mode = current.get("mode")
+        if STOP_ORDER.get(current_mode, 0) >= STOP_ORDER[mode]:
+            mode = current_mode
+        keep_stopped = persist or (bool(current_mode) and current.get("persist", True))
+        request = {"mode": mode, "persist": keep_stopped}
+        if request != current:
+            write_json(home / "stop.json", request)
 
 
 def parse_threads(value: str) -> int | None:

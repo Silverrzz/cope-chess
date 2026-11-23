@@ -82,11 +82,11 @@ def supervise(home: Path, *, boot: bool = False) -> int:
         launch_id = os.environ.get("COPE_WORKER_LAUNCH_ID") or uuid.uuid4().hex
         write_json(home / "status.json", {"state": "starting", "launch_id": launch_id})
 
-        stop_signal = False
+        stop_signal = None
 
-        def stop(_signal, _frame) -> None:
+        def stop(signum, _frame) -> None:
             nonlocal stop_signal
-            stop_signal = True
+            stop_signal = signum == signal.SIGINT or bool(stop_signal)
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
@@ -100,9 +100,9 @@ def supervise(home: Path, *, boot: bool = False) -> int:
             child = subprocess.Popen(command, cwd=home, env=environment, start_new_session=True)
             safe_since = None
             while child.poll() is None:
-                if stop_signal:
-                    request_stop(home, "safe")
-                    stop_signal = False
+                if stop_signal is not None:
+                    request_stop(home, "safe", persist=stop_signal)
+                    stop_signal = None
                 mode = read_json(home / "stop.json").get("mode")
                 if mode == "force":
                     child.kill()
@@ -121,9 +121,10 @@ def supervise(home: Path, *, boot: bool = False) -> int:
                 child.wait()
             _kill_adopted_children()
             with locked(home / "control.lock"):
-                stopped = bool(read_json(home / "stop.json").get("mode"))
+                request = read_json(home / "stop.json")
+                stopped = bool(request.get("mode"))
                 (home / "stop.json").unlink(missing_ok=True)
-                if stopped:
+                if stopped and request.get("persist", True):
                     (home / "update.json").unlink(missing_ok=True)
                     write_json(home / "desired.json", {"state": "stopped"})
                 status = read_json(home / "status.json")
