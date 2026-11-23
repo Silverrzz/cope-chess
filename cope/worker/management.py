@@ -41,6 +41,7 @@ Manage the local Cope worker.
   cope stop force                 Kill the worker and its engine processes.
   cope config                     Show worker settings.
   cope config --threads 8         Set the CPU thread limit.
+                                  Use auto for available physical cores.
   cope config --memory 12GiB      Set the worker memory limit.
   cope config --auto-update true  Enable automatic updates (the default).
                                   Use false to disable them. The worker stalls
@@ -77,7 +78,10 @@ def register_commands(subparsers) -> None:
     stop.add_argument("--timeout", type=int)
 
     config = subparsers.add_parser("config", help="view or change local worker settings")
-    config.add_argument("--threads", default=argparse.SUPPRESS, type=parse_threads)
+    config.add_argument(
+        "--threads", default=argparse.SUPPRESS, type=parse_threads,
+        help="set the CPU thread limit or use auto for available physical cores",
+    )
     config.add_argument("--memory", dest="memory_mb", default=argparse.SUPPRESS, type=parse_memory)
     config.add_argument("--auto-update", dest="auto_update", default=argparse.SUPPRESS, type=parse_boolean)
     config.add_argument("--server", default=argparse.SUPPRESS)

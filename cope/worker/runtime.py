@@ -15,6 +15,7 @@ LOG = logging.getLogger("cope.worker")
 class ManagedWorker:
     home: Path
     version: str
+    physical_cores: int
     supported: bool = False
     snapshot: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
@@ -28,7 +29,7 @@ class ManagedWorker:
     def control(self) -> WorkerControlSettings:
         settings = WorkerSettings.read(self.home)
         return WorkerControlSettings(
-            threads=settings.threads,
+            threads=settings.threads or self.physical_cores,
             memory_mb=settings.memory_mb,
             draining=self.stop_mode() == "grace" or bool(self.update_request()),
             auto_update=settings.auto_update,

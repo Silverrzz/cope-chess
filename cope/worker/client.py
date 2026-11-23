@@ -343,7 +343,6 @@ def _install_requested_release(managed: ManagedWorker, request: dict) -> tuple[P
 
 
 async def run_worker_client(config: WorkerClientConfig) -> None:
-    managed = ManagedWorker(config.managed_home, config.app_version) if config.managed_home is not None else None
     if config.identity_token is not None:
         if config.state_file is None or config.token is not None or config.session_id is not None:
             raise ValueError("worker identity requires a state file and its own token")
@@ -352,7 +351,11 @@ async def run_worker_client(config: WorkerClientConfig) -> None:
             identity_instance_key=_identity_instance_key(config.state_file),
             label_hint=config.label_hint or socket.gethostname()[:80],
         )
-    hw = _detect_hardware(cpu_capacity=None if managed is not None else config.cpu_capacity)
+    hw = _detect_hardware(cpu_capacity=config.cpu_capacity if config.managed_home is None else None)
+    managed = (
+        ManagedWorker(config.managed_home, config.app_version, physical_cores=hw.physical_cores)
+        if config.managed_home is not None else None
+    )
     try:
         threading.stack_size(1024 * 1024)
     except (RuntimeError, ValueError):
