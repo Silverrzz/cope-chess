@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { api } from "@/api/client";
@@ -31,20 +31,26 @@ const clock = ref<{ state: ClockState; observed: number } | null>(null);
 const now = ref(Date.now());
 const ply = ref(0);
 const error = ref("");
+const followedGameId = ref<number>();
+const resultDisplayMs = 4500;
 let stream: EventSource | null = null;
 let request: AbortController | null = null;
 let refreshTimer: number | undefined;
 let clockTimer: number | undefined;
+let resultTimer: number | undefined;
 
 const playable = computed(() => props.contests.filter(contest => contest.games.length));
 const pinnedGame = computed(() => typeof route.query.game_id === "string" ? route.query.game_id : null);
 const pinnedContest = computed(() => playable.value.find(contest => contest.games.some(game => String(game.id) === pinnedGame.value)));
-const contest = computed(() => pinnedContest.value
-  ?? playable.value.find(item => item.games.some(game => game.status === "live"))
+const automaticContest = computed(() => playable.value.find(item => item.games.some(game => game.status === "live"))
   ?? playable.value.find(item => item.status === "live")
   ?? playable.value.at(-1));
-const game = computed(() => contest.value?.games.find(item => String(item.id) === pinnedGame.value)
-  ?? (contest.value ? defaultGame(contest.value) : undefined));
+const automaticGame = computed(() => automaticContest.value ? defaultGame(automaticContest.value) : undefined);
+const followedContest = computed(() => playable.value.find(item => item.games.some(game => game.id === followedGameId.value)));
+const contest = computed(() => pinnedContest.value ?? followedContest.value ?? automaticContest.value);
+const game = computed(() => pinnedContest.value?.games.find(item => String(item.id) === pinnedGame.value)
+  ?? followedContest.value?.games.find(item => item.id === followedGameId.value)
+  ?? automaticGame.value);
 const activeTab = computed(() => route.query.tab === "games" || route.query.tab === "settings" ? route.query.tab : "standings");
 const contestGames = computed(() => {
   const selected = contest.value;
@@ -88,6 +94,7 @@ const status = computed(() => game.value?.result ? resultLabel(game.value.result
 const followingLive = computed(() => !pinnedContest.value && !historical.value);
 const annotations = computed(() => moves.value.map((move, index) => {
   if (move.uci.length !== 4 || !move.position_fen) return null;
+  if (capturedKing(index)) return { label: "King captured" };
   const before = positions.value[index];
   const after = positions.value[index + 1];
   const source = before?.squares[squareIndex(move.uci.slice(0, 2))];
@@ -102,6 +109,7 @@ const gameContext = computed(() => {
     game.value ? contest.value?.kind === "group" ? "Round " + game.value.round : "Pair " + game.value.pair_index : "",
     viewer.value?.viewer_game?.game_number ? "Game " + viewer.value.viewer_game.game_number : "",
     timeControlLabel(control),
+    game.value?.result && capturedKing(moves.value.length - 1) ? "King captured" : "",
   ].filter(Boolean).join(" / ");
 });
 
@@ -139,6 +147,7 @@ function selectContest(contestId: number, tab?: "games"): void {
 function followLive(): void {
   ply.value = moves.value.length;
   if (pinnedGame.value) selectGame();
+  else if (game.value?.status === "finished") advanceFollowingGame();
 }
 
 function appendChat(message: ChatMessage): void {
@@ -183,9 +192,30 @@ function evaluationRange(info: string | null | undefined): EngineEvaluationRange
   if (low && high && sampled <= possible && (sampled > 0 || possible === 0)) return { low, high, sampled, possible };
 }
 
+function capturedKing(index: number): boolean {
+  const move = moves.value[index];
+  const before = positions.value[index];
+  const after = positions.value[index + 1];
+  if (!move?.position_fen || !before || !after) return false;
+  const victim = before.squares[squareIndex(move.uci.slice(2, 4))];
+  return (victim === "k" || victim === "K") && !after.squares.includes(victim);
+}
+
 function acceptMoves(next: MoveRecord[]): void {
-  const atEnd = ply.value >= moves.value.length;
+  const previousLength = moves.value.length;
+  const atEnd = ply.value >= previousLength;
   moves.value = next;
+  if (atEnd && (previousLength > 0 || resultTimer !== undefined) && next.length > previousLength + 1 && capturedKing(next.length - 1)) {
+    const id = game.value?.id;
+    const finalPly = next.length;
+    ply.value = finalPly - 1;
+    void nextTick(() => {
+      window.requestAnimationFrame(() => {
+        if (id === game.value?.id && moves.value.length === finalPly && ply.value === finalPly - 1) ply.value = finalPly;
+      });
+    });
+    return;
+  }
   ply.value = atEnd ? next.length : Math.min(ply.value, next.length);
 }
 
@@ -230,6 +260,24 @@ async function loadViewer(): Promise<void> {
     if (request === pending) request = null;
   }
 }
+
+function advanceFollowingGame(): void {
+  window.clearTimeout(resultTimer);
+  resultTimer = undefined;
+  followedGameId.value = automaticGame.value?.id;
+}
+
+watch([pinnedGame, () => automaticGame.value?.id, () => game.value?.status], ([pinned, next], [previousPin]) => {
+  if (pinned !== null || previousPin || game.value?.status !== "finished" || game.value.id === next || game.value.id !== followedGameId.value) {
+    advanceFollowingGame();
+    return;
+  }
+  if (resultTimer !== undefined) return;
+  resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs);
+  request?.abort();
+  request = null;
+  void loadViewer();
+}, { immediate: true });
 
 watch([() => contest.value?.tournament_id, () => game.value?.id], ([tournament, id]) => {
   stream?.close();
@@ -287,6 +335,7 @@ onBeforeUnmount(() => {
   request?.abort();
   window.clearInterval(refreshTimer);
   window.clearInterval(clockTimer);
+  window.clearTimeout(resultTimer);
 });
 </script>
 

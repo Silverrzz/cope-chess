@@ -2208,7 +2208,7 @@ async def _serve_assignment(
                     **assignment.assignment.message_fields(),
                     engine_id=command.engine_id,
                     engine_name=assignment.engines[command.engine_id].name,
-                    stage="runtime" if engine.process_started else "start",
+                    stage="start" if not play_started and command_stage in {"startup", "opening"} else "runtime",
                     error=(str(error).strip() or error.__class__.__name__)[-8000:],
                 )
                 await progress.publish(

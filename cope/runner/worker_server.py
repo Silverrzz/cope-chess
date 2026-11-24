@@ -2955,6 +2955,8 @@ class WorkerEngineTransport:
                     raise ProtocolValidationError("engine failure assignment mismatch")
                 if failure.engine_id != engine_id:
                     raise ProtocolValidationError("engine failure engine mismatch")
+                if failure.stage == "start":
+                    raise AssignmentPreparationFailed(failure)
                 if not self._failure_reported:
                     self._failure_reported = True
                     self._failure_handler(failure)

@@ -2134,9 +2134,35 @@ def _starting_board(opening: OpeningPositionRecord | None, *, variant: str = "st
 def _secret_queen_files(connection, game: GameRecord) -> tuple[int, int]:
     from secrets import randbelow
 
+    key = (game.tournament_id, game.round, game.pair_index)
+    saved = connection.execute(
+        """
+        SELECT existing.id, secret.black_file, secret.white_file
+        FROM games existing
+        JOIN secret_queen_game_secrets secret ON secret.game_id = existing.id
+        WHERE existing.tournament_id = ? AND existing.round = ? AND existing.pair_index = ?
+        ORDER BY (existing.id <> ?), existing.id
+        LIMIT 1
+        """,
+        (*key, game.id),
+    ).fetchone()
+    if saved is not None and saved["id"] == game.id:
+        return saved["black_file"], saved["white_file"]
+    if saved is None:
+        connection.execute(
+            """
+            INSERT INTO secret_queen_pairs (tournament_id, round, pair_index, black_file, white_file)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+            """,
+            (*key, randbelow(8), randbelow(8)),
+        )
+        saved = connection.execute(
+            "SELECT black_file, white_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
+            key,
+        ).fetchone()
     connection.execute(
         "INSERT INTO secret_queen_game_secrets (game_id, black_file, white_file) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-        (game.id, randbelow(8), randbelow(8)),
+        (game.id, saved["black_file"], saved["white_file"]),
     )
     row = connection.execute(
         "SELECT black_file, white_file FROM secret_queen_game_secrets WHERE game_id = ?",
