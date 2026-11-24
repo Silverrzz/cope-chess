@@ -8,7 +8,7 @@ import { isTurn, type Variant } from '@/components/chess/chess'
 import { takMovePath } from '@/components/chess/tak'
 import BaseSpinner from '@/components/ui/BaseSpinner.vue'
 
-import type { EngineAnalysis, Identifier } from './types'
+import type { EngineAnalysis, EngineEvaluationRange, Identifier } from './types'
 import { formatNodes, formatNps, formatNumber } from './format'
 
 const props = withDefaults(defineProps<{
@@ -24,6 +24,7 @@ const props = withDefaults(defineProps<{
   positionFen?: string | null
   active?: boolean
   hiddenSearch?: boolean
+  evaluationRange?: EngineEvaluationRange | undefined
   loading?: boolean
 }>(), {
   name: '',
@@ -38,9 +39,10 @@ const props = withDefaults(defineProps<{
 const { evaluationPerspective } = useViewerSettings()
 const title = computed(() => props.name || (props.side === 'white' ? 'White' : 'Black'))
 const info = computed(() => props.analysis?.info || props.analysis?.pv || 'No analysis recorded')
+const invertEvaluation = computed(() => props.side === 'black' && evaluationPerspective.value !== 'side-to-move')
 const evaluation = computed(() => {
   const value = props.analysis?.eval
-  if (value === null || value === undefined || props.side === 'white' || evaluationPerspective.value === 'side-to-move') return value ?? '-'
+  if (value === null || value === undefined || !invertEvaluation.value) return value ?? '-'
   if (typeof value === 'number') return -value
   const match = value.match(/^(≤|≥)?(#?)([+-]?)(\d+(?:\.\d+)?)$/)
   if (!match) return value
@@ -49,6 +51,29 @@ const evaluation = computed(() => {
   const reversedSign = sign === '-' ? (mate ? '' : '+') : '-'
   return `${reversedBound}${mate}${reversedSign}${magnitude}`
 })
+const range = computed(() => {
+  const value = props.evaluationRange
+  if (!value) return null
+  const low = projectionScore(invertEvaluation.value ? value.high : value.low)
+  const high = projectionScore(invertEvaluation.value ? value.low : value.high)
+  let coverage = 'Single-position estimate'
+  if (value.possible > 0) {
+    const count = value.sampled === value.possible ? value.possible : `${value.sampled} of ${value.possible}`
+    coverage = `${count} possible ${value.possible === 1 ? 'position' : 'positions'}`
+  }
+  return { label: low === high ? low : `${low} to ${high}`, isRange: low !== high, coverage }
+})
+const speculativeSearch = computed(() => props.hiddenSearch || range.value !== null)
+
+function projectionScore(token: string): string {
+  if (token === 'win' || token === 'loss') {
+    const winningSide = token === 'win' ? props.side : props.side === 'white' ? 'black' : 'white'
+    return winningSide === 'white' ? 'White wins' : 'Black wins'
+  }
+  const [kind, raw] = token.split(':')
+  const value = Number(raw) * (invertEvaluation.value ? -1 : 1)
+  return kind === 'mate' ? `#${value}` : `${value >= 0 ? '+' : ''}${(value / 100).toFixed(2)}`
+}
 const depth = computed(() => `${props.analysis?.depth ?? '-'}/${props.analysis?.seldepth ?? '-'}`)
 const pvMoves = computed(() => (props.analysis?.pv || '')
   .split(/\s+/)
@@ -88,8 +113,11 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
       </header>
 
       <div class="evaluation">
-        <span>Evaluation</span>
-        <strong :class="{ 'evaluation--hidden': hiddenSearch }">{{ hiddenSearch ? 'Hidden positions' : evaluation }}</strong>
+        <span>{{ range?.isRange ? 'Evaluation range' : 'Evaluation' }}</span>
+        <strong v-if="range" class="evaluation--range">{{ range.label }}</strong>
+        <strong v-else-if="hiddenSearch && evaluation === '-'" class="evaluation--range">Not recorded</strong>
+        <strong v-else>{{ evaluation }}</strong>
+        <small v-if="range">{{ range.coverage }}</small>
       </div>
 
       <div class="engine-panel__body">
@@ -102,23 +130,23 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
           </dl>
 
           <div class="analysis-line">
-            <span>{{ hiddenSearch ? 'Search information' : analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-            <p :title="hiddenSearch ? 'Depth, nodes and NPS from searches across possible positions' : analysis?.pv || info">{{ hiddenSearch ? 'Searching possible queen positions' : analysis?.pv_san || analysis?.pv || info }}</p>
+            <span>{{ speculativeSearch ? 'Search information' : analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
+            <p :title="speculativeSearch ? 'Depth, nodes and NPS from searches across possible positions' : analysis?.pv || info">{{ speculativeSearch ? 'Searches across possible queen positions' : analysis?.pv_san || analysis?.pv || info }}</p>
           </div>
         </div>
 
         <div class="pv-preview">
-          <span>{{ hiddenSearch ? 'Public position' : 'PV position' }}</span>
+          <span>{{ speculativeSearch ? 'Public position' : 'PV position' }}</span>
           <ChessBoard
             :key="variant || 'standard'"
             :variant="variant"
-            :fen="pvRootFen"
-            :moves="hiddenSearch ? [] : pvMoves"
+            :fen="speculativeSearch ? positionFen || 'startpos' : pvRootFen"
+            :moves="speculativeSearch ? [] : pvMoves"
             :orientation="side"
             :controls="false"
             :coordinates="false"
             compact
-            :label="`${title} principal variation final position`"
+            :label="`${title} ${speculativeSearch ? 'public position' : 'principal variation final position'}`"
           />
         </div>
       </div>
@@ -149,7 +177,8 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
   --side-color: #f7f8fa;
 }
 
-.evaluation .evaluation--hidden { font-size: clamp(.9rem, 2vw, 1.4rem); }
+.evaluation .evaluation--range { font-size: clamp(1rem, 2.15vw, 1.65rem); }
+.evaluation small { color: var(--color-text-muted); font-size: .65rem; }
 
 .engine-panel::before {
   position: absolute;

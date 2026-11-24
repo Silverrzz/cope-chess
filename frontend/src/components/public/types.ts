@@ -215,6 +215,13 @@ export interface TournamentRatingSummary {
   rows: TournamentRatingRow[]
 }
 
+export interface EngineEvaluationRange {
+  low: string
+  high: string
+  sampled: number
+  possible: number
+}
+
 export interface EngineAnalysis {
   engine_id?: Identifier | null
   relay_team_id?: Identifier | null

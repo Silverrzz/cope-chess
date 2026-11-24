@@ -12,7 +12,7 @@ import EnginePanel from "@/components/public/EnginePanel.vue";
 import GameTable from "@/components/public/GameTable.vue";
 import { clockLabel, moveEvaluation, moveNps, resultLabel, timeControlLabel } from "@/components/public/format";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import type { ChatMessage, ClockState, EngineAnalysis, LiveSnapshot, MoveRecord, TournamentDetailResponse } from "@/components/public/types";
+import type { ChatMessage, ClockState, EngineAnalysis, EngineEvaluationRange, LiveSnapshot, MoveRecord, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
 import EventArena from "../EventArena.vue";
 import SecretQueenStandings from "./SecretQueenStandings.vue";
@@ -82,7 +82,7 @@ const concealedQueens = computed(() => {
 const hiddenSearch = computed(() => Boolean(concealedQueens.value?.white || concealedQueens.value?.black));
 const activeSide = computed(() => historical.value || !clock.value?.state.running ? null : clock.value.state.active_side);
 const engines = computed(() => ({ white: game.value?.white_engine_id, black: game.value?.black_engine_id }));
-const title = computed(() => game.value ? engineName(game.value.white_engine_id) + " versus " + engineName(game.value.black_engine_id) : props.detail.event.title);
+const title = computed(() => game.value ? matchup(game.value) : props.detail.event.title);
 const status = computed(() => game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
 const followingLive = computed(() => !pinnedContest.value && !historical.value);
 const annotations = computed(() => moves.value.map((move, index) => {
@@ -112,6 +112,10 @@ function defaultGame(current: SecretQueenContest): SecretQueenGame | undefined {
 
 function engineName(id: number): string {
   return names.value.get(id) ?? viewer.value?.engines[String(id)] ?? "Engine " + id;
+}
+
+function matchup(item: SecretQueenGame): string {
+  return engineName(item.white_engine_id) + " vs " + engineName(item.black_engine_id);
 }
 
 function gameTarget(gameId?: number, tab?: "games") {
@@ -168,6 +172,15 @@ function panel(side: Color): { clock: string; analysis: EngineAnalysis | null } 
   return { clock: clockLabel(start), analysis: null };
 }
 const panels = computed(() => ({ white: panel("white"), black: panel("black") }));
+
+function evaluationRange(info: string | null | undefined): EngineEvaluationRange | undefined {
+  const fields = info?.match(/(?:^| )sq_eval ((?:cp:-?\d+|mate:-?\d+|win|loss)),((?:cp:-?\d+|mate:-?\d+|win|loss)),([0-8]),([0-8])(?= |$)/);
+  if (!fields) return;
+  const [, low, high, rawSampled, rawPossible] = fields;
+  const sampled = Number(rawSampled);
+  const possible = Number(rawPossible);
+  if (low && high && sampled <= possible && (sampled > 0 || possible === 0)) return { low, high, sampled, possible };
+}
 
 function acceptMoves(next: MoveRecord[]): void {
   const atEnd = ply.value >= moves.value.length;
@@ -289,7 +302,7 @@ onBeforeUnmount(() => {
       <label v-if="contest">Game
         <select :value="game?.id" @change="selectGame(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="item in contest.games" :key="item.id" :value="item.id">
-            {{ contest.kind === 'group' ? 'Round ' + item.round : 'Pair ' + item.pair_index }} · {{ engineName(item.white_engine_id) }} – {{ engineName(item.black_engine_id) }}{{ item.result ? ' (' + item.result + ')' : '' }}
+            {{ contest.kind === 'group' ? 'Round ' + item.round : 'Pair ' + item.pair_index }} · {{ matchup(item) }}{{ item.result ? ' (' + item.result + ')' : '' }}
           </option>
         </select>
       </label>
@@ -302,7 +315,8 @@ onBeforeUnmount(() => {
     <template #engines>
       <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot">
         <EnginePanel :side="side" :engine-id="engines[side] ?? null" :name="engines[side] === undefined ? '' : engineName(engines[side]!)"
-          :clock="panels[side].clock" :analysis="panels[side].analysis" :position-fen="currentFen" :active="activeSide === side" :hidden-search="hiddenSearch" />
+          :clock="panels[side].clock" :analysis="panels[side].analysis" :position-fen="currentFen" :active="activeSide === side"
+          :hidden-search="hiddenSearch" :evaluation-range="evaluationRange(panels[side].analysis?.info)" />
       </div>
     </template>
     <template #board>

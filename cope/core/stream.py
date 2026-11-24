@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -14,6 +15,8 @@ STREAM_PROTOCOL_VERSION = 1
 MAX_STREAM_MESSAGE_BYTES = 64 * 1024
 MAX_UCI_INFO_LINE = 4096
 WORKER_COMMAND_ELAPSED_PREFIX = "info string cope-worker-command-elapsed-ms "
+_SECRET_QUEEN_SCORE = r"(?:cp:-?[0-9]{1,6}|mate:-?[1-9][0-9]{0,4}|win|loss)"
+_SECRET_QUEEN_EVALUATION = re.compile(rf"{_SECRET_QUEEN_SCORE},{_SECRET_QUEEN_SCORE},[0-8],[0-8]")
 
 
 class StreamProtocolError(ValueError):
@@ -120,8 +123,11 @@ def is_search_info_line(line: str, *, allow_partial: bool = False, allow_statist
         words = line.split()
         if words[:1] == ["info"] and len(words) >= 3 and len(words) % 2:
             fields = dict(zip(words[1::2], words[2::2], strict=True))
-            if fields and fields.keys() <= {"depth", "seldepth", "nodes", "hashfull", "nps", "time"}:
-                return all(value.isascii() and value.isdecimal() for value in fields.values())
+            if fields.keys() <= {"depth", "seldepth", "nodes", "hashfull", "nps", "time", "sq_eval"}:
+                return all(
+                    _SECRET_QUEEN_EVALUATION.fullmatch(value) if key == "sq_eval" else value.isascii() and value.isdecimal()
+                    for key, value in fields.items()
+                )
     if not allow_partial:
         return False
     parts = line.split()
