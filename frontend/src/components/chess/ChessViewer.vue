@@ -14,6 +14,7 @@ const props = withDefaults(defineProps<{
   label?: string
   arrows?: BoardArrow[]
   rings?: string[]
+  concealedQueens?: Partial<Record<Color, string | null>> | undefined
   finished?: boolean
 }>(), {
   opening: null,
@@ -37,6 +38,7 @@ let copyTimer: number | undefined
 
 const uciMoves = computed(() => props.moves.map((move) => move.uci).filter(Boolean))
 const sanMoves = computed(() => props.moves.map((move) => move.san || move.uci))
+const recordedPositions = computed(() => props.moves.map((move) => move.position_fen))
 const opening = computed<OpeningRecord>(() => props.opening || { name: 'Start position', fen: 'startpos' })
 const bookPlyTotal = computed(() => opening.value.book_moves?.length || 0)
 const positionFormat = computed(() => props.variant === 'tak' ? 'TPS' : 'FEN')
@@ -95,11 +97,13 @@ function fallbackCopy(value: string): void {
       :fen="opening.fen"
       :moves="uciMoves"
       :san-moves="sanMoves"
+      :recorded-positions="recordedPositions"
       :model-value="ply"
       :orientation="orientation"
       :label="label"
       :arrows="arrows"
       :rings="rings"
+      :concealed-queens="concealedQueens"
       :finished="finished"
       @update:model-value="selectPly"
       @position="currentFen = $event.fen; emit('position', $event)"

@@ -33,7 +33,7 @@ watch(arenaOpen, (open) => {
     <template #backdrop><SecretQueenInterference announcement /></template>
     <template #art><SecretQueenArt /></template>
   </EventAnnouncement>
-  <SecretQueenArena v-else-if="view === 'arena'" :detail="detail" :contests="contests" :style="secretQueenTheme" />
+  <SecretQueenArena v-else-if="view === 'arena'" :detail="detail" :contests="contests" :clock-offset-ms="clockOffsetMs ?? 0" />
   <div v-else class="secret-queen-competition" :style="secretQueenTheme">
     <header class="competition-heading">
       <SecretQueenInterference announcement />

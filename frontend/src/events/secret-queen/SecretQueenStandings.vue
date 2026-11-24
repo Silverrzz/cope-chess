@@ -22,7 +22,7 @@ const names = computed(() => new Map(props.cast.map(member => [Number(member.eng
         <article v-for="group in groups" :key="group.id" class="competition-card">
           <header><h3>{{ group.title }}</h3><StatusPill :status="group.status" /></header>
           <table>
-            <thead><tr><th scope="col">Engine</th><th scope="col">Points</th><th scope="col">Buchholz</th></tr></thead>
+            <thead><tr><th scope="col">Engine</th><th scope="col">Points</th><th scope="col"><abbr title="Sum of opponents' scores, counted once per completed game">Buchholz</abbr></th></tr></thead>
             <tbody>
               <tr v-for="row in group.standings" :key="row.engine_id">
                 <th scope="row">{{ names.get(row.engine_id) }}<span v-if="group.qualified.includes(row.engine_id)" class="qualified">Qualified</span></th>
@@ -59,16 +59,16 @@ const names = computed(() => new Map(props.cast.map(member => [Number(member.eng
 .standings { gap: 2rem; }
 .swiss-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: .8rem; }
 .bracket { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: .8rem; }
-.competition-card { display: grid; gap: .65rem; padding: .9rem; border: 1px solid var(--event-view-border); border-radius: var(--radius-md); background: #140d20; }
+.competition-card { display: grid; gap: .65rem; padding: .9rem; border: 1px solid var(--event-view-border, var(--color-border)); border-radius: var(--radius-md); background: var(--event-view-surface, var(--color-surface)); }
 .competition-card header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 .competition-card h3, .bracket-stage h3 { font-size: 1rem; }
 .competition-card table { width: 100%; font-size: .85rem; font-variant-numeric: tabular-nums; }
-.competition-card :is(th, td) { text-align: right; padding: .35rem 0 .35rem .4rem; border-bottom: 1px solid var(--event-view-border); }
+.competition-card :is(th, td) { text-align: right; padding: .35rem 0 .35rem .4rem; border-bottom: 1px solid var(--event-view-border, var(--color-border)); }
 .competition-card th:first-child { text-align: left; padding-left: 0; }
 .competition-card ul { list-style: none; }
-.competition-card p { color: var(--event-view-muted); font-size: .8rem; }
-.qualified { color: var(--event-view-accent); font-weight: 750; }
+.competition-card p { color: var(--event-view-muted, var(--color-text-muted)); font-size: .8rem; }
+.qualified { color: var(--event-view-accent, var(--color-accent)); font-weight: 750; }
 span.qualified { margin-left: .55rem; font-size: .72rem; }
-.match-link { justify-self: start; background: transparent; color: var(--event-view-accent); cursor: pointer; padding: .2rem 0; text-decoration: underline; }
+.match-link { justify-self: start; background: transparent; color: var(--event-view-accent, var(--color-accent)); cursor: pointer; padding: .2rem 0; text-decoration: underline; }
 @media (max-width: 44rem) { .bracket { grid-template-columns: 1fr; } }
 </style>

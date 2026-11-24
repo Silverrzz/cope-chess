@@ -66,18 +66,6 @@ export interface SecretQueenAdmin extends SecretQueenCompetition {
   engines: SecretQueenEngineChoice[];
 }
 
-export interface SecretQueenMove {
-  ply: number;
-  san: string;
-  uci: string;
-  position_fen: string;
-  clock_after_ms: number;
-}
-
 export interface SecretQueenSnapshot {
-  moves: SecretQueenMove[];
-  status: string;
-  result: string | null;
-  termination: string | null;
-  secrets: { white: string; black: string } | null;
+  concealed_queens: Array<{ white: string | null; black: string | null }> | null;
 }

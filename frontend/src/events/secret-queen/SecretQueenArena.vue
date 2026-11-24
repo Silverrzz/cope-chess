@@ -1,197 +1,290 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
 import { api } from "@/api/client";
-import ChessBoard from "@/components/chess/ChessBoard.vue";
+import ChessViewer from "@/components/chess/ChessViewer.vue";
 import MoveList from "@/components/chess/MoveList.vue";
-import StatusPill from "@/components/public/StatusPill.vue";
-import AppIcon from "@/components/ui/AppIcon.vue";
+import { buildPositions, positionFen, squareIndex, type Color } from "@/components/chess/chess";
+import ChatPanel from "@/components/public/ChatPanel.vue";
+import EnginePanel from "@/components/public/EnginePanel.vue";
+import { clockLabel, moveEvaluation, moveNps, resultLabel, timeControlLabel } from "@/components/public/format";
+import type { ChatMessage, ClockState, EngineAnalysis, LiveSnapshot, MoveRecord, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
+import EventArena from "../EventArena.vue";
 import SecretQueenStandings from "./SecretQueenStandings.vue";
-import type { SecretQueenContest, SecretQueenMove, SecretQueenSnapshot } from "./types";
+import type { SecretQueenContest, SecretQueenGame, SecretQueenSnapshot } from "./types";
 
-type Color = "white" | "black";
-interface ClockSync {
-  game_id: number;
-  active_side: Color;
-  clocks_ms: Record<Color, number | null>;
-  running: boolean;
-}
-
-const props = defineProps<{ detail: EventDetailResponse; contests: SecretQueenContest[] }>();
-const contestId = ref<number | null>(null);
-const gameId = ref<number | null>(null);
-const snapshot = ref<SecretQueenSnapshot | null>(null);
+const props = withDefaults(defineProps<{ detail: EventDetailResponse; contests: SecretQueenContest[]; clockOffsetMs?: number }>(), { clockOffsetMs: 0 });
+const route = useRoute();
+const router = useRouter();
+const viewer = ref<TournamentDetailResponse | null>(null);
+const moves = ref<MoveRecord[]>([]);
+const analysis = ref<Partial<Record<Color, EngineAnalysis>>>({});
+const clock = ref<{ state: ClockState; observed: number } | null>(null);
+const now = ref(Date.now());
 const ply = ref(0);
 const error = ref("");
-const clock = ref<(ClockSync & { observed: number }) | null>(null);
-const now = ref(Date.now());
-const orientation = ref<Color>("white");
+const concealedTimeline = ref<SecretQueenSnapshot["concealed_queens"]>(null);
 let stream: EventSource | null = null;
 let request: AbortController | null = null;
-let poll: number | undefined;
-let tick: number | undefined;
-const names = computed(() => new Map(props.detail.cast.map(member => [Number(member.engine_version_id), member.display_name])));
+let refreshTimer: number | undefined;
+let clockTimer: number | undefined;
+
 const playable = computed(() => props.contests.filter(contest => contest.games.length));
-const contest = computed(() => playable.value.find(item => item.id === contestId.value)
+const pinnedGame = computed(() => typeof route.query.game_id === "string" ? route.query.game_id : null);
+const pinnedContest = computed(() => playable.value.find(contest => contest.games.some(game => String(game.id) === pinnedGame.value)));
+const contest = computed(() => pinnedContest.value
   ?? playable.value.find(item => item.games.some(game => game.status === "live"))
-  ?? playable.value.find(item => item.status === "live") ?? playable.value.at(-1));
-const game = computed(() => contest.value?.games.find(item => item.id === gameId.value)
-  ?? contest.value?.games.find(item => item.status === "live")
-  ?? contest.value?.games.find(item => ["assigned", "pending"].includes(item.status))
-  ?? contest.value?.games.at(-1));
-const moves = computed(() => snapshot.value?.moves ?? []);
-const currentMove = computed(() => moves.value[ply.value - 1]);
-const watchingLatest = computed(() => ply.value === moves.value.length);
+  ?? playable.value.find(item => item.status === "live")
+  ?? playable.value.at(-1));
+const game = computed(() => contest.value?.games.find(item => String(item.id) === pinnedGame.value)
+  ?? (contest.value ? defaultGame(contest.value) : undefined));
+const pairFinished = computed(() => {
+  const selected = game.value;
+  const pair = contest.value?.games.filter(item => item.round === selected?.round && item.pair_index === selected?.pair_index);
+  return pair?.length === 2 && pair.every(item => item.status === "finished");
+});
+const names = computed(() => new Map(props.detail.cast.map(member => [Number(member.engine_version_id), member.display_name])));
+const opening = computed(() => viewer.value?.opening ?? { name: "Start position", fen: "startpos" });
+const positions = computed(() => buildPositions(opening.value.fen, moves.value.map(move => move.uci), undefined, moves.value.map(move => move.position_fen)));
+const currentFen = computed(() => positionFen(positions.value[ply.value] ?? positions.value[0]!));
+const historical = computed(() => game.value?.status === "finished" || ply.value < moves.value.length);
+const concealedQueens = computed(() => concealedTimeline.value?.[ply.value]);
+const activeSide = computed(() => historical.value || !clock.value?.state.running ? null : clock.value.state.active_side);
+const engines = computed(() => ({ white: game.value?.white_engine_id, black: game.value?.black_engine_id }));
+const title = computed(() => game.value ? engineName(game.value.white_engine_id) + " versus " + engineName(game.value.black_engine_id) : props.detail.event.title);
+const status = computed(() => game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
+const followingLive = computed(() => !pinnedContest.value && !historical.value);
+const annotations = computed(() => moves.value.map((move, index) => {
+  if (move.uci.length !== 4 || !move.position_fen) return null;
+  const before = positions.value[index];
+  const after = positions.value[index + 1];
+  const source = before?.squares[squareIndex(move.uci.slice(0, 2))];
+  const target = after?.squares[squareIndex(move.uci.slice(2, 4))];
+  return (source === "P" && target === "Q") || (source === "p" && target === "q")
+    ? { label: "Queen revealed" } : null;
+}));
+const gameContext = computed(() => {
+  const control = viewer.value?.tournament.config?.time_control;
+  return [
+    contest.value?.title,
+    game.value ? contest.value?.kind === "group" ? "Round " + game.value.round : "Pair " + game.value.pair_index : "",
+    viewer.value?.viewer_game?.game_number ? "Game " + viewer.value.viewer_game.game_number : "",
+    timeControlLabel(control),
+  ].filter(Boolean).join(" / ");
+});
 
-function selectContest(value: number): void {
-  contestId.value = value || null;
-  gameId.value = null;
+function defaultGame(current: SecretQueenContest): SecretQueenGame | undefined {
+  return current.games.find(item => item.status === "live")
+    ?? current.games.find(item => item.status === "assigned" || item.status === "pending")
+    ?? current.games.at(-1);
 }
 
-function clockLabel(side: Color): string {
-  const history = moves.value.slice(0, ply.value).reverse().find(move => (move.ply % 2 === 1) === (side === "white"));
-  let value = history?.clock_after_ms ?? contest.value?.time_control?.initial_ms;
-  const observed = clock.value;
-  if (observed && watchingLatest.value && game.value?.status === "live") {
-    value = observed.clocks_ms[side] ?? value;
-    if (value !== undefined && observed.running && observed.active_side === side) value -= now.value - observed.observed;
+function engineName(id: number): string {
+  return names.value.get(id) ?? viewer.value?.engines[String(id)] ?? "Engine " + id;
+}
+
+function selectGame(gameId?: number): void {
+  const query = { ...route.query };
+  if (gameId !== undefined) query.game_id = String(gameId);
+  else delete query.game_id;
+  void router.push({ query });
+}
+
+function selectContest(contestId: number): void {
+  const selected = playable.value.find(item => item.id === contestId);
+  if (selected) selectGame(defaultGame(selected)?.id);
+}
+
+function followLive(): void {
+  ply.value = moves.value.length;
+  if (pinnedGame.value) selectGame();
+}
+
+function appendChat(message: ChatMessage): void {
+  if (message.id !== undefined && props.detail.chat_messages.some(item => String(item.id) === String(message.id))) return;
+  props.detail.chat_messages.push(message);
+}
+
+function panel(side: Color): { clock: string; analysis: EngineAnalysis | null } {
+  const start = contest.value?.time_control?.initial_ms;
+  if (!historical.value) {
+    const live = clock.value;
+    let value = live?.state.clocks_ms?.[side] ?? start;
+    if (value !== undefined && live?.state.running && live.state.active_side === side) {
+      value -= Math.max(0, now.value + props.clockOffsetMs - live.observed);
+    }
+    return { clock: value === undefined ? viewer.value?.clocks?.[side] ?? "--:--" : clockLabel(value), analysis: analysis.value[side] ?? null };
   }
-  if (value === undefined) return "--:--";
-  const seconds = Math.ceil(Math.max(0, value) / 1000);
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  for (let index = Math.min(ply.value, moves.value.length) - 1; index >= 0; index -= 1) {
+    const before = positions.value[index];
+    const move = moves.value[index]!;
+    if (!before || (before.turn === "w") !== (side === "white") || move.is_book) continue;
+    return {
+      clock: clockLabel(move.clock_after_ms ?? start),
+      analysis: {
+        eval: moveEvaluation(move), depth: move.depth ?? null, seldepth: move.seldepth ?? null,
+        nodes: move.nodes ?? null, nps: moveNps(move), hashfull: move.hashfull ?? null,
+        info: move.info_line ?? null, pv: move.pv ?? null, pv_san: move.pv_san ?? null,
+        root_fen: positionFen(before),
+      },
+    };
+  }
+  return { clock: clockLabel(start), analysis: null };
+}
+const panels = computed(() => ({ white: panel("white"), black: panel("black") }));
+
+function acceptMoves(next: MoveRecord[]): void {
+  const atEnd = ply.value >= moves.value.length;
+  moves.value = next;
+  ply.value = atEnd ? next.length : Math.min(ply.value, next.length);
 }
 
-function data<T>(message: Event): T | null {
+function acceptClock(state: ClockState): void {
+  const observed = Date.parse(state.observed_at ?? state.sent_at ?? "");
+  if (Number.isFinite(observed) && clock.value && observed < clock.value.observed) return;
+  now.value = Date.now();
+  clock.value = { state, observed: Number.isFinite(observed) ? observed : now.value + props.clockOffsetMs };
+}
+
+function parseStream<T>(event: Event): T | undefined {
   try {
-    const payload = JSON.parse((message as MessageEvent<string>).data);
-    return (payload.data ?? payload) as T;
+    const message = JSON.parse((event as MessageEvent<string>).data) as { data?: T };
+    return message.data;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
-async function refresh(): Promise<void> {
+async function loadViewer(): Promise<void> {
   const id = game.value?.id;
-  if (!id || request) return;
+  const tournament = contest.value?.tournament_id;
+  if (id === undefined || tournament == null || request) return;
   const pending = new AbortController();
   request = pending;
   try {
-    const result = await api.get<SecretQueenSnapshot>(`/api/events/${encodeURIComponent(props.detail.event.slug)}/secret-queen/games/${id}`, { signal: pending.signal });
+    const response = await api.get<TournamentDetailResponse>(
+      "/api/events/" + encodeURIComponent(props.detail.event.slug) + "/tournaments/" + tournament,
+      { query: { game_id: id, page_size: 25 }, signal: pending.signal },
+    );
     if (pending.signal.aborted || game.value?.id !== id) return;
-    const latest = watchingLatest.value;
-    if (!snapshot.value || result.moves.length >= moves.value.length) snapshot.value = result;
-    if (latest) ply.value = moves.value.length;
+    viewer.value = response;
+    if (response.viewer_moves.length >= moves.value.length || response.viewer_game?.status === "pending") {
+      acceptMoves(response.viewer_moves);
+    }
+    analysis.value = response.engine_data ?? {};
+    if (response.clock_state) acceptClock(response.clock_state);
     error.value = "";
   } catch {
-    if (!pending.signal.aborted) error.value = "The game is temporarily unavailable. Reconnecting…";
+    if (!pending.signal.aborted) error.value = "The board could not be loaded.";
   } finally {
     if (request === pending) request = null;
   }
 }
 
-watch(() => [contest.value?.tournament_id, game.value?.id], ([tournament, id]) => {
+watch([() => contest.value?.tournament_id, () => game.value?.id], ([tournament, id]) => {
   stream?.close();
   stream = null;
   request?.abort();
   request = null;
-  snapshot.value = null;
+  viewer.value = null;
+  moves.value = [];
+  analysis.value = {};
   clock.value = null;
   ply.value = 0;
-  if (!id || !tournament) return;
-  void refresh();
+  if (tournament == null || id === undefined) return;
+  void loadViewer();
   if (game.value?.status === "finished") return;
-  const source = new EventSource(`/events/${encodeURIComponent(props.detail.event.slug)}/tournaments/${tournament}/stream?game_id=${id}&spectator=0`);
+
+  const source = new EventSource("/events/" + encodeURIComponent(props.detail.event.slug) + "/tournaments/" + tournament + "/stream?game_id=" + id + "&spectator=0");
   stream = source;
-  source.onopen = () => { void refresh(); };
-  source.addEventListener("game.move", message => {
-    const update = data<{ game_id: number; move?: SecretQueenMove }>(message);
-    if (stream !== source || Number(update?.game_id) !== id) return;
-    const move = update?.move;
-    if (!move?.position_fen || !snapshot.value || move.ply > moves.value.length + 1) {
-      void refresh();
-    } else if (move.ply === moves.value.length + 1) {
-      const latest = watchingLatest.value;
-      snapshot.value.moves.push(move);
-      if (latest) ply.value = moves.value.length;
+  source.addEventListener("tournament.snapshot", event => {
+    const snapshot = parseStream<LiveSnapshot>(event);
+    if (stream !== source || Number(snapshot?.game?.id) !== id || !snapshot) return;
+    if (snapshot.moves && (snapshot.moves.length >= moves.value.length || snapshot.game?.status === "pending")) acceptMoves(snapshot.moves);
+    if (snapshot.engine_data) analysis.value = snapshot.engine_data;
+    if (snapshot.clock_state) acceptClock(snapshot.clock_state);
+  });
+  source.addEventListener("game.move", event => {
+    const update = parseStream<{ game_id: number; move: MoveRecord; clocks_ms?: NonNullable<ClockState["clocks_ms"]> }>(event);
+    if (stream !== source || Number(update?.game_id) !== id || !update?.move) return;
+    if (update.move.ply === moves.value.length + 1 && update.move.position_fen) {
+      acceptMoves([...moves.value, update.move]);
+      if (update.clocks_ms) acceptClock({ clocks_ms: update.clocks_ms, running: false });
+    } else if (update.move.ply > moves.value.length) {
+      void loadViewer();
     }
   });
-  source.addEventListener("clock.sync", message => {
-    const update = data<ClockSync>(message);
-    if (stream === source && update && Number(update.game_id) === id) {
-      clock.value = { ...update, observed: Date.now() };
-    }
+  source.addEventListener("engine.info", event => {
+    const update = parseStream<EngineAnalysis & { game_id: number; side: Color; engine_data?: EngineAnalysis }>(event);
+    if (stream !== source || !update || Number(update.game_id) !== id || !["white", "black"].includes(update.side)) return;
+    analysis.value[update.side] = { ...analysis.value[update.side], ...(update.engine_data ?? update) };
   });
-  source.addEventListener("tournament.changed", () => { void refresh(); });
+  source.addEventListener("clock.sync", event => {
+    const state = parseStream<ClockState>(event);
+    if (stream === source && state && Number(state.game_id) === id) acceptClock(state);
+  });
+  source.addEventListener("tournament.changed", () => { if (stream === source) void loadViewer(); });
+}, { immediate: true });
+
+watch([() => game.value?.id, pairFinished], ([id, finished], _, onCleanup) => {
+  concealedTimeline.value = null;
+  if (id === undefined || !finished) return;
+  const pending = new AbortController();
+  onCleanup(() => pending.abort());
+  void api.get<SecretQueenSnapshot>("/api/events/" + encodeURIComponent(props.detail.event.slug) + "/secret-queen/games/" + id, { signal: pending.signal })
+    .then(snapshot => { if (!pending.signal.aborted) concealedTimeline.value = snapshot.concealed_queens; })
+    .catch(() => {});
 }, { immediate: true });
 
 onMounted(() => {
-  poll = window.setInterval(() => { void refresh(); }, 7500);
-  tick = window.setInterval(() => { now.value = Date.now(); }, 150);
+  refreshTimer = window.setInterval(() => {
+    if (!document.hidden && game.value?.status !== "finished") void loadViewer();
+  }, 5000);
+  clockTimer = window.setInterval(() => { now.value = Date.now(); }, 100);
 });
 onBeforeUnmount(() => {
   stream?.close();
   request?.abort();
-  window.clearInterval(poll);
-  window.clearInterval(tick);
+  window.clearInterval(refreshTimer);
+  window.clearInterval(clockTimer);
 });
 </script>
 
 <template>
-  <main class="secret-queen-arena">
-    <div class="page-container arena-content">
-      <header class="arena-heading">
-        <RouterLink :to="{ name: 'event', params: { slug: detail.event.slug } }"><AppIcon name="arrow-left" :size="17" /> Event</RouterLink>
-        <h1>Secret Queen Arena</h1>
-      </header>
-      <div v-if="playable.length" class="arena-filters">
-        <label class="field"><span>Group or match</span><select class="input" :value="contest?.id" @change="selectContest(Number(($event.target as HTMLSelectElement).value))">
+  <EventArena :title="detail.event.title" :slug="detail.event.slug" :status="status" :game-context="gameContext"
+    :spectator-count="detail.spectator_count" :can-follow-live="!followingLive && ['live', 'intermission'].includes(detail.event.status)"
+    :error="error" @follow-live="followLive" @retry="loadViewer">
+    <template #selectors>
+      <label v-if="playable.length > 1">Group or match
+        <select :value="contest?.id" @change="selectContest(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="item in playable" :key="item.id" :value="item.id">{{ item.title }}</option>
-        </select></label>
-        <label class="field"><span>Game</span><select class="input" :value="game?.id" @change="gameId = Number(($event.target as HTMLSelectElement).value)">
-          <option v-for="item in contest?.games" :key="item.id" :value="item.id">{{ contest?.kind === 'group' ? `Round ${item.round}` : `Pair ${item.pair_index}` }} · {{ names.get(item.white_engine_id) }} – {{ names.get(item.black_engine_id) }}{{ item.result ? ` (${item.result})` : '' }}</option>
-        </select></label>
+        </select>
+      </label>
+      <label v-if="contest">Game
+        <select :value="game?.id" @change="selectGame(Number(($event.target as HTMLSelectElement).value))">
+          <option v-for="item in contest.games" :key="item.id" :value="item.id">
+            {{ contest.kind === 'group' ? 'Round ' + item.round : 'Pair ' + item.pair_index }} · {{ engineName(item.white_engine_id) }} – {{ engineName(item.black_engine_id) }}{{ item.result ? ' (' + item.result + ')' : '' }}
+          </option>
+        </select>
+      </label>
+    </template>
+    <template #engines>
+      <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot">
+        <EnginePanel :side="side" :engine-id="engines[side] ?? null" :name="engines[side] === undefined ? '' : engineName(engines[side]!)"
+          :clock="panels[side].clock" :analysis="panels[side].analysis" :position-fen="currentFen" :active="activeSide === side" />
       </div>
-      <p v-if="error" role="status">{{ error }}</p>
-      <div v-if="game" class="arena-viewer">
-        <section class="arena-board" aria-label="Game board">
-          <div class="arena-player"><strong>{{ names.get(orientation === 'white' ? game.black_engine_id : game.white_engine_id) }}</strong><time>{{ clockLabel(orientation === 'white' ? 'black' : 'white') }}</time></div>
-          <ChessBoard :fen="currentMove?.position_fen ?? 'startpos'" :last-move="currentMove?.uci ?? ''" :orientation="orientation" :controls="false" />
-          <div class="arena-player"><strong>{{ names.get(orientation === 'white' ? game.white_engine_id : game.black_engine_id) }}</strong><time>{{ clockLabel(orientation === 'white' ? 'white' : 'black') }}</time></div>
-        </section>
-        <section class="arena-game" aria-label="Game details">
-          <header><StatusPill :status="snapshot?.status ?? game.status" /><strong v-if="snapshot?.result ?? game.result">{{ snapshot?.result ?? game.result }}</strong></header>
-          <p v-if="snapshot?.termination">{{ snapshot.termination }}</p>
-          <p v-if="snapshot?.secrets">Secret queens started on {{ snapshot.secrets.white }}2 and {{ snapshot.secrets.black }}7.</p>
-          <MoveList v-model="ply" :moves="moves.map(move => move.san)" :uci-moves="moves.map(move => move.uci)" />
-          <div class="arena-replay">
-            <button class="button button--secondary button--small" type="button" :disabled="ply === 0" @click="ply -= 1">Previous</button>
-            <button class="button button--secondary button--small" type="button" :disabled="ply >= moves.length" @click="ply += 1">Next</button>
-            <button class="button button--ghost button--small" type="button" @click="ply = moves.length">Latest</button>
-            <button class="button button--ghost button--small" type="button" @click="orientation = orientation === 'white' ? 'black' : 'white'">Flip board</button>
-          </div>
-        </section>
-      </div>
-      <SecretQueenStandings :contests="contests" :cast="detail.cast" :selected-contest="contest?.id ?? null" @select="selectContest" />
-    </div>
-  </main>
+    </template>
+    <template #board>
+      <ChessViewer :key="game?.id ?? 'pending'" v-model="ply" :opening="opening" :moves="moves" :label="title"
+        :finished="game?.status === 'finished'" :concealed-queens="concealedQueens" />
+    </template>
+    <template #activity>
+      <MoveList v-model="ply" :moves="moves.map(move => move.san || move.uci)" :uci-moves="moves.map(move => move.uci)" :fen="opening.fen" :annotations="annotations" />
+      <ChatPanel :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug"
+        :game-id="game?.id ?? null" @sent="appendChat" />
+    </template>
+    <SecretQueenStandings :contests="contests" :cast="detail.cast" :selected-contest="contest?.id ?? null" @select="selectContest" />
+  </EventArena>
 </template>
-
-<style scoped>
-.secret-queen-arena { padding-block: 2rem 4rem; background: var(--event-view-background); color: var(--event-view-text); }
-.arena-content { display: grid; gap: 1.5rem; }
-.arena-heading { display: grid; gap: .6rem; }
-.arena-heading a { display: flex; width: fit-content; gap: .45rem; align-items: center; color: var(--event-view-accent); }
-.arena-heading h1 { font-size: clamp(2rem, 4vw, 3rem); }
-.arena-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: .8rem; }
-.arena-filters select { background: #140d20; color: var(--event-view-text); }
-.arena-viewer { display: grid; grid-template-columns: minmax(0, 38rem) minmax(0, 1fr); gap: 1.2rem; }
-.arena-board, .arena-game { display: grid; gap: .65rem; align-content: start; }
-.arena-player, .arena-game header, .arena-replay { display: flex; align-items: center; gap: .5rem; }
-.arena-player, .arena-game header { justify-content: space-between; }
-.arena-player time { font-variant-numeric: tabular-nums; }
-.arena-game { padding: 1rem; border: 1px solid var(--event-view-border); border-radius: var(--radius-md); }
-.arena-game :deep(.move-list) { max-height: 27rem; --color-text: var(--event-view-text); --color-text-muted: var(--event-view-muted); --color-surface: #140d20; --color-border: var(--event-view-border); }
-.arena-replay { flex-wrap: wrap; }
-@media (max-width: 50rem) { .arena-viewer, .arena-filters { grid-template-columns: minmax(0, 1fr); } }
-</style>

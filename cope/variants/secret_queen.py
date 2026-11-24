@@ -143,6 +143,12 @@ class SecretQueenBoard:
     def concealed(self, color: chess.Color) -> bool:
         return self._secrets[color] is not None
 
+    def concealed_squares(self) -> dict[str, str | None]:
+        return {
+            chess.COLOR_NAMES[color]: None if square is None else chess.square_name(square)
+            for color, square in enumerate(self._secrets)
+        }
+
     def _key(self) -> tuple[str, ...]:
         fen = self.fen(en_passant="fen").split()
         if self._board.ep_square is not None and not any(

@@ -84,6 +84,7 @@ export interface MoveRecord {
   game_id?: Identifier
   ply: number
   uci: string
+  position_fen?: string | null
   san?: string
   is_book?: boolean
   eval_cp?: number | null

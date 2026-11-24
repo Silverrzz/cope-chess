@@ -41,6 +41,8 @@ const props = withDefaults(defineProps<{
   variant?: Variant | undefined
   moves?: string[]
   sanMoves?: string[]
+  recordedPositions?: Array<string | null | undefined>
+  concealedQueens?: Partial<Record<Color, string | null>> | undefined
   modelValue?: number
   orientation?: Color
   controls?: boolean
@@ -56,6 +58,7 @@ const props = withDefaults(defineProps<{
   fen: 'startpos',
   moves: () => [],
   sanMoves: () => [],
+  recordedPositions: () => [],
   orientation: 'white',
   controls: true,
   coordinates: true,
@@ -83,7 +86,7 @@ let annotationDrag: { pointerId: number; orig: Key; dest: Key | undefined } | nu
 let annotationArrows: DrawShape[] = []
 const selectedPly = ref(clampPly(props.modelValue ?? props.moves.length))
 
-const positions = computed(() => buildPositions(props.fen, props.moves, props.variant))
+const positions = computed(() => buildPositions(props.fen, props.moves, props.variant, props.recordedPositions))
 const position = computed(() => positions.value[clampPly(selectedPly.value)]!)
 const takPositions = computed(() => props.variant === 'tak' ? buildTakPositions(props.fen, props.moves) : [])
 const takPosition = computed(() => takPositions.value[clampPly(selectedPly.value)])
@@ -91,6 +94,18 @@ const previousTakPosition = computed(() => takPositions.value[clampPly(selectedP
 const roadWinner = computed(() => takPosition.value && props.controls && !props.compact ? takRoadWinner(takPosition.value) : null)
 const showRoads = ref(true)
 const currentFen = computed(() => takPosition.value ? takPositionText(takPosition.value) : positionFen(position.value))
+const concealedMarkers = computed<DrawShape[]>(() => {
+  const markers: DrawShape[] = []
+  for (const color of ['white', 'black'] as const) {
+    const square = props.concealedQueens?.[color]
+    if (!square || !/^[a-h][1-8]$/.test(square)) continue
+    const pawn = readGroundFen(currentFen.value).get(square as Key)
+    if (pawn?.role === 'pawn' && pawn.color === color) {
+      markers.push({ orig: square as Key, piece: { role: 'queen', color, scale: 1.12 } })
+    }
+  }
+  return markers
+})
 const keyboardSquareDescription = computed(() => {
   const square = keyboardSquare.value
   if (!square) return ''
@@ -116,7 +131,8 @@ const positionDescription = computed(() => {
   const side = position.value.turn === 'w' ? 'White' : 'Black'
   const duck = position.value.duckSquare
   const duckLabel = duck === null ? '' : ` Neutral duck on ${'abcdefgh'[duck % 8]}${8 - Math.floor(duck / 8)}.`
-  return `${status.value}. ${side} to move. ${material.value.label}.${duckLabel}`
+  const concealed = concealedMarkers.value.map(marker => ` ${marker.piece!.color} secret queen on ${marker.orig}.`).join('')
+  return `${status.value}. ${side} to move. ${material.value.label}.${duckLabel}${concealed}`
 })
 
 watch(() => props.modelValue, (next) => {
@@ -145,6 +161,7 @@ watch([
   () => props.compact,
   () => props.arrows.map((arrow) => `${arrow.color}:${arrow.move}:${arrow.fillColor || ''}:${arrow.outlineColor || ''}:${arrow.label || ''}`).join('|'),
   () => props.rings.join('|'),
+  concealedMarkers,
 ], renderBoard)
 
 watch(boardAnnotationsEnabled, (enabled) => {
@@ -350,6 +367,7 @@ function renderBoard(): void {
     },
   ]))
   const autoShapes = [
+    ...concealedMarkers.value,
     ...props.rings.filter(square => /^[a-h][1-8]$/.test(square)).map(square => ({ orig: square as Key, brush: 'brainRing' })),
     ...outlinedShapes,
     ...arrows.flatMap((arrow) => {
@@ -420,6 +438,7 @@ defineExpose({ selectPly, focusBoard })
         v-else
         ref="board"
         class="board-mount"
+        :class="{ 'board-mount--concealed-queens': concealedMarkers.length }"
         :role="editMode && editMode !== 'disabled' ? 'group' : 'img'"
         :tabindex="editMode && editMode !== 'disabled' ? 0 : undefined"
         :aria-label="editMode ? label : `${label}, ${positionDescription}`"
@@ -468,6 +487,8 @@ defineExpose({ selectPly, focusBoard })
 
 <style scoped>
 .board-frame { position: relative; container-type: inline-size; }
+.board-mount--concealed-queens :deep(cg-auto-pieces) { z-index: 1; }
+.board-mount--concealed-queens :deep(cg-auto-pieces piece.queen) { opacity: .6; }
 .board-mount :deep(piece.duck) {
   background-image: v-bind(duckImage);
   background-size: 85%;

@@ -3,6 +3,7 @@ export const secretQueenTheme = {
   "--event-view-text": "#f7f4fb",
   "--event-view-glow": "#2c1746",
   "--event-view-stage-glow": "#2c174680",
+  "--event-view-surface": "#140d20",
   "--event-view-accent": "#c5a3ff",
   "--event-view-highlight": "#e4d2ff",
   "--event-countdown-music-background": "#241438",

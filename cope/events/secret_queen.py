@@ -12,6 +12,7 @@ from cope.db.events import (
     set_event_status,
     update_event_identity,
 )
+from cope.variants.secret_queen import SecretQueenBoard
 
 from .registry import EventModule, register_event_module
 from .secret_queen_competition import CompetitionSettings, public_competition, save_settings, settings, start_competition
@@ -109,6 +110,7 @@ def _register_api(app):
         moves = list_moves(connection, game.id)
         pair = [item for item in list_games(connection, game.tournament_id) if (item.round, item.pair_index) == (game.round, game.pair_index)]
         files = None
+        concealed = None
         if len(pair) == 2 and all(item.status == "finished" for item in pair):
             row = connection.execute(
                 "SELECT white_file, black_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
@@ -116,10 +118,16 @@ def _register_api(app):
             ).fetchone()
             if row is not None:
                 files = {side: "abcdefgh"[row[f"{side}_file"]] for side in ("white", "black")}
+                board = SecretQueenBoard(files=(row["black_file"], row["white_file"]))
+                concealed = [board.concealed_squares()]
+                for move in moves:
+                    board.push(board.parse_uci(move.uci))
+                    concealed.append(board.concealed_squares())
         return _json({
             "moves": [{"ply": move.ply, "uci": move.uci, "san": move.san, "position_fen": move.position_fen,
                        "clock_after_ms": move.clock_after_ms} for move in moves],
             "status": game.status, "result": game.result, "termination": game.termination, "secrets": files,
+            "concealed_queens": concealed,
         })
 
     @app.put("/api/admin/events/{event_id}/secret-queen/announcement")

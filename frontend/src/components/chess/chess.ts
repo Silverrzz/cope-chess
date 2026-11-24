@@ -152,10 +152,11 @@ export function applyUci(position: Position, move: string, variant?: Variant): P
   return next
 }
 
-export function buildPositions(fen: string | null | undefined, moves: string[], variant?: Variant): Position[] {
+export function buildPositions(fen: string | null | undefined, moves: string[], variant?: Variant, recordedPositions: ReadonlyArray<string | null | undefined> = []): Position[] {
   const positions = [parseFen(fen)]
-  for (const move of moves) {
-    positions.push(applyUci(positions.at(-1)!, move, variant))
+  for (const [index, move] of moves.entries()) {
+    const recorded = recordedPositions[index]
+    positions.push(recorded ? parseFen(recorded) : applyUci(positions.at(-1)!, move, variant))
   }
   return positions
 }
