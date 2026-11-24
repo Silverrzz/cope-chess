@@ -18,8 +18,10 @@ import { buildTakPositions, takPositionText, takReserves, takRoadWinner } from '
 
 import {
   buildPositions,
+  chessMoveAnimationMs,
   materialSummary,
   positionFen,
+  queenRevealAnimationMs,
   isTurn,
   type Variant,
   type BoardArrow,
@@ -35,8 +37,6 @@ const arrowBrushes: DrawBrushes = {
   engineWhite: { key: 'engine-white', color: '#ffffff', opacity: 0.72, lineWidth: 8 },
 }
 const duckImage = `url("${duckIcon}")`
-const queenRevealDuration = 620
-const moveAnimationDuration = 150
 
 const props = withDefaults(defineProps<{
   fen?: string | null
@@ -85,7 +85,7 @@ const keyboardSquare = ref<Key | null>(null)
 const keyboardHelpId = useId()
 const { boardAnnotationsEnabled } = useViewerSettings()
 const queenReveal = ref<{ color: Color; left: string; top: string } | null>(null)
-const queenRevealTiming = `${queenRevealDuration}ms`
+const queenRevealTiming = `${queenRevealAnimationMs}ms`
 let ground: ChessgroundApi | null = null
 let revealTimer: number | undefined
 let revealStartedFollowing = false
@@ -201,7 +201,7 @@ onMounted(() => {
       ...editorConfig,
       viewOnly: !editing,
       coordinates: props.coordinates,
-      animation: { enabled: !props.compact, duration: moveAnimationDuration },
+      animation: { enabled: !props.compact, duration: chessMoveAnimationMs },
       drawable: { enabled: false, brushes: arrowBrushes },
     })
     renderBoard()
@@ -408,7 +408,7 @@ function renderBoard(): void {
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
-    animation: { enabled: !props.compact, duration: moveAnimationDuration },
+    animation: { enabled: !props.compact, duration: chessMoveAnimationMs },
     drawable: { autoShapes, brushes: { ...arrowBrushes, brainRing: { key: 'brain-ring', color: arrowBrushes.yellow.color, opacity: .8, lineWidth: 5 }, ...fillBrushes, ...outlineBrushes } },
   }
   const pieces: PiecesDiff = new Map([...ground.state.pieces.keys()].map((key) => [key, undefined]))
@@ -441,8 +441,8 @@ function renderBoard(): void {
         revealTimer = window.setTimeout(() => {
           revealTimer = undefined
           renderBoard()
-        }, moveAnimationDuration)
-      }, queenRevealDuration)
+        }, chessMoveAnimationMs)
+      }, queenRevealAnimationMs)
       return
     }
   }

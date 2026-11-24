@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { api } from "@/api/client";
 import ChessViewer from "@/components/chess/ChessViewer.vue";
 import MoveList from "@/components/chess/MoveList.vue";
-import { buildPositions, positionFen, squareIndex, type Color } from "@/components/chess/chess";
+import { buildPositions, chessMoveAnimationMs, positionFen, queenRevealAnimationMs, squareIndex, type Color } from "@/components/chess/chess";
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
@@ -30,6 +30,7 @@ const analysis = ref<Partial<Record<Color, EngineAnalysis>>>({});
 const clock = ref<{ state: ClockState; observed: number } | null>(null);
 const now = ref(Date.now());
 const ply = ref(0);
+const reviewing = ref(false);
 const error = ref("");
 const followedGameId = ref<number>();
 const resultDisplayMs = 4500;
@@ -38,6 +39,8 @@ let request: AbortController | null = null;
 let refreshTimer: number | undefined;
 let clockTimer: number | undefined;
 let resultTimer: number | undefined;
+let moveTimer: number | undefined;
+let historyLoaded = false;
 
 const playable = computed(() => props.contests.filter(contest => contest.games.length));
 const pinnedGame = computed(() => typeof route.query.game_id === "string" ? route.query.game_id : null);
@@ -68,6 +71,7 @@ const opening = computed(() => viewer.value?.opening ?? { name: "Start position"
 const positions = computed(() => buildPositions(opening.value.fen, moves.value.map(move => move.uci), undefined, moves.value.map(move => move.position_fen)));
 const currentFen = computed(() => positionFen(positions.value[ply.value] ?? positions.value[0]!));
 const historical = computed(() => game.value?.status === "finished" || ply.value < moves.value.length);
+const displayedMoves = computed(() => reviewing.value || ply.value === moves.value.length ? moves.value : moves.value.slice(0, ply.value));
 const concealedQueens = computed(() => {
   const starts = viewer.value?.secret_queen_squares;
   if (!starts) return;
@@ -91,16 +95,10 @@ const activeSide = computed(() => historical.value || !clock.value?.state.runnin
 const engines = computed(() => ({ white: game.value?.white_engine_id, black: game.value?.black_engine_id }));
 const title = computed(() => game.value ? matchup(game.value) : props.detail.event.title);
 const status = computed(() => game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
-const followingLive = computed(() => !pinnedContest.value && !historical.value);
-const annotations = computed(() => moves.value.map((move, index) => {
-  if (move.uci.length !== 4 || !move.position_fen) return null;
+const followingLive = computed(() => !pinnedContest.value && !reviewing.value && game.value?.status !== "finished");
+const annotations = computed(() => displayedMoves.value.map((_, index) => {
   if (capturedKing(index)) return { label: "King captured" };
-  const before = positions.value[index];
-  const after = positions.value[index + 1];
-  const source = before?.squares[squareIndex(move.uci.slice(0, 2))];
-  const target = after?.squares[squareIndex(move.uci.slice(2, 4))];
-  return (source === "P" && target === "Q") || (source === "p" && target === "q")
-    ? { label: "Queen revealed" } : null;
+  return queenRevealed(index) ? { label: "Queen revealed" } : null;
 }));
 const ending = computed(() => {
   if (!game.value?.result) return "";
@@ -153,6 +151,8 @@ function selectContest(contestId: number, tab?: "games"): void {
 }
 
 function followLive(): void {
+  stopMovePlayback();
+  reviewing.value = false;
   ply.value = moves.value.length;
   if (pinnedGame.value) selectGame();
   else if (game.value?.status === "finished") advanceFollowingGame();
@@ -209,22 +209,49 @@ function capturedKing(index: number): boolean {
   return (victim === "k" || victim === "K") && !after.squares.includes(victim);
 }
 
-function acceptMoves(next: MoveRecord[]): void {
-  const previousLength = moves.value.length;
-  const atEnd = ply.value >= previousLength;
+function queenRevealed(index: number): boolean {
+  const move = moves.value[index];
+  if (!move?.position_fen || move.uci.length !== 4) return false;
+  const source = positions.value[index]?.squares[squareIndex(move.uci.slice(0, 2))];
+  const target = positions.value[index + 1]?.squares[squareIndex(move.uci.slice(2, 4))];
+  return (source === "P" && target === "Q") || (source === "p" && target === "q");
+}
+
+function stopMovePlayback(): void {
+  window.clearTimeout(moveTimer);
+  moveTimer = undefined;
+}
+
+function seekMove(next: number): void {
+  if (next === ply.value) return;
+  stopMovePlayback();
+  ply.value = next;
+  reviewing.value = next < moves.value.length;
+}
+
+function playNextMove(): void {
+  if (moveTimer !== undefined || reviewing.value || ply.value >= moves.value.length) return;
+  const reveal = queenRevealed(ply.value) && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  ply.value += 1;
+  const duration = chessMoveAnimationMs + (reveal ? queenRevealAnimationMs : 0) + 80;
+  moveTimer = window.setTimeout(() => {
+    moveTimer = undefined;
+    if (ply.value < moves.value.length) playNextMove();
+    else if (resultTimer !== undefined) scheduleGameSwitch(resultDisplayMs);
+  }, duration);
+}
+
+function acceptMoves(next: MoveRecord[], snapshot = false): void {
+  const replace = next.length < moves.value.length || (snapshot && !historyLoaded);
+  historyLoaded = true;
   moves.value = next;
-  if (atEnd && (previousLength > 0 || resultTimer !== undefined) && next.length > previousLength + 1 && capturedKing(next.length - 1)) {
-    const id = game.value?.id;
-    const finalPly = next.length;
-    ply.value = finalPly - 1;
-    void nextTick(() => {
-      window.requestAnimationFrame(() => {
-        if (id === game.value?.id && moves.value.length === finalPly && ply.value === finalPly - 1) ply.value = finalPly;
-      });
-    });
+  if (replace) {
+    stopMovePlayback();
+    reviewing.value = false;
+    ply.value = next.length;
     return;
   }
-  ply.value = atEnd ? next.length : Math.min(ply.value, next.length);
+  playNextMove();
 }
 
 function acceptClock(state: ClockState): void {
@@ -257,7 +284,7 @@ async function loadViewer(): Promise<void> {
     if (pending.signal.aborted || game.value?.id !== id) return;
     viewer.value = response;
     if (response.viewer_moves.length >= moves.value.length || response.viewer_game?.status === "pending") {
-      acceptMoves(response.viewer_moves);
+      acceptMoves(response.viewer_moves, true);
     }
     analysis.value = response.engine_data ?? {};
     if (response.clock_state) acceptClock(response.clock_state);
@@ -275,6 +302,14 @@ function advanceFollowingGame(): void {
   followedGameId.value = automaticGame.value?.id;
 }
 
+function scheduleGameSwitch(delay: number): void {
+  window.clearTimeout(resultTimer);
+  resultTimer = window.setTimeout(() => {
+    if (moveTimer !== undefined) scheduleGameSwitch(resultDisplayMs);
+    else advanceFollowingGame();
+  }, delay);
+}
+
 watch([pinnedGame, () => automaticGame.value?.id, () => game.value?.status], ([pinned, next], [previousPin]) => {
   if (pinned !== null || previousPin || game.value?.status !== "finished" || game.value.id === next || game.value.id !== followedGameId.value) {
     advanceFollowingGame();
@@ -282,13 +317,12 @@ watch([pinnedGame, () => automaticGame.value?.id, () => game.value?.status], ([p
   }
   if (resultTimer !== undefined) return;
   const finishedId = game.value.id;
-  resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs + 2000);
+  scheduleGameSwitch(resultDisplayMs + 2000);
   request?.abort();
   request = null;
   void loadViewer().then(() => {
     if (resultTimer === undefined || game.value?.id !== finishedId) return;
-    window.clearTimeout(resultTimer);
-    resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs);
+    scheduleGameSwitch(resultDisplayMs);
   });
 }, { immediate: true });
 
@@ -297,6 +331,9 @@ watch([() => contest.value?.tournament_id, () => game.value?.id], ([tournament, 
   stream = null;
   request?.abort();
   request = null;
+  stopMovePlayback();
+  historyLoaded = false;
+  reviewing.value = false;
   viewer.value = null;
   moves.value = [];
   analysis.value = {};
@@ -311,7 +348,7 @@ watch([() => contest.value?.tournament_id, () => game.value?.id], ([tournament, 
   source.addEventListener("tournament.snapshot", event => {
     const snapshot = parseStream<LiveSnapshot>(event);
     if (stream !== source || Number(snapshot?.game?.id) !== id || !snapshot) return;
-    if (snapshot.moves && (snapshot.moves.length >= moves.value.length || snapshot.game?.status === "pending")) acceptMoves(snapshot.moves);
+    if (snapshot.moves && (snapshot.moves.length >= moves.value.length || snapshot.game?.status === "pending")) acceptMoves(snapshot.moves, true);
     if (snapshot.engine_data) analysis.value = snapshot.engine_data;
     if (snapshot.clock_state) acceptClock(snapshot.clock_state);
   });
@@ -349,6 +386,7 @@ onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
   window.clearInterval(clockTimer);
   window.clearTimeout(resultTimer);
+  stopMovePlayback();
 });
 </script>
 
@@ -384,11 +422,13 @@ onBeforeUnmount(() => {
       </div>
     </template>
     <template #board>
-      <ChessViewer :key="game?.id ?? 'pending'" v-model="ply" :opening="opening" :moves="moves" :label="title"
-        :finished="game?.status === 'finished'" :concealed-queens="concealedQueens" animate-queen-reveal />
+      <ChessViewer :key="game?.id ?? 'pending'" :model-value="ply" :opening="opening" :moves="displayedMoves" :label="title"
+        :finished="game?.status === 'finished' && ply === moves.length" :concealed-queens="concealedQueens"
+        animate-queen-reveal @update:model-value="seekMove" />
     </template>
     <template #activity>
-      <MoveList v-model="ply" :moves="moves.map(move => move.san || move.uci)" :uci-moves="moves.map(move => move.uci)" :fen="opening.fen" :annotations="annotations" />
+      <MoveList :model-value="ply" :moves="displayedMoves.map(move => move.san || move.uci)"
+        :uci-moves="displayedMoves.map(move => move.uci)" :fen="opening.fen" :annotations="annotations" @update:model-value="seekMove" />
       <ChatPanel :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug"
         :game-id="game?.id ?? null" @sent="appendChat" />
     </template>

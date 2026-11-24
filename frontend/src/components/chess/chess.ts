@@ -1,4 +1,6 @@
 export const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+export const chessMoveAnimationMs = 150
+export const queenRevealAnimationMs = 620
 
 export type Color = 'white' | 'black'
 export type Variant = 'standard' | 'dfrc' | 'duck' | 'duck960' | 'tak'
