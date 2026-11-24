@@ -50,6 +50,7 @@ export interface SecretQueenContest {
 }
 export interface SecretQueenCompetition {
   contests: SecretQueenContest[];
+  planned_contests?: SecretQueenContest[];
   winner_engine_id: number | null;
   launch_ready: boolean;
 }

@@ -6,7 +6,7 @@ import EventBracket, { bracketGroupHeight, type BracketGroup, type BracketMatch 
 import { secretQueenTheme } from "./theme";
 import type { SecretQueenContest } from "./types";
 
-const props = defineProps<{ contests: SecretQueenContest[]; cast: EventCastMember[]; selectedContest?: number | null }>();
+const props = defineProps<{ contests: SecretQueenContest[]; cast: EventCastMember[]; selectedContest?: number | null; preview?: boolean }>();
 const emit = defineEmits<{ select: [contest: number] }>();
 const columnStep = 273;
 const groupGap = 9;
@@ -15,18 +15,19 @@ const stages = computed(() => ["Quarterfinal", "Semifinal", "Final"].map(title =
   title, matches: props.contests.filter(contest => contest.kind === "bracket" && contest.stage === title),
 })).filter(stage => stage.matches.length));
 const seeds = computed(() => {
-  const list: Array<{ groupId: number; rank: number; name: string; id: number | undefined }> = [];
+  const list: Array<{ groupId: number; rank: number; name: string; tag: string; id: number | undefined }> = [];
   const maximum = Math.max(0, ...groups.value.map(group => group.qualifier_count));
   for (let rank = 0; rank < maximum; rank += 1) {
-    for (const group of groups.value) {
+    for (const [index, group] of groups.value.entries()) {
       if (rank < group.qualifier_count) {
-        list.push({ groupId: group.id, rank, name: group.title + " · #" + (rank + 1), id: group.qualified[rank] });
+        list.push({ groupId: group.id, rank, name: group.title + " · #" + (rank + 1), tag: `G${index + 1} #${rank + 1}`, id: group.qualified[rank] });
       }
     }
   }
   return list;
 });
 const sourceLabels = computed(() => Object.fromEntries(seeds.value.map((seed, index) => [index + 1, seed.name])));
+const sourceTags = computed(() => groups.value.length > 1 ? Object.fromEntries(seeds.value.map((seed, index) => [index + 1, seed.tag])) : undefined);
 const seeded = computed(() => new Map(seeds.value.flatMap((seed, index) => seed.id === undefined ? [] : [[seed.id, index + 1]])));
 const entrants = computed(() => props.cast.flatMap(member => member.engine_version_id == null ? [] : [{
   id: Number(member.engine_version_id),
@@ -46,7 +47,7 @@ const groupRows = computed(() => groups.value.map(group => {
     qualified: group.qualified.includes(row.engine_id),
   }));
 }));
-const groupsHeight = computed(() => groupRows.value.reduce((height, rows) => height + bracketGroupHeight(rows.length) + groupGap, 0) - groupGap);
+const groupsHeight = computed(() => groupRows.value.reduce((height, rows) => height + bracketGroupHeight(rows.length, props.preview) + groupGap, 0) - groupGap);
 const rowsHeight = computed(() => Math.max(groupsHeight.value, ...stages.value.map(stage => stage.matches.length * 90), 90));
 const rounds = computed(() => ["Swiss groups", ...stages.value.map(stage => stage.title === "Final" ? stage.title : stage.title + "s")]
   .map((title, index) => ({ title, x: 12 + index * columnStep, number: String(index + 1).padStart(2, "0") })));
@@ -54,8 +55,8 @@ const groupNodes = computed<BracketGroup[]>(() => {
   let y = 16 + Math.round((rowsHeight.value - groupsHeight.value) / 2);
   return groups.value.map((group, index) => {
     const rows = groupRows.value[index]!;
-    const node = { id: group.id, title: group.title, x: rounds.value[0]!.x, y, status: group.status, selectable: group.games.length > 0, rows };
-    y += bracketGroupHeight(rows.length) + groupGap;
+    const node = { id: group.id, title: group.title, x: rounds.value[0]!.x, y, status: group.status, selectable: group.games.length > 0, preview: props.preview, rows };
+    y += bracketGroupHeight(rows.length, props.preview) + groupGap;
     return node;
   });
 });
@@ -95,7 +96,7 @@ function pairScore(match: SecretQueenContest): number[] {
   <div id="secret-queen-competition" class="competition-overview" :style="secretQueenTheme">
     <EventBracket frameless :groups="groupNodes" :matches="bracket" :entrants="entrants" :rounds="rounds"
       :width="rounds.length * columnStep - 29" :height="rowsHeight + 48" :selected="selectedContest ?? undefined"
-      :source-labels="sourceLabels" @select="emit('select', $event)" />
+      :source-labels="sourceLabels" :source-tags="sourceTags" @select="emit('select', $event)" />
   </div>
 </template>
 

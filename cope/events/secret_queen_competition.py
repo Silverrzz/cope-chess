@@ -285,6 +285,32 @@ def advance_competition(connection, tournament):
     return TournamentAdvance(complete=True)
 
 
+def _planned_contests(configured: CompetitionSettings, bracket: tuple) -> list[dict]:
+    matches = [
+        {
+            "key": f"group-{index + 1}", "title": group.name.strip(), "stage": "Swiss", "kind": "group",
+            "engine_ids": group.engine_ids, "sources": [], "qualifier_count": group.qualifiers, "rounds": group.rounds,
+        }
+        for index, group in enumerate(configured.groups) if group.engine_ids
+    ]
+    stage_titles = dict(STAGES)
+    matches.extend(
+        {
+            "key": key, "title": title, "stage": stage_titles[stage], "kind": "bracket",
+            "engine_ids": [], "sources": sources, "qualifier_count": 0, "rounds": 0,
+        }
+        for key, title, stage, sources in bracket
+    )
+    return [
+        {
+            **match, "id": -index, "status": "scheduled", "result": "", "tournament_id": None,
+            "winner_engine_id": None, "winning_pair": None, "qualified": [], "standings": [], "games": [],
+            "time_control": None,
+        }
+        for index, match in enumerate(matches, start=1)
+    ]
+
+
 def public_competition(connection, event) -> dict:
     links = {row["contest_id"]: row["tournament_id"] for row in connection.execute(
         "SELECT contest_id, tournament_id FROM secret_queen_event_tournaments WHERE event_id = ?", (event.id,),
@@ -310,12 +336,19 @@ def public_competition(connection, event) -> dict:
                        "status": game.status, "result": game.result} for game in games],
             "time_control": None if tournament is None else tournament.config.time_control.model_dump(mode="json"),
         })
+    planned = []
     launch_ready = False
-    if event.status in PRE_START and event.published_at:
+    if not contests and event.status in PRE_START:
+        configured = settings(event)
+        bracket = ()
         try:
-            _validate_start(settings(event))
+            bracket = KNOCKOUT_BRACKETS[_validate_start(configured)]
         except ValueError:
             pass
         else:
-            launch_ready = True
-    return {"contests": contests, "winner_engine_id": event.state.get("winner_engine_id"), "launch_ready": launch_ready}
+            launch_ready = event.published_at is not None
+        planned = _planned_contests(configured, bracket)
+    return {
+        "contests": contests, "planned_contests": planned,
+        "winner_engine_id": event.state.get("winner_engine_id"), "launch_ready": launch_ready,
+    }

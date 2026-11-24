@@ -15,6 +15,7 @@ import AppIcon from "@/components/ui/AppIcon.vue";
 import type { ChatMessage, ClockState, EngineAnalysis, EngineEvaluationRange, LiveSnapshot, MoveRecord, TournamentDetailResponse } from "@/components/public/types";
 import type { EventDetailResponse } from "@/types/events";
 import EventArena from "../EventArena.vue";
+import SecretQueenInfo from "./SecretQueenInfo.vue";
 import SecretQueenStandings from "./SecretQueenStandings.vue";
 import type { SecretQueenContest, SecretQueenGame } from "./types";
 
@@ -293,6 +294,7 @@ onBeforeUnmount(() => {
   <EventArena :title="detail.event.title" :slug="detail.event.slug" :status="status" :game-context="gameContext"
     :spectator-count="detail.spectator_count" :can-follow-live="!followingLive && ['live', 'intermission'].includes(detail.event.status)"
     :error="error" @follow-live="followLive" @retry="loadViewer">
+    <template #title-leading><SecretQueenInfo compact /></template>
     <template #selectors>
       <label v-if="playable.length > 1">Group or match
         <select :value="contest?.id" @change="selectContest(Number(($event.target as HTMLSelectElement).value))">

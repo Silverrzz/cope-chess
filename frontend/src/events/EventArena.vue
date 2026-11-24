@@ -71,6 +71,7 @@ onBeforeUnmount(() => {
     <header ref="heading" class="tournament-heading">
       <div class="tournament-heading__title">
         <div class="title-line">
+          <slot name="title-leading" />
           <h1>{{ title }}</h1>
           <span class="relay-status">{{ status }}</span>
           <span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ spectatorCount.toLocaleString() }}</span>

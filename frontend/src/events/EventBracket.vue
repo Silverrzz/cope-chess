@@ -20,14 +20,16 @@ export interface BracketGroup {
   y: number;
   status: string;
   selectable: boolean;
+  preview?: boolean | undefined;
   rows: { id: number; points: number; buchholz: number; seed: number | undefined; qualified: boolean }[];
 }
 
-const groupRowsTop = 36;
+const groupTitleHeight = 21;
+const groupScoreHeaderHeight = 15;
 const rowHeight = 21;
 
-export function bracketGroupHeight(rowCount: number): number {
-  return groupRowsTop + rowCount * rowHeight + 8;
+export function bracketGroupHeight(rowCount: number, preview = false): number {
+  return groupTitleHeight + (preview ? 0 : groupScoreHeaderHeight) + rowCount * rowHeight + 8;
 }
 </script>
 
@@ -45,6 +47,7 @@ const props = defineProps<{
   frameless?: boolean;
   groups?: BracketGroup[];
   sourceLabels?: Record<string, string>;
+  sourceTags?: Record<string, string> | undefined;
 }>();
 const emit = defineEmits<{ select: [id: number, button: HTMLButtonElement]; cheer: [id: number] }>();
 const zoom = ref(1);
@@ -58,12 +61,13 @@ const byKey = computed(() => new Map(nodes.value.map(node => [node.key, node])))
 const groupSources = computed(() => new Map((props.groups ?? []).flatMap(group =>
   group.rows.flatMap((row, index) => row.seed === undefined ? [] : [[row.seed, {
     x: group.x,
-    y: group.y + groupRowsTop + (index + .5) * rowHeight,
+    y: group.y + (group.preview ? bracketGroupHeight(group.rows.length, true) / 2 : groupTitleHeight + groupScoreHeaderHeight + (index + .5) * rowHeight),
     qualified: row.qualified,
   }]] as const),
 )));
 const edges = computed(() => nodes.value.flatMap(node => node.sources.flatMap((source, index) => {
   if (typeof source === "number") {
+    if (props.groups?.length !== 1) return [];
     const parent = groupSources.value.get(source);
     if (!parent) return [];
     return [{ key: source + "-" + node.key, path: wire(parent.x + 220, parent.y, node.x, node.y + 29 + index * rowHeight), advanced: parent.qualified }];
@@ -81,6 +85,10 @@ function sourceName(source: number | string | undefined): string {
   if (source === undefined) return "Awaiting qualifier";
   return props.sourceLabels?.[source] ?? (typeof source === "string" ? "Winner " + source : "Seed " + source);
 }
+
+function groupSourceTag(source: number | string | undefined): string | undefined {
+  return typeof source === "number" ? props.sourceTags?.[source] : undefined;
+}
 </script>
 
 <template>
@@ -95,19 +103,21 @@ function sourceName(source: number | string | undefined): string {
           </svg>
           <article v-for="group in groups" :key="group.id" class="match-node group-node"
             :class="{ selected: group.id === selected, live: group.status === 'live', 'match-node--static': !group.selectable }"
-            :aria-label="group.title" :style="{ left: group.x + 'px', top: group.y + labelOffset + 'px', height: bracketGroupHeight(group.rows.length) + 'px' }">
+            :aria-label="group.title" :style="{ left: group.x + 'px', top: group.y + labelOffset + 'px', height: bracketGroupHeight(group.rows.length, group.preview) + 'px' }">
             <button v-if="group.selectable" type="button" class="match-select" :aria-pressed="group.id === selected"
               :aria-label="'View ' + group.title + ' games'" @click="emit('select', group.id, $event.currentTarget as HTMLButtonElement)" />
             <span class="node-meta"><b>{{ group.title }}</b><span v-if="group.status === 'live'">● LIVE</span></span>
-            <div class="group-columns"><span>Pts</span><abbr title="Buchholz: sum of opponents’ scores, counted once per completed game">BH</abbr></div>
+            <div v-if="!group.preview" class="group-columns"><span>Pts</span><abbr title="Buchholz: sum of opponents’ scores, counted once per completed game">BH</abbr></div>
             <ol>
               <li v-for="(row, index) in group.rows" :key="row.id" class="node-team"
-                :class="{ 'group-advancing': row.seed !== undefined, 'group-qualified': row.qualified }">
+                :class="{ 'group-advancing': !group.preview && row.seed !== undefined, 'group-qualified': row.qualified }">
                 <i aria-hidden="true" />
-                <small>{{ index + 1 }}</small>
+                <small v-if="!group.preview">{{ index + 1 }}</small>
                 <strong :title="entrant(row.id)?.name">{{ entrant(row.id)?.name ?? 'Engine ' + row.id }}</strong>
-                <b><span class="sr-only">Points </span>{{ row.points }}</b>
-                <span><span class="sr-only">Buchholz </span>{{ row.buchholz }}</span>
+                <template v-if="!group.preview">
+                  <b><span class="sr-only">Points </span>{{ row.points }}</b>
+                  <span><span class="sr-only">Buchholz </span>{{ row.buchholz }}</span>
+                </template>
               </li>
             </ol>
           </article>
@@ -119,7 +129,8 @@ function sourceName(source: number | string | undefined): string {
             <span v-for="(id, index) in node.entrantIds" :key="index" class="node-team" :class="{ winner: id && node.winnerId === id, eliminated: node.winnerId && node.winnerId !== id }">
               <i :style="{ background: entrant(id)?.color || 'var(--color-border-strong)' }" />
               <small>{{ entrant(id)?.seed ?? '↳' }}</small>
-              <strong>{{ entrant(id)?.name ?? sourceName(node.sources[index]) }}</strong>
+              <strong :title="entrant(id)?.name">{{ entrant(id)?.name ?? sourceName(node.sources[index]) }}</strong>
+              <small v-if="entrant(id) && groupSourceTag(node.sources[index])" class="group-source-tag" :title="sourceName(node.sources[index])">{{ groupSourceTag(node.sources[index]) }}</small>
               <b>{{ node.score?.[index] ?? '' }}</b>
               <button v-if="floating && id != null && entrant(id)" type="button" class="node-cheer" :style="{ '--team-color': entrant(id)?.color }"
                 :data-cheer-team-id="id" :aria-label="'Cheer for ' + entrant(id)?.name" :title="'Cheer for ' + entrant(id)?.name" @click="emit('cheer', id)"><span aria-hidden="true">🎉</span></button>
@@ -149,6 +160,7 @@ function sourceName(source: number | string | undefined): string {
 .group-node .group-advancing i { background: var(--color-accent); }
 .group-node .group-qualified strong { color: var(--color-success); }
 .group-node .node-team > span { color: var(--color-text-muted); font-size: .65rem; }
+.node-team .group-source-tag { flex-shrink: 0; width: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .match-select { position: absolute; z-index: 1; inset: 0; padding: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
 .match-select:focus-visible { outline: none; }
 .node-cheer { position: relative; z-index: 2; display: grid; place-items: center; flex: 0 0 1.5rem; height: 1.25rem; padding: 0; border: 1px solid transparent; border-radius: .25rem; background: transparent; color: var(--color-text); font-size: .75rem; line-height: 1; cursor: pointer; }
