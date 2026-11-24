@@ -66,4 +66,4 @@ def notification_text(fact: dict, origin: str) -> str:
             black = safe(" / ".join(data["black"] or []), 78)
             content = f"{white} vs {black} started in {title}"
         url = game_url(fact, origin)
-    return f"{mentions} {content}: {url}"
+    return f"{mentions} {content}: <{url}>"
