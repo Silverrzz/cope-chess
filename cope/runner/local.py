@@ -178,6 +178,8 @@ def run_tournament_service(config: RunnerServiceConfig) -> None:
 def run_tournament_matches(
     connection: sqlite3.Connection,
 ) -> RunnerReport:
+    from cope.db.events import list_event_tournament_links
+
     requeued_tournaments = requeue_resumable_paused_games(connection)
     prepared = prepare_scheduled_tournaments(connection)
     tournaments_finished = finish_completed_tournaments(connection)
@@ -185,15 +187,15 @@ def run_tournament_matches(
     connection.commit()
     for tournament_id in requeued_tournaments:
         publish_tournament_event(tournament_id)
+    started_events = set()
     for result in prepared:
         if result.skipped_reason is None:
             publish_tournament_event(result.tournament_id)
-            fixture = connection.execute(
-                "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
-                (result.tournament_id,),
-            ).fetchone()
-            if fixture is not None:
-                publish_stream_event(f"event.{fixture['event_id']}", "event.changed", {"event_id": fixture["event_id"]})
+            started_events.update(
+                link["event_id"] for link in list_event_tournament_links(connection, tournament_id=result.tournament_id)
+            )
+    for event_id in started_events:
+        publish_stream_event(f"event.{event_id}", "event.changed", {"event_id": event_id})
     if tournaments_finished:
         for tournament in list_tournaments(connection):
             if tournament.status == "finished":

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
+import { useRouter } from "vue-router";
 
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventDetailResponse } from "@/types/events";
@@ -12,13 +13,23 @@ import type { SecretQueenCompetition } from "./types";
 import { secretQueenTheme } from "./theme";
 
 const props = defineProps<{ detail: EventDetailResponse; clockOffsetMs?: number; view?: string }>();
+const router = useRouter();
 const competition = computed(() => props.detail.custom as SecretQueenCompetition);
 const contests = computed(() => competition.value.contests ?? []);
 const champion = computed(() => props.detail.awards.find(award => award.award_key === "champion"));
+const arenaRoute = computed(() => ({ name: "event-arena", params: { slug: props.detail.event.slug } }));
+const arenaOpen = computed(() => props.detail.arena_available !== false
+  && contests.value.some(contest => contest.games.length)
+  && ["live", "intermission"].includes(props.detail.event.status));
+const pendingStart = computed(() => competition.value.launch_ready ? "Opening the arena…" : "Waiting for competition setup");
+
+watch(arenaOpen, (open) => {
+  if (open && props.view === "event") void router.replace(arenaRoute.value);
+});
 </script>
 
 <template>
-  <EventAnnouncement v-if="!contests.length" :detail="detail" :clock-offset-ms="clockOffsetMs ?? 0" :style="secretQueenTheme">
+  <EventAnnouncement v-if="!contests.length" :detail="detail" :clock-offset-ms="clockOffsetMs ?? 0" :countdown-music="view !== 'arena'" :pending-start="pendingStart" :style="secretQueenTheme">
     <template #backdrop><SecretQueenInterference announcement /></template>
     <template #art><SecretQueenArt /></template>
   </EventAnnouncement>
@@ -30,7 +41,7 @@ const champion = computed(() => props.detail.awards.find(award => award.award_ke
         <div class="competition-emblem"><SecretQueenArt /></div>
         <span>{{ champion ? 'Secret Queen champion' : 'Secret Queen' }}</span>
         <h1>{{ champion?.recipient_label ?? detail.stages.find(stage => stage.status === 'active')?.title ?? detail.event.title }}</h1>
-        <RouterLink class="competition-action" :to="{ name: 'event-arena', params: { slug: detail.event.slug } }">
+        <RouterLink v-if="arenaOpen || champion" class="competition-action" :to="arenaRoute">
           {{ champion ? 'Replay games' : 'Enter arena' }} <AppIcon name="arrow-right" :size="18" />
         </RouterLink>
       </div>

@@ -9,7 +9,7 @@ defineProps<{ summary: EventSummary; current?: boolean; nowMs?: number }>();
 </script>
 
 <template>
-  <EventArchiveHero :summary="summary" :style="secretQueenTheme">
+  <EventArchiveHero :summary="summary" :now-ms="current ? nowMs : undefined" :style="secretQueenTheme">
     <template v-if="current" #date-placeholder><span>Date TBD</span></template>
     <template #backdrop><SecretQueenInterference /></template>
     <template #art><SecretQueenArt /></template>

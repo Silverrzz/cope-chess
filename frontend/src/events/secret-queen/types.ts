@@ -16,7 +16,6 @@ export interface SecretQueenSettings {
   knockout_clock: SecretQueenClock;
   hash_mb: number;
   group_concurrency: number;
-  auto_start: boolean;
 }
 
 export interface SecretQueenGame {
@@ -50,6 +49,7 @@ export interface SecretQueenContest {
 export interface SecretQueenCompetition {
   contests: SecretQueenContest[];
   winner_engine_id: number | null;
+  launch_ready: boolean;
 }
 
 export interface SecretQueenEngineChoice {

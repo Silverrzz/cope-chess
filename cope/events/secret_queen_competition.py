@@ -27,6 +27,11 @@ BRACKET = (
     ("s1", "S1", "semifinal", ("q1", "q2")), ("s2", "S2", "semifinal", ("q3", "q4")),
     ("final", "Final", "final", ("s1", "s2")),
 )
+KNOCKOUT_BRACKETS = {
+    2: (("final", "Final", "final", (1, 2)),),
+    4: (("s1", "S1", "semifinal", (1, 4)), ("s2", "S2", "semifinal", (2, 3)), BRACKET[-1]),
+    8: BRACKET,
+}
 PRE_START = {"draft", "announced", "scheduled", "postponed"}
 
 
@@ -43,7 +48,6 @@ class CompetitionSettings(BaseModel):
     knockout_clock: IncrementTimeControl = IncrementTimeControl(initial_ms=120000, increment_ms=1000)
     hash_mb: int = Field(default=16, ge=1, le=1024)
     group_concurrency: int = Field(default=1, ge=1, le=128)
-    auto_start: bool = False
 
 
 def settings(event) -> CompetitionSettings:
@@ -78,13 +82,15 @@ def save_settings(connection, event, configured: CompetitionSettings) -> None:
     )
 
 
-def _validate_start(configured: CompetitionSettings) -> None:
+def _validate_start(configured: CompetitionSettings) -> int:
     if not configured.groups or any(len(group.engine_ids) < 2 for group in configured.groups):
         raise ValueError("Each Swiss group needs at least two engines.")
     if any(group.qualifiers > len(group.engine_ids) for group in configured.groups):
         raise ValueError("A group cannot qualify more engines than it contains.")
-    if sum(group.qualifiers for group in configured.groups) != 8:
-        raise ValueError("Exactly eight engines must qualify for the quarterfinals.")
+    qualifiers = sum(group.qualifiers for group in configured.groups)
+    if qualifiers not in KNOCKOUT_BRACKETS:
+        raise ValueError("Choose 2, 4, or 8 qualifiers for the knockout bracket.")
+    return qualifiers
 
 
 def _tournament_config(configured, engine_ids, *, rounds=None):
@@ -118,12 +124,14 @@ def start_competition(connection, event_id: int) -> list[int]:
     if not event.published_at:
         raise ValueError("Publish the event before starting the competition.")
     configured = settings(event)
-    _validate_start(configured)
+    bracket = KNOCKOUT_BRACKETS[_validate_start(configured)]
     if list_event_contests(connection, event_id):
         raise ValueError("The bracket has already been initialized.")
+    stage_keys = {"groups", *(stage for _, _, stage, _ in bracket)}
     stages = {
         key: create_event_stage(connection, event_id, stage_key=key, title=title, position=index)
         for index, (key, title) in enumerate(STAGES)
+        if key in stage_keys
     }
     tournaments = []
     for index, group in enumerate(configured.groups):
@@ -141,7 +149,7 @@ def start_competition(connection, event_id: int) -> list[int]:
         update_event_contest_state(connection, contest_id, status="live")
         set_tournament_status(connection, tournament_id, "running")
         tournaments.append(tournament_id)
-    for index, (key, title, stage, sources) in enumerate(BRACKET, start=len(tournaments)):
+    for index, (key, title, stage, sources) in enumerate(bracket, start=len(tournaments)):
         create_event_contest(
             connection, event_id, contest_key=key, title=title, position=index, stage_id=stages[stage],
             summary=dict(STAGES)[stage], state={"sources": sources},
@@ -154,7 +162,12 @@ def start_competition(connection, event_id: int) -> list[int]:
 def start_due_competitions(connection, now: str) -> list[int]:
     result = []
     rows = connection.execute(
-        "SELECT id FROM events WHERE handler_key = 'secret-queen' AND status = 'scheduled' AND scheduled_start_at <= ? AND published_at IS NOT NULL AND (config::jsonb->'competition'->>'auto_start') = 'true' FOR UPDATE SKIP LOCKED",
+        """
+        SELECT id FROM events
+        WHERE handler_key = 'secret-queen' AND status = 'scheduled'
+          AND scheduled_start_at <= ? AND published_at IS NOT NULL
+        FOR UPDATE SKIP LOCKED
+        """,
         (now,),
     ).fetchall()
     for row in rows:
@@ -294,4 +307,12 @@ def public_competition(connection, event) -> dict:
                        "status": game.status, "result": game.result} for game in games],
             "time_control": None if tournament is None else tournament.config.time_control.model_dump(mode="json"),
         })
-    return {"contests": contests, "winner_engine_id": event.state.get("winner_engine_id")}
+    launch_ready = False
+    if event.status in PRE_START and event.published_at:
+        try:
+            _validate_start(settings(event))
+        except ValueError:
+            pass
+        else:
+            launch_ready = True
+    return {"contests": contests, "winner_engine_id": event.state.get("winner_engine_id"), "launch_ready": launch_ready}

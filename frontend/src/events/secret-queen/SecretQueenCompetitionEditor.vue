@@ -22,7 +22,7 @@ const editError = ref("");
 const editable = computed(() => ["draft", "announced", "scheduled", "postponed"].includes(props.detail.event.status));
 const qualifiers = computed(() => settings.value?.groups.reduce((total, group) => total + group.qualifiers, 0) ?? 0);
 const dirty = computed(() => JSON.stringify(settings.value) !== JSON.stringify(payload.value.settings));
-const canStart = computed(() => Boolean(props.detail.event.published_at) && !dirty.value && qualifiers.value === 8
+const canStart = computed(() => Boolean(props.detail.event.published_at) && !dirty.value && [2, 4, 8].includes(qualifiers.value)
   && settings.value?.groups.every(group => group.engine_ids.length >= 2 && group.engine_ids.length >= group.qualifiers));
 const engines = computed(() => payload.value.engines ?? []);
 const available = computed(() => {
@@ -86,8 +86,8 @@ async function submit(action: "save" | "start"): Promise<void> {
         <label class="field"><span>Hash per UCI process (MB)</span><input v-model.number="settings.hash_mb" type="number" min="1" max="1024" class="input" required></label>
         <label class="field"><span>Concurrent games per group</span><input v-model.number="settings.group_concurrency" type="number" min="1" max="128" class="input" required></label>
       </div>
-      <label class="competition-checkbox"><input v-model="settings.auto_start" type="checkbox"> Start groups automatically at the published time</label>
-      <div class="competition-toolbar"><h3>Swiss groups</h3><span>{{ qualifiers }} / 8 quarterfinal places</span></div>
+      <p class="competition-note">A published event with valid groups starts automatically at its scheduled time.</p>
+      <div class="competition-toolbar"><h3>Swiss groups</h3><span>{{ qualifiers }} qualifiers · choose 2, 4 or 8</span></div>
       <section v-for="(group, index) in settings.groups" :key="index" class="competition-group">
         <div class="competition-fields">
           <label class="field"><span>Group name</span><input v-model="group.name" class="input" maxlength="80" required></label>
@@ -129,7 +129,7 @@ async function submit(action: "save" | "start"): Promise<void> {
 .competition-toolbar, .competition-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; }
 .competition-toolbar { justify-content: space-between; }
 .competition-toolbar h3 { font-size: 1rem; }
-.competition-checkbox { display: flex; align-items: center; gap: .5rem; }
+.competition-note { margin: 0; color: var(--color-text-muted); }
 .competition-roster { display: grid; gap: .35rem; list-style: none; }
 .competition-roster li { display: flex; align-items: center; gap: .6rem; }
 .competition-roster li > span:first-child { margin-right: auto; }

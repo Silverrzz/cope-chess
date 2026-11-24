@@ -3,8 +3,13 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import type { EventSummary } from "@/types/events";
-const props = defineProps<{ summary: EventSummary }>();
+import EventCountdown from "./EventCountdown.vue";
+
+const props = defineProps<{ summary: EventSummary; nowMs?: number | undefined }>();
 const record = computed(() => props.summary.record);
+const remaining = computed(() => props.nowMs !== undefined && record.value.status === "scheduled"
+  ? Date.parse(record.value.scheduled_start_at ?? "") - props.nowMs
+  : 0);
 const completed = computed(() => record.value.status === "completed");
 const status = computed(() => {
   if (completed.value) return "Completed";
@@ -29,6 +34,7 @@ const date = computed(() => {
     <div class="event-hero-copy">
       <span class="event-hero-kicker"><AppIcon name="trophy" :size="16" />{{ status }}</span>
       <h2><slot name="title">{{ record.title }}</slot></h2>
+      <EventCountdown v-if="remaining > 0" :remaining-ms="remaining" compact />
       <div class="event-hero-meta">
         <time v-if="timestamp" :datetime="timestamp">{{ date }}</time>
         <slot v-else name="date-placeholder" />

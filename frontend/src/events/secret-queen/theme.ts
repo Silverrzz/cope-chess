@@ -5,6 +5,7 @@ export const secretQueenTheme = {
   "--event-view-stage-glow": "#2c174680",
   "--event-view-accent": "#c5a3ff",
   "--event-view-highlight": "#e4d2ff",
+  "--event-countdown-music-background": "#241438",
   "--event-view-muted": "#b3a3c6",
   "--event-view-border": "#c5a3ff26",
   "--event-view-schedule": "#c8b9d9",
