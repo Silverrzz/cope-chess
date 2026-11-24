@@ -10,7 +10,7 @@ from cope.core.models import (
     RoundRobinFormatOptions, SwissFormatOptions, TournamentConfig, TournamentFormat,
 )
 from cope.db import (
-    create_game, create_tournament, get_engine, get_tournament, list_games,
+    create_game, create_tournament, get_engine_version_record, get_tournament, list_games,
     list_tournament_matches, set_tournament_status,
 )
 from cope.db.events import (
@@ -59,10 +59,10 @@ def save_settings(connection, event, configured: CompetitionSettings) -> None:
     names = [group.name.strip().casefold() for group in configured.groups]
     if "" in names or len(set(names)) != len(names):
         raise ValueError("Group names must be non-empty and unique.")
-    engines = [get_engine(connection, engine_id) for engine_id in engine_ids]
+    engines = [get_engine_version_record(connection, engine_id) for engine_id in engine_ids]
     if any(engine is None or not engine.active or not engine.engine_active for engine in engines):
         raise ValueError("Every entrant needs an active engine version.")
-    families = [engine.name.casefold() for engine in engines]
+    families = [engine.engine_id for engine in engines]
     if len(set(families)) != len(families):
         raise ValueError("Enter one version of each engine family.")
     connection.execute("DELETE FROM event_cast_members WHERE event_id = ?", (event.id,))
