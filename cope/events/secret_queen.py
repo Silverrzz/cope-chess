@@ -113,8 +113,8 @@ def _register_api(app):
         concealed = None
         if len(pair) == 2 and all(item.status == "finished" for item in pair):
             row = connection.execute(
-                "SELECT white_file, black_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
-                (game.tournament_id, game.round, game.pair_index),
+                "SELECT white_file, black_file FROM secret_queen_game_secrets WHERE game_id = ?",
+                (game.id,),
             ).fetchone()
             if row is not None:
                 files = {side: "abcdefgh"[row[f"{side}_file"]] for side in ("white", "black")}
