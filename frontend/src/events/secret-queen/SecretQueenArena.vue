@@ -295,7 +295,9 @@ onBeforeUnmount(() => {
       </label>
     </template>
     <template #actions>
-      <a href="#secret-queen-competition" class="event-page-link"><AppIcon name="trophy" :size="15" /> Groups &amp; bracket</a>
+      <RouterLink :to="{ query: { ...route.query, tab: 'standings' }, hash: '#secret-queen-arena-info' }" class="event-page-link">
+        <AppIcon name="trophy" :size="15" /> Groups &amp; bracket
+      </RouterLink>
     </template>
     <template #engines>
       <div v-for="side in (['black', 'white'] as const)" :key="side" class="relay-engine-slot">
@@ -312,7 +314,7 @@ onBeforeUnmount(() => {
       <ChatPanel :messages="detail.chat_messages" :settings="detail.chat_settings" :event-slug="detail.event.slug"
         :game-id="game?.id ?? null" @sent="appendChat" />
     </template>
-    <section id="secret-queen-competition" class="tournament-data">
+    <section id="secret-queen-arena-info" class="tournament-data">
       <nav class="data-tabs" aria-label="Tournament information">
         <RouterLink v-for="tab in (['standings', 'games', 'settings'] as const)" :key="tab"
           :to="{ query: { ...route.query, tab } }" :aria-current="activeTab === tab ? 'page' : undefined">
