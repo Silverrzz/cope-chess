@@ -432,13 +432,12 @@ defineExpose({ selectPly, focusBoard })
     :tabindex="controls ? 0 : undefined"
   >
     <TakOverview v-if="takPosition && controls && !compact" v-model:show-roads="showRoads" :position="takPosition" :road-winner="roadWinner" :finished="Boolean(finished && selectedPly === moves.length)" />
-    <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled' }">
+    <div class="board-frame" :class="{ 'board-frame--placement': editMode === 'place', 'board-frame--inactive': editMode === 'disabled', 'board-frame--concealed-queens': concealedMarkers.length }">
       <TakNinjaBoard v-if="takPosition" class="board-mount" :tps="currentFen" :previous-tps="previousTakPosition && takPositionText(previousTakPosition)" :orientation="orientation" :last-move="lastMove" :coordinates="coordinates" :show-roads="showRoads" :compact="compact" :label="label" />
       <div
         v-else
         ref="board"
         class="board-mount"
-        :class="{ 'board-mount--concealed-queens': concealedMarkers.length }"
         :role="editMode && editMode !== 'disabled' ? 'group' : 'img'"
         :tabindex="editMode && editMode !== 'disabled' ? 0 : undefined"
         :aria-label="editMode ? label : `${label}, ${positionDescription}`"
@@ -487,8 +486,8 @@ defineExpose({ selectPly, focusBoard })
 
 <style scoped>
 .board-frame { position: relative; container-type: inline-size; }
-.board-mount--concealed-queens :deep(cg-auto-pieces) { z-index: 1; }
-.board-mount--concealed-queens :deep(cg-auto-pieces piece.queen) { opacity: .6; }
+.board-frame--concealed-queens :deep(cg-auto-pieces) { z-index: 1; }
+.board-frame--concealed-queens :deep(cg-auto-pieces piece.queen) { opacity: .6; }
 .board-mount :deep(piece.duck) {
   background-image: v-bind(duckImage);
   background-size: 85%;
