@@ -390,8 +390,7 @@ function fixtureCycles(fixture: RelayFixture): number | string {
 .advanced-fields { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, 1fr); gap: .65rem; padding: .7rem; border-radius: .5rem; background: var(--color-surface-subtle); }
 .kibitzer-picker { display: grid; grid-column: 1 / -1; gap: .3rem; }.kibitzer-picker > span { color: var(--color-text-muted); font-size: .58rem; font-weight: 680; }
 .fixture-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); }
-.fixture-card { align-self: start; padding: 1rem; transition: border-color var(--transition-fast), box-shadow var(--transition-fast); }
-.fixture-card:hover { border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border)); box-shadow: var(--shadow-xs); }
+.fixture-card { align-self: start; padding: 1rem; }
 .fixture-card > dl { grid-template-columns: repeat(3, 1fr); overflow: hidden; border-radius: .45rem; }
 .fixture-empty { gap: .45rem; }
 .fixture-empty > span { display: grid; width: 3rem; height: 3rem; place-items: center; justify-self: center; border-radius: .8rem; background: var(--color-accent-soft); color: var(--color-accent); }

@@ -420,7 +420,6 @@ onBeforeUnmount(() => {
 .data-panel th, .data-panel td { padding: .72rem .85rem; border-block-end: 1px solid var(--color-border, #d5dbe1); text-align: start; }
 .data-panel th { color: var(--color-text-muted, #607080); font-size: .63rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
 .data-panel tbody tr:last-child td { border-block-end: 0; }
-.data-panel tbody tr:hover { background: color-mix(in srgb, var(--color-accent, #2f78c4) 4.5%, transparent); }
 .data-panel td a { color: inherit; font-weight: 700; text-decoration: none; }
 .data-panel td a:hover { color: var(--color-accent, #2f78c4); text-decoration: underline; text-underline-offset: .16em; }
 .pagination { display: flex; align-items: center; justify-content: flex-end; gap: .75rem; padding: .75rem .85rem; border-top: 1px solid var(--color-border, #d5dbe1); }
