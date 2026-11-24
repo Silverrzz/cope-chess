@@ -411,7 +411,7 @@ class SecretQueenEngine(UciEngineProcess):
                     if move in scores:
                         adjustment = scores[move] - bases[move][index]
                     elif reference in scores and reference in bases:
-                        adjustment = max(-150, min(150, scores[reference] - bases[reference][index])) - 40
+                        adjustment = scores[reference] - bases[reference][index]
                     else:
                         adjustment = 0
                     guidance[move][index] = max(-150, min(150, adjustment))

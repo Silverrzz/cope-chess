@@ -46,8 +46,8 @@ def material(board: SecretQueenBoard, color: chess.Color) -> int:
 
 def concealment(board: SecretQueenBoard, color: chess.Color) -> int:
     balance = material(board, color)
-    return (int(board.concealed(color)) * (120 + min(280, max(0, -balance) // 3))
-            - int(board.concealed(not color)) * (120 + min(280, max(0, balance) // 3)))
+    return (int(board.concealed(color)) * (300 + min(280, max(0, -balance) // 3))
+            - int(board.concealed(not color)) * (300 + min(280, max(0, balance) // 3)))
 
 
 def evaluate(board: SecretQueenBoard, color: chess.Color) -> int:
