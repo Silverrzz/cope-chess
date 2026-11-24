@@ -154,6 +154,10 @@ def list_upcoming_games(
             WHERE fixture.tournament_id = games.tournament_id
           )
           AND NOT EXISTS (
+            SELECT 1 FROM secret_queen_event_tournaments fixture
+            WHERE fixture.tournament_id = games.tournament_id
+          )
+          AND NOT EXISTS (
             SELECT 1 FROM events event
             WHERE event.handler_key = 'duck-vs-fish'
               AND (event.config::jsonb->>'tournament_id')::bigint = games.tournament_id

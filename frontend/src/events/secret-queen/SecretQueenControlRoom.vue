@@ -7,6 +7,7 @@ import { errorText } from "@/components/admin/format";
 import { useToast } from "@/composables/useToast";
 import type { EventDetailResponse } from "@/types/events";
 import { timestampDate } from "@/utils/time";
+import SecretQueenCompetitionEditor from "./SecretQueenCompetitionEditor.vue";
 
 const props = defineProps<{ detail: EventDetailResponse }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -15,7 +16,7 @@ const localStart = ref("");
 const published = ref(false);
 const saving = ref(false);
 const error = ref("");
-const editable = computed(() => ["draft", "announced", "scheduled"].includes(props.detail.event.status));
+const editable = computed(() => ["draft", "announced", "scheduled", "postponed"].includes(props.detail.event.status));
 
 watch(() => props.detail.event, event => {
   const start = event.scheduled_start_at ? timestampDate(event.scheduled_start_at) : null;
@@ -62,6 +63,7 @@ async function save(): Promise<void> {
     </form>
     <p v-else>The announcement is locked after the event starts.</p>
   </section>
+  <SecretQueenCompetitionEditor :detail="detail" @changed="emit('changed')" />
 </template>
 
 <style scoped>
