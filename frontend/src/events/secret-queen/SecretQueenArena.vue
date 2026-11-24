@@ -102,6 +102,14 @@ const annotations = computed(() => moves.value.map((move, index) => {
   return (source === "P" && target === "Q") || (source === "p" && target === "q")
     ? { label: "Queen revealed" } : null;
 }));
+const ending = computed(() => {
+  if (!game.value?.result) return "";
+  if (capturedKing(moves.value.length - 1)) return "King captured";
+  const termination = viewer.value?.viewer_game?.termination;
+  if (termination?.startsWith("win adjudication:")) return "Win by adjudication";
+  if (termination?.startsWith("draw adjudication:")) return "Draw by adjudication";
+  return termination ? termination.charAt(0).toUpperCase() + termination.slice(1) : "";
+});
 const gameContext = computed(() => {
   const control = viewer.value?.tournament.config?.time_control;
   return [
@@ -109,7 +117,7 @@ const gameContext = computed(() => {
     game.value ? contest.value?.kind === "group" ? "Round " + game.value.round : "Pair " + game.value.pair_index : "",
     viewer.value?.viewer_game?.game_number ? "Game " + viewer.value.viewer_game.game_number : "",
     timeControlLabel(control),
-    game.value?.result && capturedKing(moves.value.length - 1) ? "King captured" : "",
+    ending.value,
   ].filter(Boolean).join(" / ");
 });
 
@@ -273,10 +281,15 @@ watch([pinnedGame, () => automaticGame.value?.id, () => game.value?.status], ([p
     return;
   }
   if (resultTimer !== undefined) return;
-  resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs);
+  const finishedId = game.value.id;
+  resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs + 2000);
   request?.abort();
   request = null;
-  void loadViewer();
+  void loadViewer().then(() => {
+    if (resultTimer === undefined || game.value?.id !== finishedId) return;
+    window.clearTimeout(resultTimer);
+    resultTimer = window.setTimeout(advanceFollowingGame, resultDisplayMs);
+  });
 }, { immediate: true });
 
 watch([() => contest.value?.tournament_id, () => game.value?.id], ([tournament, id]) => {
