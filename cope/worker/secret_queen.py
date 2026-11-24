@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
@@ -17,6 +17,7 @@ from .uci_engine import UciEngineProcess
 
 
 Score = tuple[int, int]
+Exchange = tuple[chess.Move, chess.Move, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,7 @@ class Probe:
 
 
 _STATISTICS = re.compile(r"\b(depth|seldepth|nodes|hashfull) ([0-9]{1,15})(?= |$)")
+_PIECE_VALUES = {chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330, chess.ROOK: 500, chess.QUEEN: 900}
 
 
 def _score_token(score: Score) -> str:
@@ -113,6 +115,52 @@ def _outcome_score(board: SecretQueenBoard, color: chess.Color) -> Score | None:
     if outcome:
         return (0, 0) if outcome.winner is None else (2 if outcome.winner == color else -2, 0)
     return None
+
+
+def _score_utility(score: Score) -> float:
+    kind, value = score
+    if kind == 0:
+        return .89 * value / (abs(value) + 300)
+    magnitude = 1.0 if abs(kind) == 2 else max(.9, .999 - abs(value) / 10_000)
+    return magnitude if kind > 0 else -magnitude
+
+
+def _move_utility(scores: list[Score]) -> float:
+    values = sorted(map(_score_utility, scores))
+    downside = values[:max(1, (len(values) + 3) // 4)]
+    return .6 * sum(values) / len(values) + .4 * sum(downside) / len(downside)
+
+
+def _exchange_followups(worlds, finalists, forced_replies, deadline, stopped) -> dict[Exchange, tuple[chess.Move, ...]] | None:
+    continuations = defaultdict(list)
+    for world, replies in zip(worlds, forced_replies, strict=True):
+        for move in finalists:
+            if move not in replies:
+                continue
+            after = world.copy(stack=False)
+            after.push(move)
+            for response in replies[move]:
+                answered = after.copy(stack=False)
+                answered.push(response)
+                if _outcome_score(answered, world.turn) is None:
+                    key = (move, response, answered.fen(en_passant="fen"))
+                    continuations[key].append(answered)
+
+    result = {}
+    for key, positions in continuations.items():
+        risks = {}
+        for move in positions[0].legal_moves:
+            if stopped.is_set() or time.monotonic() >= deadline:
+                return None
+            risk = 0
+            for position in positions:
+                after = position.copy(stack=False)
+                after.push(move)
+                risk += after.secret_capture() is not None
+            risks[move] = risk
+        safest = min(risks.values())
+        result[key] = tuple(move for move, risk in risks.items() if risk == safest)
+    return result
 
 
 class SecretQueenEngine(UciEngineProcess):
@@ -270,13 +318,32 @@ class SecretQueenEngine(UciEngineProcess):
         deadline = started + budget_ms / 1000
         risks = Counter()
         wins = Counter()
+        exposed = Counter()
+        capture_floor = {}
+        forced_replies: list[dict[chess.Move, tuple[chess.Move, ...]]] = [{} for _ in worlds]
+        own_secret = first.concealed_square(color)
         for move in moves:
-            for world in worlds:
+            attacker = first.visible_piece_type_at(move.from_square)
+            queen_move = move.from_square == own_secret or attacker == chess.QUEEN or move.promotion == chess.QUEEN
+            victim = first.visible_piece_type_at(move.to_square)
+            major_capture = victim in (chess.ROOK, chess.QUEEN)
+            gain = _PIECE_VALUES.get(victim, 0)
+            cost = _PIECE_VALUES.get(chess.QUEEN if queen_move else attacker, 0)
+            capture_floor[move] = gain if major_capture else 0
+            for index, world in enumerate(worlds):
                 after = world.copy(stack=False)
                 after.push(move)
                 value = _outcome_score(after, color)
                 risks[move] += value == (-2, 0)
                 wins[move] += value == (2, 0)
+                if value is None and (queen_move or major_capture):
+                    replies = after.captures_of(move.to_square)
+                    if replies:
+                        if queen_move and gain < cost:
+                            exposed[move] += 1
+                        forced_replies[index][move] = replies
+                        if major_capture:
+                            capture_floor[move] = min(capture_floor[move], gain - cost)
             if self._stop.is_set():
                 return [f"bestmove {move.uci()}"]
         certain_wins = [move for move in moves if wins[move] == len(worlds)]
@@ -285,58 +352,77 @@ class SecretQueenEngine(UciEngineProcess):
             return statistics.result(certain_wins[0])
         minimum = min(risks.values())
         safe = tuple(move for move in moves if risks[move] == minimum)
-        fallback = max(safe, key=lambda move: wins[move])
+        exposure = min(exposed[move] for move in safe)
+        backups = tuple(move for move in safe if exposed[move] == exposure)
+        fallback = max(backups, key=lambda move: (wins[move], capture_floor[move]))
         if len(safe) == 1 or deadline - time.monotonic() < .09:
             return [f"bestmove {fallback.uci()}"]
         anchor = first.projection(show=(color,))
         native = tuple(move for move in safe if anchor is not None and move in anchor.legal_moves)
-        restricted = native if anchor is not None and len(native) < anchor.legal_moves.count() else ()
+        backup_native = tuple(move for move in native if move in backups)
+        restricted = backup_native if anchor is not None and len(backup_native) < anchor.legal_moves.count() else ()
         incumbent = self._probe(
             0, anchor, min(deadline, started + budget_ms * .35 / 1000), moves=restricted, statistics=statistics,
-        ) if native else None
-        chosen = incumbent.move if incumbent and incumbent.move in safe else fallback
+        ) if backup_native else None
+        chosen = incumbent.move if incumbent and incumbent.move in backups else fallback
         if incumbent and incumbent.move == chosen and incumbent.score is not None:
             statistics.evaluate([incumbent.score], 0)
         if deadline - time.monotonic() < .25:
             return statistics.result(chosen)
 
         finalists = [chosen]
+        if fallback != chosen and capture_floor[fallback] > 0:
+            finalists.append(fallback)
         opposite = tuple(move for move in native if first.reveals(move) != first.reveals(chosen))
         end_nomination = min(deadline, started + budget_ms * .55 / 1000)
         nomination = self._probe(
             0, anchor, end_nomination, moves=opposite, limit_ms=125, statistics=statistics,
         ) if opposite else None
-        if nomination:
+        if nomination and nomination.move not in finalists:
             finalists.append(nomination.move)
-        votes = Counter()
-        def nominate(index, world):
-            projection = world.projection(show=(chess.WHITE, chess.BLACK))
-            options = tuple(move for move in safe if move not in finalists and projection is not None and move in projection.legal_moves)
-            return self._probe(index, projection, end_nomination, moves=options, statistics=statistics) if options else None
-
-        nominations = [self._pool.submit(nominate, index, world) for index, world in enumerate(worlds)]
-        for future in nominations:
-            result = future.result()
-            if result:
-                votes[result.move] += 1
         remaining_candidates = set(safe) - set(finalists)
-        if remaining_candidates:
+        if remaining_candidates and len(finalists) < 3:
+            def nominate(index, world):
+                projection = world.projection(show=(chess.WHITE, chess.BLACK))
+                if projection is None:
+                    return None
+                options = tuple(move for move in safe if move in remaining_candidates and move in projection.legal_moves)
+                return self._probe(index, projection, end_nomination, moves=options, statistics=statistics) if options else None
+
+            nominations = [self._pool.submit(nominate, index, world) for index, world in enumerate(worlds)]
+            votes = Counter()
+            for future in nominations:
+                result = future.result()
+                if result:
+                    votes[result.move] += 1
             finalists.append(min(remaining_candidates, key=lambda move: (-wins[move], -votes[move], move.uci())))
-        slot_ms = int((deadline - time.monotonic()) * 1000 / (2 * len(finalists))) - 20
-        if len(finalists) > 1 and slot_ms >= 35:
-            futures = [self._pool.submit(self._rank, index, world, finalists, deadline, slot_ms, statistics) for index, world in enumerate(worlds)]
+        if len(finalists) == 1:
+            return statistics.result(chosen)
+        followups = _exchange_followups(worlds, finalists, forced_replies, deadline, self._stop)
+        if followups is None:
+            return statistics.result(chosen)
+        search_count = 2 * len(finalists) + max(
+            sum(len(replies.get(move, ())) for move in finalists) for replies in forced_replies
+        )
+        slot_ms = int((deadline - time.monotonic()) * 1000 / search_count) - 20
+        if slot_ms >= 35:
+            futures = [
+                self._pool.submit(
+                    self._rank, index, world, finalists, forced_replies[index], followups, deadline, slot_ms, statistics,
+                )
+                for index, world in enumerate(worlds)
+            ]
             rows = [future.result() for future in futures]
             completed = [(square, row) for square, row in zip(opposing_squares, rows, strict=True) if row is not None]
             if len(completed) == len(worlds):
-                chosen = max(finalists, key=lambda move: sum(
-                    sum(candidate < row[move] for candidate in row.values()) for _, row in completed
-                ))
+                unique_rows = dict(completed).values()
+                chosen = max(finalists, key=lambda move: _move_utility([row[move] for row in unique_rows]))
             if completed:
                 scores = {square: row[chosen] for square, row in completed}
                 statistics.evaluate(list(scores.values()), position_count)
         return statistics.result(chosen)
 
-    def _rank(self, index, world, finalists, deadline, slot_ms, statistics):
+    def _rank(self, index, world, finalists, forced_replies, followups, deadline, slot_ms, statistics):
         scores = {}
         root_color = world.turn
         order = finalists[index % len(finalists):] + finalists[:index % len(finalists)]
@@ -344,16 +430,31 @@ class SecretQueenEngine(UciEngineProcess):
             after = world.copy(stack=False)
             after.push(move)
             score = _outcome_score(after, root_color)
-            if score is None:
-                reply = self._probe(index, after.projection(show=(after.turn,)), deadline, observe=True, limit_ms=slot_ms)
-                if reply is None or not after.is_legal(reply.move):
-                    return None
-                after.push(reply.move)
-                score = _outcome_score(after, root_color)
-            if score is None:
-                estimate = self._probe(index, after.projection(show=(chess.WHITE, chess.BLACK)), deadline, limit_ms=slot_ms, statistics=statistics)
-                if estimate is None or estimate.score is None:
-                    return None
-                score = estimate.score
-            scores[move] = score
+            if score is not None:
+                scores[move] = score
+                continue
+            reply = self._probe(index, after.projection(show=(after.turn,)), deadline, observe=True, limit_ms=slot_ms)
+            if reply is None or not after.is_legal(reply.move):
+                return None
+            worst = (2, 0)
+            for response in dict.fromkeys((reply.move, *forced_replies.get(move, ()))):
+                answered = after.copy(stack=False)
+                answered.push(response)
+                score = _outcome_score(answered, root_color)
+                if score is None:
+                    projection = answered.projection(show=(chess.WHITE, chess.BLACK))
+                    if projection is None:
+                        return None
+                    allowed = followups.get((move, response, answered.fen(en_passant="fen")))
+                    restricted = ()
+                    if allowed is not None:
+                        restricted = tuple(move for move in allowed if move in projection.legal_moves)
+                        if not restricted:
+                            return None
+                    estimate = self._probe(index, projection, deadline, moves=restricted, limit_ms=slot_ms, statistics=statistics)
+                    if estimate is None or estimate.score is None:
+                        return None
+                    score = estimate.score
+                worst = min(worst, score)
+            scores[move] = worst
         return scores

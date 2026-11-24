@@ -143,6 +143,28 @@ class SecretQueenBoard:
     def concealed(self, color: chess.Color) -> bool:
         return self._secrets[color] is not None
 
+    def concealed_square(self, color: chess.Color) -> chess.Square | None:
+        return self._secrets[color]
+
+    def visible_piece_type_at(self, square: chess.Square) -> chess.PieceType | None:
+        return self._board.piece_type_at(square)
+
+    def captures_of(self, square: chess.Square) -> tuple[chess.Move, ...]:
+        piece = self._board.piece_at(square)
+        if piece is None or piece.color == self.turn:
+            return ()
+        mask = chess.BB_SQUARES[square]
+        ep = self._board.ep_square
+        if ep is not None and ep + (-8 if self.turn else 8) == square:
+            mask |= chess.BB_SQUARES[ep]
+        secret = self._secrets[self.turn]
+        captures = tuple(move for move in self._board.generate_legal_moves(to_mask=mask) if move.from_square != secret)
+        if secret is not None:
+            move = chess.Move(secret, square)
+            if self.is_legal(move):
+                return (*captures, move)
+        return captures
+
     def concealed_squares(self) -> dict[str, str | None]:
         return {
             chess.COLOR_NAMES[color]: None if square is None else chess.square_name(square)
