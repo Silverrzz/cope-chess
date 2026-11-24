@@ -44,6 +44,10 @@ def material(board: SecretQueenBoard, color: chess.Color) -> int:
     return value + 800 * (int(board.concealed(color)) - int(board.concealed(not color)))
 
 
+def evaluate(board: SecretQueenBoard, color: chess.Color) -> int:
+    return material(board, color) + 120 * (int(board.concealed(color)) - int(board.concealed(not color)))
+
+
 def terminal(board: SecretQueenBoard, color: chess.Color, ply: int = 0) -> int | None:
     if board._board.king(color) is None:
         return -MATE + ply
@@ -148,9 +152,9 @@ def fork_reply(board: SecretQueenBoard, color: chess.Color, deadline: float, sto
             answered = after.copy(stack=False)
             answered.push(response, record=False)
             end = terminal(answered, color)
-            value = end if end is not None else material(answered, color) - exposure(answered, cache)
+            value = end if end is not None else evaluate(answered, color) - exposure(answered, cache)
             best = max(best, value)
-            if best >= material(board, color):
+            if best >= evaluate(board, color):
                 break
         worst = best if worst is None else min(worst, best)
     return worst
@@ -183,7 +187,7 @@ class TacticalSearch:
         if end is not None:
             return end
         urgent = threatened(board)
-        stand = material(board, board.turn)
+        stand = evaluate(board, board.turn)
         if depth <= 0 and quiet <= 0:
             return stand
         best = -MATE if depth > 0 or urgent else stand
@@ -219,7 +223,7 @@ class TacticalSearch:
                 done[index] = end
         if not live:
             return done
-        values = {index: material(board, self.color) for index, board in live}
+        values = {index: evaluate(board, self.color) for index, board in live}
         if depth <= 0 and quiet <= 0:
             return {**done, **values}
         own = live[0][1].turn == self.color

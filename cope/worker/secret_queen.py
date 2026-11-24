@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import json
 import re
 import logging
-from queue import Queue
 import threading
 import time
 
@@ -15,7 +14,7 @@ import chess
 from cope.variants.secret_queen import POSITION_PREFIX, SEARCH_WORKERS, SecretQueenBoard
 
 from .uci_engine import UciEngineProcess
-from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, exchange, exposure, fork_reply, material, mating_reply, move_order, terminal
+from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
 
 
 Score = tuple[int, int]
@@ -146,9 +145,6 @@ class SecretQueenEngine(UciEngineProcess):
         self._configured: list[dict[str, str]] = [{} for _ in range(SEARCH_WORKERS)]
         self._belief_cache = None
         self._pool = ThreadPoolExecutor(max_workers=max(1, SEARCH_WORKERS - 1))
-        self._slots = Queue()
-        for lane in range(SEARCH_WORKERS):
-            self._slots.put(lane)
         self._active: set[UciEngineProcess] = set()
         self._active_lock = threading.Lock()
         self._closed = False
@@ -214,6 +210,8 @@ class SecretQueenEngine(UciEngineProcess):
         return {match[1].casefold() for line in lines if (match := _OPTION_NAME.match(line))}
 
     def _warm(self, lane, deadline):
+        if self._lanes[lane] is not None and self._lanes[lane].process_started:
+            return
         try:
             self._process_for(lane, deadline, startup_timeout=2)
         except (OSError, RuntimeError):
@@ -232,8 +230,10 @@ class SecretQueenEngine(UciEngineProcess):
             self._advertised[lane] = self._advertised_options(lines)
             self._configured[lane].clear()
             engine._send("ucinewgame")
-        options = {**self._options, "threads": f"setoption name Threads value {threads}",
+        options = {"threads": "setoption name Threads value 1", **self._options,
                    "multipv": f"setoption name MultiPV value {multipv}"}
+        if threads is not None:
+            options["threads"] = f"setoption name Threads value {threads}"
         for name, option in options.items():
             if name in self._advertised[lane] and self._configured[lane].get(name) != option:
                 engine._send(option)
@@ -251,10 +251,9 @@ class SecretQueenEngine(UciEngineProcess):
                 process.kill()
         UciEngineProcess.close(engine)
 
-    def _probe(self, board, deadline, statistics, *, limit_ms=None, multipv=1, position=None, threads=1):
+    def _probe(self, board, deadline, statistics, *, lane, limit_ms=None, multipv=1, position=None, threads=1):
         if board is None or self._stop.is_set() or deadline - time.monotonic() < .055:
             return ()
-        lane = self._slots.get()
         engine = None
         try:
             engine = self._process_for(lane, deadline, multipv, threads=threads)
@@ -287,7 +286,6 @@ class SecretQueenEngine(UciEngineProcess):
         finally:
             with self._active_lock:
                 self._active.discard(engine)
-            self._slots.put(lane)
 
     def _worlds(self, color, file, history):
         prior = None
@@ -331,20 +329,18 @@ class SecretQueenEngine(UciEngineProcess):
             statistics.evaluate([(2, 0)] * len(worlds), len(worlds))
             return statistics.result(capture)
         if not any(world.concealed(side) for world in worlds for side in _COLORS):
-            self._process_for(0, max(deadline, started + .5))
-            if "threads" in self._options:
-                self._send(self._options["threads"])
-                self._configured[0]["threads"] = self._options["threads"]
+            lane = first._files[not color]
+            engine = self._process_for(lane, max(deadline, started + .5), threads=None)
             with self._active_lock:
-                self._active.add(self)
+                self._active.add(engine)
             try:
-                super().handle_command(first.native_position())
-                lines = super().handle_command(command, line_callback)
+                UciEngineProcess.handle_command(engine, first.native_position())
+                lines = UciEngineProcess.handle_command(engine, command, line_callback)
                 result = _probe_result(lines)
                 return lines if result and result.move in moves else statistics.result(moves[0])
             finally:
                 with self._active_lock:
-                    self._active.discard(self)
+                    self._active.discard(engine)
 
         quick = deadline - started < .12
         if quick:
@@ -359,12 +355,13 @@ class SecretQueenEngine(UciEngineProcess):
         oracle_deadline = started + (deadline - started) * .62
         window = max(15, int((oracle_deadline - time.monotonic()) * 1000 / waves) - 45)
         futures = [(indices, self._pool.submit(self._probe, board, oracle_deadline, statistics,
+                                              lane=worlds[indices[0]]._files[not color],
                                               multipv=6, limit_ms=window,
                                               threads=max(1, workers // max(1, min(workers, len(projections))))))
                    for board, indices in projections.values()]
         rows = {}
         exchanges = {}
-        baseline = tuple(material(world, color) for world in worlds)
+        baseline = tuple(evaluate(world, color) for world in worlds)
         for move in moves:
             values = []
             for world in worlds:
@@ -373,7 +370,7 @@ class SecretQueenEngine(UciEngineProcess):
                 end = terminal(after, color, 1)
                 if end is None:
                     loss = exchange(after, move.to_square, exchanges) if quick else exposure(after, exchanges)
-                    values.append(material(after, color) - loss)
+                    values.append(evaluate(after, color) - loss)
                 else:
                     values.append(end)
             rows[move] = SearchResult(tuple(values), -1, 0)
