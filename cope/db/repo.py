@@ -3241,6 +3241,10 @@ def list_worker_event_fixture_candidates(
               SELECT tournament_id, event_id, position, id
               FROM engine_relay_fixtures
               UNION ALL
+              SELECT fixture.tournament_id, fixture.event_id, contest.position, contest.id
+              FROM secret_queen_event_tournaments fixture
+              JOIN event_contests contest ON contest.id = fixture.contest_id
+              UNION ALL
               SELECT tournament_id, event_id, 0 AS position, event_id AS id
               FROM puzzle_gauntlet_events
               WHERE tournament_id IS NOT NULL
@@ -3309,6 +3313,9 @@ def event_fixture_has_worker_permissions(
           FROM engine_relay_fixtures
           UNION ALL
           SELECT tournament_id, event_id
+          FROM secret_queen_event_tournaments
+          UNION ALL
+          SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
           WHERE tournament_id IS NOT NULL
           UNION ALL
@@ -3349,6 +3356,9 @@ def claim_event_fixture_worker(
         WITH event_fixtures AS (
           SELECT tournament_id, event_id
           FROM engine_relay_fixtures
+          UNION ALL
+          SELECT tournament_id, event_id
+          FROM secret_queen_event_tournaments
           UNION ALL
           SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
