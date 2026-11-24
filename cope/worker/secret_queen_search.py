@@ -44,8 +44,32 @@ def material(board: SecretQueenBoard, color: chess.Color) -> int:
     return value + 800 * (int(board.concealed(color)) - int(board.concealed(not color)))
 
 
+def concealment(board: SecretQueenBoard, color: chess.Color) -> int:
+    balance = material(board, color)
+    return (int(board.concealed(color)) * (120 + min(280, max(0, -balance) // 3))
+            - int(board.concealed(not color)) * (120 + min(280, max(0, balance) // 3)))
+
+
 def evaluate(board: SecretQueenBoard, color: chess.Color) -> int:
-    return material(board, color) + 120 * (int(board.concealed(color)) - int(board.concealed(not color)))
+    native = board._board
+    position = 0
+    for side in chess.COLORS:
+        value = 0
+        for piece in (chess.KNIGHT, chess.BISHOP):
+            for square in native.pieces(piece, side):
+                distance = abs(2 * chess.square_file(square) - 7) + abs(2 * chess.square_rank(square) - 7)
+                value += (28 - 4 * distance) if piece == chess.KNIGHT else (14 - 2 * distance)
+        for square in native.pieces(chess.PAWN, side):
+            rank = chess.square_rank(square) if side else 7 - chess.square_rank(square)
+            value += 5 * rank + (8 if chess.square_file(square) in (3, 4) else 0)
+        king = native.king(side)
+        if king is not None and (native.queens or any(board.concealed(c) for c in chess.COLORS)):
+            rank = chess.square_rank(king) if side else 7 - chess.square_rank(king)
+            value -= 20 * rank
+            if rank == 0 and chess.square_file(king) in (2, 6):
+                value += 25
+        position += value if side == color else -value
+    return material(board, color) + concealment(board, color) + position
 
 
 def terminal(board: SecretQueenBoard, color: chess.Color, ply: int = 0) -> int | None:
@@ -161,11 +185,32 @@ def fork_reply(board: SecretQueenBoard, color: chess.Color, deadline: float, sto
 
 
 class TacticalSearch:
-    def __init__(self, color: chess.Color, deadline: float, stop: threading.Event):
+    def __init__(self, color: chess.Color, deadline: float, stop: threading.Event, weights=None):
         self.color = color
         self.deadline = deadline
         self.stop = stop
         self.nodes = 0
+        self.weights = weights
+        self.exchanges = {}
+
+    def _settled(self, board):
+        self._tick()
+        if not threatened(board):
+            return evaluate(board, board.turn) + exposure(board, self.exchanges)
+        best = -MATE
+        for move in board.legal_moves:
+            self._tick()
+            child = board.copy(stack=False)
+            child.push(move, record=False)
+            end = terminal(child, board.turn)
+            value = end if end is not None else evaluate(child, board.turn) - exposure(child, self.exchanges)
+            best = max(best, value)
+        return best
+
+    def _mean(self, values):
+        total = sum(self.weights[index] if self.weights is not None else 1 for index in values)
+        return sum(value * (self.weights[index] if self.weights is not None else 1)
+                   for index, value in values.items()) / total
 
     def _tick(self) -> None:
         self.nodes += 1
@@ -189,7 +234,7 @@ class TacticalSearch:
         urgent = threatened(board)
         stand = evaluate(board, board.turn)
         if depth <= 0 and quiet <= 0:
-            return stand
+            return self._settled(board)
         best = -MATE if depth > 0 or urgent else stand
         if best >= beta:
             return best
@@ -225,7 +270,8 @@ class TacticalSearch:
             return done
         values = {index: evaluate(board, self.color) for index, board in live}
         if depth <= 0 and quiet <= 0:
-            return {**done, **values}
+            return {**done, **{index: self._settled(board) * (1 if board.turn == self.color else -1)
+                              for index, board in live}}
         own = live[0][1].turn == self.color
         urgent = any(threatened(board) for _, board in live)
         forced = depth > 0 or urgent
@@ -245,7 +291,7 @@ class TacticalSearch:
                 if len(children) == len(live):
                     for index, child in children:
                         moves[key].append((index, child))
-            best_mean = sum(best.values())
+            best_mean = self._mean(best)
             for children in moves.values():
                 observations = defaultdict(list)
                 for index, child in children:
@@ -253,7 +299,7 @@ class TacticalSearch:
                 scores = {}
                 for observed in observations.values():
                     scores.update(self._shared(tuple(observed), depth - 1, quiet - int(depth <= 0), ply + 1))
-                average = sum(scores.values())
+                average = self._mean(scores)
                 if average > best_mean:
                     best, best_mean = scores, average
         else:

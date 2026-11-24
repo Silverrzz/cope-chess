@@ -61,7 +61,9 @@ const range = computed(() => {
     const count = value.sampled === value.possible ? value.possible : `${value.sampled} of ${value.possible}`
     coverage = `${count} possible ${value.possible === 1 ? 'position' : 'positions'}`
   }
-  return { label: low === high ? low : `${low} to ${high}`, isRange: low !== high, coverage }
+  const label = low === high ? low : `${low} to ${high}`
+  return { label: value.estimate ? projectionScore(value.estimate) : label,
+    coverage: value.estimate && low !== high ? `${label} across ${coverage}` : coverage }
 })
 const speculativeSearch = computed(() => props.hiddenSearch || range.value !== null)
 
@@ -113,7 +115,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
       </header>
 
       <div class="evaluation">
-        <span>{{ range?.isRange ? 'Evaluation range' : 'Evaluation' }}</span>
+        <span>{{ evaluationRange?.estimate ? 'Wrapper estimate' : range ? 'Tactical estimate' : 'Evaluation' }}</span>
         <strong v-if="range" class="evaluation--range">{{ range.label }}</strong>
         <strong v-else-if="hiddenSearch && evaluation === '-'" class="evaluation--range">Not recorded</strong>
         <strong v-else>{{ evaluation }}</strong>

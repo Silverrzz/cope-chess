@@ -216,6 +216,7 @@ export interface TournamentRatingSummary {
 }
 
 export interface EngineEvaluationRange {
+  estimate?: string | undefined
   low: string
   high: string
   sampled: number

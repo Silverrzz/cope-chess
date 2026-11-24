@@ -14,7 +14,8 @@ import chess
 from cope.variants.secret_queen import POSITION_PREFIX, SEARCH_WORKERS, SecretQueenBoard
 
 from .uci_engine import UciEngineProcess
-from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
+from .secret_queen_beliefs import OpponentBeliefs
+from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, concealment, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
 
 
 Score = tuple[int, int]
@@ -52,6 +53,7 @@ class SearchStatistics:
         self._callback = callback
         self._values: dict[str, int] = {}
         self._evaluation: str | None = None
+        self._estimate: Score | None = None
         self._lock = threading.Lock()
 
     def record(self, lines: list[str]) -> None:
@@ -68,10 +70,11 @@ class SearchStatistics:
             if self._callback is not None:
                 self._callback(self._line())
 
-    def evaluate(self, scores: list[Score], positions: int) -> None:
+    def evaluate(self, scores: list[Score], positions: int, estimate: Score | None = None) -> None:
         count = len(scores) if positions else 0
         with self._lock:
             self._evaluation = f"{_score_token(min(scores))},{_score_token(max(scores))},{count},{positions}"
+            self._estimate = estimate
             if self._callback is not None:
                 self._callback(self._line())
 
@@ -81,7 +84,11 @@ class SearchStatistics:
         if "nodes" in values:
             values["nps"] = values["nodes"] * 1000 // elapsed
         line = "info " + " ".join(f"{key} {value}" for key, value in values.items())
-        return f"{line} sq_eval {self._evaluation}" if self._evaluation else line
+        if self._evaluation:
+            line += f" sq_eval {self._evaluation}"
+        if self._estimate is not None:
+            line += f" sq_score {_score_token(self._estimate)}"
+        return line
 
     def result(self, move: chess.Move) -> list[str]:
         lines = [f"bestmove {move.uci()}"]
@@ -144,6 +151,7 @@ class SecretQueenEngine(UciEngineProcess):
         self._advertised: list[set[str]] = [set() for _ in range(SEARCH_WORKERS)]
         self._configured: list[dict[str, str]] = [{} for _ in range(SEARCH_WORKERS)]
         self._belief_cache = None
+        self._opponent_beliefs = None
         self._pool = ThreadPoolExecutor(max_workers=max(1, SEARCH_WORKERS - 1))
         self._active: set[UciEngineProcess] = set()
         self._active_lock = threading.Lock()
@@ -171,6 +179,7 @@ class SecretQueenEngine(UciEngineProcess):
         if command == "ucinewgame":
             self._position = None
             self._belief_cache = None
+            self._opponent_beliefs = None
             for engine in self._lanes[1:]:
                 if engine is not None and engine.process_started:
                     engine.handle_command(command)
@@ -343,6 +352,9 @@ class SecretQueenEngine(UciEngineProcess):
                     self._active.discard(engine)
 
         quick = deadline - started < .12
+        if self._opponent_beliefs is None or self._opponent_beliefs.color != color:
+            self._opponent_beliefs = OpponentBeliefs(color)
+        weights = self._opponent_beliefs.update(history, worlds, started + (deadline - started) * .10, self._stop)
         if quick:
             moves = tuple(sorted(moves, key=lambda move: move_order(first, move), reverse=True)[:8])
         projections = {}
@@ -360,9 +372,11 @@ class SecretQueenEngine(UciEngineProcess):
                                               threads=max(1, workers // max(1, min(workers, len(projections))))))
                    for board, indices in projections.values()]
         rows = {}
+        bases = {}
         exchanges = {}
         for move in moves:
             values = []
+            baseline = []
             for world in worlds:
                 after = world.copy(stack=False)
                 after.push(move, record=False)
@@ -372,7 +386,9 @@ class SecretQueenEngine(UciEngineProcess):
                     values.append(evaluate(after, color) - loss)
                 else:
                     values.append(end)
+                baseline.append(values[-1] - concealment(after, color))
             rows[move] = SearchResult(tuple(values), -1, 0)
+            bases[move] = baseline
         eligible = [move for move in moves if rows[move].losses == 0] or list(moves)
         guidance = {move: [0.] * len(worlds) for move in eligible}
         nominations = set()
@@ -389,19 +405,28 @@ class SecretQueenEngine(UciEngineProcess):
                 if probe.evaluation is not None:
                     kind, value = probe.evaluation.score
                     scores[probe.move] = value if kind == 0 else 10000 if kind > 0 else -10000
-            reference = max(scores.values()) if scores else 0
             for move in eligible:
-                adjustment = max(-100, min(0, scores[move] - reference)) if move in scores else -100
-                if not scores and move == probes[0].move:
-                    adjustment = 0
                 for index in indices:
-                    guidance[move][index] = adjustment
+                    reference = probes[0].move
+                    if move in scores:
+                        adjustment = scores[move] - bases[move][index]
+                    elif reference in scores and reference in bases:
+                        adjustment = max(-150, min(150, scores[reference] - bases[reference][index])) - 40
+                    else:
+                        adjustment = 0
+                    guidance[move][index] = max(-150, min(150, adjustment))
+
+        def blended(move):
+            return tuple(score + round(guidance[move][index]) if abs(score) < MATE - 128 else score
+                         for index, score in enumerate(rows[move].values))
 
         def value(move):
             row = rows[move]
-            positional = sum(guidance[move]) / len(worlds) if not row.wins and not row.losses else 0
-            downside = (row.mean - min(row.values)) / 4
-            return -row.losses, row.mean + positional - downside, min(row.values), move in nominations
+            scores = blended(move)
+            average = sum(weight * score for weight, score in zip(weights, scores))
+            downside = sum(weight * max(0, average - score) for weight, score in zip(weights, scores))
+            losses = sum(weight for weight, score in zip(weights, row.values) if score <= -MATE + 128)
+            return -losses, average - downside, min(scores), move in nominations
 
         eligible.sort(key=value, reverse=True)
         finalists = eligible[:6]
@@ -420,7 +445,7 @@ class SecretQueenEngine(UciEngineProcess):
                 loss = fork_reply(after, color, started + (deadline - started) * .82, self._stop)
                 if loss is not None:
                     refutations.setdefault(move, {})[index] = min(loss, refutations.get(move, {}).get(index, loss))
-        search = TacticalSearch(color, deadline - .025, self._stop)
+        search = TacticalSearch(color, deadline - .025, self._stop, weights)
         for depth, quiet in ((0, 2), (0, 4), (1, 4), (2, 4), (3, 4), (4, 4)):
             try:
                 completed = {move: search.candidate(worlds, move, depth, quiet) for move in finalists}
@@ -435,11 +460,13 @@ class SecretQueenEngine(UciEngineProcess):
             finalists = eligible
         chosen = max(finalists, key=value)
         scores = [(2, 0) if score >= MATE - 128 else (-2, 0) if score <= -MATE + 128 else (0, score)
-                  for score in rows[chosen].values]
-        statistics.evaluate(scores, len(worlds))
+                  for score in blended(chosen)]
+        estimate = (0, round(value(chosen)[1])) if all(kind == 0 for kind, _ in scores) else None
+        statistics.evaluate(scores, len(worlds), estimate)
         LOG.info("secret queen decision %s", json.dumps({
             "ply": first.ply(), "worlds": len(worlds), "chosen": chosen.uci(),
             "hint_coverage": len(covered), "tactical_nodes": search.nodes,
+            "weights": weights, "belief_observations": self._opponent_beliefs.observations,
             "candidates": [{"move": move.uci(), "values": row.values, "depth": row.depth,
                             "guidance": guidance.get(move), "value": value(move)[1] if move in guidance else row.mean}
                            for move, row in rows.items()],

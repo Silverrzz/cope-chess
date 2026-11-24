@@ -197,7 +197,8 @@ function evaluationRange(info: string | null | undefined): EngineEvaluationRange
   const [, low, high, rawSampled, rawPossible] = fields;
   const sampled = Number(rawSampled);
   const possible = Number(rawPossible);
-  if (low && high && sampled <= possible && (sampled > 0 || possible === 0)) return { low, high, sampled, possible };
+  const estimate = info?.match(/(?:^| )sq_score (cp:-?\d+|mate:-?\d+|win|loss)(?= |$)/)?.[1];
+  if (low && high && sampled <= possible && (sampled > 0 || possible === 0)) return { low, high, sampled, possible, estimate };
 }
 
 function capturedKing(index: number): boolean {

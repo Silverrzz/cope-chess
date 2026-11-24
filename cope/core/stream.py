@@ -123,9 +123,11 @@ def is_search_info_line(line: str, *, allow_partial: bool = False, allow_statist
         words = line.split()
         if words[:1] == ["info"] and len(words) >= 3 and len(words) % 2:
             fields = dict(zip(words[1::2], words[2::2], strict=True))
-            if fields.keys() <= {"depth", "seldepth", "nodes", "hashfull", "nps", "time", "sq_eval"}:
+            if fields.keys() <= {"depth", "seldepth", "nodes", "hashfull", "nps", "time", "sq_eval", "sq_score"}:
                 return all(
-                    _SECRET_QUEEN_EVALUATION.fullmatch(value) if key == "sq_eval" else value.isascii() and value.isdecimal()
+                    _SECRET_QUEEN_EVALUATION.fullmatch(value) if key == "sq_eval"
+                    else re.fullmatch(_SECRET_QUEEN_SCORE, value) if key == "sq_score"
+                    else value.isascii() and value.isdecimal()
                     for key, value in fields.items()
                 )
     if not allow_partial:
