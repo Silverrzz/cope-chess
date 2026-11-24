@@ -315,7 +315,7 @@ def next_worker_assignment(
         if worker.tournament_scope == "all"
         else frozenset(list_worker_tournament_ids(connection, worker.id))
     )
-    tournaments = list_tournaments(connection)
+    tournaments = list_tournaments(connection, status="running")
     if worker.tournament_scope == "all":
         tournaments = _fair_worker_tournaments(connection, worker.id, tournaments, available_resources)
     for tournament in tournaments:
@@ -1907,23 +1907,12 @@ def _next_playable_game_for_worker(
     excluded_engine_ids: frozenset[int] = frozenset(),
     excluded_game_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
-    conditions = "tournament_id = ? AND status = 'pending'"
-    parameters: list[int] = [tournament_id]
-    conditions += """
-      AND NOT EXISTS (
-        SELECT 1
-        FROM engine_versions local_version
-        WHERE local_version.id IN (games.white_engine_id, games.black_engine_id)
-          AND local_version.distribution = 'worker_local'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM worker_engine_discoveries discovery
-            WHERE discovery.worker_id = ?
-              AND discovery.local_key = local_version.worker_local_key
-          )
-      )
+    conditions = """
+      tournament_id = ? AND status = 'pending'
+      AND white_engine_id NOT IN (SELECT id FROM blocked_versions)
+      AND black_engine_id NOT IN (SELECT id FROM blocked_versions)
     """
-    parameters.append(worker.id)
+    parameters: list[int] = [worker.id, tournament_id]
     if excluded_engine_ids:
         blocked = tuple(sorted(excluded_engine_ids))
         placeholders = ", ".join("?" for _ in blocked)
@@ -1940,6 +1929,17 @@ def _next_playable_game_for_worker(
         parameters.extend(blocked_games)
     row = connection.execute(
         f"""
+        WITH blocked_versions AS MATERIALIZED (
+          SELECT local_version.id
+          FROM engine_versions local_version
+          WHERE local_version.distribution = 'worker_local'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM worker_engine_discoveries discovery
+              WHERE discovery.worker_id = ?
+                AND discovery.local_key = local_version.worker_local_key
+            )
+        )
         SELECT id
         FROM games
         WHERE {conditions}
