@@ -113,9 +113,15 @@ def is_full_uci_info_line(line: str) -> bool:
     return True
 
 
-def is_search_info_line(line: str, *, allow_partial: bool = False) -> bool:
+def is_search_info_line(line: str, *, allow_partial: bool = False, allow_statistics: bool = False) -> bool:
     if is_full_uci_info_line(line):
         return True
+    if allow_statistics:
+        words = line.split()
+        if words[:1] == ["info"] and len(words) >= 3 and len(words) % 2:
+            fields = dict(zip(words[1::2], words[2::2], strict=True))
+            if fields and fields.keys() <= {"depth", "seldepth", "nodes", "hashfull", "nps", "time"}:
+                return all(value.isascii() and value.isdecimal() for value in fields.values())
     if not allow_partial:
         return False
     parts = line.split()

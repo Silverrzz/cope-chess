@@ -80,6 +80,7 @@ onBeforeUnmount(() => {
       <div class="tournament-heading__controls">
         <div v-if="$slots.selectors" class="relay-broadcast__selectors"><slot name="selectors" /></div>
         <button v-if="canFollowLive" type="button" class="event-page-link" @click="emit('followLive')">Follow live <AppIcon name="arrow-right" :size="14" /></button>
+        <slot name="actions" />
         <RouterLink :to="{ name: 'event', params: { slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink>
       </div>
     </header>
@@ -118,7 +119,7 @@ onBeforeUnmount(() => {
 .relay-broadcast__selectors :slotted(label) { display: grid; gap: .25rem; min-width: 0; color: var(--color-text-muted, #607080); font-size: .64rem; font-weight: 700; }
 .relay-broadcast__selectors :slotted(label:last-of-type) { width: clamp(16rem, 27vw, 27rem); }
 .relay-broadcast__selectors :deep(select) { width: 100%; min-height: 2.35rem; padding: .4rem 2rem .4rem .65rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-sm, .35rem); background: var(--color-surface, #fff); color: var(--color-text, #17202a); font: inherit; font-size: .77rem; }
-.event-page-link { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .35rem; padding-inline: .8rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted, #607080); font-size: .72rem; font-weight: 730; text-decoration: none; white-space: nowrap; }
+.event-page-link, :slotted(.event-page-link) { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .35rem; padding-inline: .8rem; border: 1px solid var(--color-border, #d5dbe1); border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted, #607080); font-size: .72rem; font-weight: 730; text-decoration: none; white-space: nowrap; }
 .arena { display: grid; grid-template-columns: minmax(25rem, 29rem) var(--arena-board-size) minmax(28rem, 1fr); gap: clamp(.7rem, 1.5vw, 1.2rem); align-items: start; height: var(--arena-content-height); min-height: 0; }
 .engine-column, .activity-column { display: grid; min-height: 0; gap: var(--space-sm, .5rem); }
 .engine-column { grid-template-rows: repeat(2, minmax(0, 1fr)) auto; height: var(--arena-content-height); }

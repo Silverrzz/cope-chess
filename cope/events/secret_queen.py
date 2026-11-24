@@ -4,7 +4,7 @@ from fastapi import Depends, HTTPException, Request
 from pydantic import AwareDatetime, BaseModel
 
 from cope.adapters.http.responses import _json, _publish_admin_change
-from cope.db import get_game, list_engine_records, list_games, list_moves
+from cope.db import get_game, list_engine_records, list_moves
 from cope.db.events import (
     create_event,
     get_event,
@@ -26,6 +26,23 @@ ANNOUNCEMENT_STATUSES = {"draft", "announced", "scheduled", "postponed"}
 class AnnouncementSettings(BaseModel):
     scheduled_start_at: AwareDatetime | None
     published: bool
+
+
+def spectator_queen_files(connection, game) -> tuple[int, int] | None:
+    if game.status not in {"live", "finished"}:
+        return None
+    row = connection.execute(
+        "SELECT white_file, black_file FROM secret_queen_game_secrets WHERE game_id = ?",
+        (game.id,),
+    ).fetchone()
+    return (row["black_file"], row["white_file"]) if row is not None else None
+
+
+def spectator_queen_squares(connection, game) -> dict[str, str] | None:
+    files = spectator_queen_files(connection, game)
+    if files is None:
+        return None
+    return {"white": "abcdefgh"[files[1]] + "2", "black": "abcdefgh"[files[0]] + "7"}
 
 
 def _admin_payload(connection, event):
@@ -108,17 +125,14 @@ def _register_api(app):
         if not web_app._event_arena_is_public(event) and not web_app._admin_request_authenticated(request):
             raise HTTPException(404, "Secret Queen arena is closed.")
         moves = list_moves(connection, game.id)
-        pair = [item for item in list_games(connection, game.tournament_id) if (item.round, item.pair_index) == (game.round, game.pair_index)]
         files = None
         concealed = None
-        if len(pair) == 2 and all(item.status == "finished" for item in pair):
-            row = connection.execute(
-                "SELECT white_file, black_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
-                (game.tournament_id, game.round, game.pair_index),
-            ).fetchone()
-            if row is not None:
-                files = {side: "abcdefgh"[row[f"{side}_file"]] for side in ("white", "black")}
-                board = SecretQueenBoard(files=(row["black_file"], row["white_file"]))
+        assigned_files = spectator_queen_files(connection, game)
+        if assigned_files is not None:
+            black, white = assigned_files
+            files = {"white": "abcdefgh"[white], "black": "abcdefgh"[black]}
+            if game.status == "finished":
+                board = SecretQueenBoard(files=assigned_files)
                 concealed = [board.concealed_squares()]
                 for move in moves:
                     board.push(board.parse_uci(move.uci))

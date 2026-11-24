@@ -26,6 +26,14 @@ const pendingStart = computed(() => competition.value.launch_ready ? "Opening th
 watch(arenaOpen, (open) => {
   if (open && props.view === "event") void router.replace(arenaRoute.value);
 });
+
+function openContest(id: number): void {
+  const selected = contests.value.find(contest => contest.id === id);
+  const game = selected?.games.find(item => item.status === "live")
+    ?? selected?.games.find(item => item.status === "finished")
+    ?? selected?.games[0];
+  if (game) void router.push({ ...arenaRoute.value, query: { game_id: String(game.id) } });
+}
 </script>
 
 <template>
@@ -46,7 +54,7 @@ watch(arenaOpen, (open) => {
         </RouterLink>
       </div>
     </header>
-    <div class="page-container"><SecretQueenStandings :contests="contests" :cast="detail.cast" /></div>
+    <div class="page-container"><SecretQueenStandings :contests="contests" :cast="detail.cast" @select="openContest" /></div>
   </div>
 </template>
 

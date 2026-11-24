@@ -2134,14 +2134,13 @@ def _starting_board(opening: OpeningPositionRecord | None, *, variant: str = "st
 def _secret_queen_files(connection, game: GameRecord) -> tuple[int, int]:
     from secrets import randbelow
 
-    key = (game.tournament_id, game.round, game.pair_index)
     connection.execute(
-        "INSERT INTO secret_queen_pairs (tournament_id, round, pair_index, black_file, white_file) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        (*key, randbelow(8), randbelow(8)),
+        "INSERT INTO secret_queen_game_secrets (game_id, black_file, white_file) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+        (game.id, randbelow(8), randbelow(8)),
     )
     row = connection.execute(
-        "SELECT black_file, white_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
-        key,
+        "SELECT black_file, white_file FROM secret_queen_game_secrets WHERE game_id = ?",
+        (game.id,),
     ).fetchone()
     return row["black_file"], row["white_file"]
 

@@ -23,6 +23,7 @@ const props = withDefaults(defineProps<{
   analysis?: EngineAnalysis | null
   positionFen?: string | null
   active?: boolean
+  hiddenSearch?: boolean
   loading?: boolean
 }>(), {
   name: '',
@@ -88,7 +89,7 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 
       <div class="evaluation">
         <span>Evaluation</span>
-        <strong>{{ evaluation }}</strong>
+        <strong :class="{ 'evaluation--hidden': hiddenSearch }">{{ hiddenSearch ? 'Hidden positions' : evaluation }}</strong>
       </div>
 
       <div class="engine-panel__body">
@@ -101,18 +102,18 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
           </dl>
 
           <div class="analysis-line">
-            <span>{{ analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
-            <p :title="analysis?.pv || info">{{ analysis?.pv_san || analysis?.pv || info }}</p>
+            <span>{{ hiddenSearch ? 'Search information' : analysis?.pv ? 'Principal variation' : 'Engine info' }}</span>
+            <p :title="hiddenSearch ? 'Depth, nodes and NPS from searches across possible positions' : analysis?.pv || info">{{ hiddenSearch ? 'Searching possible queen positions' : analysis?.pv_san || analysis?.pv || info }}</p>
           </div>
         </div>
 
         <div class="pv-preview">
-          <span>PV position</span>
+          <span>{{ hiddenSearch ? 'Public position' : 'PV position' }}</span>
           <ChessBoard
             :key="variant || 'standard'"
             :variant="variant"
             :fen="pvRootFen"
-            :moves="pvMoves"
+            :moves="hiddenSearch ? [] : pvMoves"
             :orientation="side"
             :controls="false"
             :coordinates="false"
@@ -147,6 +148,8 @@ const pvRootFen = computed(() => props.analysis?.root_fen || props.positionFen |
 .engine-panel--white {
   --side-color: #f7f8fa;
 }
+
+.evaluation .evaluation--hidden { font-size: clamp(.9rem, 2vw, 1.4rem); }
 
 .engine-panel::before {
   position: absolute;

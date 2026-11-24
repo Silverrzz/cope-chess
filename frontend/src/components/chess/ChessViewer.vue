@@ -15,6 +15,7 @@ const props = withDefaults(defineProps<{
   arrows?: BoardArrow[]
   rings?: string[]
   concealedQueens?: Partial<Record<Color, string | null>> | undefined
+  animateQueenReveal?: boolean
   finished?: boolean
 }>(), {
   opening: null,
@@ -104,6 +105,7 @@ function fallbackCopy(value: string): void {
       :arrows="arrows"
       :rings="rings"
       :concealed-queens="concealedQueens"
+      :animate-queen-reveal="animateQueenReveal"
       :finished="finished"
       @update:model-value="selectPly"
       @position="currentFen = $event.fen; emit('position', $event)"
