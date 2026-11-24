@@ -100,7 +100,7 @@ class SecretQueenBoard:
         adjacent = abs(chess.square_file(move.to_square) - chess.square_file(move.from_square)) == 1
         return not (adjacent and delta in (forward - 1, forward + 1) and target is not None and target.color != self.turn)
 
-    def push(self, move: chess.Move) -> None:
+    def push(self, move: chess.Move, *, record: bool = True) -> None:
         mover = self.turn
         secrets = list(self._secrets)
         moving_secret = move.from_square == secrets[mover]
@@ -117,8 +117,9 @@ class SecretQueenBoard:
         self._board.push(move)
         self._board.clear_stack()
         self._secrets = tuple(secrets)
-        self.move_stack.append(move)
-        self._history.append((move.uci(), self.fen(en_passant="fen")))
+        if record:
+            self.move_stack.append(move)
+            self._history.append((move.uci(), self.fen(en_passant="fen")))
         self._counts[self._key()] += 1
 
     def _with_queen(self, square: chess.Square, color: chess.Color) -> chess.Board:
@@ -171,13 +172,16 @@ class SecretQueenBoard:
             for color, square in enumerate(self._secrets)
         }
 
-    def _key(self) -> tuple[str, ...]:
-        fen = self.fen(en_passant="fen").split()
-        if self._board.ep_square is not None and not any(
+    def _key(self) -> tuple:
+        native = self._board
+        ep = native.ep_square
+        if ep is not None and not any(
             move.from_square != self._secrets[self.turn] for move in self._board.generate_legal_ep()
         ):
-            fen[3] = "-"
-        return (*fen[:4], *("-" if square is None else chess.square_name(square) for square in self._secrets))
+            ep = None
+        return (native.pawns, native.knights, native.bishops, native.rooks, native.queens,
+                native.kings, native.occupied_co[chess.WHITE], native.occupied_co[chess.BLACK],
+                native.turn, native.clean_castling_rights(), ep, *self._secrets)
 
     def outcome(self) -> chess.Outcome | None:
         if self._board.king(self.turn) is None:

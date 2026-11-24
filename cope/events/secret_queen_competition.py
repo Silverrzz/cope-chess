@@ -6,7 +6,7 @@ import json
 from pydantic import BaseModel, Field
 
 from cope.core.models import (
-    AdjudicationConfig, DrawAdjudicationRule, IncrementTimeControl, ResignAdjudicationRule,
+    AdjudicationConfig, IncrementTimeControl,
     RoundRobinFormatOptions, SwissFormatOptions, TournamentConfig, TournamentFormat,
 )
 from cope.db import (
@@ -100,10 +100,7 @@ def _tournament_config(configured, engine_ids, *, rounds=None):
         format_options=SwissFormatOptions(rounds=rounds) if swiss else RoundRobinFormatOptions(),
         participants=list(engine_ids), time_control=configured.group_clock if swiss else configured.knockout_clock,
         engine_hash_mb=configured.hash_mb, concurrency=configured.group_concurrency if swiss else 1,
-        adjudication=AdjudicationConfig(
-            draw=DrawAdjudicationRule(max_abs_cp=10, consecutive_plies=8, min_fullmove=40),
-            resign=ResignAdjudicationRule(min_abs_cp=800, consecutive_plies=6),
-        ),
+        adjudication=AdjudicationConfig(),
         rated=False, lag_compensation_ms=0, uci_options={"Ponder": False},
     )
 

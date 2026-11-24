@@ -1702,7 +1702,7 @@ def _tournament_required_resources(
     if tournament.config.variant == "secret-queen":
         return WorkerResources(
             threads=SEARCH_WORKERS,
-            hash_mb=2 * SEARCH_WORKERS * engine_count * (tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB),
+            hash_mb=SEARCH_WORKERS * engine_count * (tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB),
         )
     relay_resources = relay_resources_for_tournament(
         connection,
