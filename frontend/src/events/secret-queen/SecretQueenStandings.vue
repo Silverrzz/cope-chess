@@ -10,7 +10,7 @@ const emit = defineEmits<{ select: [contest: number] }>();
 const groups = computed(() => props.contests.filter(contest => contest.kind === "group"));
 const bracket = computed(() => ["Quarterfinal", "Semifinal", "Final"].map(title => ({
   title, contests: props.contests.filter(contest => contest.kind === "bracket" && contest.stage === title),
-})));
+})).filter(stage => stage.contests.length));
 const names = computed(() => new Map(props.cast.map(member => [Number(member.engine_version_id), member.display_name])));
 </script>
 
@@ -34,7 +34,7 @@ const names = computed(() => new Map(props.cast.map(member => [Number(member.eng
         </article>
       </div>
     </section>
-    <section v-if="bracket.some(stage => stage.contests.length)" class="standings-section" aria-label="Knockout bracket">
+    <section v-if="bracket.length" class="standings-section" aria-label="Knockout bracket">
       <h2>Knockout bracket</h2>
       <div class="bracket">
         <section v-for="stage in bracket" :key="stage.title" class="bracket-stage">
@@ -58,7 +58,7 @@ const names = computed(() => new Map(props.cast.map(member => [Number(member.eng
 .standings, .standings-section, .bracket-stage { display: grid; gap: 1rem; align-content: start; min-width: 0; }
 .standings { gap: 2rem; }
 .swiss-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: .8rem; }
-.bracket { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+.bracket { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: .8rem; }
 .competition-card { display: grid; gap: .65rem; padding: .9rem; border: 1px solid var(--event-view-border); border-radius: var(--radius-md); background: #140d20; }
 .competition-card header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 .competition-card h3, .bracket-stage h3 { font-size: 1rem; }
