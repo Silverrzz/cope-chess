@@ -1248,11 +1248,15 @@ def lock_tournament(
     return _tournament_from_row(row)
 
 
-def list_tournaments(connection: sqlite3.Connection) -> tuple[TournamentRecord, ...]:
-    return tuple(
-        _tournament_from_row(row)
-        for row in connection.execute("SELECT * FROM tournaments ORDER BY id DESC")
+def list_tournaments(
+    connection: sqlite3.Connection, *, status: str | None = None,
+) -> tuple[TournamentRecord, ...]:
+    rows = (
+        connection.execute("SELECT * FROM tournaments ORDER BY id DESC")
+        if status is None
+        else connection.execute("SELECT * FROM tournaments WHERE status = ? ORDER BY id DESC", (status,))
     )
+    return tuple(_tournament_from_row(row) for row in rows)
 
 
 def list_tournaments_by_ids(
