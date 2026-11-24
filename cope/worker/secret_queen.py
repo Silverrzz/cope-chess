@@ -361,7 +361,6 @@ class SecretQueenEngine(UciEngineProcess):
                    for board, indices in projections.values()]
         rows = {}
         exchanges = {}
-        baseline = tuple(evaluate(world, color) for world in worlds)
         for move in moves:
             values = []
             for world in worlds:
@@ -375,10 +374,6 @@ class SecretQueenEngine(UciEngineProcess):
                     values.append(end)
             rows[move] = SearchResult(tuple(values), -1, 0)
         eligible = [move for move in moves if rows[move].losses == 0] or list(moves)
-        risk = {move: max(before - after for before, after in zip(baseline, rows[move].values, strict=True))
-                for move in eligible}
-        limit = max(0, min(risk.values())) + 150
-        eligible = [move for move in eligible if risk[move] <= limit or rows[move].wins == len(worlds)]
         guidance = {move: [0.] * len(worlds) for move in eligible}
         nominations = set()
         covered = set()
@@ -405,7 +400,8 @@ class SecretQueenEngine(UciEngineProcess):
         def value(move):
             row = rows[move]
             positional = sum(guidance[move]) / len(worlds) if not row.wins and not row.losses else 0
-            return -row.losses, row.mean + positional, min(row.values), move in nominations
+            downside = (row.mean - min(row.values)) / 4
+            return -row.losses, row.mean + positional - downside, min(row.values), move in nominations
 
         eligible.sort(key=value, reverse=True)
         finalists = eligible[:6]
@@ -421,13 +417,13 @@ class SecretQueenEngine(UciEngineProcess):
             for index, world in enumerate(worlds):
                 after = world.copy(stack=False)
                 after.push(move, record=False)
-                loss = fork_reply(after, color, deadline - .035, self._stop)
+                loss = fork_reply(after, color, started + (deadline - started) * .82, self._stop)
                 if loss is not None:
                     refutations.setdefault(move, {})[index] = min(loss, refutations.get(move, {}).get(index, loss))
         search = TacticalSearch(color, deadline - .025, self._stop)
-        for depth in range(0, 5):
+        for depth, quiet in ((0, 2), (0, 4), (1, 4), (2, 4), (3, 4), (4, 4)):
             try:
-                completed = {move: search.candidate(worlds, move, depth) for move in finalists}
+                completed = {move: search.candidate(worlds, move, depth, quiet) for move in finalists}
             except SearchExpired:
                 break
             rows.update(completed)
