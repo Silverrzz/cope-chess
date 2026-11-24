@@ -36,6 +36,7 @@ const arrowBrushes: DrawBrushes = {
 }
 const duckImage = `url("${duckIcon}")`
 const queenRevealDuration = 620
+const moveAnimationDuration = 150
 
 const props = withDefaults(defineProps<{
   fen?: string | null
@@ -87,6 +88,7 @@ const queenReveal = ref<{ color: Color; left: string; top: string } | null>(null
 const queenRevealTiming = `${queenRevealDuration}ms`
 let ground: ChessgroundApi | null = null
 let revealTimer: number | undefined
+let revealStartedFollowing = false
 let presentedPly = -1
 let presentedFen = ''
 let presentedOrientation: Color | undefined
@@ -199,7 +201,7 @@ onMounted(() => {
       ...editorConfig,
       viewOnly: !editing,
       coordinates: props.coordinates,
-      animation: { enabled: !props.compact, duration: 150 },
+      animation: { enabled: !props.compact, duration: moveAnimationDuration },
       drawable: { enabled: false, brushes: arrowBrushes },
     })
     renderBoard()
@@ -347,7 +349,9 @@ function predictionShapes(arrow: BoardArrow, brush: string): DrawShape[] {
 function renderBoard(): void {
   if (!ground) return
   const samePosition = presentedPly === selectedPly.value && presentedFen === currentFen.value && presentedOrientation === props.orientation
-  if (revealTimer !== undefined && samePosition) return
+  const followingNewMoves = revealStartedFollowing && presentedOrientation === props.orientation
+    && selectedPly.value > presentedPly && selectedPly.value === props.moves.length
+  if (revealTimer !== undefined && (samePosition || followingNewMoves)) return
   const interruptedReveal = revealTimer !== undefined
   if (interruptedReveal) {
     window.clearTimeout(revealTimer)
@@ -404,7 +408,7 @@ function renderBoard(): void {
     orientation: props.orientation,
     coordinates: props.coordinates,
     lastMove: lastMoveSquares,
-    animation: { enabled: !props.compact, duration: 150 },
+    animation: { enabled: !props.compact, duration: moveAnimationDuration },
     drawable: { autoShapes, brushes: { ...arrowBrushes, brainRing: { key: 'brain-ring', color: arrowBrushes.yellow.color, opacity: .8, lineWidth: 5 }, ...fillBrushes, ...outlineBrushes } },
   }
   const pieces: PiecesDiff = new Map([...ground.state.pieces.keys()].map((key) => [key, undefined]))
@@ -426,11 +430,18 @@ function renderBoard(): void {
       queenReveal.value = { color: queen.color, left: `${(white ? file : 7 - file) * 12.5}%`, top: `${(white ? 7 - rank : rank) * 12.5}%` }
       ground.set({ animation: { enabled: false }, lastMove: [] })
       ground.setPieces(new Map([[from, undefined]]))
+      revealStartedFollowing = !props.finished && presentedPly === props.moves.length
       revealTimer = window.setTimeout(() => {
-        revealTimer = undefined
         queenReveal.value = null
-        ground?.setPieces(new Map([[from, queen]]))
-        renderBoard()
+        if (ground) {
+          ground.setPieces(new Map([[from, queen]]))
+          ground.set(config)
+          ground.setPieces(pieces)
+        }
+        revealTimer = window.setTimeout(() => {
+          revealTimer = undefined
+          renderBoard()
+        }, moveAnimationDuration)
       }, queenRevealDuration)
       return
     }
