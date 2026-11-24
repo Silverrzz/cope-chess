@@ -255,12 +255,18 @@ class SecretQueenBoard:
         return f"position fen {start}" + (" moves " + " ".join(suffix) if suffix else "")
 
     @classmethod
-    def beliefs(cls, color: chess.Color, own_file: int, history: list[tuple[str, str]]) -> tuple[SecretQueenBoard, ...]:
+    def beliefs(
+        cls, color: chess.Color, own_file: int, history: tuple[tuple[str, str], ...],
+        *, prior: tuple[SecretQueenBoard, ...] | None = None,
+    ) -> tuple[SecretQueenBoard, ...]:
         worlds = []
         actions = [(chess.Move.from_uci(move), fen) for move, fen in history]
-        for opposing_file in FILES:
-            files = (opposing_file, own_file) if color else (own_file, opposing_file)
-            world = cls(files=files)
+        if prior is None:
+            seeds = (cls(files=(opposing_file, own_file) if color else (own_file, opposing_file))
+                     for opposing_file in FILES)
+        else:
+            seeds = (world.copy() for world in prior)
+        for world in seeds:
             for move, fen in actions:
                 if not world.is_legal(move):
                     break
