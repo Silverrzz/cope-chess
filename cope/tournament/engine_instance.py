@@ -355,6 +355,8 @@ class EngineInstance:
             if "threads" not in self._advertised_options and options.get("Threads", 1) != 1:
                 raise RuntimeError(f"{self._name} does not advertise Threads")
             return {name: value for name, value in options.items() if name.lower() in self._advertised_options}
+        if "ponder" not in self._advertised_options:
+            options = {name: value for name, value in options.items() if name.lower() != "ponder" or value is not False}
         duck = options.get("UCI_Variant") == "duck"
         if duck:
             declaration = self._advertised_options.get("uci_variant", "")
