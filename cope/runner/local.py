@@ -19,7 +19,9 @@ from cope.chat import (
     announce_tournament_finished,
 )
 from cope.core.san import pv_to_san
-from cope.variants import Position, create_board, get_variant
+from cope.variants import Position, SecretQueenBoard, create_board, get_variant
+from cope.variants.secret_queen import SEARCH_WORKERS
+from cope.version import app_version
 from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
@@ -418,6 +420,8 @@ def _next_tournament_worker_assignment(
         return None
     if worker.hw is None:
         return None
+    if tournament.config.variant == "secret-queen" and worker.app_commit != app_version():
+        return None
     game = _next_playable_game_for_worker(
         connection,
         tournament.id,
@@ -708,7 +712,11 @@ def run_worker_assignment_game(
         return current is not None and current.status == "paused"
 
     opening = get_opening_position(connection, game_record.opening_id)
-    board = _starting_board(opening, variant=tournament.config.variant)
+    board = (
+        SecretQueenBoard(files=_secret_queen_files(connection, game_record))
+        if tournament.config.variant == "secret-queen"
+        else _starting_board(opening, variant=tournament.config.variant)
+    )
     if (assignment.variant, assignment.rules_revision) != (tournament.config.variant, tournament.config.rules_revision):
         raise RuntimeError("Assignment variant does not match the tournament")
     recorded_moves = list_moves(connection, game_record.id)
@@ -727,6 +735,8 @@ def run_worker_assignment_game(
                     f"pause checkpoint move history is invalid at ply {recorded_move.ply}"
                 )
             board.push(move)
+            if isinstance(board, SecretQueenBoard) and recorded_move.position_fen != board.fen(en_passant="fen"):
+                raise RuntimeError(f"Secret Queen position history is invalid at ply {recorded_move.ply}")
         if checkpoint is None:
             raise RuntimeError("resumed game is missing its pause checkpoint")
         checkpoint_ply = int(checkpoint.state.get("ply", -1))
@@ -944,8 +954,9 @@ def run_worker_assignment_game(
             "book_plies": len(opening_moves),
         },
     )
-    for engine in engine_instances.values():
-        engine.prepare_position(board)
+    if not isinstance(board, SecretQueenBoard):
+        for engine in engine_instances.values():
+            engine.prepare_position(board)
     progress(
         "opening",
         "opening_start_position",
@@ -1163,6 +1174,7 @@ def run_worker_assignment_game(
             time_ms=0 if search is None else search.time_ms,
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
             engine_version_id=int(engine.get_name()),
+            position_fen=board.fen(en_passant="fen") if isinstance(board, SecretQueenBoard) else None,
         )
         moves.append(move_record)
         connection.commit()
@@ -1685,6 +1697,11 @@ def _tournament_required_resources(
 ) -> WorkerResources:
     from cope.events.engine_relay import relay_resources_for_tournament
 
+    if tournament.config.variant == "secret-queen":
+        return WorkerResources(
+            threads=SEARCH_WORKERS,
+            hash_mb=2 * SEARCH_WORKERS * engine_count * (tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB),
+        )
     relay_resources = relay_resources_for_tournament(
         connection,
         tournament.id,
@@ -2030,7 +2047,11 @@ def _finish_tournament_if_complete(
     tournament: TournamentRecord,
 ) -> bool:
     from cope.events.engine_hand_brain import advance_hand_brain
+    from cope.events.secret_queen_competition import advance_competition
 
+    secret_queen = advance_competition(connection, tournament)
+    if secret_queen is not None:
+        return secret_queen.complete
     hand_brain = advance_hand_brain(connection, tournament)
     if hand_brain is not None:
         return hand_brain.complete
@@ -2106,6 +2127,21 @@ def _finish_tournament_if_complete(
 
 def _starting_board(opening: OpeningPositionRecord | None, *, variant: str = "standard") -> Position:
     return create_board(None if opening is None else opening.start_fen, variant=variant)
+
+
+def _secret_queen_files(connection, game: GameRecord) -> tuple[int, int]:
+    from secrets import randbelow
+
+    key = (game.tournament_id, game.round, game.pair_index)
+    connection.execute(
+        "INSERT INTO secret_queen_pairs (tournament_id, round, pair_index, black_file, white_file) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        (*key, randbelow(8), randbelow(8)),
+    )
+    row = connection.execute(
+        "SELECT black_file, white_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
+        key,
+    ).fetchone()
+    return row["black_file"], row["white_file"]
 
 
 def _validate_new_game_attempt(

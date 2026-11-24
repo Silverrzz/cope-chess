@@ -164,12 +164,16 @@ def prepare_scheduled_tournaments(
     connection: sqlite3.Connection,
 ) -> tuple[TournamentPreparation, ...]:
     from cope.events.engine_hand_brain import start_scheduled_hand_brain_events
+    from cope.events.secret_queen_competition import start_due_competitions
 
     prepared: list[TournamentPreparation] = []
     now = datetime.now(UTC).isoformat(timespec="seconds")
     for tournament_id in start_scheduled_hand_brain_events(connection, now):
         tournament = get_tournament(connection, tournament_id)
         prepared.append(TournamentPreparation(tournament.id, tournament.name, 1))
+    for tournament_id in start_due_competitions(connection, now):
+        tournament = get_tournament(connection, tournament_id)
+        prepared.append(TournamentPreparation(tournament.id, tournament.name, len(list_games(connection, tournament_id))))
     for tournament in list_due_scheduled_tournaments(connection, now):
         prepared.append(prepare_tournament(connection, tournament))
     return tuple(prepared)

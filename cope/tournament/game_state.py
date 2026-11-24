@@ -1,5 +1,5 @@
 import chess
-from cope.variants import DuckBoard, Position, Turn
+from cope.variants import DuckBoard, Position, SecretQueenBoard, Turn
 from cope.variants.tak import TakBoard
 from enum import Enum
 
@@ -82,11 +82,13 @@ class GameState():
         self._termination = self._get_board_termination(outcome.termination)
         if isinstance(self._board, DuckBoard) and outcome.termination in (chess.Termination.VARIANT_WIN, chess.Termination.VARIANT_LOSS):
             self._termination = GameTermination.KING_CAPTURE if self._board._missing_king() else GameTermination.NO_LEGAL_MOVE
+        if isinstance(self._board, SecretQueenBoard) and outcome.termination == chess.Termination.VARIANT_LOSS:
+            self._termination = GameTermination.KING_CAPTURE
         self._details = self._termination.value
 
     def _current_outcome(self) -> chess.Outcome | None:
         board = self._board
-        if isinstance(board, DuckBoard):
+        if isinstance(board, (DuckBoard, SecretQueenBoard)):
             return board.outcome()
         if board.is_variant_loss():
             return chess.Outcome(chess.Termination.VARIANT_LOSS, not board.turn)
@@ -111,7 +113,7 @@ class GameState():
         return None
 
     def _reset_position_counts(self) -> None:
-        if isinstance(self._board, TakBoard):
+        if isinstance(self._board, (TakBoard, SecretQueenBoard)):
             return
         replay = self._board.root()
         self._position_counts = {self._position_key(replay): 1}
@@ -122,6 +124,8 @@ class GameState():
         self._recorded_stack_size = len(self._board.move_stack)
 
     def _record_position(self) -> None:
+        if isinstance(self._board, SecretQueenBoard):
+            return
         stack_size = len(self._board.move_stack)
         if stack_size == self._recorded_stack_size:
             return

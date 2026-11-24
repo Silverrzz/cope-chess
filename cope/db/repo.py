@@ -126,6 +126,7 @@ class MoveRecord:
     time_ms: int
     clock_after_ms: int
     engine_version_id: int | None
+    position_fen: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,6 +1141,8 @@ def variant_engine_version_ids(connection, variant: str) -> set[int]:
 
 
 def validate_tournament_variant(connection, config: TournamentConfig) -> None:
+    if config.variant == "secret-queen" and (config.opening_suite_id is not None or config.engine_threads != 1 or config.rated):
+        raise ValueError("Secret Queen requires startpos, single-threaded probes, and unrated play")
     if config.variant == "tak":
         missing = set(config.participants) - variant_engine_version_ids(connection, config.variant)
         if missing:
@@ -2326,6 +2329,7 @@ def record_move(
     time_ms: int = 0,
     clock_after_ms: int = 0,
     engine_version_id: int | None = None,
+    position_fen: str | None = None,
 ) -> MoveRecord:
     if (assignment_id is None) != (assignment_key is None):
         raise ValueError("assignment id and key must be provided together")
@@ -2348,6 +2352,7 @@ def record_move(
         time_ms,
         clock_after_ms,
         engine_version_id,
+        position_fen,
     )
     if assignment_id is None:
         cursor = connection.execute(
@@ -2355,9 +2360,9 @@ def record_move(
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
               depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
-              engine_version_id
+              engine_version_id, position_fen
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -2367,9 +2372,9 @@ def record_move(
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
               depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
-              engine_version_id
+              engine_version_id, position_fen
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
               SELECT 1 FROM game_assignments
               WHERE id = ? AND assignment_key = ? AND game_id = ?
@@ -2399,6 +2404,7 @@ def record_move(
         time_ms=time_ms,
         clock_after_ms=clock_after_ms,
         engine_version_id=engine_version_id,
+        position_fen=position_fen,
     )
 
 
@@ -5616,6 +5622,7 @@ def _move_from_row(row: sqlite3.Row) -> MoveRecord:
         time_ms=row["time_ms"],
         clock_after_ms=row["clock_after_ms"],
         engine_version_id=row["engine_version_id"],
+        position_fen=row["position_fen"],
     )
 
 

@@ -1866,6 +1866,8 @@ async def _serve_assignment(
     server_url: str,
     credential: str,
 ) -> None:
+    from cope.worker.secret_queen import SecretQueenEngine
+
     loop = asyncio.get_running_loop()
     progress = _AssignmentProgressPublisher(
         websocket,
@@ -1873,8 +1875,9 @@ async def _serve_assignment(
         loop=loop,
         send_lock=send_lock,
     )
+    engine_type = SecretQueenEngine if assignment.variant == "secret-queen" else UciEngineProcess
     engines = {
-        engine_id: UciEngineProcess(
+        engine_id: engine_type(
             engine,
             server_url=server_url,
             credential=credential,
@@ -2057,12 +2060,13 @@ async def _serve_assignment(
 
             command = EngineCommand.model_validate(envelope.data)
             _validate_assignment_message(command, assignment, "engine_command")
+            log_command = _visible_engine_command(command.command)
             LOG.debug(
                 "engine command received assignment_id=%s game_id=%s engine_id=%s command=%s",
                 command.assignment_id,
                 command.game_id,
                 command.engine_id,
-                command.command,
+                log_command,
             )
 
             engine = engines.get(command.engine_id)
@@ -2254,7 +2258,7 @@ async def _serve_assignment(
                 command.assignment_id,
                 command.game_id,
                 command.engine_id,
-                command.command,
+                log_command,
                 len(result_lines),
                 _line_sample(result_lines),
             )
@@ -2634,7 +2638,7 @@ def _command_progress(
 def _command_completed_detail(command: str, engine_name: str, elapsed_ms: int) -> str:
     if command.startswith("go"):
         return f"{engine_name} selected a move in {elapsed_ms}ms"
-    return f"{engine_name} completed {command} in {elapsed_ms}ms"
+    return f"{engine_name} completed {_visible_engine_command(command)} in {elapsed_ms}ms"
 
 
 async def _publish_engine_clock(
@@ -2865,7 +2869,7 @@ def _message_log_context(message_type: str, data: Any) -> str:
     if message_type == "engine_command":
         return (
             f"{_assignment_context(payload)} "
-            f"engine_id={payload.get('engine_id')} command={payload.get('command')}"
+            f"engine_id={payload.get('engine_id')} command={_visible_engine_command(str(payload.get('command')))}"
         )
     if message_type in {"engine_info", "engine_command_result"}:
         lines = payload.get("lines") or []
@@ -2874,6 +2878,12 @@ def _message_log_context(message_type: str, data: Any) -> str:
             f"engine_id={payload.get('engine_id')} lines={len(lines)}{_line_sample(lines)}"
         )
     return f"keys={','.join(sorted(payload))}"
+
+
+def _visible_engine_command(command: str) -> str:
+    from cope.variants.secret_queen import POSITION_PREFIX
+
+    return "position secretqueen" if command.startswith(POSITION_PREFIX) else command
 
 
 def _model_data(data: Any) -> dict[str, Any]:
