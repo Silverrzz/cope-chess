@@ -55,6 +55,67 @@ def _kill_adopted_children() -> None:
         time.sleep(0.05)
 
 
+def cleanup_orphaned_worker(launch_id: str, *, timeout: float = 10) -> int:
+    import psutil
+
+    if sys.platform != "linux":
+        raise RuntimeError("worker cleanup requires Linux process supervision")
+    if not isinstance(launch_id, str) or not launch_id:
+        raise RuntimeError("the worker launch ID is missing; process ownership cannot be verified")
+    deadline = time.monotonic() + timeout
+    tracked = set()
+    while True:
+        matching = set()
+        for process in psutil.process_iter():
+            if process.pid == os.getpid():
+                continue
+            try:
+                if process.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                if os.geteuid() != 0 and process.uids().real != os.geteuid():
+                    continue
+                if process.environ().get("COPE_WORKER_LAUNCH_ID") == launch_id:
+                    matching.add(process)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.AccessDenied as error:
+                raise RuntimeError(f"cannot verify worker process ownership for PID {process.pid}") from error
+        pending = list(matching)
+        found = set()
+        alive = False
+        try:
+            while pending:
+                process = pending.pop()
+                if process in found:
+                    continue
+                found.add(process)
+                try:
+                    process.suspend()
+                    tracked.add(process)
+                    pending.extend(process.children())
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.AccessDenied as error:
+                    raise RuntimeError(f"cannot stop orphaned worker PID {process.pid}") from error
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("orphaned worker process discovery exceeded the cleanup timeout")
+        finally:
+            for process in tracked:
+                try:
+                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                        process.kill()
+                        alive = True
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.AccessDenied as error:
+                    raise RuntimeError(f"cannot kill orphaned worker PID {process.pid}") from error
+        if not matching and not alive:
+            return len(tracked)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("orphaned worker processes did not exit before the cleanup timeout")
+        time.sleep(0.05)
+
+
 def supervise(home: Path, *, boot: bool = False) -> int:
     with ExitStack() as lifetime:
         with locked(home / "control.lock"):
