@@ -1764,8 +1764,18 @@ def register_api_routes(app: FastAPI) -> None:
             for rating in ratings:
                 engine = rating["engine"]
                 version_id = engine["engine_id"]
-                engine["tags"] = tags.get(version_id, [])
-                engine["public_hidden"] = version_id in hidden
+                version_tags = tags.get(version_id, [])
+                engine["tags"] = version_tags
+                engine["public_hidden"] = version_id in hidden or (
+                    engine["name"] == "Caissa"
+                    and (
+                        rating_list.name == "Top-Class Global Blitz"
+                        or (
+                            rating_list.name in {"All-Round Bullet", "All-Round Rapid"}
+                            and any(tag["name"] == "Contains LLM" for tag in version_tags)
+                        )
+                    )
+                )
         return _json(
             {
                 "rating_list": rating_list,
