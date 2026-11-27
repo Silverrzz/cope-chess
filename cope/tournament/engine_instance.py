@@ -92,6 +92,7 @@ class EngineInstance:
         self._captured_search_result: EngineSearchResult | None = None
         self._current_search_info: EngineSearchInfo | None = None
         self._current_info_line: str | None = None
+        self._allow_statistics = False
         self._info_listener: Callable[[str, EngineSearchInfo], None] | None = None
 
     def get_name(self):
@@ -148,6 +149,7 @@ class EngineInstance:
         self._send_uci_command(command)
 
     def get_search_result(self, board: Position, go_command_arg: str) -> EngineSearchResult:
+        self._allow_statistics = getattr(board, "variant", None) == "secret-queen"
         self._ensure_engine_started()
         self._current_search_info = None
         self._current_info_line = None
@@ -189,6 +191,7 @@ class EngineInstance:
         self._captured_search_result = None
         self._current_search_info = None
         self._current_info_line = None
+        self._allow_statistics = getattr(board, "variant", None) == "secret-queen"
         if self._is_remote():
             begin_search = getattr(self._host, "begin_engine_search", None)
             if callable(begin_search):
@@ -288,7 +291,7 @@ class EngineInstance:
 
     def _record_info_line(self, line: str) -> None:
         line = clamp_uci_info_line(line)
-        info = _parse_info_line(line, self._current_search_info, allow_partial=self._protocol == "tei")
+        info = _parse_info_line(line, self._current_search_info, allow_partial=self._protocol == "tei", allow_statistics=self._allow_statistics)
         if info is not None:
             self._current_search_info = info
             self._current_info_line = line
@@ -352,6 +355,8 @@ class EngineInstance:
             if "threads" not in self._advertised_options and options.get("Threads", 1) != 1:
                 raise RuntimeError(f"{self._name} does not advertise Threads")
             return {name: value for name, value in options.items() if name.lower() in self._advertised_options}
+        if "ponder" not in self._advertised_options:
+            options = {name: value for name, value in options.items() if name.lower() != "ponder" or value is not False}
         duck = options.get("UCI_Variant") == "duck"
         if duck:
             declaration = self._advertised_options.get("uci_variant", "")
@@ -588,14 +593,14 @@ def _parse_search_result(
     bestmove: Turn | None = None
     search_info = initial_info or EngineSearchInfo()
     info_line = initial_info_line
-    allow_partial = getattr(board, "variant", None) == "tak"
+    variant = getattr(board, "variant", None)
     for line in lines:
         worker_elapsed_ms = parse_worker_command_elapsed(line)
         if worker_elapsed_ms is not None:
             if command_elapsed_ms is None:
                 command_elapsed_ms = worker_elapsed_ms
             continue
-        info = _parse_info_line(line, search_info, allow_partial=allow_partial)
+        info = _parse_info_line(line, search_info, allow_partial=variant == "tak", allow_statistics=variant == "secret-queen")
         if info is not None:
             search_info = info
             info_line = clamp_uci_info_line(line)
@@ -636,9 +641,9 @@ def _parse_search_result(
 
 
 def _parse_info_line(
-    line: str, previous: EngineSearchInfo | None, *, allow_partial: bool = False
+    line: str, previous: EngineSearchInfo | None, *, allow_partial: bool = False, allow_statistics: bool = False
 ) -> EngineSearchInfo | None:
-    if not is_search_info_line(line, allow_partial=allow_partial):
+    if not is_search_info_line(line, allow_partial=allow_partial, allow_statistics=allow_statistics):
         return None
     parts = line.split()
 

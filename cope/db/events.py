@@ -286,6 +286,8 @@ def list_event_tournament_links(
         SELECT event_id, tournament_id FROM (
           SELECT event_id, tournament_id FROM engine_relay_fixtures
           UNION
+          SELECT event_id, tournament_id FROM secret_queen_event_tournaments
+          UNION
           SELECT event_id, tournament_id FROM puzzle_gauntlet_events WHERE tournament_id IS NOT NULL
           UNION
           SELECT id AS event_id, (config::jsonb->>'tournament_id')::bigint AS tournament_id

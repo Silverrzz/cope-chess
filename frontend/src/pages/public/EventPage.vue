@@ -55,7 +55,7 @@ onMounted(async () => {
   await load();
   if (data.value) connect();
   refreshTimer = window.setInterval(() => {
-    if (props.arena) void load(true);
+    if (props.arena || data.value?.handler.key === "secret-queen") void load(true);
   }, 15000);
 });
 onBeforeUnmount(() => {

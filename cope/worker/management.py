@@ -41,6 +41,7 @@ Manage the local Cope worker.
   cope stop force                 Kill the worker and its engine processes.
   cope config                     Show worker settings.
   cope config --threads 8         Set the CPU thread limit.
+                                  Use auto for available physical cores.
   cope config --memory 12GiB      Set the worker memory limit.
   cope config --auto-update true  Enable automatic updates (the default).
                                   Use false to disable them. The worker stalls
@@ -48,7 +49,7 @@ Manage the local Cope worker.
   cope health status              Show worker health and current activity.
   cope health doctor              Clean up an orphaned worker and repair
                                   common local issues while stopped.
-  cope update                     Install the available worker update.
+  cope update                     Finish active work and install the update.
   cope update -i                  Show installed and available versions
                                   and the status of any pending update.
 
@@ -77,7 +78,10 @@ def register_commands(subparsers) -> None:
     stop.add_argument("--timeout", type=int)
 
     config = subparsers.add_parser("config", help="view or change local worker settings")
-    config.add_argument("--threads", default=argparse.SUPPRESS, type=parse_threads)
+    config.add_argument(
+        "--threads", default=argparse.SUPPRESS, type=parse_threads,
+        help="set the CPU thread limit or use auto for available physical cores",
+    )
     config.add_argument("--memory", dest="memory_mb", default=argparse.SUPPRESS, type=parse_memory)
     config.add_argument("--auto-update", dest="auto_update", default=argparse.SUPPRESS, type=parse_boolean)
     config.add_argument("--server", default=argparse.SUPPRESS)
@@ -348,6 +352,8 @@ def _update(home: Path, args) -> int:
         and read_json(home / "status.json").get("state") == "stalled"
     )
     os.environ.setdefault("COPE_UPDATE_ROOT", str(home / "releases"))
+    if args.output == "text":
+        print("Fetching and installing the worker release.", file=sys.stderr, flush=True)
     with locked(home / "update.lock"):
         try:
             install_worker_release(target_commit=target, repository_url=repository)
@@ -359,6 +365,20 @@ def _update(home: Path, args) -> int:
     return _start(home, 25) if resume else 0
 
 
+def _update_progress(status: dict, target: str) -> str | None:
+    if status.get("version") == target:
+        return "Update installed. Waiting for the worker to reconnect to Cope."
+    if status.get("state") == "draining":
+        games, tools = status.get("active_games"), status.get("active_tools")
+        if isinstance(games, int) and isinstance(tools, int) and (remaining := games + tools) > 0:
+            work = "job" if remaining == 1 else "jobs"
+            return f"Draining worker. Waiting for {remaining} active {work} to finish."
+        return "Draining worker. Waiting for Cope to confirm there is no active work."
+    if status.get("state") == "updating":
+        return "Fetching and installing the worker release."
+    return None
+
+
 def _request_running_update(home: Path, target: str, repository: str, output: str) -> int:
     request = {"target_commit": target, "repository_url": repository}
     with locked(home / "control.lock"):
@@ -368,6 +388,9 @@ def _request_running_update(home: Path, target: str, repository: str, output: st
         if not existing:
             (home / "update-result.json").unlink(missing_ok=True)
         write_json(home / "update.json", request)
+    if output == "text":
+        print("Update queued. The worker will finish active work before installing.", file=sys.stderr, flush=True)
+    last_progress = None
     try:
         while is_running(home):
             status = read_json(home / "status.json")
@@ -382,9 +405,14 @@ def _request_running_update(home: Path, target: str, repository: str, output: st
                     if read_json(home / "update.json") == request:
                         (home / "update.json").unlink(missing_ok=True)
                 raise RuntimeError(status.get("detail") or "worker update failed")
+            if output == "text":
+                progress = _update_progress(status, target)
+                if progress and progress != last_progress:
+                    print(progress, file=sys.stderr, flush=True)
+                    last_progress = progress
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("Update is still queued. Check cope update -i.", file=sys.stderr)
+        print("Stopped waiting. The update continues in the background. Check cope update -i.", file=sys.stderr)
         return 130
     raise RuntimeError("worker exited before it could confirm the update")
 

@@ -1,5 +1,5 @@
 import chess
-from cope.variants import Position
+from cope.variants import Position, SecretQueenBoard
 from cope.variants.tak import TAK_START, TakBoard
 
 
@@ -10,6 +10,8 @@ def setoption_command(name: str, value: str | int | bool) -> str:
 
 
 def position_command(board: Position) -> str:
+    if isinstance(board, SecretQueenBoard):
+        return board.seat_position()
     root = board.root()
     moves = " ".join(move.uci() for move in board.move_stack)
 

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
-import { useViewerSettings } from "@/composables/useViewerSettings";
 import type { EventDetailResponse } from "@/types/events";
+import EventCountdownMusic from "../EventCountdownMusic.vue";
 import HandBrainArt from "./HandBrainArt.vue";
 import HandBrainAnnouncement from "./HandBrainAnnouncement.vue";
 import HandBrainArena from "./HandBrainArena.vue";
@@ -19,58 +19,14 @@ const payload = computed(() => props.detail.custom as HandBrainPayload);
 const announcementOnly = computed(() => !payload.value?.teams?.length && ["draft", "announced", "scheduled", "postponed"].includes(event.value.status));
 const final = computed(() => payload.value.matches.find(match => match.key === "F"));
 const winner = computed(() => payload.value.teams.find(team => team.id === final.value?.winner_team_id));
-const remaining = computed(() => Math.max(0, Date.parse(event.value.scheduled_start_at ?? "") - now.value - props.clockOffsetMs));
+const target = computed(() => Date.parse(event.value.scheduled_start_at ?? ""));
+const remaining = computed(() => Math.max(0, target.value - now.value - props.clockOffsetMs));
 const showCountdown = computed(() => ["announced", "scheduled"].includes(event.value.status) && remaining.value > 0);
 const showArenaLink = computed(() =>
   (completed.value && payload.value.matches.some(match => match.quads.some(quad => quad.games.length)))
   || ["live", "intermission"].includes(event.value.status)
   || (event.value.status === "scheduled" && !!event.value.scheduled_start_at && remaining.value === 0),
 );
-const { eventMusicEnabled, setEventMusicEnabled } = useViewerSettings();
-const countdownAudio = ref<HTMLAudioElement>();
-const musicBlocked = ref(false);
-const musicVisible = computed(() => showCountdown.value && props.view !== "arena" && !announcementOnly.value);
-const musicLengthMs = 60_000;
-let pendingAudio = false;
-
-async function playMusic(prime = false) {
-  const audio = countdownAudio.value;
-  if (!audio || pendingAudio || !audio.paused) return;
-  pendingAudio = true;
-  try {
-    audio.volume = prime ? 0 : 1;
-    audio.currentTime = prime ? 0 : Math.max(0, (musicLengthMs - remaining.value) / 1000);
-    await audio.play();
-    if (prime || !musicVisible.value || !eventMusicEnabled.value) audio.pause();
-    musicBlocked.value = false;
-  } catch {
-    if (musicVisible.value && eventMusicEnabled.value) musicBlocked.value = true;
-  } finally {
-    audio.volume = 1;
-    pendingAudio = false;
-  }
-}
-
-function toggleMusic() {
-  if (eventMusicEnabled.value && !musicBlocked.value) {
-    setEventMusicEnabled(false);
-    return;
-  }
-  setEventMusicEnabled(true);
-  musicBlocked.value = false;
-  now.value = Date.now();
-  void playMusic(remaining.value > musicLengthMs);
-}
-
-watch([musicVisible, remaining, eventMusicEnabled, countdownAudio], () => {
-  if (!musicVisible.value || !eventMusicEnabled.value) {
-    countdownAudio.value?.pause();
-    musicBlocked.value = false;
-  } else if (remaining.value <= musicLengthMs && !musicBlocked.value && !countdownAudio.value?.ended) {
-    void playMusic();
-  }
-}, { flush: "post" });
-onBeforeUnmount(() => countdownAudio.value?.pause());
 const countdown = computed(() => {
   const seconds = Math.ceil(remaining.value / 1000);
   return [{ label: "days", value: Math.floor(seconds / 86400) }, { label: "hours", value: Math.floor(seconds % 86400 / 3600) }, { label: "mins", value: Math.floor(seconds % 3600 / 60) }, { label: "secs", value: seconds % 60 }];
@@ -96,16 +52,12 @@ const status = computed(() => ({ draft: "Draft", announced: "Announced", schedul
         </div>
         <div v-if="!completed" class="hb-schedule">
           <time :datetime="event.scheduled_start_at ?? undefined"><AppIcon name="clock" :size="15" />{{ schedule }}</time>
-          <button v-if="musicVisible" type="button" class="hb-music" :aria-pressed="eventMusicEnabled && !musicBlocked" @click="toggleMusic">
-            <AppIcon name="radio" :size="14" />
-            {{ eventMusicEnabled && !musicBlocked ? 'Countdown music on' : 'Enable countdown music' }}
-          </button>
+          <EventCountdownMusic v-if="showCountdown" :key="target" :target-ms="target" :clock-offset-ms="clockOffsetMs" :remaining-ms="remaining" />
         </div>
         <RouterLink v-if="showArenaLink" :to="`/events/${event.slug}/arena`" class="hb-arena-link">
           <AppIcon name="arrow-right" :size="16" />
           {{ completed ? 'Replay games' : 'Enter arena' }}
         </RouterLink>
-        <audio ref="countdownAudio" src="/audio/openbench-engine-clash-countdown.wav" preload="none" />
         <HandBrainResults v-if="!completed && payload.matches.length" :detail="detail" />
       </div>
       <footer class="hb-status">
@@ -138,9 +90,7 @@ const status = computed(() => ({ draft: "Draft", announced: "Announced", schedul
 .hb-countdown span { color: #b98696; font-size: .6rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
 .hb-schedule { display: flex; align-items: center; justify-content: center; gap: .5rem; margin-top: .65rem; color: #c397a7; font-size: .75rem; text-align: center; }
 .hb-schedule { flex-wrap: wrap; }
-.hb-schedule time, .hb-music { display: inline-flex; align-items: center; gap: .35rem; }
-.hb-music { padding: .2rem .45rem; border: 1px solid #ff72934d; border-radius: .35rem; background: #29101b; color: #fff0f3; font: inherit; cursor: pointer; }
-.hb-music:hover, .hb-music:focus-visible { border-color: #ff7293; }
+.hb-schedule time { display: inline-flex; align-items: center; gap: .35rem; }
 .hb-arena-link { display: inline-flex; align-items: center; gap: .45rem; margin-top: .65rem; padding: .45rem .8rem; border: 1px solid #ff72934d; border-radius: .45rem; background: #ff7293; color: #200b14; font-size: .8rem; font-weight: 750; text-decoration: none; }
 .hb-arena-link:hover, .hb-arena-link:focus-visible { background: #ff9eb5; }
 .hb-stage--ready .hb-content { width: min(100%, 76rem); padding-block: .5rem .15rem; }
