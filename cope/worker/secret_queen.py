@@ -15,7 +15,7 @@ from cope.variants.secret_queen import POSITION_PREFIX, SEARCH_WORKERS, SecretQu
 
 from .uci_engine import UciEngineProcess
 from .secret_queen_beliefs import OpponentBeliefs
-from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, concealment, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
+from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
 
 
 Score = tuple[int, int]
@@ -372,12 +372,10 @@ class SecretQueenEngine(UciEngineProcess):
                                               threads=max(1, workers // max(1, min(workers, len(projections))))))
                    for board, indices in projections.values()]
         rows = {}
-        bases = {}
         repeats = {}
         exchanges = {}
         for move in moves:
             values = []
-            baseline = []
             resolved = []
             revisits = []
             for world in worlds:
@@ -389,11 +387,9 @@ class SecretQueenEngine(UciEngineProcess):
                     values.append(evaluate(after, color) - loss)
                 else:
                     values.append(end)
-                baseline.append(values[-1] - concealment(after, color))
                 resolved.append(end is not None)
                 revisits.append(25 * max(0, after._counts[after._key()] - 1))
             rows[move] = SearchResult(tuple(values), -1, 0, tuple(resolved))
-            bases[move] = baseline
             repeats[move] = revisits
         eligible = [move for move in moves if rows[move].losses == 0] or list(moves)
         guidance = {move: [0.] * len(worlds) for move in eligible}
@@ -414,13 +410,14 @@ class SecretQueenEngine(UciEngineProcess):
             for move in eligible:
                 for index in indices:
                     if move in scores:
-                        adjustment = scores[move] - bases[move][index]
+                        adjustment = max(0, 75 + scores[move] - max(scores.values()))
                     else:
                         adjustment = 0
-                    guidance[move][index] = max(-75, min(75, adjustment))
+                    guidance[move][index] = adjustment
 
         def blended(move):
-            return tuple(score + round(guidance[move][index]) - repeats[move][index]
+            hint = round(sum(weight * score for weight, score in zip(weights, guidance[move])))
+            return tuple(score + hint - repeats[move][index]
                          if not rows[move].resolved[index] and abs(score) < MATE - 128 else score
                          for index, score in enumerate(rows[move].values))
 
