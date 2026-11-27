@@ -15,7 +15,7 @@ from cope.variants.secret_queen import POSITION_PREFIX, SEARCH_WORKERS, SecretQu
 
 from .uci_engine import UciEngineProcess
 from .secret_queen_beliefs import OpponentBeliefs
-from .secret_queen_search import MATE, SearchExpired, SearchResult, TacticalSearch, evaluate, exchange, exposure, fork_reply, mating_reply, move_order, terminal
+from .secret_queen_search import MATE, concealment, move_order, terminal
 
 
 Score = tuple[int, int]
@@ -32,6 +32,8 @@ class Assessment:
 class Probe:
     move: chess.Move
     evaluation: Assessment | None
+    depth: int = 0
+    pv: tuple[chess.Move, ...] = ()
 
 
 _STATISTICS = re.compile(r"\b(depth|seldepth|nodes|hashfull) ([0-9]{1,15})(?= |$)")
@@ -70,11 +72,13 @@ class SearchStatistics:
             if self._callback is not None:
                 self._callback(self._line())
 
-    def evaluate(self, scores: list[Score], positions: int, estimate: Score | None = None) -> None:
+    def evaluate(self, scores: list[Score], positions: int, estimate: Score | None = None, *, depth=None) -> None:
         count = len(scores) if positions else 0
         with self._lock:
             self._evaluation = f"{_score_token(min(scores))},{_score_token(max(scores))},{count},{positions}"
             self._estimate = estimate
+            if depth is not None:
+                self._values["depth"] = depth
             if self._callback is not None:
                 self._callback(self._line())
 
@@ -113,12 +117,14 @@ def _probe_result(lines: list[str]) -> Probe | None:
                 continue
             index = words.index("score")
             kind, value = words[index + 1], int(words[index + 2])
+            depth = int(words[words.index("depth") + 1]) if "depth" in words else 0
+            pv = tuple(chess.Move.from_uci(move) for move in words[words.index("pv") + 1:])
         except (ValueError, IndexError):
             continue
         if kind == "cp":
-            return Probe(move, Assessment((0, value)))
+            return Probe(move, Assessment((0, value)), depth, pv)
         if kind == "mate":
-            return Probe(move, Assessment((1, -value) if value > 0 else (-1, -value)))
+            return Probe(move, Assessment((1, -value) if value > 0 else (-1, -value)), depth, pv)
     return Probe(move, None)
 
 
@@ -152,7 +158,7 @@ class SecretQueenEngine(UciEngineProcess):
         self._configured: list[dict[str, str]] = [{} for _ in range(SEARCH_WORKERS)]
         self._belief_cache = None
         self._opponent_beliefs = None
-        self._pool = ThreadPoolExecutor(max_workers=max(1, SEARCH_WORKERS - 1))
+        self._pool = ThreadPoolExecutor(max_workers=SEARCH_WORKERS)
         self._active: set[UciEngineProcess] = set()
         self._active_lock = threading.Lock()
         self._closed = False
@@ -351,79 +357,63 @@ class SecretQueenEngine(UciEngineProcess):
                 with self._active_lock:
                     self._active.discard(engine)
 
-        quick = deadline - started < .12
+        duration = deadline - started
         if self._opponent_beliefs is None or self._opponent_beliefs.color != color:
             self._opponent_beliefs = OpponentBeliefs(color)
-        weights = self._opponent_beliefs.update(history, worlds, started + (deadline - started) * .10, self._stop)
-        if quick:
-            moves = tuple(sorted(moves, key=lambda move: move_order(first, move), reverse=True)[:8])
-        projections = {}
-        for index, world in enumerate(() if quick else worlds):
+        weights = self._opponent_beliefs.update(history, worlds, started + duration * .05, self._stop)
+        public = self._probe(first._board, started + duration * .12, statistics,
+                             lane=0, multipv=3, position=first.native_position())
+        nomination_deadline = started + duration * .32
+        groups = {}
+        for index, world in enumerate(worlds):
             board = world.projection(show=_COLORS)
-            if board is not None:
-                projections.setdefault(board.fen(), (board, []))[1].append(index)
-        workers = max(1, SEARCH_WORKERS - 1)
-        waves = max(1, (len(projections) + workers - 1) // workers)
-        oracle_deadline = started + (deadline - started) * .50
-        window = max(15, int((oracle_deadline - time.monotonic()) * 1000 / waves) - 45)
-        futures = [(indices, self._pool.submit(self._probe, board, oracle_deadline, statistics,
-                                              lane=worlds[indices[0]]._files[not color],
-                                              multipv=6, limit_ms=window,
-                                              threads=max(1, workers // max(1, min(workers, len(projections))))))
-                   for board, indices in projections.values()]
-        rows = {}
-        repeats = {}
-        exchanges = {}
-        for move in moves:
-            values = []
-            resolved = []
-            revisits = []
-            for world in worlds:
-                after = world.copy(stack=False)
-                after.push(move, record=False)
-                end = terminal(after, color, 1)
-                if end is None:
-                    loss = exchange(after, move.to_square, exchanges) if quick else exposure(after, exchanges)
-                    values.append(evaluate(after, color) - loss)
-                else:
-                    values.append(end)
-                resolved.append(end is not None)
-                revisits.append(25 * max(0, after._counts[after._key()] - 1))
-            rows[move] = SearchResult(tuple(values), -1, 0, tuple(resolved))
-            repeats[move] = revisits
-        eligible = [move for move in moves if rows[move].losses == 0] or list(moves)
-        guidance = {move: [0.] * len(worlds) for move in eligible}
-        nominations = set()
-        covered = set()
+            key = board.fen() if board is not None else (index,)
+            groups.setdefault(key, (world, board, []))[2].append(index)
+        futures = [(indices, self._pool.submit(self._probe, board, nomination_deadline, statistics,
+                                              lane=world._files[not color], multipv=3,
+                                              threads=max(1, SEARCH_WORKERS // len(groups))))
+                   for world, board, indices in groups.values()]
+        support = {}
+        for rank, probe in enumerate(public):
+            if probe.move in moves:
+                support[probe.move] = .5 / (rank + 1)
         for indices, future in futures:
-            probes = future.result()
-            if not probes:
-                continue
-            covered.update(indices)
-            scores = {}
-            for probe in probes:
-                if probe.move in eligible:
-                    nominations.add(probe.move)
-                if probe.evaluation is not None:
-                    kind, value = probe.evaluation.score
-                    scores[probe.move] = value if kind == 0 else 10000 if kind > 0 else -10000
-            for move in eligible:
+            for rank, probe in enumerate(future.result()):
+                if probe.move in moves:
+                    support[probe.move] = support.get(probe.move, 0.) + sum(weights[index] for index in indices) / (rank + 1)
+        nominated = sorted(support, key=support.get, reverse=True)
+        if not nominated:
+            nominated = sorted(moves, key=lambda move: move_order(first, move), reverse=True)[:1]
+        count = max(2, min(6, int(max(0, deadline - time.monotonic()) / .15)))
+        candidates = []
+        for reveal in (False, True):
+            candidate = next((move for move in nominated if first.reveals(move) == reveal), None)
+            if candidate is not None and len(candidates) < count:
+                candidates.append(candidate)
+        candidates.extend(move for move in nominated if move not in candidates)
+        candidates = candidates[:count]
+        values = {move: [None] * len(worlds) for move in candidates}
+        depths = {move: [0] * len(worlds) for move in candidates}
+        resolved = {move: [False] * len(worlds) for move in candidates}
+        futures = [(indices, self._pool.submit(self._assess, world, candidates, color,
+                                              deadline - .025, statistics, max(1, SEARCH_WORKERS // len(groups))))
+                   for world, _, indices in groups.values()]
+        for indices, future in futures:
+            for move, score, depth, known in future.result():
                 for index in indices:
-                    if move in scores:
-                        adjustment = max(0, 75 + scores[move] - max(scores.values()))
-                    else:
-                        adjustment = 0
-                    guidance[move][index] = adjustment
-
-        def blended(move):
-            hint = round(sum(weight * score for weight, score in zip(weights, guidance[move])))
-            return tuple(score + hint - repeats[move][index]
-                         if not rows[move].resolved[index] and abs(score) < MATE - 128 else score
-                         for index, score in enumerate(rows[move].values))
+                    values[move][index] = score
+                    depths[move][index] = depth
+                    resolved[move][index] = known
+        complete = [move for move in candidates if all(score is not None for score in values[move])]
+        if not complete:
+            chosen = max(candidates, key=lambda move: (
+                -sum(weight for weight, score in zip(weights, values[move]) if score is not None and score <= -MATE + 128),
+                sum(weight for weight, score in zip(weights, values[move]) if score is not None), support.get(move, 0.)))
+            LOG.warning("secret queen native search incomplete ply=%s chosen=%s", first.ply(), chosen.uci())
+            return statistics.result(chosen)
 
         def value(move):
-            row = rows[move]
-            scores = blended(move)
+            scores = values[move]
             average = sum(weight * score for weight, score in zip(weights, scores))
             remaining = .5
             cautious = 0.
@@ -431,58 +421,64 @@ class SecretQueenEngine(UciEngineProcess):
                 portion = min(remaining, weight)
                 cautious += portion * score
                 remaining -= portion
-            losses = sum(weight for weight, score in zip(weights, row.values) if score <= -MATE + 128)
-            return -losses, 2 * cautious, average, min(scores), move in nominations
+            losses = sum(weight for weight, score in zip(weights, scores) if score <= -MATE + 128)
+            return -losses, 2 * cautious, average
 
-        eligible.sort(key=value, reverse=True)
-        finalists = eligible[:6]
-        refutations = {}
-        for move in finalists:
-            for index, world in enumerate(worlds):
-                after = world.copy(stack=False)
-                after.push(move, record=False)
-                loss = mating_reply(after, color, started + (deadline - started) * .60)
-                if loss is not None:
-                    refutations.setdefault(move, {})[index] = loss
-        for move in finalists:
-            for index, world in enumerate(worlds):
-                after = world.copy(stack=False)
-                after.push(move, record=False)
-                loss = fork_reply(after, color, started + (deadline - started) * .70, self._stop)
-                if loss is not None:
-                    refutations.setdefault(move, {})[index] = min(loss, refutations.get(move, {}).get(index, loss))
-        search = TacticalSearch(color, deadline - .025, self._stop, weights)
-        for depth, quiet in ((0, 2), (1, 2), (2, 2), (3, 2), (4, 2)):
-            try:
-                completed = {move: search.candidate(worlds, move, depth, quiet) for move in finalists}
-            except SearchExpired:
-                break
-            rows.update(completed)
-        for move, results in refutations.items():
-            row = rows[move]
-            rows[move] = SearchResult(tuple(min(score, results.get(index, score))
-                                           for index, score in enumerate(row.values)), row.depth, row.nodes,
-                                     tuple(known and results.get(index, score) >= score
-                                           for index, (known, score) in enumerate(zip(row.resolved, row.values))))
-        if min(rows[move].losses for move in finalists) > min(rows[move].losses for move in eligible):
-            finalists = eligible
-        chosen = max(finalists, key=value)
-        if all(known and score == 0 for known, score in zip(rows[chosen].resolved, rows[chosen].values)):
-            continuations = [move for move in finalists if not all(rows[move].resolved)
+        chosen = max(complete, key=value)
+        if all(known and score == 0 for known, score in zip(resolved[chosen], values[chosen])):
+            continuations = [move for move in complete if not all(resolved[move])
                              and value(move)[0] == 0 and value(move)[1] >= -50]
             if continuations:
                 chosen = max(continuations, key=value)
         scores = [(2, 0) if score >= MATE - 128 else (-2, 0) if score <= -MATE + 128 else (0, score)
-                  for score in blended(chosen)]
+                  for score in values[chosen]]
         estimate = (0, round(value(chosen)[1])) if all(kind == 0 for kind, _ in scores) else None
-        statistics.evaluate(scores, len(worlds), estimate)
+        statistics.evaluate(scores, len(worlds), estimate, depth=min((depth for depth in depths[chosen] if depth), default=0))
         LOG.info("secret queen decision %s", json.dumps({
             "ply": first.ply(), "worlds": len(worlds), "chosen": chosen.uci(),
-            "hint_coverage": len(covered), "tactical_nodes": search.nodes,
-            "weights": weights, "belief_observations": self._opponent_beliefs.observations,
-            "candidates": [{"move": move.uci(), "values": row.values, "depth": row.depth,
-                            "resolved": row.resolved, "repeat_penalty": repeats[move],
-                            "guidance": guidance.get(move), "value": value(move)[1] if move in guidance else row.mean}
-                           for move, row in rows.items()],
+            "search": "native", "weights": weights, "belief_observations": self._opponent_beliefs.observations,
+            "candidates": [{"move": move.uci(), "values": values[move], "depths": depths[move],
+                            "resolved": resolved[move], "complete": move in complete,
+                            "value": value(move)[1] if move in complete else None}
+                           for move in candidates],
         }, separators=(",", ":")))
         return statistics.result(chosen)
+
+    def _assess(self, world, candidates, color, deadline, statistics, threads):
+        results = []
+        lane = world._files[not color]
+        for offset, move in enumerate(candidates):
+            after = world.copy(stack=False)
+            after.push(move, record=False)
+            end = terminal(after, color, 1)
+            if end is not None:
+                results.append((move, end, 0, True))
+                continue
+            board = after.projection(show=_COLORS)
+            score = None
+            depth = 0
+            if board is not None:
+                survivors = list(after._secrets)
+                outcome = board.outcome()
+                if outcome is not None:
+                    score = 0 if outcome.winner is None else 10000 if outcome.winner == color else -10000
+                else:
+                    window = max(0, int((deadline - time.monotonic()) * 1000 / (len(candidates) - offset)) - 45)
+                    probes = self._probe(board, deadline, statistics, lane=lane, limit_ms=window, threads=threads)
+                    if probes and probes[0].evaluation is not None and probes[0].depth > 0:
+                        kind, cp = probes[0].evaluation.score
+                        score = -max(-10000, min(10000, cp)) if kind == 0 else -10000 if kind > 0 else 10000
+                        depth = probes[0].depth
+                        for follow in probes[0].pv:
+                            if not board.is_legal(follow):
+                                break
+                            for side in _COLORS:
+                                if follow.to_square == survivors[side] and side != board.turn:
+                                    survivors[side] = None
+                                elif follow.from_square == survivors[side]:
+                                    survivors[side] = follow.to_square
+                            board.push(follow)
+                if score is not None:
+                    score += concealment(after, color, survivors) - 25 * max(0, after._counts[after._key()] - 1)
+            results.append((move, score, depth, False))
+        return results
