@@ -1,13 +1,15 @@
 FROM ubuntu:24.04 AS builder
 
-ADD --checksum=sha256:8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d https://apt.llvm.org/llvm-snapshot.gpg.key /etc/apt/keyrings/llvm.asc
+ADD --chmod=644 --checksum=sha256:8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d https://apt.llvm.org/llvm-snapshot.gpg.key /etc/apt/keyrings/llvm.asc
 
 ARG LLVM_VERSION=1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' > /etc/apt/sources.list.d/llvm.list \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' > /etc/apt/sources.list.d/llvm.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates cmake git ninja-build \
+    && apt-get install -y --no-install-recommends build-essential cmake git ninja-build \
         "clang-22=${LLVM_VERSION}" "lld-22=${LLVM_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
