@@ -1858,6 +1858,16 @@ def register_api_routes(app: FastAPI) -> None:
             }
         )
 
+    @app.get("/api/engines/{engine_id}/ratings")
+    def public_engine_ratings(
+        engine_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = get_engine_record(connection, engine_id)
+        if engine is None or engine.public_hidden:
+            raise HTTPException(status_code=404, detail="Engine not found.")
+        return _json({"ratings": _public_engine_ratings(connection, engine_id)})
+
     @app.get("/api/engines/{engine_id}")
     def public_engine(
         engine_id: int,

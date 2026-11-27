@@ -97,6 +97,46 @@ class Store:
             """, (target.family_id, target.version_id, target.version_id))
             return cursor.fetchone()
 
+    def family_choices(self, search: str) -> list[dict]:
+        with self.cursor() as cursor:
+            cursor.execute("""
+                SELECT 'f:' || family_id AS key, label FROM catalog
+                WHERE version_id = 0 AND strpos(lower(label), lower(%s)) > 0
+                ORDER BY lower(label) <> lower(%s), lower(label)
+                LIMIT 25
+            """, (search.strip(), search.strip()))
+            return cursor.fetchall()
+
+    def version_choices(self, engine: str, search: str) -> list[dict]:
+        family = self.resolve(engine)
+        if family is None or family.version_id:
+            return []
+        with self.cursor() as cursor:
+            cursor.execute("""
+                SELECT 'v:' || version_id AS key,
+                       substr(label, length(%s) + 2) AS label
+                FROM catalog
+                WHERE family_id = %s AND version_id <> 0
+                  AND strpos(lower(substr(label, length(%s) + 2)), lower(%s)) > 0
+                ORDER BY version_id DESC
+                LIMIT 25
+            """, (family.label, family.family_id, family.label, search.strip()))
+            return cursor.fetchall()
+
+    def resolve_version(self, engine: str, version: str) -> Target | None:
+        family = self.resolve(engine)
+        if family is None or family.version_id:
+            return None
+        with self.cursor() as cursor:
+            cursor.execute("""
+                SELECT family_id, version_id, label FROM catalog
+                WHERE family_id = %s AND version_id <> 0
+                  AND ('v:' || version_id = %s OR lower(label) = lower(%s))
+                LIMIT 2
+            """, (family.family_id, version.strip(), f"{family.label} {version.strip()}"))
+            rows = cursor.fetchall()
+            return Target(**rows[0]) if len(rows) == 1 else None
+
     def rating_choices(self, search: str) -> list[dict]:
         with self.cursor() as cursor:
             cursor.execute("""
