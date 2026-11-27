@@ -21,6 +21,7 @@ database = [
 ]
 web = [
     "discord.py>=2.7,<3",
+    "resvg-py>=0.5,<1",
     "fastapi>=0.111",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.30",

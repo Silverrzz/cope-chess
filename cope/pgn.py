@@ -108,17 +108,24 @@ def render_annotated_pgn(game: PgnGame) -> str:
     move_lines: list[str] = []
     move_line: str | None = None
     for move_record in game.moves:
-        try:
-            move = board.parse_uci(move_record.uci)
-        except ValueError as exc:
-            raise ValueError(f"Game {game.id}: invalid turn at ply {move_record.ply}: {move_record.uci}") from exc
-        if move not in board.legal_moves:
-            raise ValueError(f"Game {game.id}: illegal turn at ply {move_record.ply}")
         mover = board.turn
         move_number = board.fullmove_number
-        san = board.san(move)
         annotation = _move_annotation(move_record)
-        board.push(move)
+        if game.variant == "secret-queen":
+            if not move_record.position_fen or move_record.ply != board.ply() + 1:
+                raise ValueError(f"Game {game.id}: missing public position at ply {move_record.ply}")
+            board = create_board(move_record.position_fen, variant=game.variant)
+            san = move_record.san
+            annotation = f"{annotation} {{ [%fen {move_record.position_fen}] }}"
+        else:
+            try:
+                move = board.parse_uci(move_record.uci)
+            except ValueError as exc:
+                raise ValueError(f"Game {game.id}: invalid turn at ply {move_record.ply}: {move_record.uci}") from exc
+            if move not in board.legal_moves:
+                raise ValueError(f"Game {game.id}: illegal turn at ply {move_record.ply}")
+            san = board.san(move)
+            board.push(move)
         if mover == chess.WHITE:
             if move_line is not None:
                 move_lines.append(move_line)
@@ -323,6 +330,7 @@ def _list_export_moves(
                 time_ms=int(row["time_ms"]),
                 clock_after_ms=int(row["clock_after_ms"]),
                 engine_version_id=row["engine_version_id"],
+                position_fen=row["position_fen"],
             )
         )
     return {game_id: tuple(moves) for game_id, moves in collected.items()}

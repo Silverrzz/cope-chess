@@ -19,7 +19,9 @@ from cope.chat import (
     announce_tournament_finished,
 )
 from cope.core.san import pv_to_san
-from cope.variants import Position, create_board, get_variant
+from cope.variants import Position, SecretQueenBoard, create_board, get_variant
+from cope.variants.secret_queen import SEARCH_WORKERS
+from cope.version import app_version
 from cope.core.models import (
     AdjudicationConfig,
     ColorSlot,
@@ -176,6 +178,8 @@ def run_tournament_service(config: RunnerServiceConfig) -> None:
 def run_tournament_matches(
     connection: sqlite3.Connection,
 ) -> RunnerReport:
+    from cope.db.events import list_event_tournament_links
+
     requeued_tournaments = requeue_resumable_paused_games(connection)
     prepared = prepare_scheduled_tournaments(connection)
     tournaments_finished = finish_completed_tournaments(connection)
@@ -183,15 +187,15 @@ def run_tournament_matches(
     connection.commit()
     for tournament_id in requeued_tournaments:
         publish_tournament_event(tournament_id)
+    started_events = set()
     for result in prepared:
         if result.skipped_reason is None:
             publish_tournament_event(result.tournament_id)
-            fixture = connection.execute(
-                "SELECT event_id FROM engine_relay_fixtures WHERE tournament_id = ?",
-                (result.tournament_id,),
-            ).fetchone()
-            if fixture is not None:
-                publish_stream_event(f"event.{fixture['event_id']}", "event.changed", {"event_id": fixture["event_id"]})
+            started_events.update(
+                link["event_id"] for link in list_event_tournament_links(connection, tournament_id=result.tournament_id)
+            )
+    for event_id in started_events:
+        publish_stream_event(f"event.{event_id}", "event.changed", {"event_id": event_id})
     if tournaments_finished:
         for tournament in list_tournaments(connection):
             if tournament.status == "finished":
@@ -315,7 +319,7 @@ def next_worker_assignment(
         if worker.tournament_scope == "all"
         else frozenset(list_worker_tournament_ids(connection, worker.id))
     )
-    tournaments = list_tournaments(connection)
+    tournaments = list_tournaments(connection, status="running")
     if worker.tournament_scope == "all":
         tournaments = _fair_worker_tournaments(connection, worker.id, tournaments, available_resources)
     for tournament in tournaments:
@@ -417,6 +421,8 @@ def _next_tournament_worker_assignment(
     ):
         return None
     if worker.hw is None:
+        return None
+    if tournament.config.variant == "secret-queen" and worker.app_commit != app_version():
         return None
     game = _next_playable_game_for_worker(
         connection,
@@ -708,7 +714,11 @@ def run_worker_assignment_game(
         return current is not None and current.status == "paused"
 
     opening = get_opening_position(connection, game_record.opening_id)
-    board = _starting_board(opening, variant=tournament.config.variant)
+    board = (
+        SecretQueenBoard(files=_secret_queen_files(connection, game_record))
+        if tournament.config.variant == "secret-queen"
+        else _starting_board(opening, variant=tournament.config.variant)
+    )
     if (assignment.variant, assignment.rules_revision) != (tournament.config.variant, tournament.config.rules_revision):
         raise RuntimeError("Assignment variant does not match the tournament")
     recorded_moves = list_moves(connection, game_record.id)
@@ -727,6 +737,8 @@ def run_worker_assignment_game(
                     f"pause checkpoint move history is invalid at ply {recorded_move.ply}"
                 )
             board.push(move)
+            if isinstance(board, SecretQueenBoard) and recorded_move.position_fen != board.fen(en_passant="fen"):
+                raise RuntimeError(f"Secret Queen position history is invalid at ply {recorded_move.ply}")
         if checkpoint is None:
             raise RuntimeError("resumed game is missing its pause checkpoint")
         checkpoint_ply = int(checkpoint.state.get("ply", -1))
@@ -944,8 +956,9 @@ def run_worker_assignment_game(
             "book_plies": len(opening_moves),
         },
     )
-    for engine in engine_instances.values():
-        engine.prepare_position(board)
+    if not isinstance(board, SecretQueenBoard):
+        for engine in engine_instances.values():
+            engine.prepare_position(board)
     progress(
         "opening",
         "opening_start_position",
@@ -1163,6 +1176,7 @@ def run_worker_assignment_game(
             time_ms=0 if search is None else search.time_ms,
             clock_after_ms=clock_after_ms if clock_after_ms is not None else 0,
             engine_version_id=int(engine.get_name()),
+            position_fen=board.fen(en_passant="fen") if isinstance(board, SecretQueenBoard) else None,
         )
         moves.append(move_record)
         connection.commit()
@@ -1685,6 +1699,11 @@ def _tournament_required_resources(
 ) -> WorkerResources:
     from cope.events.engine_relay import relay_resources_for_tournament
 
+    if tournament.config.variant == "secret-queen":
+        return WorkerResources(
+            threads=SEARCH_WORKERS,
+            hash_mb=SEARCH_WORKERS * engine_count * (tournament.config.engine_hash_mb + ENGINE_PROCESS_MEMORY_OVERHEAD_MB),
+        )
     relay_resources = relay_resources_for_tournament(
         connection,
         tournament.id,
@@ -1907,23 +1926,12 @@ def _next_playable_game_for_worker(
     excluded_engine_ids: frozenset[int] = frozenset(),
     excluded_game_ids: frozenset[int] = frozenset(),
 ) -> GameRecord | None:
-    conditions = "tournament_id = ? AND status = 'pending'"
-    parameters: list[int] = [tournament_id]
-    conditions += """
-      AND NOT EXISTS (
-        SELECT 1
-        FROM engine_versions local_version
-        WHERE local_version.id IN (games.white_engine_id, games.black_engine_id)
-          AND local_version.distribution = 'worker_local'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM worker_engine_discoveries discovery
-            WHERE discovery.worker_id = ?
-              AND discovery.local_key = local_version.worker_local_key
-          )
-      )
+    conditions = """
+      tournament_id = ? AND status = 'pending'
+      AND white_engine_id NOT IN (SELECT id FROM blocked_versions)
+      AND black_engine_id NOT IN (SELECT id FROM blocked_versions)
     """
-    parameters.append(worker.id)
+    parameters: list[int] = [worker.id, tournament_id]
     if excluded_engine_ids:
         blocked = tuple(sorted(excluded_engine_ids))
         placeholders = ", ".join("?" for _ in blocked)
@@ -1940,6 +1948,17 @@ def _next_playable_game_for_worker(
         parameters.extend(blocked_games)
     row = connection.execute(
         f"""
+        WITH blocked_versions AS MATERIALIZED (
+          SELECT local_version.id
+          FROM engine_versions local_version
+          WHERE local_version.distribution = 'worker_local'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM worker_engine_discoveries discovery
+              WHERE discovery.worker_id = ?
+                AND discovery.local_key = local_version.worker_local_key
+            )
+        )
         SELECT id
         FROM games
         WHERE {conditions}
@@ -2030,7 +2049,11 @@ def _finish_tournament_if_complete(
     tournament: TournamentRecord,
 ) -> bool:
     from cope.events.engine_hand_brain import advance_hand_brain
+    from cope.events.secret_queen_competition import advance_competition
 
+    secret_queen = advance_competition(connection, tournament)
+    if secret_queen is not None:
+        return secret_queen.complete
     hand_brain = advance_hand_brain(connection, tournament)
     if hand_brain is not None:
         return hand_brain.complete
@@ -2106,6 +2129,46 @@ def _finish_tournament_if_complete(
 
 def _starting_board(opening: OpeningPositionRecord | None, *, variant: str = "standard") -> Position:
     return create_board(None if opening is None else opening.start_fen, variant=variant)
+
+
+def _secret_queen_files(connection, game: GameRecord) -> tuple[int, int]:
+    from secrets import randbelow
+
+    key = (game.tournament_id, game.round, game.pair_index)
+    saved = connection.execute(
+        """
+        SELECT existing.id, secret.black_file, secret.white_file
+        FROM games existing
+        JOIN secret_queen_game_secrets secret ON secret.game_id = existing.id
+        WHERE existing.tournament_id = ? AND existing.round = ? AND existing.pair_index = ?
+        ORDER BY (existing.id <> ?), existing.id
+        LIMIT 1
+        """,
+        (*key, game.id),
+    ).fetchone()
+    if saved is not None and saved["id"] == game.id:
+        return saved["black_file"], saved["white_file"]
+    if saved is None:
+        connection.execute(
+            """
+            INSERT INTO secret_queen_pairs (tournament_id, round, pair_index, black_file, white_file)
+            VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+            """,
+            (*key, randbelow(8), randbelow(8)),
+        )
+        saved = connection.execute(
+            "SELECT black_file, white_file FROM secret_queen_pairs WHERE tournament_id = ? AND round = ? AND pair_index = ?",
+            key,
+        ).fetchone()
+    connection.execute(
+        "INSERT INTO secret_queen_game_secrets (game_id, black_file, white_file) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+        (game.id, saved["black_file"], saved["white_file"]),
+    )
+    row = connection.execute(
+        "SELECT black_file, white_file FROM secret_queen_game_secrets WHERE game_id = ?",
+        (game.id,),
+    ).fetchone()
+    return row["black_file"], row["white_file"]
 
 
 def _validate_new_game_attempt(

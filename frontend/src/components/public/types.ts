@@ -84,6 +84,7 @@ export interface MoveRecord {
   game_id?: Identifier
   ply: number
   uci: string
+  position_fen?: string | null
   san?: string
   is_book?: boolean
   eval_cp?: number | null
@@ -212,6 +213,14 @@ export interface TournamentRatingSummary {
   rating_list_name: string
   average_competitor_elo: number | null
   rows: TournamentRatingRow[]
+}
+
+export interface EngineEvaluationRange {
+  estimate?: string | undefined
+  low: string
+  high: string
+  sampled: number
+  possible: number
 }
 
 export interface EngineAnalysis {

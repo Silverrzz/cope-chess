@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
+from io import BytesIO
 
 import aiohttp
 import discord
@@ -9,7 +11,8 @@ import psycopg
 from discord import app_commands
 from discord.ext import tasks
 
-from .messages import ALERTS, DEFAULT_ALERTS, game_url, notification_text, safe
+from .messages import ALERTS, DEFAULT_ALERTS, game_url, notification_text, rating_messages, safe
+from .positions import parse_fen, position_png, position_text
 from .store import Batch, Store, Target
 
 
@@ -275,7 +278,59 @@ class CopeBot(discord.Client):
         self.channel_id = channel_id
         self.channel_error = False
         self.tree = app_commands.CommandTree(self)
-        self.tree.add_command(CopeCommands(self))
+        self.commands = CopeCommands(self)
+        self.tree.add_command(self.commands)
+        rating = app_commands.Command(name="rating", description="Show an engine version's Elo on every list", callback=self.rating)
+        rating.autocomplete("engine")(self.find_rating_engine)
+        rating.autocomplete("version")(self.find_rating_version)
+        self.tree.add_command(rating)
+        self.tree.add_command(app_commands.Command(name="fen", description="Show a chess position and analysis links", callback=self.fen))
+        self.tree.on_error = self.commands.on_error
+
+    @app_commands.describe(engine="Choose an engine", version="Choose one of this engine's versions")
+    async def rating(self, interaction: discord.Interaction, engine: str, version: str) -> None:
+        await interaction.response.defer(ephemeral=False)
+        target = await asyncio.to_thread(self.store.resolve_version, engine, version)
+        if target is None:
+            await interaction.edit_original_response(content="Choose an engine and one of its versions from the Cope suggestions.")
+            return
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.get(f"{self.origin}/api/engines/{target.version_id}/ratings") as response:
+                if response.status in {401, 403, 404}:
+                    await interaction.edit_original_response(content="Ratings for this engine version are not publicly available.")
+                    return
+                response.raise_for_status()
+                data = await response.json()
+        messages = rating_messages(target.label, data["ratings"])
+        await interaction.edit_original_response(content=messages[0], allowed_mentions=discord.AllowedMentions.none())
+        for message in messages[1:]:
+            await interaction.followup.send(message, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
+
+    async def find_rating_engine(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        return await self.commands.choices(self.store.family_choices, current)
+
+    async def find_rating_version(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        engine = getattr(interaction.namespace, "engine", "")
+        return await self.commands.choices(self.store.version_choices, engine, current)
+
+    @app_commands.describe(fen="The position's full six-field FEN")
+    async def fen(self, interaction: discord.Interaction, fen: app_commands.Range[str, 1, 200]) -> None:
+        try:
+            fen, board = parse_fen(fen)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=False)
+        png = await asyncio.to_thread(position_png, board)
+        with closing(discord.File(BytesIO(png), filename="position.png", description=f"Chess position: {fen}")) as attachment:
+            message = await interaction.edit_original_response(
+                content=position_text(fen), attachments=[attachment],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        await interaction.edit_original_response(
+            content=position_text(fen, message.attachments[0].url),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self.store.check_schema)

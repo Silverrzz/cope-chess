@@ -1646,8 +1646,14 @@ def register_api_routes(app: FastAPI) -> None:
             clocks = web_app._merge_clock_data(clocks, game_live.get("clocks"))
             if isinstance(game_live.get("clock_state"), dict):
                 clock_state = game_live["clock_state"]
+        variant_view = {}
+        if slug is not None and tournament.config.variant == "secret-queen" and viewer_game is not None and not cross_table:
+            from cope.events.secret_queen import spectator_queen_squares
+
+            variant_view["secret_queen_squares"] = spectator_queen_squares(connection, viewer_game)
         return _json(
             {
+                **variant_view,
                 "tournament": tournament,
                 "spectator_count": request.app.state.stream_hub.tournament_spectator_count(
                     tournament.id
@@ -1764,8 +1770,18 @@ def register_api_routes(app: FastAPI) -> None:
             for rating in ratings:
                 engine = rating["engine"]
                 version_id = engine["engine_id"]
-                engine["tags"] = tags.get(version_id, [])
-                engine["public_hidden"] = version_id in hidden
+                version_tags = tags.get(version_id, [])
+                engine["tags"] = version_tags
+                engine["public_hidden"] = version_id in hidden or (
+                    engine["name"] == "Caissa"
+                    and (
+                        rating_list.name == "Top-Class Global Blitz"
+                        or (
+                            rating_list.name in {"All-Round Bullet", "All-Round Rapid"}
+                            and any(tag["name"] == "Contains LLM" for tag in version_tags)
+                        )
+                    )
+                )
         return _json(
             {
                 "rating_list": rating_list,
@@ -1847,6 +1863,16 @@ def register_api_routes(app: FastAPI) -> None:
                 },
             }
         )
+
+    @app.get("/api/engines/{engine_id}/ratings")
+    def public_engine_ratings(
+        engine_id: int,
+        connection: sqlite3.Connection = Depends(web_app._database),
+    ):
+        engine = get_engine_record(connection, engine_id)
+        if engine is None or engine.public_hidden:
+            raise HTTPException(status_code=404, detail="Engine not found.")
+        return _json({"ratings": _public_engine_ratings(connection, engine_id)})
 
     @app.get("/api/engines/{engine_id}")
     def public_engine(

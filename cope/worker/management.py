@@ -27,7 +27,7 @@ from .local_state import (
     request_stop,
     write_json,
 )
-from .supervisor import release_python, supervise
+from .supervisor import cleanup_orphaned_worker, release_python, supervise
 
 
 COMMANDS = {"help", "start", "stop", "config", "health", "update"}
@@ -47,8 +47,8 @@ Manage the local Cope worker.
                                   Use false to disable them. The worker stalls
                                   if Cope requires an update.
   cope health status              Show worker health and current activity.
-  cope health doctor              Repair common local issues while stopped
-                                  and report any problems it finds.
+  cope health doctor              Clean up an orphaned worker and repair
+                                  common local issues while stopped.
   cope update                     Finish active work and install the update.
   cope update -i                  Show installed and available versions
                                   and the status of any pending update.
@@ -119,7 +119,7 @@ def _wait_stop(home: Path, mode: str, seconds: int | None = None) -> int:
     if not is_running(home):
         previous = read_json(home / "status.json")
         if previous.get("state") in {"starting", "connecting", "reconnecting", "ready", "busy", "draining", "stopping", "updating"}:
-            raise RuntimeError("the supervisor is unavailable and process cleanup could not be verified")
+            raise RuntimeError("the supervisor is unavailable and process cleanup could not be verified. Run cope health doctor.")
         with locked(home / "control.lock"):
             if not is_running(home):
                 write_json(home / "desired.json", {"state": "stopped"})
@@ -228,20 +228,61 @@ def fetch_release(server: str) -> dict:
     return release
 
 
+def _repair_worker_cleanup(home: Path, status: dict, repaired: list[str]) -> dict:
+    launch_id = status.get("launch_id")
+    if launch_id:
+        count = cleanup_orphaned_worker(launch_id)
+    elif status and status.get("processes") != 0:
+        raise RuntimeError("the worker launch ID is missing; process ownership cannot be verified")
+    else:
+        count = 0
+    needs_repair = (
+        count or status.get("state", "stopped") != "stopped"
+        or status.get("processes") != 0
+        or any(status.get(key) for key in (
+            "active_games", "active_tools", "game_ids", "tool_ids", "reserved_threads",
+            "reserved_memory_mb", "worker_cpu_threads", "worker_memory_mb",
+        ))
+        or read_json(home / "desired.json").get("state") != "stopped"
+        or (home / "update.json").exists()
+    )
+    if needs_repair:
+        write_json(home / "desired.json", {"state": "stopped"})
+        (home / "update.json").unlink(missing_ok=True)
+        status.update(
+            state="stopped", processes=0, active_games=0, active_tools=0,
+            game_ids=[], tool_ids=[], reserved_threads=0, reserved_memory_mb=0,
+            worker_cpu_threads=0, worker_memory_mb=0,
+        )
+        for key in ("detail", "target", "required_version", "cpu_percent", "available_memory_mb"):
+            status.pop(key, None)
+        write_json(home / "status.json", status)
+        repaired.append(f"cleaned up {count} orphaned worker processes" if count else "verified worker process cleanup")
+        repaired.append("reset worker activity and saved stopped state")
+    return status
+
+
 def _status(home: Path, *, doctor: bool) -> dict:
     running = is_running(home)
     status = read_json(home / "status.json")
     status.setdefault("state", "starting" if running else "stopped")
     status["supervisor"] = "running" if running else "stopped"
-    status.pop("launch_id", None)
     if not doctor:
+        status.pop("launch_id", None)
         return status
     repaired = []
     issues = []
     settings = WorkerSettings.read(home)
     if not running:
-        with locked(home / "supervisor.lock", wait=False):
-            if (home / "stop.json").is_file():
+        with locked(home / "control.lock"), locked(home / "supervisor.lock", wait=False):
+            status = read_json(home / "status.json")
+            try:
+                status = _repair_worker_cleanup(home, status, repaired)
+            except (OSError, RuntimeError) as error:
+                issues.append(f"worker process cleanup could not be verified: {error}")
+            status.setdefault("state", "stopped")
+            status["supervisor"] = "stopped"
+            if not issues and (home / "stop.json").is_file():
                 (home / "stop.json").unlink()
                 repaired.append("removed stale stop request")
             cache = home / "engines"
@@ -261,8 +302,7 @@ def _status(home: Path, *, doctor: bool) -> dict:
         fetch_release(settings.server)
     except (OSError, ValueError) as error:
         issues.append(f"release service unavailable: {error}")
-    if not running and status["state"] not in {"stopped", "failed", "stalled", "blocked"}:
-        issues.append("worker supervisor exited without verifying cleanup")
+    status.pop("launch_id", None)
     status.update(repaired=repaired, issues=issues)
     return status
 

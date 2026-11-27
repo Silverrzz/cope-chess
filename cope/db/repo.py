@@ -126,6 +126,7 @@ class MoveRecord:
     time_ms: int
     clock_after_ms: int
     engine_version_id: int | None
+    position_fen: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1140,6 +1141,8 @@ def variant_engine_version_ids(connection, variant: str) -> set[int]:
 
 
 def validate_tournament_variant(connection, config: TournamentConfig) -> None:
+    if config.variant == "secret-queen" and (config.opening_suite_id is not None or config.engine_threads != 1 or config.rated):
+        raise ValueError("Secret Queen requires startpos, single-threaded probes, and unrated play")
     if config.variant == "tak":
         missing = set(config.participants) - variant_engine_version_ids(connection, config.variant)
         if missing:
@@ -1245,11 +1248,15 @@ def lock_tournament(
     return _tournament_from_row(row)
 
 
-def list_tournaments(connection: sqlite3.Connection) -> tuple[TournamentRecord, ...]:
-    return tuple(
-        _tournament_from_row(row)
-        for row in connection.execute("SELECT * FROM tournaments ORDER BY id DESC")
+def list_tournaments(
+    connection: sqlite3.Connection, *, status: str | None = None,
+) -> tuple[TournamentRecord, ...]:
+    rows = (
+        connection.execute("SELECT * FROM tournaments ORDER BY id DESC")
+        if status is None
+        else connection.execute("SELECT * FROM tournaments WHERE status = ? ORDER BY id DESC", (status,))
     )
+    return tuple(_tournament_from_row(row) for row in rows)
 
 
 def list_tournaments_by_ids(
@@ -2326,6 +2333,7 @@ def record_move(
     time_ms: int = 0,
     clock_after_ms: int = 0,
     engine_version_id: int | None = None,
+    position_fen: str | None = None,
 ) -> MoveRecord:
     if (assignment_id is None) != (assignment_key is None):
         raise ValueError("assignment id and key must be provided together")
@@ -2348,6 +2356,7 @@ def record_move(
         time_ms,
         clock_after_ms,
         engine_version_id,
+        position_fen,
     )
     if assignment_id is None:
         cursor = connection.execute(
@@ -2355,9 +2364,9 @@ def record_move(
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
               depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
-              engine_version_id
+              engine_version_id, position_fen
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         )
@@ -2367,9 +2376,9 @@ def record_move(
             INSERT INTO moves (
               game_id, ply, uci, san, is_book, eval_cp, eval_mate, score_bound,
               depth, seldepth, nodes, nps, hashfull, pv, info_line, time_ms, clock_after_ms,
-              engine_version_id
+              engine_version_id, position_fen
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
               SELECT 1 FROM game_assignments
               WHERE id = ? AND assignment_key = ? AND game_id = ?
@@ -2399,6 +2408,7 @@ def record_move(
         time_ms=time_ms,
         clock_after_ms=clock_after_ms,
         engine_version_id=engine_version_id,
+        position_fen=position_fen,
     )
 
 
@@ -3235,6 +3245,10 @@ def list_worker_event_fixture_candidates(
               SELECT tournament_id, event_id, position, id
               FROM engine_relay_fixtures
               UNION ALL
+              SELECT fixture.tournament_id, fixture.event_id, contest.position, contest.id
+              FROM secret_queen_event_tournaments fixture
+              JOIN event_contests contest ON contest.id = fixture.contest_id
+              UNION ALL
               SELECT tournament_id, event_id, 0 AS position, event_id AS id
               FROM puzzle_gauntlet_events
               WHERE tournament_id IS NOT NULL
@@ -3303,6 +3317,9 @@ def event_fixture_has_worker_permissions(
           FROM engine_relay_fixtures
           UNION ALL
           SELECT tournament_id, event_id
+          FROM secret_queen_event_tournaments
+          UNION ALL
+          SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
           WHERE tournament_id IS NOT NULL
           UNION ALL
@@ -3343,6 +3360,9 @@ def claim_event_fixture_worker(
         WITH event_fixtures AS (
           SELECT tournament_id, event_id
           FROM engine_relay_fixtures
+          UNION ALL
+          SELECT tournament_id, event_id
+          FROM secret_queen_event_tournaments
           UNION ALL
           SELECT tournament_id, event_id
           FROM puzzle_gauntlet_events
@@ -5616,6 +5636,7 @@ def _move_from_row(row: sqlite3.Row) -> MoveRecord:
         time_ms=row["time_ms"],
         clock_after_ms=row["clock_after_ms"],
         engine_version_id=row["engine_version_id"],
+        position_fen=row["position_fen"],
     )
 
 

@@ -1,0 +1,16 @@
+export const secretQueenTheme = {
+  "--event-view-background": "#0b0810",
+  "--event-view-text": "#f7f4fb",
+  "--event-view-glow": "#2c1746",
+  "--event-view-stage-glow": "#2c174680",
+  "--event-view-surface": "#140d20",
+  "--event-view-accent": "#c5a3ff",
+  "--event-view-highlight": "#e4d2ff",
+  "--event-countdown-music-background": "#241438",
+  "--event-view-muted": "#b3a3c6",
+  "--event-view-border": "#c5a3ff26",
+  "--event-view-schedule": "#c8b9d9",
+  "--event-view-status-icon": "#bba4d9",
+  "--event-view-status-label": "#b3a3c6",
+  "--event-view-status-text": "#e4d2ff",
+};

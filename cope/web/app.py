@@ -3255,6 +3255,7 @@ def _move_payload(move: MoveRecord, root_fen: str | None, variant: str = "dfrc")
         "time_ms": move.time_ms,
         "clock_after_ms": move.clock_after_ms,
         "engine_version_id": move.engine_version_id,
+        **({"position_fen": move.position_fen} if move.position_fen is not None else {}),
     }
 
 
@@ -3378,7 +3379,7 @@ def _cross_table_games_payload(
         plies[game.id] = 0
     for row in connection.execute(
         """
-        SELECT moves.game_id, moves.ply, moves.uci, moves.clock_after_ms,
+        SELECT moves.game_id, moves.ply, moves.uci, moves.clock_after_ms, moves.position_fen,
                moves.eval_cp, moves.eval_mate, moves.score_bound
         FROM moves
         JOIN games ON games.id = moves.game_id
@@ -3402,7 +3403,10 @@ def _cross_table_games_payload(
         last_moves[game_id] = move
         plies[game_id] = move_ply
         try:
-            boards[game_id].push_uci(move)
+            if variant == "secret-queen" and row["position_fen"]:
+                boards[game_id] = create_board(row["position_fen"], variant=variant)
+            else:
+                boards[game_id].push_uci(move)
         except ValueError:
             continue
 
@@ -3568,6 +3572,8 @@ def _move_root_fens(
     variant: str = "dfrc",
 ) -> list[str | None]:
     start_fen = (opening or {}).get("fen") or "startpos"
+    if variant == "secret-queen":
+        return [start_fen, *(move.position_fen for move in moves)][:-1]
     try:
         board = create_board(start_fen, variant=variant)
     except ValueError:

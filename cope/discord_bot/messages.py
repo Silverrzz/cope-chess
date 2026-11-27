@@ -1,3 +1,4 @@
+from math import floor
 from urllib.parse import urlencode
 
 import discord
@@ -17,6 +18,25 @@ DEFAULT_ALERTS = ["tournament_started", "event_started", "rating_placed", "ratin
 
 def safe(text: str, limit: int = 200) -> str:
     return discord.utils.escape_markdown(" ".join(text.split())[:limit])
+
+
+def rating_messages(label: str, ratings: list[dict]) -> list[str]:
+    heading = f"{safe(label)} Elo:"
+    messages = []
+    message = heading
+    for rating in ratings:
+        elo = floor(rating["elo"] + 0.5)
+        margin = rating["error_margin"]
+        bounds = f" +/- {floor(margin + 0.5)}" if margin is not None else ""
+        line = f'{safe(rating["rating_list"]["name"])}: {elo}{bounds} (#{rating["rank"]})'
+        if len(message) + len(line) + 1 > 2000:
+            messages.append(message)
+            message = heading
+        message += "\n" + line
+    if not ratings:
+        message += "\nThis version is not rated on any list yet."
+    messages.append(message)
+    return messages
 
 
 def game_url(game: dict, origin: str) -> str:
