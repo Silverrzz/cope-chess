@@ -40,6 +40,7 @@ let refreshTimer: number | undefined;
 let clockTimer: number | undefined;
 let resultTimer: number | undefined;
 let moveTimer: number | undefined;
+let lastMoveAt: number | undefined;
 let historyLoaded = false;
 
 const playable = computed(() => props.contests.filter(contest => contest.games.length));
@@ -94,8 +95,10 @@ const hiddenSearch = computed(() => Boolean(concealedQueens.value?.white || conc
 const activeSide = computed(() => historical.value || !clock.value?.state.running ? null : clock.value.state.active_side);
 const engines = computed(() => ({ white: game.value?.white_engine_id, black: game.value?.black_engine_id }));
 const title = computed(() => game.value ? matchup(game.value) : props.detail.event.title);
-const status = computed(() => game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
-const followingLive = computed(() => !pinnedContest.value && !reviewing.value && game.value?.status !== "finished");
+const catchingUp = computed(() => !reviewing.value && ply.value < moves.value.length);
+const status = computed(() => catchingUp.value ? game.value?.status === "finished" ? "Replaying" : "Catching up"
+  : game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
+const followingLive = computed(() => !pinnedContest.value && !reviewing.value && !catchingUp.value && game.value?.status !== "finished");
 const annotations = computed(() => displayedMoves.value.map((_, index) => {
   if (capturedKing(index)) return { label: "King captured" };
   return queenRevealed(index) ? { label: "Queen revealed" } : null;
@@ -221,6 +224,7 @@ function queenRevealed(index: number): boolean {
 function stopMovePlayback(): void {
   window.clearTimeout(moveTimer);
   moveTimer = undefined;
+  lastMoveAt = undefined;
 }
 
 function seekMove(next: number): void {
@@ -230,10 +234,30 @@ function seekMove(next: number): void {
   reviewing.value = next < moves.value.length;
 }
 
+function moveDuration(index: number): number {
+  const move = moves.value[index];
+  const control = viewer.value?.tournament.config?.time_control;
+  if (!move) return 0;
+  if (control?.category === "increment" && move.clock_after_ms != null) {
+    const previous = index < 2 ? control.initial_ms : moves.value[index - 2]?.clock_after_ms;
+    if (previous != null) return Math.max(0, previous + control.increment_ms - move.clock_after_ms);
+  }
+  return Math.max(0, move.time_ms ?? 0);
+}
+
 function playNextMove(): void {
   if (moveTimer !== undefined || reviewing.value || ply.value >= moves.value.length) return;
+  const delay = lastMoveAt === undefined ? 0 : lastMoveAt + moveDuration(ply.value) - performance.now();
+  if (delay > 0) {
+    moveTimer = window.setTimeout(() => {
+      moveTimer = undefined;
+      playNextMove();
+    }, Math.ceil(delay));
+    return;
+  }
   const reveal = queenRevealed(ply.value) && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   ply.value += 1;
+  lastMoveAt = performance.now();
   const duration = chessMoveAnimationMs + (reveal ? queenRevealAnimationMs : 0) + 80;
   moveTimer = window.setTimeout(() => {
     moveTimer = undefined;
