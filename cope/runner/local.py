@@ -1796,9 +1796,11 @@ def _worker_available_resources(
     thread_capacity = capacity.threads
     if used_threads and connection.execute(
         """SELECT 1 FROM game_assignments assignment
-           JOIN game_clock_calibrations calibration
-             ON calibration.game_id = assignment.game_id AND calibration.assignment_key = assignment.assignment_key
-           WHERE assignment.worker_id = ? AND assignment.status IN ('assigned', 'acked', 'live') LIMIT 1""",
+           JOIN games game ON game.id = assignment.game_id
+           JOIN tournaments tournament ON tournament.id = game.tournament_id
+           WHERE assignment.worker_id = ? AND assignment.status IN ('assigned', 'acked', 'live')
+             AND tournament.config::jsonb ->> 'clock_reference_hardware_key' IS NOT NULL
+           LIMIT 1""",
         (worker.id,),
     ).fetchone() is not None:
         thread_capacity = min(thread_capacity, worker.hw.physical_cores)

@@ -41,6 +41,7 @@ from cope.core.models import (
     WORKER_PROTOCOL_VERSION,
     WorkerControlSettings,
     WorkerControlState,
+    WorkerGameAssignment,
     WorkerIdentityHello,
     WorkerResources,
     WorkerResourceTelemetry,
@@ -147,6 +148,7 @@ WORKER_SERVER_STALL_TIMEOUT_S = 60.0
 WORKER_SERVER_WATCHDOG_INTERVAL_S = 5.0
 PROGRESS_BATCH_INTERVAL_S = 0.05
 PROGRESS_BATCH_SIZE = 512
+ASSIGNMENT_CLAIM_BATCH_SIZE = 8
 
 
 class AssignmentPreparationFailed(RuntimeError):
@@ -691,7 +693,7 @@ class WorkerHandshakeServer:
                                 worker_status = "busy"
                     if tool_jobs:
                         break
-                    assignment = await self._claim_next_assignment(
+                    claimed_assignments = await self._claim_next_assignments(
                         worker,
                         wake_generation,
                         (
@@ -708,44 +710,45 @@ class WorkerHandshakeServer:
                             identity[1] for identity in assignment_identities.values()
                         ),
                     )
-                    if assignment is None:
+                    if not claimed_assignments:
                         break
-                    assignment_id = assignment.assignment.assignment_id
-                    inbox: asyncio.Queue = asyncio.Queue()
-                    inboxes[assignment_id] = inbox
-                    assignment_identities[assignment_id] = (
-                        assignment.assignment.assignment_key,
-                        assignment.assignment.game_id,
-                    )
-                    cancellation = asyncio.Event()
-                    pause_signal = threading.Event()
-                    task = asyncio.create_task(
-                        self._serve_worker_assignment(
-                            websocket,
-                            worker,
-                            assignment,
-                            inbox=inbox,
-                            send_lock=send_lock,
-                            cancellation=cancellation,
-                            pause_signal=pause_signal,
-                        ),
-                        name=f"server-assignment-{assignment_id}",
-                    )
-                    assignments[assignment_id] = task
-                    assignment_resources[assignment_id] = assignment.required_resources
-                    assignment_cancellations[assignment_id] = cancellation
-                    assignment_pause_signals[assignment_id] = pause_signal
-                    if worker_status != "busy":
-                        if not self._record_worker_status(
-                            worker.id,
-                            "busy",
-                            session_id=worker.session_id,
-                        ):
-                            task.cancel()
-                            raise WorkerConnectionInactive(
-                                "worker session is no longer current"
-                            )
-                        worker_status = "busy"
+                    for assignment in claimed_assignments:
+                        assignment_id = assignment.assignment.assignment_id
+                        inbox: asyncio.Queue = asyncio.Queue()
+                        inboxes[assignment_id] = inbox
+                        assignment_identities[assignment_id] = (
+                            assignment.assignment.assignment_key,
+                            assignment.assignment.game_id,
+                        )
+                        cancellation = asyncio.Event()
+                        pause_signal = threading.Event()
+                        task = asyncio.create_task(
+                            self._serve_worker_assignment(
+                                websocket,
+                                worker,
+                                assignment,
+                                inbox=inbox,
+                                send_lock=send_lock,
+                                cancellation=cancellation,
+                                pause_signal=pause_signal,
+                            ),
+                            name=f"server-assignment-{assignment_id}",
+                        )
+                        assignments[assignment_id] = task
+                        assignment_resources[assignment_id] = assignment.required_resources
+                        assignment_cancellations[assignment_id] = cancellation
+                        assignment_pause_signals[assignment_id] = pause_signal
+                        if worker_status != "busy":
+                            if not self._record_worker_status(
+                                worker.id,
+                                "busy",
+                                session_id=worker.session_id,
+                            ):
+                                task.cancel()
+                                raise WorkerConnectionInactive(
+                                    "worker session is no longer current"
+                                )
+                            worker_status = "busy"
 
                 if control.draining and not assignments and not tool_jobs and not control.drain_reported:
                     await _send_message(websocket, "worker_drained", {}, lock=send_lock)
@@ -2276,66 +2279,86 @@ class WorkerHandshakeServer:
         finally:
             connection.close()
 
-    async def _claim_next_assignment(
+    async def _claim_next_assignments(
         self,
         worker: WorkerRecord,
         wake_generation: int,
         used_resources: tuple[int, int],
         *,
         active_game_ids: frozenset[int] = frozenset(),
-    ):
+    ) -> list[WorkerGameAssignment]:
         capability = self._worker_capabilities.get(
             worker.id,
             _worker_capability_key(worker),
         )
         if self._empty_claim_generation.get(capability) == wake_generation:
-            return None
+            return []
         async with self._assignment_lock:
             if self._empty_claim_generation.get(capability) == wake_generation:
-                return None
-            assignment = await asyncio.to_thread(
-                self._claim_next_assignment_from_database,
+                return []
+            started = time.monotonic()
+            claimed = await asyncio.to_thread(
+                self._claim_next_assignments_from_database,
                 worker,
                 used_resources,
                 active_game_ids,
             )
-            if assignment is None:
+            if not claimed:
                 self._empty_claim_generation[capability] = wake_generation
-            return assignment
+            elif len(claimed) > 1:
+                LOG.info(
+                    "claimed assignment batch worker_id=%s count=%s elapsed_ms=%.1f",
+                    worker.id,
+                    len(claimed),
+                    (time.monotonic() - started) * 1000,
+                )
+            return claimed
 
-    def _claim_next_assignment_from_database(
+    def _claim_next_assignments_from_database(
         self,
         worker: WorkerRecord,
         used_resources: tuple[int, int],
-        active_game_ids: frozenset[int] = frozenset(),
-    ):
+        active_game_ids: frozenset[int],
+    ) -> list[WorkerGameAssignment]:
+        claimed = []
+        tournament_ids = set()
         connection = connect_database(self._config.db_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
             live_worker = self._validate_assignable_worker(connection, worker)
             blocked_engine_ids = self._blocked_engine_ids(live_worker)
-            assignment = (
-                None
-                if 0 in blocked_engine_ids
-                else next_worker_assignment(
+            if 0 in blocked_engine_ids:
+                return []
+            threads, hash_mb = used_resources
+            game_ids = set(active_game_ids)
+            for _ in range(ASSIGNMENT_CLAIM_BATCH_SIZE):
+                assignment = next_worker_assignment(
                     connection,
                     live_worker,
-                    used_resources=used_resources,
+                    used_resources=(threads, hash_mb),
                     excluded_engine_ids=blocked_engine_ids,
-                    excluded_game_ids=active_game_ids,
+                    excluded_game_ids=frozenset(game_ids),
                 )
-            )
-            if assignment is not None:
-                connection.commit()
+                if assignment is None:
+                    break
+                claimed.append(assignment)
+                threads += assignment.required_resources.threads
+                hash_mb += assignment.required_resources.hash_mb
+                game_ids.add(assignment.assignment.game_id)
                 game = get_game(connection, assignment.assignment.game_id)
                 if game is not None:
-                    publish_tournament_event(game.tournament_id)
-            return assignment
+                    tournament_ids.add(game.tournament_id)
+            if claimed:
+                connection.commit()
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+
+        for tournament_id in tournament_ids:
+            publish_tournament_event(tournament_id)
+        return claimed
 
     def _validate_assignable_worker(
         self,
