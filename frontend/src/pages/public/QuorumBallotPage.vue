@@ -10,7 +10,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import AppIcon from '@/components/ui/AppIcon.vue'
 import QuorumTally from '@/components/public/QuorumTally.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
-import { ballotOptions, ballotScope, verifyBallot, type BallotPackage, type VoteEvidence } from '@/quorum'
+import { ballotOptions, ballotScope, verifyBallot, voteChangeMessage, type BallotPackage, type VoteEvidence } from '@/quorum'
 import { resultLabels, resultTones, witnessReportUrl, type WitnessStatus } from '@/quorum-results'
 import { downloadQuorumFile, generateQuorumProof, loadQuorumBallot, quorumReceiptKey, readQuorumReceipt, unlockedCredential } from '@/quorum-voter'
 
@@ -41,6 +41,7 @@ const manifest = computed(() => packet.value?.manifest)
 const endpoint = computed(() => '/api/quorum/ballots/' + encodeURIComponent(String(route.params.id)))
 const signedCount = computed(() => publications.value?.witnesses.filter(witness => witness.signed_at).length ?? 0)
 const open = computed(() => packet.value?.status === 'open')
+const hasVote = computed(() => packet.value?.vote_revision !== undefined)
 const fullTurnout = computed(() => {
   const result = packet.value?.result
   return Boolean(result && result.total === result.electorate)
@@ -138,23 +139,40 @@ async function audit() {
 async function cast() {
   const evidence = packet.value
   const path = endpoint.value
-  if (busy.value || !evidence || !credential.value || !open.value || choice.value === '') return
+  const voter = credential.value
+  if (busy.value || !evidence || !voter || !open.value || choice.value === '') return
   busy.value = true
   error.value = ''
   try {
-    const proof = await generateQuorumProof(credential.value, evidence.roster.members, choice.value, await ballotScope(evidence.manifest))
-    const response = await fetch(path + '/votes', {
-      method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(proof),
+    const scope = await ballotScope(evidence.manifest)
+    const proof = await generateQuorumProof(voter, evidence.roster.members, choice.value, scope)
+    if (disposed || path !== endpoint.value) return
+    const current = await loadQuorumBallot(path, proof.nullifier)
+    if (disposed || path !== endpoint.value) return
+    if (current.status !== 'open') throw new Error('This ballot has closed.')
+    const revision = current.vote_revision
+    const authorization = revision === undefined ? undefined : await generateQuorumProof(voter, evidence.roster.members,
+      await voteChangeMessage(evidence.manifest.id, revision, proof), scope)
+    if (disposed || path !== endpoint.value) return
+    const response = await fetch(path + (authorization ? '/votes/change' : '/votes'), {
+      method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(authorization ? { revision, proof, authorization } : proof),
     })
     const result = await response.json()
     if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : result.detail?.message ?? 'Could not submit the vote.')
-    localStorage.setItem(quorumReceiptKey(evidence.manifest.id), result.nullifier)
+    try {
+      localStorage.setItem(quorumReceiptKey(evidence.manifest.id), result.nullifier)
+    } catch {}
     if (!disposed && path === endpoint.value) {
       receipt.value = result.nullifier
-      void load()
+      choice.value = ''
+      await load()
     }
   } catch (cause) {
-    error.value = (cause as Error).message
+    if (!disposed && path === endpoint.value) {
+      error.value = (cause as Error).message
+      await load()
+    }
   } finally {
     busy.value = false
   }
@@ -206,13 +224,13 @@ async function cast() {
         <InlineFeedback :message="error" />
       </section>
 
-      <section v-else-if="receipt" class="ballot-sheet__section ballot-sheet__receipt" role="status">
-        <AppIcon name="check-circle" :size="22" />
-        <strong>Vote submitted</strong>
-      </section>
-
       <section v-else-if="open" class="ballot-sheet__section section-stack" aria-labelledby="quorum-cast-title">
-        <h2 id="quorum-cast-title">Cast a vote</h2>
+        <div v-if="hasVote" class="ballot-sheet__receipt" role="status">
+          <AppIcon name="check-circle" :size="22" />
+          <strong>Vote submitted</strong>
+        </div>
+        <h2 id="quorum-cast-title">{{ hasVote ? 'Change your vote' : 'Cast a vote' }}</h2>
+        <p class="muted">You can change your vote while this ballot is open. Only your latest choice counts. Voting closes at the deadline or when everyone has voted.</p>
         <QuorumCredential v-if="!credential" :members="packet.roster.members" />
         <form v-else class="section-stack" @submit.prevent="cast">
           <fieldset class="ballot-choices">
@@ -224,7 +242,7 @@ async function cast() {
             </label>
           </fieldset>
           <div class="button-row">
-            <BaseButton type="submit" variant="primary" :disabled="choice === ''" :loading="busy">Cast vote</BaseButton>
+            <BaseButton type="submit" variant="primary" :disabled="choice === ''" :loading="busy">{{ hasVote ? 'Change vote' : 'Cast vote' }}</BaseButton>
           </div>
         </form>
         <InlineFeedback :message="error" />

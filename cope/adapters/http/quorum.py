@@ -219,6 +219,12 @@ def register_quorum_routes(app):
         require_origin(request)
         return election_call(elections.cast_vote, connection, ballot_id, payload)
 
+    @app.post("/api/quorum/ballots/{ballot_id}/votes/change")
+    def change_vote(ballot_id: UUID, payload: elections.VoteChange, request: Request, connection=Depends(database)):
+        require_secure(request)
+        require_origin(request)
+        return election_call(elections.change_vote, connection, ballot_id, payload)
+
     @app.get("/api/admin/quorum", name="admin_quorum_get_setup")
     def get_setup(request: Request, connection=Depends(database)):
         require_admin(request)
