@@ -118,7 +118,13 @@ def _probe_result(lines: list[str]) -> Probe | None:
             index = words.index("score")
             kind, value = words[index + 1], int(words[index + 2])
             depth = int(words[words.index("depth") + 1]) if "depth" in words else 0
-            pv = tuple(chess.Move.from_uci(move) for move in words[words.index("pv") + 1:])
+            variation = []
+            for token in words[words.index("pv") + 1:]:
+                try:
+                    variation.append(chess.Move.from_uci(token))
+                except ValueError:
+                    break
+            pv = tuple(variation)
         except (ValueError, IndexError):
             continue
         if kind == "cp":
@@ -162,6 +168,7 @@ class SecretQueenEngine(UciEngineProcess):
         self._active: set[UciEngineProcess] = set()
         self._active_lock = threading.Lock()
         self._closed = False
+        self._clock_lanes: set[int] = set()
         self._lanes: list[UciEngineProcess | None] = [self] + [None] * (SEARCH_WORKERS - 1)
         self._new_process = lambda: UciEngineProcess(spec, server_url=server_url, credential=credential)
 
@@ -276,23 +283,30 @@ class SecretQueenEngine(UciEngineProcess):
                 if self._stop.is_set():
                     return ()
                 self._active.add(engine)
-            remaining = int((deadline - time.monotonic()) * 1000) - 35
-            if remaining < 15:
-                return ()
-            window = remaining if limit_ms is None else min(remaining, limit_ms)
-            engine._send(position if position is not None else "position fen " + board.fen())
-            engine._send(f"go movetime {max(1, window)}")
-            lines = []
-            try:
-                ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
-                                            timeout_s=(window + 10) / 1000)
-            except RuntimeError:
-                UciEngineProcess.stop_search(engine)
-                ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
-                                            timeout_s=max(.005, min(.040, deadline - time.monotonic())))
-            lines.append(ending[-1])
-            statistics.record(lines)
-            return _variations(lines, board)
+            cutoff = deadline if limit_ms is None else min(deadline, time.monotonic() + (limit_ms + 35) / 1000)
+            probes = ()
+            for clock in ((True,) if lane in self._clock_lanes else (False, True)):
+                window = int((cutoff - time.monotonic()) * 1000) - 35
+                if window < 15 or self._stop.is_set():
+                    break
+                engine._send(position if position is not None else "position fen " + board.fen())
+                engine._send(f"go wtime {window} btime {window} winc 0 binc 0 movestogo 1" if clock else f"go movetime {window}")
+                lines = []
+                try:
+                    ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
+                                                timeout_s=window / 1000)
+                except RuntimeError:
+                    UciEngineProcess.stop_search(engine)
+                    ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
+                                                timeout_s=max(.005, min(.040, cutoff - time.monotonic())))
+                lines.append(ending[-1])
+                statistics.record(lines)
+                probes = _variations(lines, board)
+                if probes and probes[0].evaluation is not None and probes[0].depth > 0:
+                    if clock:
+                        self._clock_lanes.add(lane)
+                    return probes
+            return probes
         except (OSError, RuntimeError):
             failed = engine if engine is not None else self._lanes[lane]
             if failed is not None:
