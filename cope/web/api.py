@@ -1771,7 +1771,11 @@ def register_api_routes(app: FastAPI) -> None:
                     and (
                         rating_list.name == "Top-Class Global Blitz"
                         or (
-                            rating_list.name in {"All-Round Bullet", "All-Round Rapid"}
+                            rating_list.name in {
+                                "All-Round Bullet",
+                                "All-Round Rapid",
+                                "8CPU Top-Class Classical",
+                            }
                             and any(tag["name"] == "Contains LLM" for tag in version_tags)
                         )
                     )
