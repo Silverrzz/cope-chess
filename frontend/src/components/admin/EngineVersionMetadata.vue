@@ -124,6 +124,7 @@ onMounted(loadTags)
       <label class="metadata-check"><input v-model="hidden" type="checkbox" :disabled="busy"> Hide from public engine pages</label>
       <fieldset v-if="ready" :disabled="busy">
         <legend>Assigned tags</legend>
+        <p class="history-help">Rating graphs detect numbered releases and R strength variants automatically. Use Release to include an unusual release name, Strength variant for deliberately adjusted strength, or Temporary, Experimental or Modified to keep a build outside release progression. Strength variant takes precedence, followed by experimental tags, then Release. Historical numbered releases sort by version, other builds by source date.</p>
         <div class="metadata-options">
           <label v-for="tag in tags" :key="tag.id" class="metadata-check">
             <input v-model="selected" type="checkbox" :value="tag.id">
@@ -168,6 +169,7 @@ p { color: var(--color-text-muted); font-size: .76rem; margin: .25rem 0 0; }
 .metadata-check, .metadata-options { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
 .metadata-check { font-size: .8rem; }
 .metadata-options { gap: .65rem; }
+.history-help { max-width: 52rem; margin-block: 0 .65rem; }
 .metadata-color { min-height: 2.25rem; width: 4rem; }
 .metadata-catalog { border-top: 1px solid var(--color-border); padding-top: .75rem; }
 .metadata-catalog summary { cursor: pointer; font-size: .8rem; font-weight: 650; }
