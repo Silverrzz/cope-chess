@@ -9,6 +9,7 @@ import { buildPositions, chessMoveAnimationMs, positionFen, queenRevealAnimation
 import ChatPanel from "@/components/public/ChatPanel.vue";
 import ContentState from "@/components/public/ContentState.vue";
 import EnginePanel from "@/components/public/EnginePanel.vue";
+import FollowEnginePicker from "@/components/public/FollowEnginePicker.vue";
 import GameTable from "@/components/public/GameTable.vue";
 import { clockLabel, moveEvaluation, moveNps, resultLabel, timeControlLabel } from "@/components/public/format";
 import AppIcon from "@/components/ui/AppIcon.vue";
@@ -44,12 +45,42 @@ let lastMoveAt: number | undefined;
 let historyLoaded = false;
 
 const playable = computed(() => props.contests.filter(contest => contest.games.length));
+const names = computed(() => new Map(props.detail.cast.map(member => [Number(member.engine_version_id), member.display_name])));
+const followOptions = computed(() => [...new Set(props.contests.flatMap(contest => contest.engine_ids))]
+  .map(id => ({ id: String(id), name: engineName(id) }))
+  .sort((left, right) => left.name.localeCompare(right.name)));
 const pinnedGame = computed(() => typeof route.query.game_id === "string" ? route.query.game_id : null);
 const pinnedContest = computed(() => playable.value.find(contest => contest.games.some(game => String(game.id) === pinnedGame.value)));
-const automaticContest = computed(() => playable.value.find(item => item.games.some(game => game.status === "live"))
-  ?? playable.value.find(item => item.status === "live")
-  ?? playable.value.at(-1));
-const automaticGame = computed(() => automaticContest.value ? defaultGame(automaticContest.value) : undefined);
+const liveContest = computed(() => playable.value.find(contest => contest.key === route.query.follow_contest));
+const followedEngineId = computed({
+  get: () => followOptions.value.find(engine => engine.id === route.query.follow_engine)?.id ?? "",
+  set: (id: string) => {
+    const { query } = gameTarget();
+    delete query.follow_contest;
+    if (id) query.follow_engine = id;
+    else delete query.follow_engine;
+    void router.push({ query });
+  },
+});
+const engineTarget = computed(() => {
+  if (!followedEngineId.value) return;
+  const id = Number(followedEngineId.value);
+  const games = playable.value.flatMap(contest => contest.games
+    .filter(game => game.white_engine_id === id || game.black_engine_id === id)
+    .map(game => ({ contest, game })));
+  return games.find(({ game }) => game.status === "live")
+    ?? games.find(({ game }) => game.status === "assigned")
+    ?? games.filter(({ game }) => game.status === "finished").at(-1)
+    ?? games.find(({ game }) => game.status === "pending");
+});
+const automaticContest = computed(() => followedEngineId.value
+  ? engineTarget.value?.contest ?? playable.value.find(item => item.engine_ids.includes(Number(followedEngineId.value)))
+  : liveContest.value ?? playable.value.find(item => item.games.some(game => game.status === "live"))
+    ?? playable.value.find(item => item.status === "live")
+    ?? playable.value.at(-1));
+const automaticGame = computed(() => followedEngineId.value
+  ? engineTarget.value?.game
+  : automaticContest.value && defaultGame(automaticContest.value));
 const followedContest = computed(() => playable.value.find(item => item.games.some(game => game.id === followedGameId.value)));
 const contest = computed(() => pinnedContest.value ?? followedContest.value ?? automaticContest.value);
 const game = computed(() => pinnedContest.value?.games.find(item => String(item.id) === pinnedGame.value)
@@ -67,7 +98,6 @@ const settingsRows = computed(() => (viewer.value?.settings ?? []).map(row => {
   const [label, value] = Array.isArray(row) ? row : [row.label, row.value];
   return { label, value: label === "Variant" ? "Secret Queen" : value };
 }));
-const names = computed(() => new Map(props.detail.cast.map(member => [Number(member.engine_version_id), member.display_name])));
 const opening = computed(() => viewer.value?.opening ?? { name: "Start position", fen: "startpos" });
 const positions = computed(() => buildPositions(opening.value.fen, moves.value.map(move => move.uci), undefined, moves.value.map(move => move.position_fen)));
 const currentFen = computed(() => positionFen(positions.value[ply.value] ?? positions.value[0]!));
@@ -99,6 +129,20 @@ const catchingUp = computed(() => !reviewing.value && ply.value < moves.value.le
 const status = computed(() => catchingUp.value ? game.value?.status === "finished" ? "Replaying" : "Catching up"
   : game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
 const followingLive = computed(() => !pinnedContest.value && !reviewing.value && !catchingUp.value && game.value?.status !== "finished");
+const followState = computed(() => {
+  if (!followedEngineId.value) return "off";
+  if (pinnedContest.value) return "paused";
+  if (game.value?.status === "live") return "live";
+  if (game.value?.status === "assigned") return "preparing";
+  return "waiting";
+});
+const followStateLabel = computed(() => ({
+  off: "",
+  paused: "Paused",
+  live: "Following live",
+  preparing: "Following next",
+  waiting: game.value?.status === "finished" ? "Last game" : "Waiting for game",
+})[followState.value]);
 const annotations = computed(() => displayedMoves.value.map((_, index) => {
   if (capturedKing(index)) return { label: "King captured" };
   return queenRevealed(index) ? { label: "Queen revealed" } : null;
@@ -153,12 +197,20 @@ function selectContest(contestId: number, tab?: "games"): void {
   if (selected) void router.push(gameTarget(defaultGame(selected)?.id, tab));
 }
 
-function followLive(): void {
+function followLive(resumeEngine = false): void {
   stopMovePlayback();
   reviewing.value = false;
   ply.value = moves.value.length;
-  if (pinnedGame.value) selectGame();
-  else if (game.value?.status === "finished") advanceFollowingGame();
+  if (pinnedGame.value) {
+    const selected = pinnedContest.value;
+    const { query } = gameTarget();
+    if (!resumeEngine) {
+      delete query.follow_engine;
+      if (selected?.status === "live") query.follow_contest = selected.key;
+      else delete query.follow_contest;
+    }
+    void router.push({ query });
+  } else if (game.value?.status === "finished") advanceFollowingGame();
 }
 
 function appendChat(message: ChatMessage): void {
@@ -335,13 +387,19 @@ function scheduleGameSwitch(delay: number): void {
   }, delay);
 }
 
-watch([pinnedGame, () => automaticGame.value?.id, () => game.value?.status], ([pinned, next], [previousPin]) => {
-  if (pinned !== null || previousPin || game.value?.status !== "finished" || game.value.id === next || game.value.id !== followedGameId.value) {
+watch([pinnedGame, followedEngineId, () => liveContest.value?.key, () => automaticGame.value?.id, () => game.value?.status], ([pinned, engine, contestKey, next], [previousPin, previousEngine, previousContestKey]) => {
+  const current = game.value;
+  if (pinned !== null || previousPin || engine !== previousEngine || contestKey !== previousContestKey || !current || current.id !== followedGameId.value) {
+    advanceFollowingGame();
+    return;
+  }
+  if (current.status === "live") return;
+  if (current.status !== "finished" || current.id === next) {
     advanceFollowingGame();
     return;
   }
   if (resultTimer !== undefined) return;
-  const finishedId = game.value.id;
+  const finishedId = current.id;
   scheduleGameSwitch(resultDisplayMs + 2000);
   request?.abort();
   request = null;
@@ -416,11 +474,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <EventArena :title="detail.event.title" :slug="detail.event.slug" :status="status" :game-context="gameContext"
+  <EventArena class="secret-queen-arena" :title="detail.event.title" :slug="detail.event.slug" :status="status" :game-context="gameContext"
     :spectator-count="detail.spectator_count" :can-follow-live="!followingLive && ['live', 'intermission'].includes(detail.event.status)"
-    :error="error" @follow-live="followLive" @retry="loadViewer">
+    :error="error" @follow-live="followLive()" @retry="loadViewer">
     <template #title-leading><SecretQueenInfo compact /></template>
     <template #selectors>
+      <FollowEnginePicker v-if="followOptions.length" v-model="followedEngineId" class="secret-queen-follow"
+        :engines="followOptions" :state="followState" :state-label="followStateLabel" @resume="followLive(true)" />
       <label v-if="playable.length > 1">Group or match
         <select :value="contest?.id" @change="selectContest(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="item in playable" :key="item.id" :value="item.id">{{ item.title }}</option>
@@ -484,6 +544,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.secret-queen-arena :deep(.tournament-heading__controls),
+.secret-queen-arena :deep(.relay-broadcast__selectors) { flex-wrap: wrap; min-width: 0; }
+.secret-queen-follow { width: 14rem; max-width: 100%; }
+@media (max-width: 40rem) { .secret-queen-follow { width: 100%; } }
 .tournament-data { display: grid; gap: var(--space-md, 1rem); min-width: 0; }
 .data-tabs { display: flex; gap: .3rem; overflow-x: auto; }
 .data-tabs a { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .45rem; padding-inline: .85rem; border: 1px solid transparent; border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted); font-size: .78rem; font-weight: 730; text-decoration: none; text-transform: capitalize; }
