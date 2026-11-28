@@ -32,6 +32,7 @@ from cope.core.models import (
     GameAssignment,
     GameBenchmarkReference,
     TimeControl,
+    TournamentFormat,
     WorkerGameAssignment,
     IncrementTimeControl,
     MoveNodesTimeControl,
@@ -61,11 +62,11 @@ from cope.db import (
     get_common_benchmark_reference,
     get_opening_position,
     get_tournament,
-    get_worker_event_fixture,
     list_games,
     list_moves,
     list_tournaments,
     list_worker_event_fixture_candidates,
+    list_worker_event_fixtures,
     list_worker_tournament_ids,
     lock_tournament,
     mark_game_assignment_live,
@@ -259,6 +260,10 @@ def print_runner_report(report: RunnerReport) -> None:
         LOG.warning("failed runner commands count=%s", report.commands_failed)
 
 
+def _is_secret_queen_swiss(tournament: TournamentRecord) -> bool:
+    return tournament.config.variant == "secret-queen" and tournament.config.format == TournamentFormat.SWISS
+
+
 def next_worker_assignment(
     connection: sqlite3.Connection,
     worker: WorkerRecord,
@@ -277,14 +282,15 @@ def next_worker_assignment(
     )
     if available_resources is None:
         return None
-    active_event_fixture = get_worker_event_fixture(connection, worker.id)
-    if active_event_fixture is not None:
-        tournament = get_tournament(connection, active_event_fixture.tournament_id)
-        if tournament is None or tournament.status == "paused":
-            return None
-        if tournament.status == "scheduled" and used_resources not in {None, (0, 0)}:
-            return None
-        return _next_tournament_worker_assignment(
+    active_event_fixtures = list_worker_event_fixtures(connection, worker.id)
+    parallel_swiss = bool(active_event_fixtures)
+    worker_busy = used_resources not in {None, (0, 0)}
+    for fixture in active_event_fixtures:
+        tournament = get_tournament(connection, fixture.tournament_id)
+        parallel_swiss = parallel_swiss and tournament is not None and _is_secret_queen_swiss(tournament)
+        if tournament is None or tournament.status == "paused" or (tournament.status == "scheduled" and worker_busy):
+            continue
+        assignment = _next_tournament_worker_assignment(
             connection,
             worker,
             tournament,
@@ -293,13 +299,17 @@ def next_worker_assignment(
             excluded_game_ids=excluded_game_ids,
             preload_event_engines=tournament.status == "scheduled",
         )
+        if assignment is not None:
+            return assignment
+    if active_event_fixtures and not parallel_swiss:
+        return None
 
     event_candidate_ids = list_worker_event_fixture_candidates(connection, worker.id)
-    if event_candidate_ids and used_resources not in {None, (0, 0)}:
+    if event_candidate_ids and worker_busy and not parallel_swiss:
         return None
     for tournament_id in event_candidate_ids:
         tournament = get_tournament(connection, tournament_id)
-        if tournament is None:
+        if tournament is None or (parallel_swiss and not _is_secret_queen_swiss(tournament)):
             continue
         assignment = _next_tournament_worker_assignment(
             connection,
@@ -313,6 +323,8 @@ def next_worker_assignment(
         )
         if assignment is not None:
             return assignment
+    if active_event_fixtures:
+        return None
 
     allowed_tournament_ids = (
         None

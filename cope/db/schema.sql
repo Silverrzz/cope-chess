@@ -468,7 +468,7 @@ CREATE TABLE IF NOT EXISTS event_fixture_workers (
   claimed_at TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_event_fixture_workers_active_worker
+CREATE INDEX IF NOT EXISTS idx_event_fixture_workers_worker
   ON event_fixture_workers(worker_id);
 
 CREATE TABLE IF NOT EXISTS game_assignments (

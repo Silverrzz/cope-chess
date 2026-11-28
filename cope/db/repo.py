@@ -3204,33 +3204,32 @@ def list_worker_event_ids(
     )
 
 
-def get_worker_event_fixture(
+def list_worker_event_fixtures(
     connection: sqlite3.Connection,
     worker_id: int,
-) -> EventFixtureWorkerRecord | None:
-    row = connection.execute(
+) -> tuple[EventFixtureWorkerRecord, ...]:
+    rows = connection.execute(
         """
         SELECT claim.*, tournament.status AS tournament_status
         FROM event_fixture_workers claim
         JOIN tournaments tournament ON tournament.id = claim.tournament_id
         WHERE claim.worker_id = ?
+        ORDER BY claim.tournament_id
         """,
         (worker_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    if row["tournament_status"] not in {"scheduled", "running", "paused"}:
-        connection.execute(
-            "DELETE FROM event_fixture_workers WHERE tournament_id = ?",
-            (int(row["tournament_id"]),),
-        )
-        return None
-    return EventFixtureWorkerRecord(
-        tournament_id=int(row["tournament_id"]),
-        event_id=int(row["event_id"]),
-        worker_id=int(row["worker_id"]),
-        claimed_at=str(row["claimed_at"]),
-    )
+    ).fetchall()
+    fixtures = []
+    for row in rows:
+        if row["tournament_status"] not in {"scheduled", "running", "paused"}:
+            release_event_fixture_worker(connection, int(row["tournament_id"]), worker_id)
+            continue
+        fixtures.append(EventFixtureWorkerRecord(
+            tournament_id=int(row["tournament_id"]),
+            event_id=int(row["event_id"]),
+            worker_id=worker_id,
+            claimed_at=str(row["claimed_at"]),
+        ))
+    return tuple(fixtures)
 
 
 def list_worker_event_fixture_candidates(
@@ -3356,6 +3355,10 @@ def claim_event_fixture_worker(
     worker_id: int,
 ) -> EventFixtureWorkerRecord | None:
     connection.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+        (f"event-fixture-worker:{worker_id}",),
+    )
+    connection.execute(
         """
         WITH event_fixtures AS (
           SELECT tournament_id, event_id
@@ -3379,6 +3382,18 @@ def claim_event_fixture_worker(
         JOIN tournaments tournament ON tournament.id = fixture.tournament_id
         WHERE fixture.tournament_id = ?
           AND tournament.status IN ('scheduled', 'running')
+          AND NOT EXISTS (
+            SELECT 1 FROM event_fixture_workers prior
+            JOIN tournaments prior_tournament ON prior_tournament.id = prior.tournament_id
+            WHERE prior.worker_id = ?
+              AND prior.tournament_id <> fixture.tournament_id
+              AND prior_tournament.status IN ('scheduled', 'running', 'paused')
+              AND NOT (
+                prior.event_id = fixture.event_id
+                AND tournament.config::jsonb @> '{"variant":"secret-queen","format":"swiss"}'::jsonb
+                AND prior_tournament.config::jsonb @> '{"variant":"secret-queen","format":"swiss"}'::jsonb
+              )
+          )
           AND (
             EXISTS (
               SELECT 1 FROM worker_event_permissions permission
@@ -3393,7 +3408,7 @@ def claim_event_fixture_worker(
           )
         ON CONFLICT DO NOTHING
         """,
-        (worker_id, utc_now(), tournament_id, worker_id, worker_id),
+        (worker_id, utc_now(), tournament_id, worker_id, worker_id, worker_id),
     )
     claim = event_fixture_worker(connection, tournament_id)
     return claim if claim is not None and claim.worker_id == worker_id else None
