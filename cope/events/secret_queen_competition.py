@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from cope.core.models import (
     AdjudicationConfig, IncrementTimeControl,
@@ -46,8 +46,16 @@ class CompetitionSettings(BaseModel):
     groups: list[SwissGroup] = Field(default_factory=list)
     group_clock: IncrementTimeControl = IncrementTimeControl(initial_ms=120000, increment_ms=1000)
     knockout_clock: IncrementTimeControl = IncrementTimeControl(initial_ms=120000, increment_ms=1000)
+    final_clock: IncrementTimeControl = IncrementTimeControl(initial_ms=120000, increment_ms=1000)
     hash_mb: int = Field(default=16, ge=1, le=1024)
     group_concurrency: int = Field(default=1, ge=1, le=128)
+
+    @model_validator(mode="before")
+    @classmethod
+    def inherit_final_clock(cls, value):
+        if isinstance(value, dict) and "final_clock" not in value and "knockout_clock" in value:
+            return {**value, "final_clock": value["knockout_clock"]}
+        return value
 
 
 def settings(event) -> CompetitionSettings:
@@ -93,12 +101,13 @@ def _validate_start(configured: CompetitionSettings) -> int:
     return qualifiers
 
 
-def _tournament_config(configured, engine_ids, *, rounds=None):
+def _tournament_config(configured, engine_ids, *, rounds=None, final=False):
     swiss = rounds is not None
+    clock = configured.group_clock if swiss else configured.final_clock if final else configured.knockout_clock
     return TournamentConfig(
         variant="secret-queen", format=TournamentFormat.SWISS if swiss else TournamentFormat.ROUND_ROBIN,
         format_options=SwissFormatOptions(rounds=rounds) if swiss else RoundRobinFormatOptions(),
-        participants=list(engine_ids), time_control=configured.group_clock if swiss else configured.knockout_clock,
+        participants=list(engine_ids), time_control=clock,
         engine_hash_mb=configured.hash_mb, concurrency=configured.group_concurrency if swiss else 1,
         adjudication=AdjudicationConfig(),
         rated=False, lag_compensation_ms=0, uci_options={"Ponder": False},
@@ -208,7 +217,7 @@ def _next_match(connection, event) -> None:
             engine_ids = [sources[key] for key in pending.state["sources"]]
             title = f"{event.title} · {pending.summary} {pending.title}" if pending.contest_key != "final" else f"{event.title} · Final"
             tournament_id = create_tournament(
-                connection, title, _tournament_config(settings(event), engine_ids),
+                connection, title, _tournament_config(settings(event), engine_ids, final=pending.contest_key == "final"),
             )
             _link(connection, event.id, pending.id, tournament_id)
             update_event_contest_state(connection, pending.id, status="live", state={**pending.state, "engine_ids": engine_ids})

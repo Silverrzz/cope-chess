@@ -14,6 +14,7 @@ export interface SecretQueenSettings {
   groups: SwissGroup[];
   group_clock: SecretQueenClock;
   knockout_clock: SecretQueenClock;
+  final_clock: SecretQueenClock;
   hash_mb: number;
   group_concurrency: number;
 }
