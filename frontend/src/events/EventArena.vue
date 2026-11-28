@@ -9,6 +9,7 @@ withDefaults(defineProps<{
   slug: string;
   status: string;
   gameContext: string;
+  gameContextTitle?: string;
   spectatorCount?: number | undefined;
   canFollowLive?: boolean;
   error?: string;
@@ -68,7 +69,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="relay-viewer">
     <slot name="background" />
-    <header ref="heading" class="tournament-heading">
+    <header ref="heading" class="tournament-heading" :class="{ 'tournament-heading--separate-nav': $slots.navigation }">
       <div class="tournament-heading__title">
         <div class="title-line">
           <slot name="title-leading" />
@@ -76,13 +77,17 @@ onBeforeUnmount(() => {
           <span class="relay-status">{{ status }}</span>
           <span class="relay-spectators"><AppIcon name="user" :size="14" /> {{ spectatorCount.toLocaleString() }}</span>
         </div>
-        <p>{{ gameContext }}</p>
+        <p :title="gameContextTitle">{{ gameContext }}</p>
       </div>
+      <nav v-if="$slots.navigation" class="tournament-heading__navigation" aria-label="Event navigation">
+        <slot name="navigation" />
+        <RouterLink :to="{ name: 'event', params: { slug } }"><AppIcon name="arrow-left" :size="14" /> Event page</RouterLink>
+      </nav>
       <div class="tournament-heading__controls">
         <div v-if="$slots.selectors" class="relay-broadcast__selectors"><slot name="selectors" /></div>
-        <button v-if="canFollowLive" type="button" class="event-page-link" @click="emit('followLive')">Follow live <AppIcon name="arrow-right" :size="14" /></button>
+        <button v-if="canFollowLive" type="button" class="event-page-link tournament-heading__follow-live" @click="emit('followLive')">Follow live <AppIcon name="arrow-right" :size="14" /></button>
         <slot name="actions" />
-        <RouterLink :to="{ name: 'event', params: { slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink>
+        <RouterLink v-if="!$slots.navigation" :to="{ name: 'event', params: { slug } }" class="event-page-link"><AppIcon name="arrow-left" :size="15" /> Event page</RouterLink>
       </div>
     </header>
     <ContentState v-if="error" kind="error" :message="error" action-label="Try again" compact @action="emit('retry')" />
@@ -152,5 +157,64 @@ onBeforeUnmount(() => {
   .engine-column { grid-template-columns: 1fr; }
   .engine-column > :slotted(.arena-cheers) { grid-column: 1; }
   .activity-column { grid-template-columns: 1fr; grid-template-rows: minmax(12rem, 19rem) minmax(18rem, 26rem); }
+}
+.tournament-heading--separate-nav {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "title navigation" "title controls";
+  gap: .4rem 1.5rem;
+  align-items: end;
+  padding-block: .1rem .65rem;
+}
+.tournament-heading--separate-nav .tournament-heading__title { grid-area: title; align-self: center; }
+.tournament-heading--separate-nav .tournament-heading__title > p { margin-block-start: .35rem; }
+.tournament-heading--separate-nav .tournament-heading__controls {
+  grid-area: controls;
+  min-width: 0;
+  justify-content: flex-end;
+}
+.tournament-heading__navigation {
+  grid-area: navigation;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: .25rem 1rem;
+}
+.tournament-heading__navigation a,
+.tournament-heading__navigation :slotted(a) {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding-block: .14rem;
+  color: var(--color-text-muted);
+  font-size: .73rem;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.tournament-heading__navigation a:hover,
+.tournament-heading__navigation :slotted(a:hover) { color: var(--color-text); text-decoration: underline; }
+.tournament-heading--separate-nav .tournament-heading__follow-live {
+  min-height: 2.4rem;
+  border-color: color-mix(in srgb, var(--color-accent) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface));
+  color: var(--color-accent);
+  cursor: pointer;
+}
+.tournament-heading--separate-nav .tournament-heading__follow-live:hover {
+  background: color-mix(in srgb, var(--color-accent) 18%, var(--color-surface));
+}
+@media (max-width: 68rem) {
+  .tournament-heading--separate-nav { grid-template-areas: "title navigation" "controls controls"; row-gap: .65rem; }
+  .tournament-heading--separate-nav .tournament-heading__controls { justify-content: flex-start; }
+}
+@media (max-width: 40rem) {
+  .tournament-heading--separate-nav {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "title" "navigation" "controls";
+  }
+  .tournament-heading__navigation { justify-content: flex-start; }
+  .tournament-heading--separate-nav .tournament-heading__controls { flex-direction: column; }
+  .tournament-heading--separate-nav .tournament-heading__follow-live { align-self: flex-start; }
 }
 </style>

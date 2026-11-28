@@ -148,10 +148,10 @@ const followState = computed(() => {
 const followStateLabel = computed(() => ({
   off: "",
   paused: "Paused",
-  live: "Following live",
-  fallback: "Watching live while waiting",
-  preparing: "Following next",
-  waiting: game.value?.status === "finished" ? "Last game" : "Waiting for game",
+  live: "Live",
+  fallback: "Other game",
+  preparing: "Starting",
+  waiting: game.value?.status === "finished" ? "Last game" : "Waiting",
 })[followState.value]);
 const annotations = computed(() => displayedMoves.value.map((_, index) => {
   if (capturedKing(index)) return { label: "King captured" };
@@ -161,6 +161,7 @@ const ending = computed(() => {
   if (!game.value?.result) return "";
   if (capturedKing(moves.value.length - 1)) return "King captured";
   const termination = viewer.value?.viewer_game?.termination;
+  if (termination?.startsWith("engine error:")) return "Engine error";
   if (termination?.startsWith("win adjudication:")) return "Win by adjudication";
   if (termination?.startsWith("draw adjudication:")) return "Draw by adjudication";
   return termination ? termination.charAt(0).toUpperCase() + termination.slice(1) : "";
@@ -173,7 +174,7 @@ const gameContext = computed(() => {
     viewer.value?.viewer_game?.game_number ? "Game " + viewer.value.viewer_game.game_number : "",
     timeControlLabel(control),
     ending.value,
-  ].filter(Boolean).join(" / ");
+  ].filter(Boolean).join(" · ");
 });
 
 function defaultGame(current: SecretQueenContest): SecretQueenGame | undefined {
@@ -499,27 +500,28 @@ onBeforeUnmount(() => {
 
 <template>
   <EventArena class="secret-queen-arena" :title="detail.event.title" :slug="detail.event.slug" :status="status" :game-context="gameContext"
+    :game-context-title="viewer?.viewer_game?.termination ?? ''"
     :spectator-count="detail.spectator_count" :can-follow-live="!followingLive && ['live', 'intermission'].includes(detail.event.status)"
     :error="error" @follow-live="followLive()" @retry="loadViewer">
     <template #title-leading><SecretQueenInfo compact /></template>
     <template #selectors>
-      <FollowEnginePicker v-if="followOptions.length" v-model="followedEngineId" class="secret-queen-follow"
-        :engines="followOptions" :state="followState" :state-label="followStateLabel" @resume="followLive(true)" />
-      <label v-if="playable.length > 1">Group or match
+      <label v-if="playable.length > 1" class="secret-queen-group">Group / match
         <select :value="contest?.id" @change="selectContest(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="item in playable" :key="item.id" :value="item.id">{{ item.title }}</option>
         </select>
       </label>
-      <label v-if="contest">Game
+      <label v-if="contest" class="secret-queen-game">Game
         <select :value="game?.id" @change="selectGame(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="item in contest.games" :key="item.id" :value="item.id">
             {{ contest.kind === 'group' ? 'Round ' + item.round : 'Pair ' + item.pair_index }} · {{ matchup(item) }}{{ item.result ? ' (' + item.result + ')' : '' }}
           </option>
         </select>
       </label>
+      <FollowEnginePicker v-if="followOptions.length" v-model="followedEngineId" class="secret-queen-follow" compact-trigger
+        :engines="followOptions" :state="followState" :state-label="followStateLabel" @resume="followLive(true)" />
     </template>
-    <template #actions>
-      <RouterLink :to="{ query: { ...route.query, tab: 'standings' }, hash: '#secret-queen-arena-info' }" class="event-page-link">
+    <template #navigation>
+      <RouterLink :to="{ query: { ...route.query, tab: 'standings' }, hash: '#secret-queen-arena-info' }">
         <AppIcon name="trophy" :size="15" /> Groups &amp; bracket
       </RouterLink>
     </template>
@@ -568,10 +570,23 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.secret-queen-arena :deep(.tournament-heading__controls),
-.secret-queen-arena :deep(.relay-broadcast__selectors) { flex-wrap: wrap; min-width: 0; }
-.secret-queen-follow { width: 14rem; max-width: 100%; }
-@media (max-width: 40rem) { .secret-queen-follow { width: 100%; } }
+.secret-queen-arena :deep(.relay-broadcast__selectors) { min-width: 0; gap: .55rem; }
+.secret-queen-arena :deep(.relay-broadcast__selectors select) { min-height: 2.4rem; text-overflow: ellipsis; }
+.secret-queen-arena .secret-queen-group { width: 7rem; }
+.secret-queen-arena .secret-queen-game { width: clamp(12rem, 24vw, 22rem); }
+.secret-queen-follow { width: 12rem; }
+@media (max-width: 40rem) {
+  .secret-queen-arena :deep(.relay-broadcast__selectors) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+    width: 100%;
+  }
+  .secret-queen-arena .secret-queen-group,
+  .secret-queen-arena .secret-queen-game,
+  .secret-queen-follow { width: 100%; }
+  .secret-queen-arena .secret-queen-game { order: 1; grid-column: 1 / -1; }
+}
 .tournament-data { display: grid; gap: var(--space-md, 1rem); min-width: 0; }
 .data-tabs { display: flex; gap: .3rem; overflow-x: auto; }
 .data-tabs a { display: inline-flex; min-height: 2.35rem; align-items: center; gap: .45rem; padding-inline: .85rem; border: 1px solid transparent; border-radius: var(--radius-sm, .35rem); color: var(--color-text-muted); font-size: .78rem; font-weight: 730; text-decoration: none; text-transform: capitalize; }

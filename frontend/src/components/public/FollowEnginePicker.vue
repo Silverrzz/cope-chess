@@ -13,6 +13,7 @@ const props = defineProps<{
   engines: EngineOption[]
   state: string
   stateLabel: string
+  compactTrigger?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -201,7 +202,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="follow-engine-picker">
+  <div ref="root" class="follow-engine-picker" :class="{ 'follow-engine-picker--compact-trigger': compactTrigger }">
     <div class="follow-picker__heading">
       <span>Follow engine</span>
       <span v-if="stateLabel" class="follow-picker__status">
@@ -224,7 +225,7 @@ onBeforeUnmount(() => {
       <span class="follow-picker__trigger-icon"><AppIcon :name="selectedEngine ? 'engine' : 'eye-off'" :size="16" /></span>
       <span class="follow-picker__selection">
         <strong>{{ selectedEngine?.name || 'Don\'t follow' }}</strong>
-        <small>{{ selectedEngine ? 'Switches to this engine’s active game' : 'Stay on the game you choose' }}</small>
+        <small v-if="!compactTrigger">{{ selectedEngine ? 'Switches to this engine’s active game' : 'Stay on the game you choose' }}</small>
       </span>
       <AppIcon class="follow-picker__chevron" name="chevron-down" :size="16" />
     </button>
@@ -339,6 +340,8 @@ onBeforeUnmount(() => {
 .follow-picker-panel-enter-active, .follow-picker-panel-leave-active, .follow-picker-backdrop-enter-active, .follow-picker-backdrop-leave-active { transition: opacity var(--transition-fast, 120ms ease), transform var(--transition-fast, 120ms ease); }
 .follow-picker-panel-enter-from, .follow-picker-panel-leave-to { opacity: 0; transform: translateY(-.25rem) scale(.985); }
 .follow-picker-backdrop-enter-from, .follow-picker-backdrop-leave-to { opacity: 0; }
+.follow-engine-picker--compact-trigger .follow-picker__trigger { min-height: 2.4rem; padding: .25rem .6rem; }
+.follow-engine-picker--compact-trigger .follow-picker__trigger-icon { width: 1.45rem; height: 1.45rem; }
 @media (max-width: 40rem) {
   .follow-picker__trigger { min-height: 3.25rem; padding: .48rem .65rem; }
   .follow-picker__selection strong { font-size: .82rem; }
