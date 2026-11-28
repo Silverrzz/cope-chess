@@ -19,6 +19,8 @@ const payload = computed(() => props.detail.custom as SecretQueenAdmin);
 const settings = ref<SecretQueenSettings | null>(null);
 const busy = ref(false);
 const editError = ref("");
+const lateGroupId = ref("");
+const lateEngineId = ref("");
 const editable = computed(() => ["draft", "announced", "scheduled", "postponed"].includes(props.detail.event.status));
 const qualifiers = computed(() => settings.value?.groups.reduce((total, group) => total + group.qualifiers, 0) ?? 0);
 const dirty = computed(() => JSON.stringify(settings.value) !== JSON.stringify(payload.value.settings));
@@ -30,6 +32,22 @@ const available = computed(() => {
   const families = new Set(engines.value.filter(engine => used.has(engine.id)).map(engine => engine.engine_id));
   return engines.value.filter(engine => engine.active && !families.has(engine.engine_id));
 });
+const lateGroups = computed(() => (payload.value.contests ?? []).flatMap(contest => {
+  if (contest.kind !== "group" || contest.status !== "live" || contest.tournament_id === null || contest.engine_ids.length % 2 === 0) return [];
+  const rounds = new Map<number, Set<number>>();
+  for (const game of contest.games) {
+    const players = rounds.get(game.round) ?? new Set<number>();
+    players.add(game.white_engine_id);
+    players.add(game.black_engine_id);
+    rounds.set(game.round, players);
+  }
+  const byes = [...rounds].flatMap(([round, players]) => {
+    const missing = contest.engine_ids.filter(id => !players.has(id));
+    return missing.length === 1 && missing[0] !== undefined ? [{ round, opponent_id: missing[0] }] : [];
+  }).sort((left, right) => left.round - right.round);
+  return byes.length && byes.length === rounds.size ? [{ title: contest.title, id: contest.tournament_id, byes }] : [];
+}));
+const lateGroup = computed(() => lateGroups.value.find(group => String(group.id) === lateGroupId.value));
 
 watch(() => payload.value.settings, value => { settings.value = value ? structuredClone(toRaw(value)) : null; }, { immediate: true });
 
@@ -48,6 +66,35 @@ function selectEngine(group: SwissGroup, value: string | number): void {
 function name(id: number): string {
   const engine = engines.value.find(item => item.id === id);
   return engine ? `${engine.name} ${engine.version}`.trim() : `Engine #${id}`;
+}
+
+async function submitLateEntry(): Promise<void> {
+  const group = lateGroup.value;
+  const engineId = Number(lateEngineId.value);
+  if (!group || !available.value.some(engine => engine.id === engineId) || busy.value) return;
+  const matches = group.byes.map(bye => `round ${bye.round} against ${name(bye.opponent_id)}`).join(", ");
+  const accepted = await confirm({
+    title: `Add ${name(engineId)} to ${group.title}?`,
+    message: `Replace the byes in ${matches} with two games each. Every existing game and other pairing is preserved.`,
+    confirmLabel: "Replace byes and add engine",
+  });
+  if (!accepted) return;
+  busy.value = true;
+  editError.value = "";
+  try {
+    const response = await api.post<{ game_ids: number[] }>(
+      `/api/admin/events/${props.detail.event.id}/secret-queen/groups/${group.id}/late-entry`,
+      { body: { engine_version_id: engineId, expected_byes: group.byes } },
+    );
+    toast.success(`Added ${name(engineId)} to ${group.title} and scheduled ${response.game_ids.length} games.`);
+    lateEngineId.value = "";
+    lateGroupId.value = "";
+    emit("changed");
+  } catch (cause) {
+    editError.value = errorText(cause);
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function submit(action: "save" | "start"): Promise<void> {
@@ -119,6 +166,23 @@ async function submit(action: "save" | "start"): Promise<void> {
         <RouterLink v-if="contest.tournament_id" class="button button--ghost button--small" :to="`/admin/tournaments/${contest.tournament_id}`">Manage games</RouterLink>
       </li>
     </ul>
+    <form v-if="lateGroups.length" class="competition-group" @submit.prevent="submitLateEntry">
+      <h3>Late Swiss entry</h3>
+      <div class="competition-fields">
+        <label class="field"><span>Group</span><select v-model="lateGroupId" class="input">
+          <option value="">Choose a group</option>
+          <option v-for="group in lateGroups" :key="group.id" :value="String(group.id)">{{ group.title }}</option>
+        </select></label>
+        <EngineVersionPicker :model-value="lateEngineId" :engines="available" label="Engine" placeholder="Choose an engine version"
+          @update:model-value="lateEngineId = String($event)" />
+      </div>
+      <ul v-if="lateGroup" class="competition-roster">
+        <li v-for="bye in lateGroup.byes" :key="bye.round">Round {{ bye.round }} bye · {{ name(bye.opponent_id) }}</li>
+      </ul>
+      <div class="competition-actions">
+        <button class="button button--primary" type="submit" :disabled="busy || !lateGroup || !lateEngineId">Add and schedule games</button>
+      </div>
+    </form>
   </section>
 </template>
 
