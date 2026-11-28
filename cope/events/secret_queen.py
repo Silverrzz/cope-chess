@@ -15,7 +15,10 @@ from cope.db.events import (
 from cope.variants.secret_queen import SecretQueenBoard
 
 from .registry import EventModule, register_event_module
-from .secret_queen_competition import CompetitionSettings, public_competition, save_settings, settings, start_competition
+from .secret_queen_competition import (
+    CompetitionSettings, LateSwissEntry, add_late_swiss_entrant, public_competition, save_settings,
+    settings, start_competition,
+)
 
 
 MODULE_KEY = "secret-queen"
@@ -103,6 +106,21 @@ def _register_api(app):
             raise HTTPException(422, str(error)) from error
         publish_change(request, event_id)
         return _json({"message": "Competition settings saved."})
+
+    @app.post("/api/admin/events/{event_id}/secret-queen/groups/{tournament_id}/late-entry")
+    def add_secret_queen_late_entry(
+        event_id: int, tournament_id: int, payload: LateSwissEntry, request: Request,
+        connection=Depends(web_app._database),
+    ):
+        event = require_event(connection, event_id)
+        try:
+            game_ids = add_late_swiss_entrant(connection, event, tournament_id, payload)
+            connection.commit()
+        except ValueError as error:
+            connection.rollback()
+            raise HTTPException(409, str(error)) from error
+        publish_change(request, event_id)
+        return _json({"tournament_id": tournament_id, "engine_version_id": payload.engine_version_id, "game_ids": game_ids})
 
     @app.post("/api/admin/events/{event_id}/secret-queen/start")
     def start(event_id: int, request: Request, connection=Depends(web_app._database)):

@@ -10,8 +10,9 @@ from cope.core.models import (
     RoundRobinFormatOptions, SwissFormatOptions, TournamentConfig, TournamentFormat,
 )
 from cope.db import (
-    create_game, create_tournament, get_engine_version_record, get_tournament, list_games,
-    list_tournament_matches, set_tournament_status,
+    create_game, create_tournament, get_common_benchmark_reference, get_engine,
+    get_engine_version_record, get_tournament, list_games, list_tournament_matches,
+    lock_tournament, set_tournament_participants, set_tournament_status,
 )
 from cope.db.events import (
     create_event_award, create_event_cast_member, create_event_contest, create_event_stage,
@@ -58,6 +59,16 @@ class CompetitionSettings(BaseModel):
         return value
 
 
+class SwissBye(BaseModel):
+    round: int = Field(gt=0)
+    opponent_id: int = Field(gt=0)
+
+
+class LateSwissEntry(BaseModel):
+    engine_version_id: int = Field(gt=0)
+    expected_byes: list[SwissBye] = Field(min_length=1, max_length=100)
+
+
 def settings(event) -> CompetitionSettings:
     return CompetitionSettings.model_validate(event.config.get("competition", {}))
 
@@ -88,6 +99,99 @@ def save_settings(connection, event, configured: CompetitionSettings) -> None:
         "UPDATE events SET config = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
         (json.dumps(config), utc_now(), event.id),
     )
+
+
+def add_late_swiss_entrant(connection, event, tournament_id: int, entry: LateSwissEntry) -> list[int]:
+    link = connection.execute(
+        "SELECT contest_id FROM secret_queen_event_tournaments WHERE event_id = ? AND tournament_id = ?",
+        (event.id, tournament_id),
+    ).fetchone()
+    if event.status != "live" or link is None:
+        raise ValueError("Choose a Swiss group in a live Secret Queen event.")
+    tournament = lock_tournament(connection, tournament_id)
+    contest = next((item for item in list_event_contests(connection, event.id) if item.id == link["contest_id"]), None)
+    if (
+        tournament is None or tournament.status not in {"running", "paused"}
+        or tournament.config.variant != "secret-queen" or tournament.config.format != TournamentFormat.SWISS
+        or contest is None or contest.status != "live" or "qualifiers" not in contest.state
+    ):
+        raise ValueError("This Swiss group is no longer accepting a late entrant.")
+
+    participants = tournament.config.participants
+    configured = settings(event)
+    group = next((group for group in configured.groups if group.name.strip() == contest.title), None)
+    if group is None or group.engine_ids != participants or contest.state.get("engine_ids") != participants:
+        raise ValueError("The group roster does not match the tournament roster.")
+    if len(participants) % 2 == 0:
+        raise ValueError("A late entrant needs a bye to fill in each generated round.")
+
+    matches = list_tournament_matches(connection, tournament_id)
+    byes = [match for match in matches if match.status == "bye" and match.engine2_id is None]
+    approved = sorted((bye.round, bye.opponent_id) for bye in entry.expected_byes)
+    actual = sorted((match.round, match.engine1_id) for match in byes)
+    rounds_with_byes = {match.round for match in byes}
+    if actual != approved or len(byes) != len(rounds_with_byes) or rounds_with_byes != {match.round for match in matches}:
+        raise ValueError("The generated Swiss byes no longer match the approved rounds and opponents.")
+    bye_ids = {match.id for match in byes}
+    if any(game.match_id in bye_ids for game in list_games(connection, tournament_id)):
+        raise ValueError("The approved byes already have games.")
+
+    record = get_engine_version_record(connection, entry.engine_version_id)
+    engine = get_engine(connection, entry.engine_version_id)
+    if (
+        record is None or not record.active or not record.engine_active
+        or engine is None or engine.distribution != "managed" or engine.artifact is None
+    ):
+        raise ValueError("The entrant must have an active, managed engine build.")
+    if connection.execute(
+        """
+        SELECT 1 FROM event_cast_members member
+        JOIN engine_versions version ON version.id = member.engine_version_id
+        WHERE member.event_id = ? AND version.engine_id = ?
+        """,
+        (event.id, record.engine_id),
+    ).fetchone() is not None:
+        raise ValueError("This engine family is already in the event.")
+    for match in byes:
+        opponent = get_engine(connection, match.engine1_id, tournament_id=tournament_id)
+        if opponent is None or get_common_benchmark_reference(connection, (engine, opponent)) is None:
+            raise ValueError(f"The round {match.round} opponent needs a shared build benchmark with the entrant.")
+
+    participants = [*participants, entry.engine_version_id]
+    set_tournament_participants(connection, tournament, participants)
+    game_ids = []
+    for match in byes:
+        updated = connection.execute(
+            """
+            UPDATE tournament_matches
+            SET engine2_id = ?, status = 'pending', winner_engine_id = NULL
+            WHERE id = ? AND status = 'bye' AND engine2_id IS NULL
+            """,
+            (entry.engine_version_id, match.id),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("A Swiss bye changed before it could be paired.")
+        for number, (white, black) in enumerate(
+            ((match.engine1_id, entry.engine_version_id), (entry.engine_version_id, match.engine1_id)), start=1,
+        ):
+            game_ids.append(create_game(
+                connection, tournament_id=tournament_id, round=match.round, pair_index=match.match_index,
+                white_engine_id=white, black_engine_id=black, match_id=match.id, game_number=number,
+            ))
+
+    create_event_cast_member(
+        connection, event.id, member_key=f"engine-{record.id}", kind="engine", role="competitor",
+        display_name=f"{record.name} {record.version}".strip(), engine_version_id=record.id,
+        position=max((member.position for member in list_event_cast(connection, event.id)), default=-1) + 1,
+    )
+    update_event_contest_state(connection, contest.id, state={**contest.state, "engine_ids": participants})
+    group.engine_ids = participants
+    config = {**event.config, "competition": configured.model_dump(mode="json")}
+    connection.execute(
+        "UPDATE events SET config = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+        (json.dumps(config), utc_now(), event.id),
+    )
+    return game_ids
 
 
 def _validate_start(configured: CompetitionSettings) -> int:
