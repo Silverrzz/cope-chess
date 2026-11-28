@@ -57,6 +57,7 @@ const followedEngineId = computed({
   set: (id: string) => {
     const { query } = gameTarget();
     delete query.follow_contest;
+    delete query.follow_live;
     if (id) query.follow_engine = id;
     else delete query.follow_engine;
     void router.push({ query });
@@ -66,19 +67,27 @@ const engineTarget = computed(() => {
   if (!followedEngineId.value) return;
   const id = Number(followedEngineId.value);
   const games = playable.value.flatMap(contest => contest.games
-    .filter(game => game.white_engine_id === id || game.black_engine_id === id)
+    .filter(game => includesEngine(game, id))
     .map(game => ({ contest, game })));
   return games.find(({ game }) => game.status === "live")
     ?? games.find(({ game }) => game.status === "assigned")
     ?? games.filter(({ game }) => game.status === "finished").at(-1)
     ?? games.find(({ game }) => game.status === "pending");
 });
+const engineContest = computed(() => engineTarget.value?.contest
+  ?? playable.value.find(item => item.engine_ids.includes(Number(followedEngineId.value))));
+const firstLiveContest = computed(() => playable.value.find(item => item.games.some(game => game.status === "live")));
+const watchLiveWhileWaiting = computed(() => Boolean(followedEngineId.value) && route.query.follow_live === "1");
+const fallbackContest = computed(() => {
+  if (!watchLiveWhileWaiting.value || engineTarget.value?.game.status === "live") return;
+  return engineContest.value?.games.some(game => game.status === "live") ? engineContest.value : firstLiveContest.value;
+});
 const automaticContest = computed(() => followedEngineId.value
-  ? engineTarget.value?.contest ?? playable.value.find(item => item.engine_ids.includes(Number(followedEngineId.value)))
-  : liveContest.value ?? playable.value.find(item => item.games.some(game => game.status === "live"))
+  ? fallbackContest.value ?? engineContest.value
+  : liveContest.value ?? firstLiveContest.value
     ?? playable.value.find(item => item.status === "live")
     ?? playable.value.at(-1));
-const automaticGame = computed(() => followedEngineId.value
+const automaticGame = computed(() => followedEngineId.value && !fallbackContest.value
   ? engineTarget.value?.game
   : automaticContest.value && defaultGame(automaticContest.value));
 const followedContest = computed(() => playable.value.find(item => item.games.some(game => game.id === followedGameId.value)));
@@ -128,11 +137,11 @@ const title = computed(() => game.value ? matchup(game.value) : props.detail.eve
 const catchingUp = computed(() => !reviewing.value && ply.value < moves.value.length);
 const status = computed(() => catchingUp.value ? game.value?.status === "finished" ? "Replaying" : "Catching up"
   : game.value?.result ? resultLabel(game.value.result) : game.value?.status === "live" ? "Live" : "Waiting for game");
-const followingLive = computed(() => !pinnedContest.value && !reviewing.value && !catchingUp.value && game.value?.status !== "finished");
+const followingLive = computed(() => !pinnedContest.value && !reviewing.value && !catchingUp.value && game.value?.status === "live");
 const followState = computed(() => {
   if (!followedEngineId.value) return "off";
   if (pinnedContest.value) return "paused";
-  if (game.value?.status === "live") return "live";
+  if (game.value?.status === "live") return includesEngine(game.value, Number(followedEngineId.value)) ? "live" : "fallback";
   if (game.value?.status === "assigned") return "preparing";
   return "waiting";
 });
@@ -140,6 +149,7 @@ const followStateLabel = computed(() => ({
   off: "",
   paused: "Paused",
   live: "Following live",
+  fallback: "Watching live while waiting",
   preparing: "Following next",
   waiting: game.value?.status === "finished" ? "Last game" : "Waiting for game",
 })[followState.value]);
@@ -172,6 +182,10 @@ function defaultGame(current: SecretQueenContest): SecretQueenGame | undefined {
     ?? current.games.at(-1);
 }
 
+function includesEngine(game: SecretQueenGame, id: number): boolean {
+  return game.white_engine_id === id || game.black_engine_id === id;
+}
+
 function engineName(id: number): string {
   return names.value.get(id) ?? viewer.value?.engines[String(id)] ?? "Engine " + id;
 }
@@ -201,14 +215,21 @@ function followLive(resumeEngine = false): void {
   stopMovePlayback();
   reviewing.value = false;
   ply.value = moves.value.length;
+  const { query } = gameTarget();
+  const current = game.value;
+  if (followedEngineId.value && (resumeEngine || !pinnedContest.value || (current && includesEngine(current, Number(followedEngineId.value))))) {
+    if (resumeEngine) delete query.follow_live;
+    else query.follow_live = "1";
+    void router.push({ query });
+    if (!pinnedGame.value && current?.status !== "live") advanceFollowingGame();
+    return;
+  }
   if (pinnedGame.value) {
     const selected = pinnedContest.value;
-    const { query } = gameTarget();
-    if (!resumeEngine) {
-      delete query.follow_engine;
-      if (selected?.status === "live") query.follow_contest = selected.key;
-      else delete query.follow_contest;
-    }
+    delete query.follow_engine;
+    delete query.follow_live;
+    if (selected?.status === "live") query.follow_contest = selected.key;
+    else delete query.follow_contest;
     void router.push({ query });
   } else if (game.value?.status === "finished") advanceFollowingGame();
 }
@@ -387,13 +408,16 @@ function scheduleGameSwitch(delay: number): void {
   }, delay);
 }
 
-watch([pinnedGame, followedEngineId, () => liveContest.value?.key, () => automaticGame.value?.id, () => game.value?.status], ([pinned, engine, contestKey, next], [previousPin, previousEngine, previousContestKey]) => {
+watch([pinnedGame, followedEngineId, () => liveContest.value?.key, watchLiveWhileWaiting, () => automaticGame.value?.id, () => game.value?.status], ([pinned, engine, contestKey, fallback, next], [previousPin, previousEngine, previousContestKey, previousFallback]) => {
   const current = game.value;
-  if (pinned !== null || previousPin || engine !== previousEngine || contestKey !== previousContestKey || !current || current.id !== followedGameId.value) {
+  if (pinned !== null || previousPin || engine !== previousEngine || contestKey !== previousContestKey || fallback !== previousFallback || !current || current.id !== followedGameId.value) {
     advanceFollowingGame();
     return;
   }
-  if (current.status === "live") return;
+  if (current.status === "live") {
+    if (engineTarget.value?.game.status === "live" && next !== current.id) advanceFollowingGame();
+    return;
+  }
   if (current.status !== "finished" || current.id === next) {
     advanceFollowingGame();
     return;
