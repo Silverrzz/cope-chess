@@ -149,9 +149,9 @@ def _variations(lines: list[str], board: chess.Board) -> tuple[Probe, ...]:
         if probe and probe.evaluation and board.is_legal(probe.move):
             found[slot] = probe
     best = _probe_result(lines)
-    if best and board.is_legal(best.move):
+    if best and best.evaluation and board.is_legal(best.move):
         return (best, *(probe for _, probe in sorted(found.items()) if probe.move != best.move))
-    return tuple(probe for _, probe in sorted(found.items()))
+    return tuple(probe for _, probe in sorted(found.items())) or ((best,) if best and board.is_legal(best.move) else ())
 
 
 class SecretQueenEngine(UciEngineProcess):
