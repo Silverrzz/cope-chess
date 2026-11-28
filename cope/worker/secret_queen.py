@@ -62,7 +62,10 @@ class SearchStatistics:
         values: dict[str, int] = {}
         for line in lines:
             if line.startswith("info ") and not line.startswith("info string "):
-                values.update((key, int(value)) for key, value in _STATISTICS.findall(line.partition(" pv ")[0]))
+                values.update(
+                    (key, int(value))
+                    for key, value in _STATISTICS.findall(line.partition(" pv ")[0])
+                )
         if not values:
             return
         with self._lock:
@@ -72,10 +75,19 @@ class SearchStatistics:
             if self._callback is not None:
                 self._callback(self._line())
 
-    def evaluate(self, scores: list[Score], positions: int, estimate: Score | None = None, *, depth=None) -> None:
+    def evaluate(
+        self,
+        scores: list[Score],
+        positions: int,
+        estimate: Score | None = None,
+        *,
+        depth=None,
+    ) -> None:
         count = len(scores) if positions else 0
         with self._lock:
-            self._evaluation = f"{_score_token(min(scores))},{_score_token(max(scores))},{count},{positions}"
+            self._evaluation = (
+                f"{_score_token(min(scores))},{_score_token(max(scores))},{count},{positions}"
+            )
             self._estimate = estimate
             if depth is not None:
                 self._values["depth"] = depth
@@ -110,7 +122,11 @@ def _probe_result(lines: list[str]) -> Probe | None:
         return None
     for line in reversed(lines[:-1]):
         words = line.split()
-        if not words or words[0] != "info" or any(bound in words for bound in ("lowerbound", "upperbound")):
+        if (
+            not words
+            or words[0] != "info"
+            or any(bound in words for bound in ("lowerbound", "upperbound"))
+        ):
             continue
         try:
             if words[words.index("pv") + 1] != move.uci():
@@ -119,7 +135,7 @@ def _probe_result(lines: list[str]) -> Probe | None:
             kind, value = words[index + 1], int(words[index + 2])
             depth = int(words[words.index("depth") + 1]) if "depth" in words else 0
             variation = []
-            for token in words[words.index("pv") + 1:]:
+            for token in words[words.index("pv") + 1 :]:
                 try:
                     variation.append(chess.Move.from_uci(token))
                 except ValueError:
@@ -150,13 +166,23 @@ def _variations(lines: list[str], board: chess.Board) -> tuple[Probe, ...]:
             found[slot] = probe
     best = _probe_result(lines)
     if best and best.evaluation and board.is_legal(best.move):
-        return (best, *(probe for _, probe in sorted(found.items()) if probe.move != best.move))
-    return tuple(probe for _, probe in sorted(found.items())) or ((best,) if best and board.is_legal(best.move) else ())
+        return (
+            best,
+            *(probe for _, probe in sorted(found.items()) if probe.move != best.move),
+        )
+    return tuple(probe for _, probe in sorted(found.items())) or (
+        (best,) if best and board.is_legal(best.move) else ()
+    )
 
 
 class SecretQueenEngine(UciEngineProcess):
     def __init__(self, spec, *, server_url: str, credential: str, progress_callback=None):
-        super().__init__(spec, server_url=server_url, credential=credential, progress_callback=progress_callback)
+        super().__init__(
+            spec,
+            server_url=server_url,
+            credential=credential,
+            progress_callback=progress_callback,
+        )
         self._position: dict | None = None
         self._stop = threading.Event()
         self._options: dict[str, str] = {}
@@ -170,12 +196,14 @@ class SecretQueenEngine(UciEngineProcess):
         self._closed = False
         self._clock_lanes: set[int] = set()
         self._lanes: list[UciEngineProcess | None] = [self] + [None] * (SEARCH_WORKERS - 1)
-        self._new_process = lambda: UciEngineProcess(spec, server_url=server_url, credential=credential)
+        self._new_process = lambda: UciEngineProcess(
+            spec, server_url=server_url, credential=credential
+        )
 
     def handle_command(self, command, line_callback=None):
         if command.startswith(POSITION_PREFIX):
             try:
-                self._position = json.loads(command[len(POSITION_PREFIX):])
+                self._position = json.loads(command[len(POSITION_PREFIX) :])
             except ValueError:
                 raise RuntimeError("Invalid Secret Queen seat position") from None
             return []
@@ -184,7 +212,7 @@ class SecretQueenEngine(UciEngineProcess):
             self._advertised[0] = self._advertised_options(lines)
             return lines
         if command.startswith("setoption name "):
-            name = command[len("setoption name "):].split(" value", 1)[0].casefold()
+            name = command[len("setoption name ") :].split(" value", 1)[0].casefold()
             if name not in self._advertised[0]:
                 return []
             self._options[name] = command
@@ -198,7 +226,9 @@ class SecretQueenEngine(UciEngineProcess):
                     engine.handle_command(command)
         if command == "isready":
             deadline = time.monotonic() + 3
-            futures = [self._pool.submit(self._warm, lane, deadline) for lane in range(1, SEARCH_WORKERS)]
+            futures = [
+                self._pool.submit(self._warm, lane, deadline) for lane in range(1, SEARCH_WORKERS)
+            ]
             lines = super().handle_command(command, line_callback)
             for future in futures:
                 future.result()
@@ -240,20 +270,30 @@ class SecretQueenEngine(UciEngineProcess):
             if self._lanes[lane] is not None:
                 self._discard(self._lanes[lane])
 
-    def _process_for(self, lane: int, deadline: float, multipv: int = 1, startup_timeout=.5, threads=1) -> UciEngineProcess:
+    def _process_for(
+        self,
+        lane: int,
+        deadline: float,
+        multipv: int = 1,
+        startup_timeout=0.5,
+        threads=1,
+    ) -> UciEngineProcess:
         engine = self._lanes[lane]
         if engine is None:
             engine = self._new_process()
             self._lanes[lane] = engine
         if not engine.process_started:
             engine._send("uci")
-            timeout = max(.001, min(startup_timeout, deadline - time.monotonic() - .035))
+            timeout = max(0.001, min(startup_timeout, deadline - time.monotonic() - 0.035))
             lines = engine._read_until(lambda line: line == "uciok", timeout_s=timeout)
             self._advertised[lane] = self._advertised_options(lines)
             self._configured[lane].clear()
             engine._send("ucinewgame")
-        options = {"threads": "setoption name Threads value 1", **self._options,
-                   "multipv": f"setoption name MultiPV value {multipv}"}
+        options = {
+            "threads": "setoption name Threads value 1",
+            **self._options,
+            "multipv": f"setoption name MultiPV value {multipv}",
+        }
         if threads is not None:
             options["threads"] = f"setoption name Threads value {threads}"
         for name, option in options.items():
@@ -261,7 +301,7 @@ class SecretQueenEngine(UciEngineProcess):
                 engine._send(option)
                 self._configured[lane][name] = option
         engine._send("isready")
-        timeout = max(.001, min(startup_timeout, deadline - time.monotonic() - .035))
+        timeout = max(0.001, min(startup_timeout, deadline - time.monotonic() - 0.035))
         engine._read_until(lambda line: line == "readyok", timeout_s=timeout)
         return engine
 
@@ -273,8 +313,19 @@ class SecretQueenEngine(UciEngineProcess):
                 process.kill()
         UciEngineProcess.close(engine)
 
-    def _probe(self, board, deadline, statistics, *, lane, limit_ms=None, multipv=1, position=None, threads=1):
-        if board is None or self._stop.is_set() or deadline - time.monotonic() < .055:
+    def _probe(
+        self,
+        board,
+        deadline,
+        statistics,
+        *,
+        lane,
+        limit_ms=None,
+        multipv=1,
+        position=None,
+        threads=1,
+    ):
+        if board is None or self._stop.is_set() or deadline - time.monotonic() < 0.055:
             return ()
         engine = None
         try:
@@ -283,22 +334,36 @@ class SecretQueenEngine(UciEngineProcess):
                 if self._stop.is_set():
                     return ()
                 self._active.add(engine)
-            cutoff = deadline if limit_ms is None else min(deadline, time.monotonic() + (limit_ms + 35) / 1000)
+            cutoff = (
+                deadline
+                if limit_ms is None
+                else min(deadline, time.monotonic() + (limit_ms + 35) / 1000)
+            )
             probes = ()
-            for clock in ((True,) if lane in self._clock_lanes else (False, True)):
+            for clock in (True,) if lane in self._clock_lanes else (False, True):
                 window = int((cutoff - time.monotonic()) * 1000) - 35
                 if window < 15 or self._stop.is_set():
                     break
                 engine._send(position if position is not None else "position fen " + board.fen())
-                engine._send(f"go wtime {window} btime {window} winc 0 binc 0 movestogo 1" if clock else f"go movetime {window}")
+                engine._send(
+                    f"go wtime {window} btime {window} winc 0 binc 0 movestogo 1"
+                    if clock
+                    else f"go movetime {window}"
+                )
                 lines = []
                 try:
-                    ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
-                                                timeout_s=window / 1000)
+                    ending = engine._read_until(
+                        lambda line: line.startswith("bestmove"),
+                        line_callback=lines.append,
+                        timeout_s=window / 1000,
+                    )
                 except RuntimeError:
                     UciEngineProcess.stop_search(engine)
-                    ending = engine._read_until(lambda line: line.startswith("bestmove"), line_callback=lines.append,
-                                                timeout_s=max(.005, min(.040, cutoff - time.monotonic())))
+                    ending = engine._read_until(
+                        lambda line: line.startswith("bestmove"),
+                        line_callback=lines.append,
+                        timeout_s=max(0.005, min(0.040, cutoff - time.monotonic())),
+                    )
                 lines.append(ending[-1])
                 statistics.record(lines)
                 probes = _variations(lines, board)
@@ -321,9 +386,11 @@ class SecretQueenEngine(UciEngineProcess):
         suffix = history
         if self._belief_cache is not None:
             previous_color, previous_file, previous_history, previous_worlds = self._belief_cache
-            if (color, file) == (previous_color, previous_file) and history[:len(previous_history)] == previous_history:
+            if (color, file) == (previous_color, previous_file) and history[
+                : len(previous_history)
+            ] == previous_history:
                 prior = previous_worlds
-                suffix = history[len(previous_history):]
+                suffix = history[len(previous_history) :]
         worlds = SecretQueenBoard.beliefs(color, file, suffix, prior=prior)
         self._belief_cache = color, file, history, worlds
         return worlds
@@ -331,14 +398,73 @@ class SecretQueenEngine(UciEngineProcess):
     @staticmethod
     def _budget(command, color):
         words = command.split()
+
         def value(name, default):
             return int(words[words.index(name) + 1]) if name in words else default
+
         if "movetime" in words:
             return max(0, value("movetime", 1000) - 50)
         remaining = value("wtime" if color else "btime", 1000)
         increment = value("winc" if color else "binc", 0)
         moves = max(1, min(24, value("movestogo", 24)))
         return max(0, min(remaining - 80, remaining // moves + increment * 3 // 4, 5000))
+
+    def _nominate_moves(self, first, worlds, moves, weights, color, started, duration, statistics):
+        public = self._probe(
+            first._board,
+            started + duration * 0.12,
+            statistics,
+            lane=0,
+            multipv=3,
+            position=first.native_position(),
+        )
+        nomination_deadline = started + duration * 0.32
+        groups = {}
+        for index, world in enumerate(worlds):
+            board = world.projection(show=_COLORS)
+            key = board.fen() if board is not None else (index,)
+            groups.setdefault(key, (world, board, []))[2].append(index)
+        futures = [
+            (
+                indices,
+                self._pool.submit(
+                    self._probe,
+                    board,
+                    nomination_deadline,
+                    statistics,
+                    lane=world._files[not color],
+                    multipv=3,
+                    threads=max(1, SEARCH_WORKERS // len(groups)),
+                ),
+            )
+            for world, board, indices in groups.values()
+        ]
+        support = {}
+        for rank, probe in enumerate(public):
+            if probe.move in moves:
+                support[probe.move] = 0.5 / (rank + 1)
+        for indices, future in futures:
+            for rank, probe in enumerate(future.result()):
+                if probe.move in moves:
+                    support[probe.move] = support.get(probe.move, 0.0) + sum(
+                        weights[index] for index in indices
+                    ) / (rank + 1)
+        return groups, support
+
+    @staticmethod
+    def _select_candidates(first, moves, support, deadline):
+        nominated = sorted(support, key=support.get, reverse=True)
+        if not nominated:
+            nominated = sorted(moves, key=lambda move: move_order(first, move), reverse=True)[:1]
+        count = max(2, min(6, int(max(0, deadline - time.monotonic()) / 0.15)))
+        candidates = []
+        for reveal in (False, True):
+            candidate = next((move for move in nominated if first.reveals(move) == reveal), None)
+            if candidate is not None and len(candidates) < count:
+                candidates.append(candidate)
+        candidates.extend(move for move in nominated if move not in candidates)
+        candidates = candidates[:count]
+        return candidates
 
     def _turn(self, command, line_callback):
         started = time.monotonic()
@@ -359,7 +485,7 @@ class SecretQueenEngine(UciEngineProcess):
             return statistics.result(capture)
         if not any(world.concealed(side) for world in worlds for side in _COLORS):
             lane = first._files[not color]
-            engine = self._process_for(lane, max(deadline, started + .5), threads=None)
+            engine = self._process_for(lane, max(deadline, started + 0.5), threads=None)
             with self._active_lock:
                 self._active.add(engine)
             try:
@@ -374,44 +500,31 @@ class SecretQueenEngine(UciEngineProcess):
         duration = deadline - started
         if self._opponent_beliefs is None or self._opponent_beliefs.color != color:
             self._opponent_beliefs = OpponentBeliefs(color)
-        weights = self._opponent_beliefs.update(history, worlds, started + duration * .05, self._stop)
-        public = self._probe(first._board, started + duration * .12, statistics,
-                             lane=0, multipv=3, position=first.native_position())
-        nomination_deadline = started + duration * .32
-        groups = {}
-        for index, world in enumerate(worlds):
-            board = world.projection(show=_COLORS)
-            key = board.fen() if board is not None else (index,)
-            groups.setdefault(key, (world, board, []))[2].append(index)
-        futures = [(indices, self._pool.submit(self._probe, board, nomination_deadline, statistics,
-                                              lane=world._files[not color], multipv=3,
-                                              threads=max(1, SEARCH_WORKERS // len(groups))))
-                   for world, board, indices in groups.values()]
-        support = {}
-        for rank, probe in enumerate(public):
-            if probe.move in moves:
-                support[probe.move] = .5 / (rank + 1)
-        for indices, future in futures:
-            for rank, probe in enumerate(future.result()):
-                if probe.move in moves:
-                    support[probe.move] = support.get(probe.move, 0.) + sum(weights[index] for index in indices) / (rank + 1)
-        nominated = sorted(support, key=support.get, reverse=True)
-        if not nominated:
-            nominated = sorted(moves, key=lambda move: move_order(first, move), reverse=True)[:1]
-        count = max(2, min(6, int(max(0, deadline - time.monotonic()) / .15)))
-        candidates = []
-        for reveal in (False, True):
-            candidate = next((move for move in nominated if first.reveals(move) == reveal), None)
-            if candidate is not None and len(candidates) < count:
-                candidates.append(candidate)
-        candidates.extend(move for move in nominated if move not in candidates)
-        candidates = candidates[:count]
+        weights = self._opponent_beliefs.update(
+            history, worlds, started + duration * 0.05, self._stop
+        )
+        groups, support = self._nominate_moves(
+            first, worlds, moves, weights, color, started, duration, statistics
+        )
+        candidates = self._select_candidates(first, moves, support, deadline)
         values = {move: [None] * len(worlds) for move in candidates}
         depths = {move: [0] * len(worlds) for move in candidates}
         resolved = {move: [False] * len(worlds) for move in candidates}
-        futures = [(indices, self._pool.submit(self._assess, world, candidates, color,
-                                              deadline - .025, statistics, max(1, SEARCH_WORKERS // len(groups))))
-                   for world, _, indices in groups.values()]
+        futures = [
+            (
+                indices,
+                self._pool.submit(
+                    self._assess,
+                    world,
+                    candidates,
+                    color,
+                    deadline - 0.025,
+                    statistics,
+                    max(1, SEARCH_WORKERS // len(groups)),
+                ),
+            )
+            for world, _, indices in groups.values()
+        ]
         for indices, future in futures:
             for move, score, depth, known in future.result():
                 for index in indices:
@@ -420,17 +533,32 @@ class SecretQueenEngine(UciEngineProcess):
                     resolved[move][index] = known
         complete = [move for move in candidates if all(score is not None for score in values[move])]
         if not complete:
-            chosen = max(candidates, key=lambda move: (
-                -sum(weight for weight, score in zip(weights, values[move]) if score is not None and score <= -MATE + 128),
-                sum(weight for weight, score in zip(weights, values[move]) if score is not None), support.get(move, 0.)))
-            LOG.warning("secret queen native search incomplete ply=%s chosen=%s", first.ply(), chosen.uci())
+            chosen = max(
+                candidates,
+                key=lambda move: (
+                    -sum(
+                        weight
+                        for weight, score in zip(weights, values[move])
+                        if score is not None and score <= -MATE + 128
+                    ),
+                    sum(
+                        weight for weight, score in zip(weights, values[move]) if score is not None
+                    ),
+                    support.get(move, 0.0),
+                ),
+            )
+            LOG.warning(
+                "secret queen native search incomplete ply=%s chosen=%s",
+                first.ply(),
+                chosen.uci(),
+            )
             return statistics.result(chosen)
 
         def value(move):
             scores = values[move]
             average = sum(weight * score for weight, score in zip(weights, scores))
-            remaining = .5
-            cautious = 0.
+            remaining = 0.5
+            cautious = 0.0
             for score, weight in sorted(zip(scores, weights)):
                 portion = min(remaining, weight)
                 cautious += portion * score
@@ -440,22 +568,49 @@ class SecretQueenEngine(UciEngineProcess):
 
         chosen = max(complete, key=value)
         if all(known and score == 0 for known, score in zip(resolved[chosen], values[chosen])):
-            continuations = [move for move in complete if not all(resolved[move])
-                             and value(move)[0] == 0 and value(move)[1] >= -50]
+            continuations = [
+                move
+                for move in complete
+                if not all(resolved[move]) and value(move)[0] == 0 and value(move)[1] >= -50
+            ]
             if continuations:
                 chosen = max(continuations, key=value)
-        scores = [(2, 0) if score >= MATE - 128 else (-2, 0) if score <= -MATE + 128 else (0, score)
-                  for score in values[chosen]]
+        scores = [
+            (2, 0) if score >= MATE - 128 else (-2, 0) if score <= -MATE + 128 else (0, score)
+            for score in values[chosen]
+        ]
         estimate = (0, round(value(chosen)[1])) if all(kind == 0 for kind, _ in scores) else None
-        statistics.evaluate(scores, len(worlds), estimate, depth=min((depth for depth in depths[chosen] if depth), default=0))
-        LOG.info("secret queen decision %s", json.dumps({
-            "ply": first.ply(), "worlds": len(worlds), "chosen": chosen.uci(),
-            "search": "native", "weights": weights, "belief_observations": self._opponent_beliefs.observations,
-            "candidates": [{"move": move.uci(), "values": values[move], "depths": depths[move],
-                            "resolved": resolved[move], "complete": move in complete,
-                            "value": value(move)[1] if move in complete else None}
-                           for move in candidates],
-        }, separators=(",", ":")))
+        statistics.evaluate(
+            scores,
+            len(worlds),
+            estimate,
+            depth=min((depth for depth in depths[chosen] if depth), default=0),
+        )
+        LOG.info(
+            "secret queen decision %s",
+            json.dumps(
+                {
+                    "ply": first.ply(),
+                    "worlds": len(worlds),
+                    "chosen": chosen.uci(),
+                    "search": "native",
+                    "weights": weights,
+                    "belief_observations": self._opponent_beliefs.observations,
+                    "candidates": [
+                        {
+                            "move": move.uci(),
+                            "values": values[move],
+                            "depths": depths[move],
+                            "resolved": resolved[move],
+                            "complete": move in complete,
+                            "value": value(move)[1] if move in complete else None,
+                        }
+                        for move in candidates
+                    ],
+                },
+                separators=(",", ":"),
+            ),
+        )
         return statistics.result(chosen)
 
     def _assess(self, world, candidates, color, deadline, statistics, threads):
@@ -475,13 +630,33 @@ class SecretQueenEngine(UciEngineProcess):
                 survivors = list(after._secrets)
                 outcome = board.outcome()
                 if outcome is not None:
-                    score = 0 if outcome.winner is None else 10000 if outcome.winner == color else -10000
+                    if outcome.winner is None:
+                        score = 0
+                    elif outcome.winner == color:
+                        score = 10000
+                    else:
+                        score = -10000
                 else:
-                    window = max(0, int((deadline - time.monotonic()) * 1000 / (len(candidates) - offset)) - 45)
-                    probes = self._probe(board, deadline, statistics, lane=lane, limit_ms=window, threads=threads)
+                    window = max(
+                        0,
+                        int((deadline - time.monotonic()) * 1000 / (len(candidates) - offset)) - 45,
+                    )
+                    probes = self._probe(
+                        board,
+                        deadline,
+                        statistics,
+                        lane=lane,
+                        limit_ms=window,
+                        threads=threads,
+                    )
                     if probes and probes[0].evaluation is not None and probes[0].depth > 0:
                         kind, cp = probes[0].evaluation.score
-                        score = -max(-10000, min(10000, cp)) if kind == 0 else -10000 if kind > 0 else 10000
+                        if kind == 0:
+                            score = -max(-10000, min(10000, cp))
+                        elif kind > 0:
+                            score = -10000
+                        else:
+                            score = 10000
                         depth = probes[0].depth
                         for follow in probes[0].pv:
                             if not board.is_legal(follow):
@@ -493,6 +668,8 @@ class SecretQueenEngine(UciEngineProcess):
                                     survivors[side] = follow.to_square
                             board.push(follow)
                 if score is not None:
-                    score += concealment(after, color, survivors) - 25 * max(0, after._counts[after._key()] - 1)
+                    score += concealment(after, color, survivors) - 25 * max(
+                        0, after._counts[after._key()] - 1
+                    )
             results.append((move, score, depth, False))
         return results
