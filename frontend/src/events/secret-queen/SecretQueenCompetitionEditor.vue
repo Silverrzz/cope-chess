@@ -81,8 +81,10 @@ async function submit(action: "save" | "start"): Promise<void> {
       <div class="competition-fields">
         <label class="field"><span>Group base time (ms)</span><input v-model.number="settings.group_clock.initial_ms" type="number" min="1000" class="input" required></label>
         <label class="field"><span>Group increment (ms)</span><input v-model.number="settings.group_clock.increment_ms" type="number" min="0" class="input" required></label>
-        <label class="field"><span>Knockout base time (ms)</span><input v-model.number="settings.knockout_clock.initial_ms" type="number" min="1000" class="input" required></label>
-        <label class="field"><span>Knockout increment (ms)</span><input v-model.number="settings.knockout_clock.increment_ms" type="number" min="0" class="input" required></label>
+        <label class="field"><span>QF/SF base time (ms)</span><input v-model.number="settings.knockout_clock.initial_ms" type="number" min="1000" class="input" required></label>
+        <label class="field"><span>QF/SF increment (ms)</span><input v-model.number="settings.knockout_clock.increment_ms" type="number" min="0" class="input" required></label>
+        <label class="field"><span>Final base time (ms)</span><input v-model.number="settings.final_clock.initial_ms" type="number" min="1000" class="input" required></label>
+        <label class="field"><span>Final increment (ms)</span><input v-model.number="settings.final_clock.increment_ms" type="number" min="0" class="input" required></label>
         <label class="field"><span>Hash per UCI process (MB)</span><input v-model.number="settings.hash_mb" type="number" min="1" max="1024" class="input" required></label>
         <label class="field"><span>Concurrent games per group</span><input v-model.number="settings.group_concurrency" type="number" min="1" max="128" class="input" required></label>
       </div>

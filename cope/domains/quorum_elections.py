@@ -58,6 +58,16 @@ class BallotPublication(Input):
     revision: int = Field(strict=True, ge=0)
 
 
+class VoteChangeProof(Proof):
+    message: str = Field(pattern=r"^(0|[1-9][0-9]{0,77})$")
+
+
+class VoteChange(Input):
+    revision: int = Field(strict=True, ge=0, le=2**53 - 2)
+    proof: Proof
+    authorization: VoteChangeProof
+
+
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False).encode()
 
@@ -219,9 +229,10 @@ def build_evidence(connection, row, now, *, receipt=None):
     }
     if evidence["status"] == "open" and receipt and re.fullmatch(r"0|[1-9][0-9]{0,76}", receipt):
         accepted = connection.execute(
-            "SELECT 1 FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?", (ballot_id, receipt),
+            "SELECT revision FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?", (ballot_id, receipt),
         ).fetchone()
         if accepted:
+            evidence["vote_revision"] = accepted["revision"]
             evidence["live_tally"] = current_tally(connection, ballot_id, ballot_options(manifest), electorate)
     return evidence
 
@@ -331,3 +342,52 @@ def cast_vote(connection, ballot_id, proof):
     )
     connection.commit()
     return {"position": next_position, "nullifier": proof.nullifier}
+
+
+def change_vote(connection, ballot_id, submitted):
+    proof = submitted.proof
+    authorization = submitted.authorization
+    row = ballot(connection, ballot_id)
+    manifest = row["manifest"]
+    expected_message = scope(["cope-quorum-vote-change/1", str(ballot_id), submitted.revision,
+                              digest(proof.model_dump())])
+    if authorization.nullifier != proof.nullifier or authorization.message != expected_message:
+        fail("quorum_invalid_vote_change", "The authorization does not match this vote change.", 422)
+    if int(proof.message) >= len(ballot_options(manifest)):
+        fail("quorum_invalid_option", "This option is outside the frozen ballot.", 422)
+    accepted = connection.execute(
+        "SELECT position, proof, revision FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?",
+        (str(ballot_id), proof.nullifier),
+    ).fetchone()
+    if accepted is None:
+        fail("quorum_vote_missing", "This credential has no recorded vote on this ballot.", 404)
+    if accepted["revision"] == submitted.revision + 1 and accepted["proof"] == proof.model_dump():
+        return {"position": accepted["position"], "nullifier": proof.nullifier}
+    if accepted["revision"] != submitted.revision:
+        fail("quorum_vote_changed", "Your vote changed on another request. Review your choice and try again.")
+    if build_evidence(connection, row, datetime.now(UTC))["status"] != "open":
+        fail("quorum_voting_closed", "This ballot has closed.")
+    connection.commit()
+    ballot_scope = scope(["cope-quorum-ballot/1", manifest])
+    if not proof_worker(row["roster"]["members"], proof, ballot_scope)["valid"]:
+        fail("quorum_invalid_vote", "The anonymous vote proof is invalid.", 422)
+    if not proof_worker(row["roster"]["members"], authorization, ballot_scope)["valid"]:
+        fail("quorum_invalid_vote_change", "The anonymous vote change authorization is invalid.", 422)
+    row = ballot(connection, ballot_id, lock=" FOR UPDATE")
+    accepted = connection.execute(
+        "SELECT position, proof, revision FROM cope_quorum.votes WHERE ballot_id = ?::uuid AND nullifier = ?",
+        (str(ballot_id), proof.nullifier),
+    ).fetchone()
+    if accepted["revision"] == submitted.revision + 1 and accepted["proof"] == proof.model_dump():
+        return {"position": accepted["position"], "nullifier": proof.nullifier}
+    if accepted["revision"] != submitted.revision:
+        fail("quorum_vote_changed", "Your vote changed on another request. Review your choice and try again.")
+    if build_evidence(connection, row, datetime.now(UTC))["status"] != "open":
+        fail("quorum_voting_closed", "This ballot has closed.")
+    connection.execute(
+        """UPDATE cope_quorum.votes SET proof = ?::jsonb, revision = revision + 1
+           WHERE ballot_id = ?::uuid AND nullifier = ? AND revision = ?""",
+        (canonical(proof.model_dump()).decode(), str(ballot_id), proof.nullifier, submitted.revision),
+    )
+    connection.commit()
+    return {"position": accepted["position"], "nullifier": proof.nullifier}

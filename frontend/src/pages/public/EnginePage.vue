@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
 import EngineVersionTags from '@/components/engines/EngineVersionTags.vue'
+import { orderVersionHistory, versionTrack, versionTrackLabels, type VersionTrack } from '@/components/engines/versionHistory'
 import ContentState from '@/components/public/ContentState.vue'
 import EngineGameFiltersModal from '@/components/public/EngineGameFiltersModal.vue'
 import GameTable from '@/components/public/GameTable.vue'
@@ -74,14 +75,7 @@ interface EngineResponse {
 }
 
 type FilterKey = keyof EngineGameFilters
-type RatingMode = 'releases' | 'builds' | 'version'
-
-const numericVersion = /^v\.?\s*(?=\d)/i
-const numberedRelease = /^\d+(?:\.\d+)*(?:[a-z])?$/i
-const buildLabel = /(?:^|[\s._-])(?:rc\d*|alpha\d*|beta\d*|dev\d*|snapshot|nightly|pre(?:release)?\d*|unreleased|placeholder|temporary|temp|modified|experimental|test\d*|obfix|cope\d*)(?=$|[\s._-])/i
-const prereleaseSuffix = /\d(?:rc|alpha|beta|pre)\d*$/i
-const randomSuffix = /-R(100|[0-9]{1,2})$/i
-const versionCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+type RatingMode = VersionTrack | 'version'
 
 const route = useRoute()
 const router = useRouter()
@@ -96,6 +90,9 @@ const requestedRatingMode = ref<RatingMode>('releases')
 const focusedPoint = ref<number | null>(null)
 const pinnedPoint = ref<number | null>(null)
 let controller: AbortController | null = null
+const chartElement = ref<HTMLElement | null>(null)
+const chartWidth = ref(760)
+let chartObserver: ResizeObserver | null = null
 
 const engineId = computed(() => String(route.meta.publicResourceId ?? route.params.id ?? ''))
 const scorePercent = computed(() => {
@@ -121,26 +118,23 @@ const engineVersions = computed(() => {
     label: engineVersionLabel(version.version) || version.version?.trim() || 'Unversioned',
     track: versionTrack(version),
   }))
-  const releases = versions.filter((version) => version.track === 'releases')
-  if (releases.every((version) => /^\d/.test(version.label.replace(numericVersion, '')))) {
-    releases.sort((left, right) => versionCollator.compare(right.label.replace(numericVersion, ''), left.label.replace(numericVersion, '')))
+  return {
+    releases: orderVersionHistory(versions.filter((version) => version.track === 'releases'), 'releases'),
+    strength: orderVersionHistory(versions.filter((version) => version.track === 'strength'), 'strength'),
+    builds: orderVersionHistory(versions.filter((version) => version.track === 'builds'), 'builds'),
   }
-  const builds = versions.filter((version) => version.track === 'builds')
-  return { releases, builds }
 })
 const versionOptions = computed(() => {
-  const choices = (versions: typeof engineVersions.value.releases) => versions.map((version) => ({
-    value: String(version.id),
-    label: version.label,
-    description: version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'release' ? 'Release source' : 'Commit',
-  }))
-  const releases = choices(engineVersions.value.releases)
-  const builds = choices(engineVersions.value.builds)
-  if (!releases.length || !builds.length) return [...releases, ...builds]
-  return [
-    { value: 'releases', label: 'Releases', children: releases },
-    { value: 'builds', label: 'Other builds', children: builds },
-  ]
+  const groups = (Object.keys(versionTrackLabels) as VersionTrack[]).map((track) => ({
+    value: track,
+    label: versionTrackLabels[track],
+    children: [...engineVersions.value[track]].reverse().map((version) => ({
+      value: String(version.id),
+      label: version.label,
+      description: version.distribution === 'worker_local' ? 'Worker-local' : version.source_kind === 'release' ? 'Release source' : 'Commit',
+    })),
+  })).filter((group) => group.children.length)
+  return groups.length === 1 ? groups[0]!.children : groups
 })
 const ratingListOptions = computed(() => (data.value?.version_ratings ?? []).map((list) => ({
   value: String(list.id),
@@ -155,23 +149,30 @@ const familyRatings = computed(() => {
 const ratedVersions = computed(() => {
   const rated = (versions: typeof engineVersions.value.releases) => versions
     .filter((version) => familyRatings.value.has(String(version.id)))
-    .reverse()
-  const releases = rated(engineVersions.value.releases)
-  const builds = rated(engineVersions.value.builds)
-  const otherBuilds = builds.filter((version) => !randomSuffix.test(version.label))
-  const randomBuilds = builds.filter((version) => randomSuffix.test(version.label))
-    .sort((left, right) => familyRatings.value.get(String(left.id))! - familyRatings.value.get(String(right.id))!)
-  return { releases, builds: [...randomBuilds, ...otherBuilds] }
+  return {
+    releases: rated(engineVersions.value.releases),
+    strength: rated(engineVersions.value.strength),
+    builds: rated(engineVersions.value.builds),
+  }
 })
+const availableTracks = computed(() => (Object.keys(versionTrackLabels) as VersionTrack[])
+  .filter((track) => ratedVersions.value[track].length))
 const ratingMode = computed<RatingMode>(() => {
-  if (requestedRatingMode.value === 'version') return 'version'
-  if (requestedRatingMode.value === 'builds' && ratedVersions.value.builds.length) return 'builds'
-  return ratedVersions.value.releases.length || !ratedVersions.value.builds.length ? 'releases' : 'builds'
+  const requested = requestedRatingMode.value
+  if (requested === 'version' || ratedVersions.value[requested].length) return requested
+  return availableTracks.value[0] ?? 'releases'
 })
 const chartLabel = computed(() => ({
   releases: 'Elo by release',
-  builds: 'Elo by build',
+  strength: 'Elo by strength variant',
+  builds: 'Elo by experimental build',
   version: 'Elo over time for this version',
+})[ratingMode.value])
+const chartDescription = computed(() => ({
+  releases: 'Release progression in version order for numbered releases, otherwise by source date. Temporary builds and strength variants have separate views.',
+  strength: 'Deliberately adjusted versions, separate from release progression. R variants run from more random to less random, grouped by base version; other variants use source date.',
+  builds: 'Temporary, development and experimental builds in source-date order. Each point is independent, not a release progression.',
+  version: 'Rating updates for the selected version over time.',
 })[ratingMode.value])
 const chartHistory = computed(() => {
   const mode = ratingMode.value
@@ -197,8 +198,8 @@ const ratingChart = computed(() => {
   const values = history.map((point) => point.elo)
   const low = Math.floor((Math.min(...values) - 20) / 20) * 20
   const high = Math.ceil((Math.max(...values) + 20) / 20) * 20
-  const width = 760
-  const height = 236
+  const width = chartWidth.value
+  const height = Math.round(Math.min(320, Math.max(230, width * .3)))
   const left = 49
   const right = 18
   const top = 14
@@ -219,6 +220,16 @@ const ratingChart = computed(() => {
     value: Math.round(high - ((high - low) * index) / 4),
     y: top + (plotHeight * index) / 4,
   }))
+  let labelEnd = -Infinity
+  const labels = points.filter((point, index) => {
+    const labelWidth = point.label.length * 7 + 16
+    const start = index === 0 ? point.x : point.x - labelWidth / 2
+    const end = index === 0 ? point.x + labelWidth : point.x + labelWidth / 2
+    const lastStart = points.at(-1)!.x - history.at(-1)!.label.length * 7 - 16
+    if (index !== 0 && index !== points.length - 1 && (start < labelEnd || end > lastStart)) return false
+    labelEnd = end
+    return true
+  })
   return {
     width,
     height,
@@ -229,8 +240,7 @@ const ratingChart = computed(() => {
     ticks,
     polyline: points.map((point) => `${point.x},${point.y}`).join(' '),
     area: `${points[0]!.x},${top + plotHeight} ${points.map((point) => `${point.x},${point.y}`).join(' ')} ${points.at(-1)!.x},${top + plotHeight}`,
-    start: history[0]!.label,
-    end: points.length > 1 ? history.at(-1)!.label : '',
+    labels,
   }
 })
 const activePoint = computed(() => {
@@ -290,7 +300,19 @@ watch([ratingMode, selectedRatingListId, engineId], () => {
   pinnedPoint.value = null
 })
 
-onBeforeUnmount(() => controller?.abort())
+watch(chartElement, (element) => {
+  chartObserver?.disconnect()
+  if (!element) return
+  chartObserver = new ResizeObserver(([entry]) => {
+    if (entry && entry.contentRect.width > 0) chartWidth.value = Math.max(240, Math.round(entry.contentRect.width))
+  })
+  chartObserver.observe(element)
+}, { flush: 'post' })
+
+onBeforeUnmount(() => {
+  controller?.abort()
+  chartObserver?.disconnect()
+})
 
 function emptyFilters(): EngineGameFilters {
   return { result: '', ratingListId: '', opponentId: '', side: '' }
@@ -298,15 +320,6 @@ function emptyFilters(): EngineGameFilters {
 
 function dateValue(value: string): number {
   return Date.parse(value) || 0
-}
-
-function versionTrack(version: EngineRecord): 'releases' | 'builds' {
-  const tags = version.tags?.map((tag) => tag.name.trim().toLowerCase()) ?? []
-  if (tags.some((tag) => ['experimental', 'modified', 'temporary'].includes(tag))) return 'builds'
-  if (tags.includes('release')) return 'releases'
-  const label = engineVersionLabel(version.version)
-  if (!label || randomSuffix.test(label) || buildLabel.test(label) || prereleaseSuffix.test(label)) return 'builds'
-  return version.source_kind === 'release' || numberedRelease.test(label.replace(numericVersion, '')) ? 'releases' : 'builds'
 }
 
 function selectVersion(value: string | number): void {
@@ -401,8 +414,7 @@ async function load(): Promise<void> {
           </div>
           <div class="performance-controls">
             <div class="rating-mode" role="group" aria-label="Rating history view">
-              <button v-if="ratedVersions.releases.length || !ratedVersions.builds.length" type="button" :aria-pressed="ratingMode === 'releases'" @click="requestedRatingMode = 'releases'">Releases</button>
-              <button v-if="ratedVersions.builds.length" type="button" :aria-pressed="ratingMode === 'builds'" @click="requestedRatingMode = 'builds'">Other builds</button>
+              <button v-for="track in availableTracks" :key="track" type="button" :aria-pressed="ratingMode === track" @click="requestedRatingMode = track">{{ versionTrackLabels[track] }} <span>{{ ratedVersions[track].length }}</span></button>
               <button type="button" :aria-pressed="ratingMode === 'version'" @click="requestedRatingMode = 'version'">Over time</button>
             </div>
             <OptionPicker v-if="ratingListOptions.length > 1" v-model="selectedRatingListId" class="rating-list-picker" :options="ratingListOptions" label="Rating list" />
@@ -410,7 +422,7 @@ async function load(): Promise<void> {
           </div>
         </header>
 
-        <div v-if="ratingChart && activePoint" class="rating-chart">
+        <div v-if="ratingChart && activePoint" ref="chartElement" class="rating-chart">
           <div class="chart-summary">
             <div class="chart-reading" aria-live="polite">
               <strong>{{ Math.round(activePoint.elo).toLocaleString() }} <small>Elo</small></strong>
@@ -418,24 +430,24 @@ async function load(): Promise<void> {
               <span v-else>{{ activePoint.label }}</span>
               <span v-if="ratingMode !== 'version' && activePoint.at" class="chart-date">{{ formatDate(activePoint.at) }}</span>
             </div>
-            <dl v-if="selectedRating" class="rating-facts">
+            <dl v-if="selectedRating && activePoint.id === engineId" class="rating-facts">
               <div><dt>Current</dt><dd>{{ Math.round(selectedRating.elo).toLocaleString() }}<small v-if="selectedRating.error_margin != null"> ±{{ Math.round(selectedRating.error_margin) }}</small></dd></div>
               <div><dt>Rank</dt><dd>#{{ selectedRating.rank }} <small>of {{ selectedRating.field_size }}</small></dd></div>
               <div><dt>Rated games</dt><dd>{{ selectedRating.games_played.toLocaleString() }}</dd></div>
               <div v-if="ratingMode === 'version'"><dt>Peak</dt><dd>{{ Math.round(selectedRating.peak_elo).toLocaleString() }}</dd></div>
             </dl>
           </div>
-          <svg class="elo-chart" :viewBox="'0 0 ' + ratingChart.width + ' ' + ratingChart.height" role="group" :aria-label="chartLabel" @mouseleave="focusedPoint = null">
+          <p id="rating-chart-description" class="chart-description">{{ chartDescription }}</p>
+          <svg aria-describedby="rating-chart-description" class="elo-chart" :viewBox="'0 0 ' + ratingChart.width + ' ' + ratingChart.height" role="group" :aria-label="chartLabel" @mouseleave="focusedPoint = null">
             <g v-for="tick in ratingChart.ticks" :key="tick.value">
               <line :x1="ratingChart.left" :x2="ratingChart.right" :y1="tick.y" :y2="tick.y" />
               <text :x="ratingChart.left - 8" :y="tick.y + 4" text-anchor="end">{{ tick.value }}</text>
             </g>
-            <polygon v-if="ratingMode !== 'builds'" class="elo-chart__area" :points="ratingChart.area" />
-            <polyline v-if="ratingMode !== 'builds'" class="elo-chart__line" :points="ratingChart.polyline" />
+            <polygon v-if="ratingMode === 'releases' || ratingMode === 'version'" class="elo-chart__area" :points="ratingChart.area" />
+            <polyline v-if="ratingMode === 'releases' || ratingMode === 'version'" class="elo-chart__line" :points="ratingChart.polyline" />
             <line class="elo-chart__guide" :x1="activePoint.x" :x2="activePoint.x" :y1="activePoint.y" :y2="ratingChart.bottom" />
             <circle v-for="(point, index) in ratingChart.points" :key="index" :cx="point.x" :cy="point.y" :r="point === activePoint ? 5 : 3" :class="{ 'chart-point--active': point === activePoint }" tabindex="0" role="button" :aria-pressed="pinnedPoint === index" :aria-label="point.label + ', ' + Math.round(point.elo) + ' Elo'" @mouseenter="focusedPoint = index" @click="pinnedPoint = index" @focus="focusedPoint = index" @blur="focusedPoint = null" @keydown.enter.prevent="pinnedPoint = index" @keydown.space.prevent="pinnedPoint = index" />
-            <text :x="ratingChart.points[0]?.x" :y="ratingChart.height - 9" :text-anchor="ratingChart.end ? 'start' : 'middle'">{{ ratingChart.start }}</text>
-            <text v-if="ratingChart.end" :x="ratingChart.right" :y="ratingChart.height - 9" text-anchor="end">{{ ratingChart.end }}</text>
+            <text v-for="point in ratingChart.labels" :key="point.x" :x="point.x" :y="ratingChart.height - 9" :text-anchor="ratingChart.points.length === 1 ? 'middle' : point === ratingChart.points[0] ? 'start' : point === ratingChart.points.at(-1) ? 'end' : 'middle'">{{ point.label }}</text>
           </svg>
           <RouterLink v-if="selectedRatingListId" class="rating-link" :to="ratingPath(selectedRatingListId)">View rating list <AppIcon name="arrow-right" :size="13" /></RouterLink>
         </div>
@@ -518,12 +530,15 @@ async function load(): Promise<void> {
 .panel { min-width: 0; overflow: hidden; padding: 0; }
 .panel > header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .8rem 1rem; border-block-end: 1px solid var(--color-border); }
 .panel h2 { font-size: 1rem; }
-.performance-controls { display: flex; align-items: center; gap: .65rem; }
-.rating-mode { display: flex; flex: 0 0 auto; gap: .15rem; padding: .18rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
+.performance-controls { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.performance-header { flex-wrap: wrap; }
+.rating-mode { display: flex; flex-wrap: wrap; gap: .15rem; padding: .18rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
 .rating-mode button { padding: .38rem .65rem; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-muted); cursor: pointer; font-size: .76rem; font-weight: 650; }
 .rating-mode button[aria-pressed='true'] { background: var(--color-surface-raised); color: var(--color-accent); box-shadow: var(--shadow-sm); }
 .rating-list-picker { width: 13rem; }
 .rating-list-label { color: var(--color-text-muted); font-size: .76rem; font-weight: 650; }
+.rating-mode button span { color: var(--color-text-muted); font-size: .68rem; margin-inline-start: .2rem; }
+.chart-description { color: var(--color-text-muted); font-size: .76rem; }
 .rating-chart { display: grid; gap: .6rem; padding: clamp(.7rem, 2vw, 1.4rem); }
 .chart-summary { display: flex; align-items: end; justify-content: space-between; gap: .85rem; flex-wrap: wrap; }
 .chart-reading { display: flex; align-items: baseline; flex-wrap: wrap; gap: .2rem .55rem; min-width: 0; }
@@ -536,7 +551,7 @@ async function load(): Promise<void> {
 .rating-facts dt { color: var(--color-text-muted); font-size: .7rem; }
 .rating-facts dd { margin: 0; font-size: .92rem; font-weight: 700; }
 .rating-facts small { color: var(--color-text-muted); font-size: .74em; font-weight: 550; }
-.elo-chart { display: block; width: 100%; max-height: 20rem; overflow: visible; }
+.elo-chart { display: block; width: 100%; height: auto; overflow: visible; }
 .elo-chart line { stroke: var(--color-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .elo-chart text { fill: var(--color-text-muted); font-size: 12px; }
 .elo-chart__area { fill: color-mix(in srgb, var(--color-accent) 12%, transparent); }
@@ -585,6 +600,5 @@ async function load(): Promise<void> {
   .performance-panel > header, .games-panel > header { align-items: start; flex-direction: column; }
   .performance-controls { flex-wrap: wrap; width: 100%; }
   .rating-list-picker { width: auto; min-width: 10rem; flex: 1; }
-  .elo-chart text { font-size: 16px; }
 }
 </style>

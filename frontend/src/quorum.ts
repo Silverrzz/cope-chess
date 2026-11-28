@@ -48,6 +48,7 @@ export interface BallotPackage {
   status: 'scheduled' | 'open' | 'completed'
   result: BallotResult | null
   live_tally?: VoteTally
+  vote_revision?: number
 }
 
 export interface VoteEvidence {
@@ -85,6 +86,10 @@ export async function fingerprint(value: unknown) {
 
 export async function ballotScope(manifest: Manifest) {
   return BigInt('0x' + await fingerprint(['cope-quorum-ballot/1', manifest])).toString()
+}
+
+export async function voteChangeMessage(ballotId: string, revision: number, proof: SemaphoreProof) {
+  return BigInt('0x' + await fingerprint(['cope-quorum-vote-change/1', ballotId, revision, await fingerprint(proof)])).toString()
 }
 
 async function verifyBallotContext(manifest: Manifest, roster: Roster) {
